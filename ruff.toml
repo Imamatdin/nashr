@@ -1,0 +1,34 @@
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "N",
+    "SIM",
+    "RUF",
+]
+ignore = [
+    "E501",
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["N802", "N803", "N806"]
+"scripts/**/*.py" = ["N802"]
+
+[lint.isort]
+known-first-party = ["packages"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"

@@ -1,0 +1,44 @@
+# Local-only docs
+CLAUDE.local.md
+
+# Reference material (not for distribution)
+claude-code-system-prompts-main/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# Node
+node_modules/
+.next/
+.turbo/
+
+# Claude Code local overrides
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

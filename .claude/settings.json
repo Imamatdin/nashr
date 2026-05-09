@@ -1,0 +1,69 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Bash(pytest:*)",
+      "Bash(vitest:*)",
+      "Bash(npx vitest:*)",
+      "Bash(ruff:*)",
+      "Bash(pyright:*)",
+      "Bash(eslint:*)",
+      "Bash(npx eslint:*)",
+      "Bash(tsc:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git stash:*)",
+      "Bash(git fetch:*)",
+      "Bash(pip install:*)",
+      "Bash(uv pip install:*)",
+      "Bash(uv sync:*)",
+      "Bash(npm install:*)",
+      "Bash(pnpm install:*)",
+      "Bash(python scripts/generate_golden.py:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(supabase migration:*)",
+      "Bash(supabase db:*)"
+    ],
+    "ask": [
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Write(**/.env)",
+      "Write(**/.env.*)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Edit(**/docker-compose.yml)",
+      "Edit(**/Dockerfile)",
+      "Write(**/docker-compose.yml)",
+      "Write(**/Dockerfile)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(Invoke-WebRequest:*)",
+      "Bash(gh issue:*)",
+      "Bash(gh pr:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(rm -rf:*)",
+      "Bash(Remove-Item -Recurse:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/format-python.py"
+          }
+        ]
+      }
+    ]
+  }
+}
