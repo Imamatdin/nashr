@@ -9,6 +9,7 @@ with reportlab so tests/golden/ stays minimal.
 from __future__ import annotations
 
 import io
+import shutil
 from io import BytesIO
 from pathlib import Path
 
@@ -44,6 +45,14 @@ from packages.workers.source.parsers import (
 )
 
 GOLDEN = Path(__file__).resolve().parent.parent / "golden"
+
+TESSERACT_AVAILABLE = shutil.which("tesseract") is not None or any(
+    Path(p).exists()
+    for p in (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    )
+)
 
 
 # ---------------------------------------------------------------------------
@@ -541,10 +550,35 @@ async def test_parse_service_routes_txt(parse_service: SourceParseService) -> No
     assert "hello world" in result.full_text
 
 
-async def test_parse_service_routes_image(parse_service: SourceParseService) -> None:
+@pytest.mark.skipif(not TESSERACT_AVAILABLE, reason="Tesseract not installed")
+async def test_parse_service_routes_image_with_ocr(
+    parse_service: SourceParseService,
+) -> None:
+    """With Tesseract installed, the routing service runs OCR end-to-end."""
+
     payload = (GOLDEN / "sample_scanned.png").read_bytes()
     result = await parse_service.parse(payload, "scan.png", "png")
+
+    assert result.file_type == "png"
+    assert len(result.pages) == 1
+    assert result.needs_ocr_pages == []
+    assert result.pages[0].is_ocr is True
+    assert result.pages[0].text != ""
+
+
+@pytest.mark.skipif(TESSERACT_AVAILABLE, reason="Only meaningful without Tesseract")
+async def test_parse_service_routes_image_without_ocr(
+    parse_service: SourceParseService,
+) -> None:
+    """Without Tesseract, the OCR signal is left unconsumed for downstream handling."""
+
+    payload = (GOLDEN / "sample_scanned.png").read_bytes()
+    result = await parse_service.parse(payload, "scan.png", "png")
+
+    assert result.file_type == "png"
+    assert len(result.pages) == 1
     assert result.needs_ocr_pages == [1]
+    assert result.pages[0].text == ""
 
 
 async def test_parse_service_rejects_unknown_type(

@@ -1,5 +1,7 @@
 """Source-processing worker: file validation (Magika), parsing, OCR, chunking, claim extraction."""
 
+from packages.workers.source.ocr import OCRService
+from packages.workers.source.ocr_preprocess import OCRPreprocessor
 from packages.workers.source.parse_service import SourceParseService
 from packages.workers.source.parsers import (
     DOCXParser,
@@ -17,6 +19,8 @@ __all__ = [
     "DOCXParser",
     "FileValidationService",
     "ImageParser",
+    "OCRPreprocessor",
+    "OCRService",
     "PDFParser",
     "PPTXParser",
     "SourceParseService",

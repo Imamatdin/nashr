@@ -38,7 +38,7 @@ class ResearchQuestion(BaseModel):
     project_id: UUID
     question_text: str = Field(min_length=1, max_length=2000)
     question_type: ResearchQuestionType
-    related_source_ids: list[UUID] = Field(default_factory=list)
+    related_source_ids: list[UUID] = Field(default_factory=list[UUID])
     created_at: datetime
 
 
@@ -65,7 +65,7 @@ class ResearchAnswer(BaseModel):
     project_id: UUID
     question_id: UUID
     answer_text: str = Field(min_length=1, max_length=10_000)
-    source_references_used: list[UUID] = Field(default_factory=list)
+    source_references_used: list[UUID] = Field(default_factory=list[UUID])
     score: AnswerScore
     credits_earned: int = Field(ge=0, le=10)
     created_at: datetime

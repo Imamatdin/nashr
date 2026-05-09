@@ -3,6 +3,11 @@
 Each slide is one :class:`ParsedPage`. Slide title (when present), all shape
 text, and the speaker-notes pane are concatenated into the page text. Table
 shapes are extracted into ``page.tables``.
+
+python-pptx exposes shape attributes through duck-typed accessors that
+pyright cannot follow without help, so each call site casts the relevant
+attribute to its concrete return type. This keeps every value flowing into
+:mod:`packages.core.models` strictly typed.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ import asyncio
 import logging
 import re
 from io import BytesIO
+from typing import cast
 
 from pptx import Presentation
 from pptx.presentation import Presentation as PresentationType
@@ -80,34 +86,47 @@ class PPTXParser:
         headings: list[str] = []
         tables: list[list[list[str]]] = []
 
+        shapes_container = getattr(slide, "shapes", None)
         try:
-            title_shape = slide.shapes.title  # type: ignore[attr-defined]
+            title_shape: object | None = (
+                getattr(shapes_container, "title", None) if shapes_container is not None else None
+            )
         except (AttributeError, KeyError):
             title_shape = None
         if title_shape is not None and getattr(title_shape, "has_text_frame", False):
-            title = (title_shape.text or "").strip()
+            title = cast("str", getattr(title_shape, "text", "") or "").strip()
             if title:
                 headings.append(title)
 
-        for shape in slide.shapes:  # type: ignore[attr-defined]
+        shapes_iter = cast("list[object]", list(shapes_container) if shapes_container else [])
+        for shape in shapes_iter:
             if getattr(shape, "has_table", False):
-                rows: list[list[str]] = []
-                for row in shape.table.rows:
-                    rows.append([cell.text.strip() for cell in row.cells])
-                if rows:
-                    tables.append(rows)
+                rows_out: list[list[str]] = []
+                shape_table = getattr(shape, "table", None)
+                if shape_table is None:
+                    continue
+                for row in cast("list[object]", list(getattr(shape_table, "rows", []))):
+                    cells = cast("list[object]", list(getattr(row, "cells", [])))
+                    rows_out.append(
+                        [cast("str", getattr(cell, "text", "") or "").strip() for cell in cells]
+                    )
+                if rows_out:
+                    tables.append(rows_out)
                 continue
             if getattr(shape, "has_text_frame", False):
-                txt = (shape.text_frame.text or "").strip()
+                text_frame = getattr(shape, "text_frame", None)
+                txt = cast("str", getattr(text_frame, "text", "") or "").strip()
                 if txt and txt != title:
                     body_parts.append(txt)
 
         notes_text = ""
         if getattr(slide, "has_notes_slide", False):
             try:
-                notes_text = (
-                    slide.notes_slide.notes_text_frame.text or ""  # type: ignore[attr-defined]
-                ).strip()
+                notes_slide = getattr(slide, "notes_slide", None)
+                notes_text_frame = (
+                    getattr(notes_slide, "notes_text_frame", None) if notes_slide else None
+                )
+                notes_text = cast("str", getattr(notes_text_frame, "text", "") or "").strip()
             except (AttributeError, KeyError):
                 notes_text = ""
 

@@ -26,7 +26,7 @@ class Paragraph(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     text: str = Field(min_length=1, max_length=5_000)
-    citations: list[CitationRef] = Field(default_factory=list)
+    citations: list[CitationRef] = Field(default_factory=list[CitationRef])
 
 
 class OutlineSection(BaseModel):
@@ -62,7 +62,7 @@ class ArticleSection(BaseModel):
     article_id: UUID
     section_index: int = Field(ge=0)
     title: str = Field(min_length=1, max_length=200)
-    paragraphs: list[Paragraph] = Field(default_factory=list)
+    paragraphs: list[Paragraph] = Field(default_factory=list[Paragraph])
     word_count: int = Field(ge=0)
     status: ArticleSectionStatus = ArticleSectionStatus.DRAFT
     created_at: datetime

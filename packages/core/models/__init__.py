@@ -44,6 +44,7 @@ from packages.core.models.evidence import (
 from packages.core.models.project import Project, ProjectCreate
 from packages.core.models.source import (
     FileValidationResult,
+    OCRResult,
     ParsedPage,
     ParsedSource,
     Source,
@@ -78,6 +79,7 @@ __all__ = [
     "InteractiveSpec",
     "MatchingPair",
     "NavigationSpec",
+    "OCRResult",
     "Order",
     "OutlineSection",
     "Paragraph",

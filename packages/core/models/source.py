@@ -99,7 +99,29 @@ class ParsedPage(BaseModel):
     char_count: int = Field(ge=0)
     needs_ocr: bool = False
     headings: list[str] = Field(default_factory=list)
-    tables: list[list[list[str]]] = Field(default_factory=list)
+    tables: list[list[list[str]]] = Field(default_factory=list[list[list[str]]])
+    ocr_confidence: float | None = Field(default=None, ge=0.0, le=100.0)
+    is_ocr: bool = False
+
+
+class OCRResult(BaseModel):
+    """Result of OCR processing on a single page or image.
+
+    ``average_confidence`` is the mean Tesseract per-word confidence on the
+    accepted (non-empty, non-``-1``) words, on a 0–100 scale. ``success`` is
+    True even when the page is blank — only crashes/timeouts flip it to False.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(default="", max_length=200_000)
+    word_count: int = Field(default=0, ge=0)
+    average_confidence: float = Field(default=0.0, ge=0.0, le=100.0)
+    low_confidence_words: int = Field(default=0, ge=0)
+    language_detected: str | None = Field(default=None, max_length=8)
+    processing_time_ms: int = Field(default=0, ge=0)
+    success: bool = True
+    error: str | None = Field(default=None, max_length=500)
 
 
 class SourceMetadataExtracted(BaseModel):
@@ -126,10 +148,10 @@ class ParsedSource(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     file_type: str = Field(min_length=1, max_length=32)
     file_size_bytes: int = Field(ge=0)
-    pages: list[ParsedPage] = Field(default_factory=list)
+    pages: list[ParsedPage] = Field(default_factory=list[ParsedPage])
     metadata: SourceMetadataExtracted = Field(default_factory=SourceMetadataExtracted)
     full_text: str = ""
-    needs_ocr_pages: list[int] = Field(default_factory=list)
+    needs_ocr_pages: list[int] = Field(default_factory=list[int])
     parse_errors: list[str] = Field(default_factory=list)
 
 

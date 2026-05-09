@@ -3,6 +3,10 @@
 Per-page text, headings (font-size heuristic), tables (PyMuPDF 1.23+ API),
 metadata, and a DOI scan over the first two pages. Pages with very little
 extractable text are flagged ``needs_ocr=True`` for the OCR worker downstream.
+
+PyMuPDF ships no type stubs, so every fitz call site casts to its concrete
+expected return type before doing real work. This keeps the rest of the file
+(and downstream consumers) in strict-typed territory.
 """
 
 from __future__ import annotations
@@ -10,9 +14,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Final
+from typing import Final, cast
 
-import fitz
+import fitz  # type: ignore[reportMissingTypeStubs]
 
 from packages.core.models.source import (
     ParsedPage,
@@ -109,13 +113,14 @@ class PDFParser:
         errors: list[str],
     ) -> tuple[ParsedPage, bool]:
         page = doc[page_index]
-        text = page.get_text("text")
+        text: str = cast("str", page.get_text("text"))  # type: ignore[reportUnknownMemberType]
         char_count = len(re.sub(r"\s+", "", text))
         needs_ocr = char_count < self.TEXT_DENSITY_THRESHOLD
 
         headings = self._extract_headings(page)
         tables = self._extract_tables(page, errors, page_index)
-        page_has_images = bool(page.get_images(full=False))
+        images = cast("list[object]", page.get_images(full=False))
+        page_has_images = bool(images)
 
         return (
             ParsedPage(
@@ -133,20 +138,23 @@ class PDFParser:
     def _extract_headings(page: fitz.Page) -> list[str]:
         headings: list[str] = []
         try:
-            details = page.get_text("dict")
+            details = cast("dict[str, object]", page.get_text("dict"))  # type: ignore[reportUnknownMemberType]
         except Exception:
             return headings
 
-        for block in details.get("blocks", []):
-            for line in block.get("lines", []):
+        blocks = cast("list[dict[str, object]]", details.get("blocks", []))
+        for block in blocks:
+            lines = cast("list[dict[str, object]]", block.get("lines", []))
+            for line in lines:
                 line_text_parts: list[str] = []
                 line_is_heading = False
-                for span in line.get("spans", []):
-                    span_text = span.get("text", "").strip()
+                spans = cast("list[dict[str, object]]", line.get("spans", []))
+                for span in spans:
+                    span_text = cast("str", span.get("text", "")).strip()
                     if not span_text:
                         continue
-                    size = float(span.get("size", 0))
-                    flags = int(span.get("flags", 0))
+                    size = float(cast("float | int", span.get("size", 0)))
+                    flags = int(cast("int", span.get("flags", 0)))
                     bold = bool(flags & HEADING_FLAG_BOLD)
                     if size >= HEADING_FONT_SIZE or bold:
                         line_is_heading = True
@@ -166,15 +174,19 @@ class PDFParser:
         if not hasattr(page, "find_tables"):
             return []
         try:
-            finder = page.find_tables()
+            finder = page.find_tables()  # type: ignore[reportUnknownMemberType]
         except Exception as exc:
             errors.append(f"Page {page_index + 1} table-extraction failed: {exc}")
             return []
 
+        if finder is None:
+            return []
+
         tables: list[list[list[str]]] = []
-        for table in finder.tables:
+        finder_tables = cast("list[object]", finder.tables)
+        for table in finder_tables:
             try:
-                extracted = table.extract()
+                extracted = cast("list[list[str | None]]", table.extract())  # type: ignore[reportUnknownMemberType]
             except Exception as exc:
                 errors.append(f"Page {page_index + 1} table.extract() failed: {exc}")
                 continue
@@ -192,7 +204,7 @@ class PDFParser:
         word_count: int,
         has_images: bool,
     ) -> SourceMetadataExtracted:
-        raw = doc.metadata or {}
+        raw: dict[str, str] = cast("dict[str, str]", doc.metadata or {})  # type: ignore[reportUnknownMemberType]
         title = (raw.get("title") or "").strip() or None
         author_field = (raw.get("author") or "").strip()
         authors = [a.strip() for a in re.split(r"[,;]", author_field) if a.strip()]
