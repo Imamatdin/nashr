@@ -49,10 +49,13 @@ from packages.core.models.source import (
     ParsedSource,
     Source,
     SourceChunk,
+    SourceChunkCreate,
     SourceClaim,
+    SourceClaimCreate,
     SourceCreate,
     SourceMetadata,
     SourceMetadataExtracted,
+    SourcePipelineResult,
 )
 from packages.core.models.user import User, UserCreate
 
@@ -94,10 +97,13 @@ __all__ = [
     "Slide",
     "Source",
     "SourceChunk",
+    "SourceChunkCreate",
     "SourceClaim",
+    "SourceClaimCreate",
     "SourceCreate",
     "SourceMetadata",
     "SourceMetadataExtracted",
+    "SourcePipelineResult",
     "TrueFalseItem",
     "TypographySpec",
     "User",

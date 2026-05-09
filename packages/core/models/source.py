@@ -84,6 +84,39 @@ class SourceClaim(BaseModel):
     created_at: datetime
 
 
+class SourceChunkCreate(BaseModel):
+    """Pre-persistence representation of a chunk emitted by :class:`SourceChunker`.
+
+    ``source_id`` and ``project_id`` are filled in by the caller after the
+    parent :class:`Source` row is written; the chunker itself emits them as
+    empty strings so it can stay decoupled from persistence concerns. Text
+    intentionally is *not* whitespace-stripped here — chunk overlap math
+    relies on byte-exact slices of the parent page.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(default="", max_length=64)
+    project_id: str = Field(default="", max_length=64)
+    chunk_index: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=10_000)
+    page: int | None = Field(default=None, ge=1)
+    is_ocr: bool = False
+    confidence: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class SourceClaimCreate(BaseModel):
+    """Pre-persistence representation of a single claim emitted by the extractor."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_chunk_id: str = Field(default="", max_length=64)
+    project_id: str = Field(default="", max_length=64)
+    claim_text: str = Field(min_length=10, max_length=500)
+    quote: str | None = Field(default=None, max_length=300)
+    strength: ClaimStrength
+
+
 class ParsedPage(BaseModel):
     """A single page (or logical section) extracted from a source file.
 
@@ -174,3 +207,26 @@ class FileValidationResult(BaseModel):
     extension_mismatch: bool = False
     rejection_reason: str | None = Field(default=None, max_length=500)
     warning: str | None = Field(default=None, max_length=500)
+
+
+class SourcePipelineResult(BaseModel):
+    """End-to-end output of :class:`SourcePipeline.process` for one upload.
+
+    ``parsed`` is ``None`` only when validation rejected the file; in that case
+    ``chunks`` and ``claims`` are empty and ``errors`` contains the rejection
+    reason. Non-fatal warnings (empty extracted text, partial OCR, claim
+    extractor JSON failures) are appended to ``errors`` without short-
+    circuiting the pipeline.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    validation: FileValidationResult
+    parsed: ParsedSource | None = None
+    chunks: list[SourceChunkCreate] = Field(
+        default_factory=list[SourceChunkCreate], max_length=10_000
+    )
+    claims: list[SourceClaimCreate] = Field(
+        default_factory=list[SourceClaimCreate], max_length=50_000
+    )
+    errors: list[str] = Field(default_factory=list[str], max_length=100)

@@ -64,6 +64,7 @@ from packages.core.models import (
     Deck,
     DesignDirection,
     EvidenceMatrixEntry,
+    FileValidationResult,
     FillBlankItem,
     GenerationJob,
     InteractiveSpec,
@@ -72,6 +73,8 @@ from packages.core.models import (
     Order,
     OutlineSection,
     Paragraph,
+    ParsedPage,
+    ParsedSource,
     Project,
     ProjectCreate,
     QuizFeedback,
@@ -81,9 +84,13 @@ from packages.core.models import (
     Slide,
     Source,
     SourceChunk,
+    SourceChunkCreate,
     SourceClaim,
+    SourceClaimCreate,
     SourceCreate,
     SourceMetadata,
+    SourceMetadataExtracted,
+    SourcePipelineResult,
     TrueFalseItem,
     TypographySpec,
     User,
@@ -269,6 +276,73 @@ def test_source_claim_requires_strength_enum() -> None:
             strength="super",  # type: ignore[arg-type]
             created_at=_now(),
         )
+
+
+def test_source_chunk_create_round_trip() -> None:
+    chunk = SourceChunkCreate(
+        source_id="src-uuid",
+        project_id="proj-uuid",
+        chunk_index=7,
+        text="Some chunk text.",
+        page=2,
+        is_ocr=True,
+        confidence=87.5,
+    )
+    dumped = chunk.model_dump()
+    restored = SourceChunkCreate.model_validate(dumped)
+    assert restored == chunk
+
+
+def test_source_claim_create_round_trip() -> None:
+    claim = SourceClaimCreate(
+        source_chunk_id="chunk-uuid",
+        project_id="proj-uuid",
+        claim_text="A factual claim long enough to validate.",
+        quote="Supporting quote.",
+        strength=ClaimStrength.MODERATE,
+    )
+    dumped = claim.model_dump()
+    restored = SourceClaimCreate.model_validate(dumped)
+    assert restored == claim
+
+
+def test_source_pipeline_result_round_trip() -> None:
+    validation = FileValidationResult(
+        valid=True,
+        detected_type="pdf",
+        mime_type="application/pdf",
+        confidence=0.99,
+        file_size_bytes=2048,
+        extension_mismatch=False,
+        rejection_reason=None,
+        warning=None,
+    )
+    parsed = ParsedSource(
+        filename="x.pdf",
+        file_type="pdf",
+        file_size_bytes=2048,
+        pages=[ParsedPage(page_number=1, text="hello", char_count=5)],
+        metadata=SourceMetadataExtracted(),
+        full_text="hello",
+        needs_ocr_pages=[],
+        parse_errors=[],
+    )
+    chunk = SourceChunkCreate(chunk_index=0, text="hello", page=1)
+    claim = SourceClaimCreate(
+        claim_text="A factual claim of valid length here.",
+        quote=None,
+        strength=ClaimStrength.STRONG,
+    )
+    result = SourcePipelineResult(
+        validation=validation,
+        parsed=parsed,
+        chunks=[chunk],
+        claims=[claim],
+        errors=["a warning"],
+    )
+    dumped = result.model_dump()
+    restored = SourcePipelineResult.model_validate(dumped)
+    assert restored == result
 
 
 # ---------------------------------------------------------------------------
