@@ -6,7 +6,7 @@ source chunk, user-supplied answer, and article section into a single graph.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -69,3 +69,63 @@ class ResearchAnswer(BaseModel):
     score: AnswerScore
     credits_earned: int = Field(ge=0, le=10)
     created_at: datetime
+
+
+class EvidenceMatrix(BaseModel):
+    """Complete evidence matrix for a project.
+
+    Container for all :class:`EvidenceMatrixEntry` rows belonging to one
+    project. The matrix is the article worker's source of truth for what
+    can be cited; an article may not introduce a sourced claim that lacks
+    a corresponding entry here in ``READY`` or ``VERIFIED`` state.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    project_id: UUID
+    entries: list[EvidenceMatrixEntry] = Field(default_factory=list[EvidenceMatrixEntry])
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class EvidenceMatrixStats(BaseModel):
+    """Summary statistics for an evidence matrix.
+
+    ``coverage_percentage`` is ``(ready + verified) / total * 100`` rounded
+    to one decimal place, or ``0.0`` for an empty matrix. ``sections_with_
+    claims`` counts unique non-null ``article_section_id`` values seen on
+    any entry; ``sections_without_claims`` is computed by the validator
+    against an outline and is reported as ``0`` for stand-alone calls.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_claims: int = Field(ge=0)
+    ready_claims: int = Field(ge=0)
+    needs_input_claims: int = Field(ge=0)
+    unsupported_claims: int = Field(ge=0)
+    verified_claims: int = Field(ge=0)
+    sections_with_claims: int = Field(ge=0)
+    sections_without_claims: int = Field(ge=0)
+    coverage_percentage: float = Field(ge=0.0, le=100.0)
+
+
+class MatrixValidationResult(BaseModel):
+    """Result of validating matrix completeness against an outline.
+
+    A matrix is *complete* when every section in the outline has at least
+    one entry whose ``citation_status`` is ``READY`` or ``VERIFIED``. A
+    section with exactly one such entry is reported as *weak* — the
+    article worker can still write the section, but the bibliography will
+    rest on a single source and the user should be prompted to add more.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    is_complete: bool
+    sections_ready: list[str] = Field(default_factory=list[str])
+    sections_missing: list[str] = Field(default_factory=list[str])
+    sections_weak: list[str] = Field(default_factory=list[str])
+    total_ready: int = Field(ge=0)
+    minimum_needed: int = Field(ge=0)
+    warnings: list[str] = Field(default_factory=list[str])

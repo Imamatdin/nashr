@@ -42,7 +42,10 @@ from packages.core.models.deck import (
 )
 from packages.core.models.evidence import (
     AnswerScore,
+    EvidenceMatrix,
     EvidenceMatrixEntry,
+    EvidenceMatrixStats,
+    MatrixValidationResult,
     ResearchAnswer,
     ResearchQuestion,
 )
@@ -83,12 +86,15 @@ __all__ = [
     "DebateScenario",
     "Deck",
     "DesignDirection",
+    "EvidenceMatrix",
     "EvidenceMatrixEntry",
+    "EvidenceMatrixStats",
     "FileValidationResult",
     "FillBlankItem",
     "GenerationJob",
     "InteractiveSpec",
     "MatchingPair",
+    "MatrixValidationResult",
     "NavigationSpec",
     "OCRResult",
     "Order",
