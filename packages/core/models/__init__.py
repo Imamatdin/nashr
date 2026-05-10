@@ -86,6 +86,14 @@ from packages.core.models.source import (
     SourceMetadataExtracted,
     SourcePipelineResult,
 )
+from packages.core.models.suggestion import (
+    AcademicDomain,
+    DomainDetectionResult,
+    DomainScore,
+    SectionSuggestions,
+    Suggestion,
+    SuggestionSource,
+)
 from packages.core.models.user import User, UserCreate
 from packages.core.models.verification import (
     CitationVerification,
@@ -93,6 +101,7 @@ from packages.core.models.verification import (
 )
 
 __all__ = [
+    "AcademicDomain",
     "AcademicPaper",
     "AcademicSearchResult",
     "AnswerScore",
@@ -119,6 +128,8 @@ __all__ = [
     "DebateScenario",
     "Deck",
     "DesignDirection",
+    "DomainDetectionResult",
+    "DomainScore",
     "DraftResult",
     "EvidenceMatrix",
     "EvidenceMatrixEntry",
@@ -149,6 +160,7 @@ __all__ = [
     "ResearchAnswer",
     "ResearchQuestion",
     "ScoredAnswer",
+    "SectionSuggestions",
     "Slide",
     "Source",
     "SourceChunk",
@@ -159,6 +171,8 @@ __all__ = [
     "SourceMetadata",
     "SourceMetadataExtracted",
     "SourcePipelineResult",
+    "Suggestion",
+    "SuggestionSource",
     "TrueFalseItem",
     "TypographySpec",
     "User",
