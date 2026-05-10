@@ -230,6 +230,15 @@ class PrimaryUse(StrEnum):
     OTHER = "other"
 
 
+class AcademicAPI(StrEnum):
+    """Academic-search providers federated by :class:`AcademicSearchService`."""
+
+    SEMANTIC_SCHOLAR = "semantic_scholar"
+    ARXIV = "arxiv"
+    OPENALEX = "openalex"
+    CROSSREF = "crossref"
+
+
 class GenerationPackage(StrEnum):
     """Pricing tiers offered to the user."""
 

@@ -1,5 +1,10 @@
 """Pydantic data models for all Nashr entities (users, projects, sources, articles, decks)."""
 
+from packages.core.models.academic import (
+    AcademicPaper,
+    AcademicSearchResult,
+    DOIMetadata,
+)
 from packages.core.models.article import (
     Article,
     ArticleCreate,
@@ -60,6 +65,8 @@ from packages.core.models.source import (
 from packages.core.models.user import User, UserCreate
 
 __all__ = [
+    "AcademicPaper",
+    "AcademicSearchResult",
     "AnswerScore",
     "Article",
     "ArticleCreate",
@@ -71,6 +78,7 @@ __all__ = [
     "ColorEntry",
     "ColorPalette",
     "CreditLedgerEntry",
+    "DOIMetadata",
     "DebateOption",
     "DebateScenario",
     "Deck",
