@@ -220,6 +220,36 @@ class ResearchQuestionType(StrEnum):
     CONTRADICTION = "contradiction"
 
 
+class InterviewMode(StrEnum):
+    """Depth of the research interview chosen by the user.
+
+    ``FAST`` is the no-interview path and never reaches the engine; the
+    engine itself only handles ``GUIDED`` and ``RESEARCH``.
+    """
+
+    FAST = "fast"
+    GUIDED = "guided"
+    RESEARCH = "research"
+
+
+class WeaknessDimension(StrEnum):
+    """Axes along which the evidence matrix can be weak."""
+
+    THESIS_CLARITY = "thesis_clarity"
+    SOURCE_COVERAGE = "source_coverage"
+    CONTRADICTION_AWARENESS = "contradiction_awareness"
+    ORIGINALITY = "originality"
+    EVIDENCE_DEPTH = "evidence_depth"
+
+
+class CreditCapHit(StrEnum):
+    """Which cap blocked a credit award, when one did."""
+
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    PER_PROJECT = "per_project"
+
+
 class PrimaryUse(StrEnum):
     """Self-reported primary reason a user signed up."""
 

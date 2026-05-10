@@ -49,6 +49,12 @@ from packages.core.models.evidence import (
     ResearchAnswer,
     ResearchQuestion,
 )
+from packages.core.models.interview import (
+    CreditDecision,
+    ProcessedAnswer,
+    ScoredAnswer,
+    WeaknessProfile,
+)
 from packages.core.models.project import Project, ProjectCreate
 from packages.core.models.source import (
     FileValidationResult,
@@ -80,6 +86,7 @@ __all__ = [
     "CitationRef",
     "ColorEntry",
     "ColorPalette",
+    "CreditDecision",
     "CreditLedgerEntry",
     "DOIMetadata",
     "DebateOption",
@@ -102,12 +109,14 @@ __all__ = [
     "Paragraph",
     "ParsedPage",
     "ParsedSource",
+    "ProcessedAnswer",
     "Project",
     "ProjectCreate",
     "QuizFeedback",
     "QuizOption",
     "ResearchAnswer",
     "ResearchQuestion",
+    "ScoredAnswer",
     "Slide",
     "Source",
     "SourceChunk",
@@ -124,4 +133,5 @@ __all__ = [
     "UserCreate",
     "VisualSpec",
     "VisualTheme",
+    "WeaknessProfile",
 ]
