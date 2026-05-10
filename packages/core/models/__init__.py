@@ -58,6 +58,10 @@ from packages.core.models.evidence import (
     ResearchAnswer,
     ResearchQuestion,
 )
+from packages.core.models.export import (
+    ArticleExportMetadata,
+    ExportResult,
+)
 from packages.core.models.interview import (
     CreditDecision,
     ProcessedAnswer,
@@ -93,6 +97,7 @@ __all__ = [
     "Article",
     "ArticleCreate",
     "ArticleDraftResult",
+    "ArticleExportMetadata",
     "ArticleOutline",
     "ArticleQualitySummary",
     "ArticleSection",
@@ -115,6 +120,7 @@ __all__ = [
     "EvidenceMatrix",
     "EvidenceMatrixEntry",
     "EvidenceMatrixStats",
+    "ExportResult",
     "FileValidationResult",
     "FillBlankItem",
     "FormattedBibliography",
