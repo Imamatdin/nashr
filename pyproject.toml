@@ -49,9 +49,17 @@ include = ["packages", "tests"]
 exclude = ["**/__pycache__", "**/node_modules", "packages/web"]
 strict = ["packages/core", "packages/api", "packages/bot", "packages/workers", "packages/academic"]
 pythonVersion = "3.13"
+pythonPlatform = "Windows"
 typeCheckingMode = "strict"
 reportMissingImports = "error"
 reportMissingTypeStubs = "warning"
+# Third-party libraries without type stubs (google-generativeai, magika,
+# pytesseract, feedparser, python-pptx). Strict mode would otherwise flag
+# every call as reportUnknownMemberType. Per-call # pyright: ignore comments
+# are used at the boundary where these libraries are wrapped into typed
+# pydantic models, so the rest of the codebase stays strict.
+reportUntypedFunctionDecorator = "warning"
+reportUntypedBaseClass = "warning"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

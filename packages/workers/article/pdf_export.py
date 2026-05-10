@@ -120,7 +120,7 @@ class PDFExporter:
 
         try:
             pdf_bytes = await self._run_conversion(docx_bytes, filename)
-        except (FileNotFoundError, TimeoutError, RuntimeError) as exc:
+        except (OSError, RuntimeError) as exc:
             return PDFExportResult(
                 file_bytes=b"",
                 filename=out_filename,
@@ -158,7 +158,8 @@ class PDFExporter:
 
         soffice = _find_libreoffice()
 
-        with tempfile.TemporaryDirectory(prefix="nashr_pdf_") as tmpdir:
+        tmpdir = tempfile.mkdtemp(prefix="nashr_pdf_")
+        try:
             docx_name = filename if filename.lower().endswith(".docx") else f"{filename}.docx"
             docx_path = os.path.join(tmpdir, os.path.basename(docx_name))
             with open(docx_path, "wb") as handle:
@@ -173,6 +174,13 @@ class PDFExporter:
 
             with open(pdf_path, "rb") as handle:
                 return handle.read()
+        finally:
+            # LibreOffice on Windows can briefly hold a lock on the converted
+            # DOCX even after exit, which makes a strict rmtree raise
+            # PermissionError. Leftover temp files are not load-bearing —
+            # the OS reaps %TEMP% periodically — so a best-effort cleanup is
+            # fine and keeps the contract "never raise on a conversion failure".
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     async def _invoke_libreoffice(self, soffice: str, docx_path: str, output_dir: str) -> None:
         """Spawn LibreOffice headless; enforce timeout; surface non-zero exit codes."""
