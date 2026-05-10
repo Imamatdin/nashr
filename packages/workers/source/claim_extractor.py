@@ -28,7 +28,7 @@ from typing import Any, Final
 
 from pydantic import ValidationError
 
-from packages.core.enums import ClaimStrength
+from packages.core.enums import ClaimStrength, ClaimType
 from packages.core.llm import LLMClient
 from packages.core.models.source import (
     SourceChunkCreate,
@@ -183,6 +183,7 @@ def _items_to_claims(items: list[dict[str, Any]]) -> list[SourceClaimCreate]:
         claim_text_obj = raw.get("claim_text")
         quote_obj = raw.get("quote")
         strength_obj = raw.get("strength")
+        claim_type_obj = raw.get("claim_type")
 
         if not isinstance(claim_text_obj, str):
             continue
@@ -196,6 +197,8 @@ def _items_to_claims(items: list[dict[str, Any]]) -> list[SourceClaimCreate]:
             strength = ClaimStrength(strength_obj)
         except ValueError:
             continue
+
+        claim_type = _coerce_claim_type(claim_type_obj)
 
         quote: str | None
         if quote_obj is None:
@@ -213,11 +216,28 @@ def _items_to_claims(items: list[dict[str, Any]]) -> list[SourceClaimCreate]:
                     claim_text=claim_text,
                     quote=quote,
                     strength=strength,
+                    claim_type=claim_type,
                 )
             )
         except ValidationError:
             continue
     return claims
+
+
+def _coerce_claim_type(raw: object) -> ClaimType:
+    """Map an LLM ``claim_type`` value to the enum, defaulting on miss.
+
+    A missing or unrecognised type is *not* a reason to drop the whole
+    claim — the article worker can still use a claim whose type is
+    ``general_fact`` even if the LLM forgot to classify it.
+    """
+
+    if not isinstance(raw, str):
+        return ClaimType.GENERAL_FACT
+    try:
+        return ClaimType(raw)
+    except ValueError:
+        return ClaimType.GENERAL_FACT
 
 
 __all__ = ["ClaimExtractor"]

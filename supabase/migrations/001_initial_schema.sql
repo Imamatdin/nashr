@@ -142,6 +142,17 @@ create table if not exists source_claims (
     claim_text          text not null check (char_length(claim_text) between 1 and 2000),
     quote               text check (quote is null or char_length(quote) between 1 and 500),
     strength            text not null check (strength in ('strong', 'moderate', 'weak')),
+    claim_type          text not null default 'general_fact' check (claim_type in (
+        'empirical_finding',
+        'statistical_result',
+        'theoretical_argument',
+        'methodological',
+        'definition',
+        'recommendation',
+        'comparison',
+        'limitation',
+        'general_fact'
+    )),
     created_at          timestamptz not null default now()
 );
 

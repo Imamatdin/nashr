@@ -64,6 +64,20 @@ def test_no_enum_has_duplicate_values() -> None:
         (enums.SourceQuality, {"strong", "medium", "weak", "invalid"}),
         (enums.ClaimStrength, {"strong", "moderate", "weak"}),
         (
+            enums.ClaimType,
+            {
+                "empirical_finding",
+                "statistical_result",
+                "theoretical_argument",
+                "methodological",
+                "definition",
+                "recommendation",
+                "comparison",
+                "limitation",
+                "general_fact",
+            },
+        ),
+        (
             enums.CitationStatus,
             {"ready", "needs_user_input", "unsupported", "verified"},
         ),

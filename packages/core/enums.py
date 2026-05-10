@@ -202,6 +202,26 @@ class ClaimStrength(StrEnum):
     WEAK = "weak"
 
 
+class ClaimType(StrEnum):
+    """Rhetorical category of a single source claim.
+
+    Used by the article outline generator to route claims into the
+    correct article section: statistical findings belong in Results,
+    theoretical arguments in Literature Review, methodology
+    descriptions in Methods, and so on.
+    """
+
+    EMPIRICAL_FINDING = "empirical_finding"
+    STATISTICAL_RESULT = "statistical_result"
+    THEORETICAL_ARGUMENT = "theoretical_argument"
+    METHODOLOGICAL = "methodological"
+    DEFINITION = "definition"
+    RECOMMENDATION = "recommendation"
+    COMPARISON = "comparison"
+    LIMITATION = "limitation"
+    GENERAL_FACT = "general_fact"
+
+
 class CitationStatus(StrEnum):
     """State of a single evidence_matrix row."""
 

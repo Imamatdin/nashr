@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.core.constants import MAX_FILE_SIZE_BYTES
-from packages.core.enums import ClaimStrength, FileType, SourceQuality
+from packages.core.enums import ClaimStrength, ClaimType, FileType, SourceQuality
 
 
 class SourceMetadata(BaseModel):
@@ -75,7 +75,9 @@ class SourceClaim(BaseModel):
 
     ``quote`` is optional: the LLM may legitimately return ``null`` for claims
     that are implied rather than supported by an extractable quotation. The
-    SQL schema mirrors this with a nullable column.
+    SQL schema mirrors this with a nullable column. ``claim_type`` defaults
+    to :attr:`ClaimType.GENERAL_FACT` so legacy rows persisted before the
+    classifier shipped remain valid without backfill.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -86,6 +88,7 @@ class SourceClaim(BaseModel):
     claim_text: str = Field(min_length=1, max_length=2000)
     quote: str | None = Field(default=None, min_length=1, max_length=500)
     strength: ClaimStrength
+    claim_type: ClaimType = ClaimType.GENERAL_FACT
     created_at: datetime
 
 
@@ -111,7 +114,12 @@ class SourceChunkCreate(BaseModel):
 
 
 class SourceClaimCreate(BaseModel):
-    """Pre-persistence representation of a single claim emitted by the extractor."""
+    """Pre-persistence representation of a single claim emitted by the extractor.
+
+    ``claim_type`` defaults to :attr:`ClaimType.GENERAL_FACT` so an LLM
+    response that omits or garbles the field still produces a usable
+    claim — the extractor will not reject a claim solely on type.
+    """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -120,6 +128,7 @@ class SourceClaimCreate(BaseModel):
     claim_text: str = Field(min_length=10, max_length=500)
     quote: str | None = Field(default=None, min_length=1, max_length=500)
     strength: ClaimStrength
+    claim_type: ClaimType = ClaimType.GENERAL_FACT
 
 
 class ParsedPage(BaseModel):

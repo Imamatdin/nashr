@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from packages.core.enums import ClaimStrength
+from packages.core.enums import ClaimStrength, ClaimType
 from packages.core.llm import LLMResponse
 from packages.core.models.source import SourceChunkCreate, SourceMetadataExtracted
 from packages.workers.source.claim_extractor import (
@@ -79,11 +79,13 @@ def _valid_claims_payload() -> str:
                 "claim_text": "Logic emerged as a formal discipline in the 4th century BCE.",
                 "quote": "Aristotle's Organon laid the foundations of formal logic.",
                 "strength": "strong",
+                "claim_type": "theoretical_argument",
             },
             {
                 "claim_text": "Stoic philosophers later extended propositional logic.",
                 "quote": None,
                 "strength": "moderate",
+                "claim_type": "general_fact",
             },
         ]
     )
@@ -128,11 +130,17 @@ async def test_extract_claims_retries_on_bad_json_then_succeeds() -> None:
 async def test_extract_claims_filters_too_short_claims() -> None:
     payload = json.dumps(
         [
-            {"claim_text": "tiny", "quote": None, "strength": "strong"},
+            {
+                "claim_text": "tiny",
+                "quote": None,
+                "strength": "strong",
+                "claim_type": "general_fact",
+            },
             {
                 "claim_text": "This claim is long enough to pass validation rules.",
                 "quote": None,
                 "strength": "strong",
+                "claim_type": "general_fact",
             },
         ]
     )
@@ -150,11 +158,17 @@ async def test_extract_claims_filters_too_long_claims() -> None:
     too_long = "x" * 600
     payload = json.dumps(
         [
-            {"claim_text": too_long, "quote": None, "strength": "strong"},
+            {
+                "claim_text": too_long,
+                "quote": None,
+                "strength": "strong",
+                "claim_type": "general_fact",
+            },
             {
                 "claim_text": "Another well-formed factual claim about the topic.",
                 "quote": None,
                 "strength": "moderate",
+                "claim_type": "general_fact",
             },
         ]
     )
@@ -171,13 +185,24 @@ async def test_extract_claims_filters_too_long_claims() -> None:
 async def test_extract_claims_validates_strength_enum() -> None:
     payload = json.dumps(
         [
-            {"claim_text": "First valid claim about a fact.", "quote": None, "strength": "strong"},
+            {
+                "claim_text": "First valid claim about a fact.",
+                "quote": None,
+                "strength": "strong",
+                "claim_type": "general_fact",
+            },
             {
                 "claim_text": "Second valid claim about another.",
                 "quote": None,
                 "strength": "moderate",
+                "claim_type": "general_fact",
             },
-            {"claim_text": "Third valid claim, weakly stated.", "quote": None, "strength": "weak"},
+            {
+                "claim_text": "Third valid claim, weakly stated.",
+                "quote": None,
+                "strength": "weak",
+                "claim_type": "general_fact",
+            },
         ]
     )
     stub = _StubLLM([payload])
@@ -200,11 +225,13 @@ async def test_extract_claims_invalid_strength_skipped() -> None:
                 "claim_text": "Good claim with valid strength value.",
                 "quote": None,
                 "strength": "very_strong",
+                "claim_type": "general_fact",
             },
             {
                 "claim_text": "Other good claim with valid strength.",
                 "quote": None,
                 "strength": "strong",
+                "claim_type": "general_fact",
             },
         ]
     )
@@ -244,3 +271,107 @@ async def test_extract_claims_concurrent_batching() -> None:
 
     assert len(stub.calls) == 10
     assert len(claims) == 20  # 2 claims per stubbed payload
+
+
+@pytest.mark.asyncio
+async def test_extract_claims_parses_claim_type() -> None:
+    payload = json.dumps(
+        [
+            {
+                "claim_text": "Adoption rates increased by 15% in the trial year.",
+                "quote": None,
+                "strength": "strong",
+                "claim_type": "empirical_finding",
+            },
+            {
+                "claim_text": "Sample size of 234 produced p < 0.05 across all cohorts.",
+                "quote": None,
+                "strength": "strong",
+                "claim_type": "statistical_result",
+            },
+            {
+                "claim_text": "Renewable energy refers to power from naturally replenished flows.",
+                "quote": None,
+                "strength": "moderate",
+                "claim_type": "definition",
+            },
+            {
+                "claim_text": "Governments should invest more aggressively in solar capacity.",
+                "quote": None,
+                "strength": "moderate",
+                "claim_type": "recommendation",
+            },
+            {
+                "claim_text": "The sample size was insufficient to confirm regional effects.",
+                "quote": None,
+                "strength": "weak",
+                "claim_type": "limitation",
+            },
+        ]
+    )
+    stub = _StubLLM([payload])
+    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+
+    claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
+
+    assert [c.claim_type for c in claims] == [
+        ClaimType.EMPIRICAL_FINDING,
+        ClaimType.STATISTICAL_RESULT,
+        ClaimType.DEFINITION,
+        ClaimType.RECOMMENDATION,
+        ClaimType.LIMITATION,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_extract_claims_defaults_missing_claim_type() -> None:
+    payload = json.dumps(
+        [
+            {
+                "claim_text": "An otherwise valid claim with no type field at all.",
+                "quote": None,
+                "strength": "strong",
+            },
+            {
+                "claim_text": "Another valid claim with an explicit type given.",
+                "quote": None,
+                "strength": "moderate",
+                "claim_type": "comparison",
+            },
+        ]
+    )
+    stub = _StubLLM([payload])
+    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+
+    claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
+
+    assert len(claims) == 2
+    assert claims[0].claim_type is ClaimType.GENERAL_FACT
+    assert claims[1].claim_type is ClaimType.COMPARISON
+
+
+@pytest.mark.asyncio
+async def test_extract_claims_defaults_invalid_claim_type() -> None:
+    payload = json.dumps(
+        [
+            {
+                "claim_text": "An otherwise valid claim with a nonsense type label.",
+                "quote": None,
+                "strength": "strong",
+                "claim_type": "nonsense",
+            },
+            {
+                "claim_text": "Another valid claim with a non-string type field.",
+                "quote": None,
+                "strength": "moderate",
+                "claim_type": 42,
+            },
+        ]
+    )
+    stub = _StubLLM([payload])
+    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+
+    claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
+
+    assert len(claims) == 2
+    assert all(c.claim_type is ClaimType.GENERAL_FACT for c in claims)

@@ -30,6 +30,7 @@ from packages.core.enums import (
     CitationFormat,
     CitationStatus,
     ClaimStrength,
+    ClaimType,
     CreditReason,
     CreditStatus,
     FileType,
@@ -304,6 +305,42 @@ def test_source_claim_create_round_trip() -> None:
     dumped = claim.model_dump()
     restored = SourceClaimCreate.model_validate(dumped)
     assert restored == claim
+
+
+def test_source_claim_create_default_claim_type_is_general_fact() -> None:
+    claim = SourceClaimCreate(
+        claim_text="A factual claim long enough to validate.",
+        quote=None,
+        strength=ClaimStrength.MODERATE,
+    )
+    assert claim.claim_type is ClaimType.GENERAL_FACT
+
+
+def test_source_claim_create_explicit_claim_type_round_trip() -> None:
+    claim = SourceClaimCreate(
+        source_chunk_id="chunk-uuid",
+        project_id="proj-uuid",
+        claim_text="Adoption rates increased by fifteen percent in the trial.",
+        quote=None,
+        strength=ClaimStrength.STRONG,
+        claim_type=ClaimType.EMPIRICAL_FINDING,
+    )
+    dumped = claim.model_dump()
+    restored = SourceClaimCreate.model_validate(dumped)
+    assert restored == claim
+    assert restored.claim_type is ClaimType.EMPIRICAL_FINDING
+
+
+def test_source_claim_default_claim_type_is_general_fact() -> None:
+    claim = SourceClaim(
+        source_chunk_id=uuid4(),
+        project_id=uuid4(),
+        claim_text="A factual claim",
+        quote=None,
+        strength=ClaimStrength.STRONG,
+        created_at=_now(),
+    )
+    assert claim.claim_type is ClaimType.GENERAL_FACT
 
 
 def test_source_pipeline_result_round_trip() -> None:
