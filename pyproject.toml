@@ -18,7 +18,7 @@ dependencies = [
     "magika>=0.6.0",
     "pytesseract>=0.3.10",
     "anthropic>=0.40.0",
-    "google-generativeai>=0.8.0",
+    "google-genai>=2.0.0",
     "feedparser>=6.0.11",
     "python-jose[cryptography]>=3.3.0",
     "arq>=0.26.0",
@@ -53,10 +53,10 @@ pythonPlatform = "Windows"
 typeCheckingMode = "strict"
 reportMissingImports = "error"
 reportMissingTypeStubs = "warning"
-# Third-party libraries without type stubs (google-generativeai, magika,
-# pytesseract, feedparser, python-pptx). Strict mode would otherwise flag
-# every call as reportUnknownMemberType. Per-call # pyright: ignore comments
-# are used at the boundary where these libraries are wrapped into typed
+# Third-party libraries without type stubs (magika, pytesseract,
+# feedparser, python-pptx). Strict mode would otherwise flag every call
+# as reportUnknownMemberType. Per-call # pyright: ignore comments are
+# used at the boundary where these libraries are wrapped into typed
 # pydantic models, so the rest of the codebase stays strict.
 reportUntypedFunctionDecorator = "warning"
 reportUntypedBaseClass = "warning"

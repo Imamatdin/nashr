@@ -149,7 +149,7 @@ If DOI is found in PDF metadata:
 
 **STEP 4: Research Pass**
 
-Model: Haiku 4.5 (fast, cheap)
+Model: Gemini 3 Flash (fast, cheap)
 Input: user topic + source chunk text (truncated to 8K tokens)
 Output: structured research brief as JSON
 
@@ -668,7 +668,7 @@ design_directions (
 | Research Package | 20 | 5 | $4.00 |
 
 Model routing:
-- Haiku 4.5 ($1/$5 per M tokens): source parsing, claim extraction, citation verification, answer scoring
+- Gemini 3 Flash ($0.50/$3.00 per M tokens): source parsing, claim extraction, citation verification, answer scoring, question generation
 - Sonnet 4.6 ($3/$15 per M tokens): editorial, design direction, layout, article sections
 
 Every job records: estimated_cost, actual_cost, model_calls_count, image_count, tokens_in, tokens_out.

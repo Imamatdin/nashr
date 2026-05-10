@@ -6,10 +6,12 @@ so workers can route between Anthropic and Google providers via
 :class:`packages.core.model_router.ModelRouter` without changing call
 sites.
 
-The Google ``google-generativeai`` SDK exposes a per-call
-``GenerativeModel`` factory rather than a long-lived client; we wrap
-that in an injectable ``model_factory`` so tests can stub the model
-without monkeypatching module-level state.
+Built on the ``google-genai`` SDK (the successor to the deprecated
+``google-generativeai`` package). The SDK exposes a single async entry
+point at ``client.aio.models.generate_content``; we wrap that call in
+an injectable ``generate_content_fn`` so tests can supply a stub
+without monkeypatching module-level state or constructing a live
+:class:`google.genai.Client`.
 """
 
 from __future__ import annotations
@@ -18,19 +20,12 @@ import asyncio
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import ClassVar, Final, Protocol, runtime_checkable
 
-import google.generativeai as genai
-from google.api_core.exceptions import (
-    DeadlineExceeded,
-    GoogleAPICallError,
-    PermissionDenied,
-    ResourceExhausted,
-    ServiceUnavailable,
-    Unauthenticated,
-)
-from google.generativeai.types import HarmBlockThreshold, HarmCategory
+import google.genai as genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 from packages.core.constants import (
     DEFAULT_LLM_MAX_RETRIES,
@@ -62,27 +57,49 @@ GEMINI_PRO_INPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3.1-pro-prev
 GEMINI_PRO_OUTPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3.1-pro-preview"][1]
 
 
-_SAFETY_SETTINGS: Final[dict[HarmCategory, HarmBlockThreshold]] = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
+_SAFETY_SETTINGS: Final[list[genai_types.SafetySetting]] = [
+    genai_types.SafetySetting(
+        category=genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    genai_types.SafetySetting(
+        category=genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    genai_types.SafetySetting(
+        category=genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    genai_types.SafetySetting(
+        category=genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+]
+
+
+# HTTP status codes the SDK surfaces via APIError.code. Auth errors must
+# not retry — a bad key is a configuration fault, not a transient one.
+_AUTH_HTTP_CODES: Final[frozenset[int]] = frozenset({401, 403})
 
 
 @runtime_checkable
-class _GenerativeModelLike(Protocol):
-    """Subset of ``GenerativeModel`` we depend on; lets tests inject stubs."""
+class _GenerateContentResponseLike(Protocol):
+    """Subset of ``GenerateContentResponse`` we depend on; lets tests inject stubs.
 
-    async def generate_content_async(
-        self,
-        contents: str,
-        generation_config: object | None = ...,
-        safety_settings: object | None = ...,
-    ) -> object: ...
+    Both attributes are read-only properties on the SDK's real
+    response model, so we declare them as ``@property`` here to keep
+    Protocol matching covariant. Test fakes can satisfy the protocol
+    with plain attributes of the same types.
+    """
+
+    @property
+    def text(self) -> str | None: ...
+
+    @property
+    def usage_metadata(self) -> object | None: ...
 
 
-ModelFactory = Callable[[str, str], _GenerativeModelLike]
+GenerateContentFn = Callable[..., Awaitable[_GenerateContentResponseLike]]
 
 
 def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -100,14 +117,22 @@ def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens / 1_000_000.0) * input_rate + (output_tokens / 1_000_000.0) * output_rate
 
 
-def _default_model_factory(model_name: str, system_instruction: str) -> _GenerativeModelLike:
-    """Construct a real ``GenerativeModel`` with our shared safety settings."""
+def _default_generate_content_fn(client: genai.Client) -> GenerateContentFn:
+    """Bind a ``google.genai.Client`` into the injected-fn shape."""
 
-    return genai.GenerativeModel(  # type: ignore[reportUnknownMemberType]
-        model_name=model_name,
-        system_instruction=system_instruction,
-        safety_settings=_SAFETY_SETTINGS,
-    )
+    async def fn(
+        *,
+        model: str,
+        contents: str,
+        config: genai_types.GenerateContentConfig,
+    ) -> _GenerateContentResponseLike:
+        return await client.aio.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+
+    return fn
 
 
 class GeminiClient:
@@ -116,39 +141,40 @@ class GeminiClient:
     Behaviour parity with :class:`packages.core.llm.LLMClient`:
 
     * 30s asyncio timeout per call;
-    * up to two retries on :class:`ResourceExhausted`,
-      :class:`ServiceUnavailable`, :class:`DeadlineExceeded`, or
-      ``asyncio.TimeoutError`` (1s/2s exponential backoff);
-    * authentication errors (:class:`PermissionDenied`,
-      :class:`Unauthenticated`) propagate immediately without retry — a
-      misconfigured key is a configuration fault, not a transient one;
+    * up to two retries on transient API errors (any
+      :class:`google.genai.errors.APIError` whose HTTP code is not an
+      auth code) or ``asyncio.TimeoutError`` (1s/2s exponential backoff);
+    * authentication errors (HTTP 401 / 403) propagate immediately
+      without retry — a misconfigured key is a configuration fault, not
+      a transient one;
     * one info log per call with model, token counts, latency, and
       estimated cost.
 
     The constructor reads ``GOOGLE_API_KEY`` from the environment and
-    calls :func:`genai.configure`. Tests inject a ``model_factory`` to
-    bypass both the env-var requirement and the global SDK state.
+    constructs a :class:`google.genai.Client`. Tests inject a
+    ``generate_content_fn`` to bypass both the env-var requirement and
+    the live SDK initialization.
     """
 
     DEFAULT_MODEL: ClassVar[str] = GEMINI_FLASH_MODEL
 
     def __init__(
         self,
-        model_factory: ModelFactory | None = None,
+        generate_content_fn: GenerateContentFn | None = None,
         timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
         max_retries: int = DEFAULT_LLM_MAX_RETRIES,
     ) -> None:
-        if model_factory is None:
+        if generate_content_fn is None:
             api_key = os.environ.get("GOOGLE_API_KEY")
             if not api_key:
                 raise RuntimeError(
                     "GOOGLE_API_KEY environment variable is not set; "
                     "GeminiClient cannot be initialized without it."
                 )
-            genai.configure(api_key=api_key)  # type: ignore[reportUnknownMemberType]
-            self._model_factory: ModelFactory = _default_model_factory
+            client = genai.Client(api_key=api_key)
+            self._generate_content_fn: GenerateContentFn = _default_generate_content_fn(client)
         else:
-            self._model_factory = model_factory
+            self._generate_content_fn = generate_content_fn
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
 
@@ -162,27 +188,27 @@ class GeminiClient:
     ) -> LLMResponse:
         """Run one completion with retry, timeout, and cost logging."""
 
+        config = genai_types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+            safety_settings=_SAFETY_SETTINGS,
+        )
+
         attempt = 0
         last_error: Exception | None = None
         while attempt <= self._max_retries:
             start = time.perf_counter()
             try:
-                model_obj = self._model_factory(model, system)
-                generation_config = genai.GenerationConfig(  # type: ignore[reportUnknownMemberType]
-                    max_output_tokens=max_tokens,
-                    temperature=temperature,
-                )
                 response = await asyncio.wait_for(
-                    model_obj.generate_content_async(
-                        user,
-                        generation_config=generation_config,
-                        safety_settings=_SAFETY_SETTINGS,
+                    self._generate_content_fn(
+                        model=model,
+                        contents=user,
+                        config=config,
                     ),
                     timeout=self._timeout_seconds,
                 )
-            except (PermissionDenied, Unauthenticated):
-                raise
-            except (TimeoutError, ResourceExhausted, ServiceUnavailable, DeadlineExceeded) as exc:
+            except TimeoutError as exc:
                 last_error = exc
                 attempt += 1
                 if attempt > self._max_retries:
@@ -199,7 +225,9 @@ class GeminiClient:
                 )
                 await asyncio.sleep(backoff)
                 continue
-            except GoogleAPICallError as exc:
+            except genai_errors.APIError as exc:
+                if exc.code in _AUTH_HTTP_CODES:
+                    raise
                 last_error = exc
                 attempt += 1
                 if attempt > self._max_retries:
@@ -212,6 +240,7 @@ class GeminiClient:
                         "attempt": attempt,
                         "backoff_seconds": backoff,
                         "error_type": type(exc).__name__,
+                        "error_code": exc.code,
                     },
                 )
                 await asyncio.sleep(backoff)
@@ -245,15 +274,18 @@ class GeminiClient:
         raise last_error
 
 
-def _extract_content_and_usage(response: object) -> tuple[str, int, int]:
+def _extract_content_and_usage(
+    response: _GenerateContentResponseLike,
+) -> tuple[str, int, int]:
     """Pull text and token usage from a ``GenerateContentResponse``-like object.
 
-    Defensive against missing ``usage_metadata`` (older SDKs return
-    ``None``) and against responses with no candidates — both surface as
-    empty/zero values rather than crashes so cost accounting stays sound.
+    Defensive against missing ``usage_metadata`` (the SDK returns
+    ``None`` when no token accounting is available) and against
+    responses with no text content — both surface as empty/zero values
+    rather than crashes so cost accounting stays sound.
     """
 
-    text_attr = getattr(response, "text", "")
+    text_attr = getattr(response, "text", None)
     text = text_attr if isinstance(text_attr, str) else ""
 
     usage = getattr(response, "usage_metadata", None)

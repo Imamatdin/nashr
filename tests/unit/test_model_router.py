@@ -140,7 +140,7 @@ async def test_router_lazy_initializes_clients(monkeypatch: pytest.MonkeyPatch) 
     def fake_gemini_init(self: GeminiClient, *args: Any, **kwargs: Any) -> None:
         del args, kwargs
         init_counts["gemini"] += 1
-        self._model_factory = lambda *_a, **_k: None  # type: ignore[attr-defined]
+        self._generate_content_fn = lambda *_a, **_k: None  # type: ignore[attr-defined]
         self._timeout_seconds = 30  # type: ignore[attr-defined]
         self._max_retries = 2  # type: ignore[attr-defined]
 

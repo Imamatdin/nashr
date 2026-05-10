@@ -1,17 +1,17 @@
 """Behaviour tests for :class:`GeminiClient` and Gemini cost helpers.
 
-The Google Generative AI SDK is the only thing we mock at this layer
+The Google ``google-genai`` SDK is the only thing we mock at this layer
 (per the testing rules: external LLM APIs may be stubbed). We assert
 the contract that the rest of the system relies on:
 
 * Cost is computed from the token counts using the right per-model rate.
-* Retry kicks in for transient errors (``ResourceExhausted`` /
-  ``ServiceUnavailable``) and the first successful response is returned.
-* ``PermissionDenied`` / ``Unauthenticated`` propagate immediately —
-  a misconfigured key is a configuration fault, not transient.
-* When ``GOOGLE_API_KEY`` is unset and no model factory is injected,
-  initialization fails with a clear error instead of failing later
-  on a confusing API call.
+* Retry kicks in for transient errors (HTTP 429 / 503) and the first
+  successful response is returned.
+* Auth errors (HTTP 401 / 403) propagate immediately — a misconfigured
+  key is a configuration fault, not transient.
+* When ``GOOGLE_API_KEY`` is unset and no generate-content fn is
+  injected, initialization fails with a clear error instead of failing
+  later on a confusing API call.
 """
 
 from __future__ import annotations
@@ -20,11 +20,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
-from google.api_core.exceptions import (
-    PermissionDenied,
-    ResourceExhausted,
-    ServiceUnavailable,
-)
+from google.genai import errors as genai_errors
 from pydantic import ValidationError
 
 from packages.core.gemini import (
@@ -49,43 +45,44 @@ class _FakeUsage:
 
 class _FakeResponse:
     def __init__(self, text: str, prompt_tokens: int, candidate_tokens: int) -> None:
-        self.text = text
-        self.usage_metadata = _FakeUsage(prompt_tokens, candidate_tokens)
+        self.text: str | None = text
+        self.usage_metadata: object | None = _FakeUsage(prompt_tokens, candidate_tokens)
 
 
-class _FakeModel:
-    """Stand-in for ``GenerativeModel`` returning scripted responses in order."""
-
-    def __init__(
-        self,
-        behaviour: Callable[[], Awaitable[_FakeResponse]],
-    ) -> None:
-        self._behaviour = behaviour
-        self.calls = 0
-
-    async def generate_content_async(
-        self,
-        contents: str,
-        generation_config: object | None = None,
-        safety_settings: object | None = None,
-    ) -> _FakeResponse:
-        del contents, generation_config, safety_settings
-        self.calls += 1
-        return await self._behaviour()
-
-
-def _make_factory(
+def _make_fn(
     behaviour: Callable[[], Awaitable[_FakeResponse]],
-) -> tuple[Callable[[str, str], Any], list[_FakeModel]]:
-    created: list[_FakeModel] = []
+) -> tuple[Callable[..., Awaitable[Any]], list[dict[str, Any]]]:
+    """Build a `generate_content_fn` that scripts a sequence of behaviours.
 
-    def factory(model_name: str, system_instruction: str) -> _FakeModel:
-        del model_name, system_instruction
-        m = _FakeModel(behaviour)
-        created.append(m)
-        return m
+    Returns the fn and a captured list of call kwargs so tests can
+    assert how many times the SDK boundary was invoked.
+    """
 
-    return factory, created
+    calls: list[dict[str, Any]] = []
+
+    async def fn(*, model: str, contents: str, config: object) -> _FakeResponse:
+        calls.append({"model": model, "contents": contents, "config": config})
+        return await behaviour()
+
+    return fn, calls
+
+
+def _rate_limited() -> genai_errors.ClientError:
+    return genai_errors.ClientError(
+        429, {"error": {"status": "RESOURCE_EXHAUSTED", "message": "rate limit"}}
+    )
+
+
+def _service_unavailable() -> genai_errors.ServerError:
+    return genai_errors.ServerError(
+        503, {"error": {"status": "UNAVAILABLE", "message": "overloaded"}}
+    )
+
+
+def _permission_denied() -> genai_errors.ClientError:
+    return genai_errors.ClientError(
+        403, {"error": {"status": "PERMISSION_DENIED", "message": "no access"}}
+    )
 
 
 def test_gemini_response_cost_calculation_flash() -> None:
@@ -142,8 +139,8 @@ async def test_gemini_client_returns_text_and_cost() -> None:
     async def behaviour() -> _FakeResponse:
         return _FakeResponse("hello world", prompt_tokens=200, candidate_tokens=400)
 
-    factory, created = _make_factory(behaviour)
-    client = GeminiClient(model_factory=factory)
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
 
     response = await client.complete(system="sys", user="usr")
 
@@ -155,8 +152,9 @@ async def test_gemini_client_returns_text_and_cost() -> None:
         + 400 / 1_000_000 * GEMINI_FLASH_OUTPUT_COST_PER_MTOK
     )
     assert response.estimated_cost_usd == pytest.approx(expected_cost)
-    assert len(created) == 1
-    assert created[0].calls == 1
+    assert len(calls) == 1
+    assert calls[0]["model"] == GEMINI_FLASH_MODEL
+    assert calls[0]["contents"] == "usr"
 
 
 @pytest.mark.asyncio
@@ -168,7 +166,7 @@ async def test_gemini_client_retries_on_transient_error(
     async def behaviour() -> _FakeResponse:
         state["count"] += 1
         if state["count"] <= 2:
-            raise ResourceExhausted("rate limit hit")
+            raise _rate_limited()
         return _FakeResponse("recovered", prompt_tokens=10, candidate_tokens=10)
 
     async def no_sleep(_seconds: float) -> None:
@@ -176,14 +174,14 @@ async def test_gemini_client_retries_on_transient_error(
 
     monkeypatch.setattr("packages.core.gemini.asyncio.sleep", no_sleep)
 
-    factory, created = _make_factory(behaviour)
-    client = GeminiClient(model_factory=factory)
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
 
     response = await client.complete(system="sys", user="usr")
 
     assert response.content == "recovered"
     assert state["count"] == 3
-    assert sum(m.calls for m in created) == 3
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio
@@ -195,7 +193,7 @@ async def test_gemini_client_retries_on_service_unavailable(
     async def behaviour() -> _FakeResponse:
         state["count"] += 1
         if state["count"] == 1:
-            raise ServiceUnavailable("backend overloaded")
+            raise _service_unavailable()
         return _FakeResponse("ok", prompt_tokens=5, candidate_tokens=5)
 
     async def no_sleep(_seconds: float) -> None:
@@ -203,8 +201,8 @@ async def test_gemini_client_retries_on_service_unavailable(
 
     monkeypatch.setattr("packages.core.gemini.asyncio.sleep", no_sleep)
 
-    factory, _ = _make_factory(behaviour)
-    client = GeminiClient(model_factory=factory)
+    fn, _ = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
 
     response = await client.complete(system="sys", user="usr")
     assert response.content == "ok"
@@ -216,51 +214,50 @@ async def test_gemini_client_gives_up_after_max_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def behaviour() -> _FakeResponse:
-        raise ResourceExhausted("permanent rate limit")
+        raise _rate_limited()
 
     async def no_sleep(_seconds: float) -> None:
         return None
 
     monkeypatch.setattr("packages.core.gemini.asyncio.sleep", no_sleep)
 
-    factory, created = _make_factory(behaviour)
-    client = GeminiClient(model_factory=factory, max_retries=2)
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn, max_retries=2)
 
-    with pytest.raises(ResourceExhausted):
+    with pytest.raises(genai_errors.ClientError):
         await client.complete(system="sys", user="usr")
 
-    # initial call + 2 retries = 3 attempts → 3 model factory invocations
-    assert len(created) == 3
-    assert sum(m.calls for m in created) == 3
+    # initial call + 2 retries = 3 attempts → 3 boundary invocations
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio
 async def test_gemini_client_does_not_retry_auth_error() -> None:
     async def behaviour() -> _FakeResponse:
-        raise PermissionDenied("invalid api key")
+        raise _permission_denied()
 
-    factory, created = _make_factory(behaviour)
-    client = GeminiClient(model_factory=factory)
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
 
-    with pytest.raises(PermissionDenied):
+    with pytest.raises(genai_errors.ClientError) as excinfo:
         await client.complete(system="sys", user="usr")
 
-    assert len(created) == 1
-    assert created[0].calls == 1
+    assert excinfo.value.code == 403
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_gemini_client_handles_missing_usage_metadata() -> None:
     class _ResponseWithoutUsage:
         def __init__(self) -> None:
-            self.text = "no metadata"
-            self.usage_metadata = None
+            self.text: str | None = "no metadata"
+            self.usage_metadata: object | None = None
 
     async def behaviour() -> Any:
         return _ResponseWithoutUsage()
 
-    factory, _ = _make_factory(behaviour)
-    client = GeminiClient(model_factory=factory)
+    fn, _ = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
 
     response = await client.complete(system="sys", user="usr")
     assert response.content == "no metadata"
