@@ -240,7 +240,7 @@ create table if not exists articles (
                          )),
     thesis              text not null check (char_length(thesis) between 1 and 2000),
     outline             jsonb not null,
-    citation_format     text not null check (citation_format in ('gost', 'apa', 'ieee')),
+    citation_format     text not null check (citation_format in ('gost', 'apa', 'ieee', 'chicago', 'vancouver')),
     target_pages        integer not null check (target_pages between 1 and 30),
     status              text not null default 'draft'
                          check (status in ('draft', 'verified', 'revised', 'final')),

@@ -39,7 +39,22 @@ def test_no_enum_has_duplicate_values() -> None:
             enums.ArticleStructure,
             {"referat", "kurs_ishi", "ilmiy_maqola", "hisobot"},
         ),
-        (enums.CitationFormat, {"gost", "apa", "ieee"}),
+        (enums.CitationFormat, {"gost", "apa", "ieee", "chicago", "vancouver"}),
+        (
+            enums.SourceType,
+            {
+                "journal_article",
+                "book",
+                "book_chapter",
+                "conference_paper",
+                "dissertation",
+                "web_page",
+                "report",
+                "legal_document",
+                "dataset",
+                "other",
+            },
+        ),
         (
             enums.JobType,
             {

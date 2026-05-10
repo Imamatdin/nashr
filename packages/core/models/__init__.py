@@ -18,6 +18,11 @@ from packages.core.models.article import (
     Paragraph,
     QualityCheckResult,
 )
+from packages.core.models.bibliography import (
+    CitationMetadata,
+    FormattedBibliography,
+    FormattedEntry,
+)
 from packages.core.models.billing import (
     CreditLedgerEntry,
     GenerationJob,
@@ -76,6 +81,10 @@ from packages.core.models.source import (
     SourcePipelineResult,
 )
 from packages.core.models.user import User, UserCreate
+from packages.core.models.verification import (
+    CitationVerification,
+    CitationVerificationReport,
+)
 
 __all__ = [
     "AcademicPaper",
@@ -89,7 +98,10 @@ __all__ = [
     "ArticleSection",
     "BackgroundSpec",
     "CategoryItem",
+    "CitationMetadata",
     "CitationRef",
+    "CitationVerification",
+    "CitationVerificationReport",
     "ColorEntry",
     "ColorPalette",
     "CreditDecision",
@@ -105,6 +117,8 @@ __all__ = [
     "EvidenceMatrixStats",
     "FileValidationResult",
     "FillBlankItem",
+    "FormattedBibliography",
+    "FormattedEntry",
     "GenerationJob",
     "InteractiveSpec",
     "MatchingPair",

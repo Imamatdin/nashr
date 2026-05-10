@@ -57,11 +57,41 @@ class ArticleStructure(StrEnum):
 
 
 class CitationFormat(StrEnum):
-    """Bibliography style supported by the article worker."""
+    """Bibliography style supported by the article worker.
+
+    GOST is the CIS academic standard (default for Uzbek and Russian
+    output). APA is the default for English output. IEEE is offered for
+    engineering/CS articles. Chicago and Vancouver are present because
+    some Uzbek universities mandate footnote-based or numeric medical
+    styles for specific faculties.
+    """
 
     GOST = "gost"
     APA = "apa"
     IEEE = "ieee"
+    CHICAGO = "chicago"
+    VANCOUVER = "vancouver"
+
+
+class SourceType(StrEnum):
+    """Bibliographic kind of a single citable source.
+
+    Drives format selection in :class:`BibliographyFormatter`: a journal
+    article rendered in GOST uses ``//`` and an issue/volume block, a
+    book uses ``— City: Publisher, Year. — N с.``, a web page adds the
+    ``[Электронный ресурс]`` marker, and so on.
+    """
+
+    JOURNAL_ARTICLE = "journal_article"
+    BOOK = "book"
+    BOOK_CHAPTER = "book_chapter"
+    CONFERENCE_PAPER = "conference_paper"
+    DISSERTATION = "dissertation"
+    WEB_PAGE = "web_page"
+    REPORT = "report"
+    LEGAL_DOCUMENT = "legal_document"
+    DATASET = "dataset"
+    OTHER = "other"
 
 
 class ArticleSectionStatus(StrEnum):
@@ -229,6 +259,24 @@ class CitationStatus(StrEnum):
     NEEDS_USER_INPUT = "needs_user_input"
     UNSUPPORTED = "unsupported"
     VERIFIED = "verified"
+
+
+class CitationVerdict(StrEnum):
+    """Verifier's judgement of how well a source supports a cited claim.
+
+    Emitted by :class:`packages.workers.article.citation_verifier.CitationVerifier`
+    for each citation in a drafted article. ``SOURCE_NOT_FOUND`` is a
+    structural verdict assigned without an LLM call when the cited
+    ``source_chunk_id`` or ``claim_id`` is not present in the project's
+    extracted material.
+    """
+
+    SUPPORTED = "supported"
+    PARTIALLY_SUPPORTED = "partially_supported"
+    OVERCLAIMED = "overclaimed"
+    NOT_SUPPORTED = "not_supported"
+    CONTRADICTED = "contradicted"
+    SOURCE_NOT_FOUND = "source_not_found"
 
 
 class ResearchQuestionType(StrEnum):

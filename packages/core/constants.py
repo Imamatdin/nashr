@@ -89,6 +89,17 @@ DAILY_GENERATION_JOB_LIMIT: Final[int] = 10
 DEFAULT_LLM_TIMEOUT_SECONDS: Final[int] = 30
 DEFAULT_LLM_MAX_RETRIES: Final[int] = 2
 
+MODEL_ROUTING: Final[dict[str, str]] = {
+    "citation_verification": "gemini-3-flash",
+    "claim_extraction": "gemini-3-flash",
+    "answer_scoring": "gemini-3-flash",
+    "question_generation": "gemini-3-flash",
+    "section_drafting": "claude-sonnet-4-6-20250514",
+    "outline_generation": "claude-sonnet-4-6-20250514",
+    "design_direction": "claude-sonnet-4-6-20250514",
+    "layout_pass": "claude-sonnet-4-6-20250514",
+}
+
 EXPORT_URL_EXPIRY_SECONDS: Final[int] = 60 * 60 * 24 * 7
 
 PRESENTATION_TIER_IMAGE_LIMITS: Final[dict[str, int]] = {
