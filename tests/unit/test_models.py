@@ -238,13 +238,13 @@ def test_paragraph_text_capped_at_5000() -> None:
         Paragraph(text="x" * 5_001)
 
 
-def test_source_chunk_confidence_must_be_unit_interval() -> None:
+def test_source_chunk_confidence_uses_tesseract_scale() -> None:
     SourceChunk(
         source_id=uuid4(),
         project_id=uuid4(),
         chunk_index=0,
         text="hello",
-        confidence=0.5,
+        confidence=87.5,
         created_at=_now(),
     )
     with pytest.raises(ValidationError):
@@ -253,7 +253,7 @@ def test_source_chunk_confidence_must_be_unit_interval() -> None:
             project_id=uuid4(),
             chunk_index=0,
             text="hello",
-            confidence=1.5,
+            confidence=120.0,
             created_at=_now(),
         )
 

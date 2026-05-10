@@ -21,7 +21,7 @@ class SourceMetadata(BaseModel):
     year: int | None = Field(default=None, ge=1500, le=2100)
     doi: str | None = Field(default=None, max_length=200)
     page_count: int | None = Field(default=None, ge=0)
-    ocr_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    ocr_confidence: float | None = Field(default=None, ge=0.0, le=100.0)
 
 
 class SourceCreate(BaseModel):
@@ -66,12 +66,17 @@ class SourceChunk(BaseModel):
     text: str = Field(min_length=1, max_length=10_000)
     page: int | None = Field(default=None, ge=1)
     is_ocr: bool = False
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    confidence: float = Field(default=100.0, ge=0.0, le=100.0)
     created_at: datetime
 
 
 class SourceClaim(BaseModel):
-    """A specific evidentiary claim extracted from a source chunk."""
+    """A specific evidentiary claim extracted from a source chunk.
+
+    ``quote`` is optional: the LLM may legitimately return ``null`` for claims
+    that are implied rather than supported by an extractable quotation. The
+    SQL schema mirrors this with a nullable column.
+    """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -79,7 +84,7 @@ class SourceClaim(BaseModel):
     source_chunk_id: UUID
     project_id: UUID
     claim_text: str = Field(min_length=1, max_length=2000)
-    quote: str = Field(min_length=1, max_length=2000)
+    quote: str | None = Field(default=None, min_length=1, max_length=500)
     strength: ClaimStrength
     created_at: datetime
 
@@ -113,7 +118,7 @@ class SourceClaimCreate(BaseModel):
     source_chunk_id: str = Field(default="", max_length=64)
     project_id: str = Field(default="", max_length=64)
     claim_text: str = Field(min_length=10, max_length=500)
-    quote: str | None = Field(default=None, max_length=300)
+    quote: str | None = Field(default=None, min_length=1, max_length=500)
     strength: ClaimStrength
 
 

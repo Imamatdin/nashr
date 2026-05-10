@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 CLAIM_BATCH_SIZE: Final[int] = 5
 CLAIM_MIN_TEXT_LENGTH: Final[int] = 10
 CLAIM_MAX_TEXT_LENGTH: Final[int] = 500
-CLAIM_MAX_QUOTE_LENGTH: Final[int] = 300
+CLAIM_MAX_QUOTE_LENGTH: Final[int] = 500
 
 
 class ClaimExtractor:
@@ -86,10 +86,11 @@ class ClaimExtractor:
     ) -> list[SourceClaimCreate]:
         """Extract claims from one chunk; returns ``[]`` on unrecoverable errors."""
 
-        system_prompt = CLAIM_EXTRACTION_SYSTEM.format(source_context=source_context)
-        user_prompt = CLAIM_EXTRACTION_USER.format(chunk_text=chunk.text)
+        user_prompt = CLAIM_EXTRACTION_USER.format(
+            source_context=source_context, chunk_text=chunk.text
+        )
 
-        raw_items = await self._call_with_json_retry(system_prompt, user_prompt)
+        raw_items = await self._call_with_json_retry(CLAIM_EXTRACTION_SYSTEM, user_prompt)
         if raw_items is None:
             return []
         return _items_to_claims(raw_items)

@@ -213,8 +213,8 @@ async def test_pdf_parse_handles_empty_pdf() -> None:
 
     result = await parser.parse(payload, "empty.pdf")
 
-    if result.pages:
-        assert result.pages[0].char_count == 0
+    assert len(result.pages) == 1
+    assert result.pages[0].char_count == 0
     assert result.metadata.word_count == 0
 
 

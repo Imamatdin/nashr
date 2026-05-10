@@ -113,7 +113,7 @@ create table if not exists source_chunks (
     text            text not null check (char_length(text) between 1 and 10000),
     page            integer check (page is null or page >= 1),
     is_ocr          boolean not null default false,
-    confidence      real not null default 1.0 check (confidence >= 0.0 and confidence <= 1.0),
+    confidence      real not null default 100.0 check (confidence >= 0.0 and confidence <= 100.0),
     created_at      timestamptz not null default now(),
     unique (source_id, chunk_index)
 );
@@ -140,7 +140,7 @@ create table if not exists source_claims (
     source_chunk_id     uuid not null references source_chunks(id) on delete cascade,
     project_id          uuid not null references projects(id) on delete cascade,
     claim_text          text not null check (char_length(claim_text) between 1 and 2000),
-    quote               text not null check (char_length(quote) between 1 and 2000),
+    quote               text check (quote is null or char_length(quote) between 1 and 500),
     strength            text not null check (strength in ('strong', 'moderate', 'weak')),
     created_at          timestamptz not null default now()
 );
