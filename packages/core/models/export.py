@@ -63,3 +63,41 @@ class ExportResult(BaseModel):
     citation_count: int = Field(ge=0)
     bibliography_count: int = Field(ge=0)
     warnings: list[str] = Field(default_factory=list[str], max_length=50)
+
+
+class PDFExportResult(BaseModel):
+    """Output of :meth:`PDFExporter.export` — the DOCX→PDF conversion.
+
+    On the success path ``file_bytes`` holds the rendered PDF and
+    ``error`` is ``None``. On failure (LibreOffice missing, conversion
+    timeout, corrupt input) ``success`` is ``False``, ``file_bytes`` is
+    empty, ``file_size_bytes`` is 0, and ``error`` carries a human-
+    readable explanation. Callers always get a value back; they never
+    need a try/except around the exporter.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    file_bytes: bytes
+    filename: str = Field(min_length=1, max_length=300)
+    file_size_bytes: int = Field(ge=0)
+    source_docx_size: int = Field(ge=0)
+    conversion_time_ms: int = Field(ge=0)
+    success: bool = True
+    error: str | None = Field(default=None, max_length=2000)
+
+
+class ArticleExportBundle(BaseModel):
+    """Both DOCX and PDF outputs of a single article export job.
+
+    The DOCX is the canonical, edit-friendly artefact; the PDF is the
+    layout-locked version produced by piping the DOCX through
+    LibreOffice. Both are returned together so the caller (bot, API,
+    admin) can hand the user whichever they ask for without re-running
+    the exporter.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    docx: ExportResult
+    pdf: PDFExportResult

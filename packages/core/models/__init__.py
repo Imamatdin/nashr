@@ -59,8 +59,10 @@ from packages.core.models.evidence import (
     ResearchQuestion,
 )
 from packages.core.models.export import (
+    ArticleExportBundle,
     ArticleExportMetadata,
     ExportResult,
+    PDFExportResult,
 )
 from packages.core.models.interview import (
     CreditDecision,
@@ -97,6 +99,7 @@ __all__ = [
     "Article",
     "ArticleCreate",
     "ArticleDraftResult",
+    "ArticleExportBundle",
     "ArticleExportMetadata",
     "ArticleOutline",
     "ArticleQualitySummary",
@@ -133,6 +136,7 @@ __all__ = [
     "OCRResult",
     "Order",
     "OutlineSection",
+    "PDFExportResult",
     "Paragraph",
     "ParsedPage",
     "ParsedSource",

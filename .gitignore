@@ -1,4 +1,6 @@
-# Local-only docs
+# Claude (proprietary — prompts, rules, hooks, settings, instructions)
+.claude/
+CLAUDE.md
 CLAUDE.local.md
 
 # Reference material (not for distribution)
@@ -28,9 +30,6 @@ dist/
 node_modules/
 .next/
 .turbo/
-
-# Claude Code local overrides
-.claude/settings.local.json
 
 # OS
 .DS_Store
