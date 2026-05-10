@@ -7,7 +7,11 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from packages.core.enums import ArticleSectionStatus, ArticleStructure, CitationFormat
+from packages.core.enums import (
+    ArticleSectionStatus,
+    ArticleStructure,
+    CitationFormat,
+)
 
 
 class CitationRef(BaseModel):
@@ -116,3 +120,62 @@ class Article(BaseModel):
     status: ArticleSectionStatus = ArticleSectionStatus.DRAFT
     created_at: datetime
     updated_at: datetime
+
+
+class QualityCheckResult(BaseModel):
+    """Outcome of running an :class:`ArticleSection` against its checklist.
+
+    ``checks_passed`` and ``checks_failed`` are the literal checklist
+    strings from the section's :class:`SectionRequirement`. ``passed``
+    is the binary verdict; ``overall_score`` is the fraction of checks
+    that passed (0.0..1.0) and is what the drafter compares against the
+    revision threshold.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    passed: bool
+    checks_passed: list[str] = Field(default_factory=list[str], max_length=50)
+    checks_failed: list[str] = Field(default_factory=list[str], max_length=50)
+    overall_score: float = Field(ge=0.0, le=1.0)
+
+
+class DraftResult(BaseModel):
+    """Result of drafting one section, including quality and cost telemetry."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    section: ArticleSection
+    quality_check: QualityCheckResult
+    revision_attempted: bool = False
+    revision_improved: bool = False
+    warnings: list[str] = Field(default_factory=list[str], max_length=50)
+    llm_calls_made: int = Field(default=0, ge=0, le=10)
+    tokens_used: int = Field(default=0, ge=0)
+
+
+class ArticleQualitySummary(BaseModel):
+    """Aggregate quality verdict across every section of one article."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    sections_passed: int = Field(ge=0)
+    sections_failed: int = Field(ge=0)
+    sections_revised: int = Field(ge=0)
+    overall_score: float = Field(ge=0.0, le=1.0)
+    weakest_section: str = Field(default="", max_length=64)
+    strongest_section: str = Field(default="", max_length=64)
+
+
+class ArticleDraftResult(BaseModel):
+    """End-to-end result of drafting an entire article section by section."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    sections: list[DraftResult] = Field(default_factory=list[DraftResult], max_length=40)
+    total_word_count: int = Field(ge=0)
+    total_llm_calls: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+    estimated_cost_usd: float = Field(ge=0.0)
+    quality_summary: ArticleQualitySummary
+    warnings: list[str] = Field(default_factory=list[str], max_length=100)

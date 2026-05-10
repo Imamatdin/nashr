@@ -289,6 +289,22 @@ class AcademicAPI(StrEnum):
     CROSSREF = "crossref"
 
 
+class CalibrationLevel(StrEnum):
+    """Academic register the article drafter should write at.
+
+    The level adapts vocabulary, sentence complexity, and analytical
+    sophistication to the user's demonstrated capability — not to make
+    output worse for younger users, but to match the register a real
+    writer at that level would actually produce.
+    """
+
+    SCHOOL = "school"
+    UNDERGRADUATE = "undergraduate"
+    MASTERS = "masters"
+    DOCTORAL = "doctoral"
+    PROFESSIONAL = "professional"
+
+
 class GenerationPackage(StrEnum):
     """Pricing tiers offered to the user."""
 
