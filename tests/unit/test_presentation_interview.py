@@ -12,6 +12,7 @@ from packages.core.enums import (
     ClaimStrength,
     ClaimType,
     DiagramStrategy,
+    Language,
     NarrativeEmphasis,
     PresentationMood,
     SpeakerNotesStyle,
@@ -359,3 +360,45 @@ def test_apply_answers_closing_ask_text_captured() -> None:
         {"closing_ask": "Pilot site at hyperscaler X"},
     )
     assert resolved.closing_ask == "Pilot site at hyperscaler X"
+
+
+# ---------------------------------------------------------------------------
+# Karakalpak (kaa) language support
+# ---------------------------------------------------------------------------
+
+
+def test_generate_questions_karakalpak() -> None:
+    """generate_questions must return Karakalpak text when language='kaa'."""
+
+    engine = PresentationInterviewEngine()
+    result = engine.generate_questions(
+        claims=_education_claims(),
+        chunks=[],
+        source_metadata=[],
+        language="kaa",
+    )
+    audience = next(q for q in result.questions if q.question_id == "audience")
+    assert audience.question_text == "Kim ushın tayarlanbaqta?"
+    # Karakalpak diverges from Uzbek for this question.
+    uz = engine.generate_questions(
+        claims=_education_claims(), chunks=[], source_metadata=[], language="uz"
+    )
+    audience_uz = next(q for q in uz.questions if q.question_id == "audience").question_text
+    assert audience.question_text != audience_uz
+
+    # Option labels also localise to Karakalpak (different from Uzbek).
+    assert audience.options is not None
+    decide = next(opt for opt in audience.options if opt.value == "decide_for_me")
+    assert decide.label == "Ózińiz tańlań"
+
+
+def test_apply_defaults_karakalpak_language() -> None:
+    """apply_defaults must thread an explicit Karakalpak language code through."""
+
+    engine = PresentationInterviewEngine()
+    defaults = engine.apply_defaults(
+        claims=_education_claims(),
+        source_metadata=[],
+        language="kaa",
+    )
+    assert defaults.language is Language.KAA

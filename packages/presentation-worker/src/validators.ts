@@ -44,8 +44,8 @@ export function validateDeckSpec(raw: unknown): ValidationResult {
   if (raw['language'] !== undefined && raw['language'] !== null) {
     if (typeof raw['language'] !== 'string') {
       errors.push({ path: 'language', message: 'must be a string' });
-    } else if (!['uz', 'ru', 'en'].includes(raw['language'] as string)) {
-      errors.push({ path: 'language', message: 'must be one of uz, ru, en' });
+    } else if (!['uz', 'ru', 'en', 'kaa'].includes(raw['language'] as string)) {
+      errors.push({ path: 'language', message: 'must be one of uz, ru, en, kaa' });
     }
   }
 

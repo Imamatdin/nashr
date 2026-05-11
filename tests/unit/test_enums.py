@@ -32,7 +32,7 @@ def test_no_enum_has_duplicate_values() -> None:
 @pytest.mark.parametrize(
     ("enum_cls", "expected"),
     [
-        (enums.Language, {"uz", "ru", "en"}),
+        (enums.Language, {"uz", "ru", "en", "kaa"}),
         (enums.Audience, {"talaba", "oqituvchi", "akademik", "biznes"}),
         (enums.ProjectType, {"presentation", "article", "research_package"}),
         (

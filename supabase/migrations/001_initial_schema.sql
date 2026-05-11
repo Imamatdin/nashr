@@ -20,7 +20,7 @@ create table if not exists users (
     telegram_id     bigint unique not null check (telegram_id > 0),
     username        text check (char_length(username) <= 64),
     first_name      text check (char_length(first_name) <= 128),
-    language        text not null default 'uz' check (language in ('uz', 'ru', 'en')),
+    language        text not null default 'uz' check (language in ('uz', 'ru', 'en', 'kaa')),
     primary_use     text not null default 'study'
                      check (primary_use in ('study', 'teaching', 'research', 'business', 'other')),
     created_at      timestamptz not null default now()
@@ -46,7 +46,7 @@ create table if not exists projects (
     type            text not null
                      check (type in ('presentation', 'article', 'research_package')),
     title           text not null check (char_length(title) between 1 and 200),
-    language        text not null check (language in ('uz', 'ru', 'en')),
+    language        text not null check (language in ('uz', 'ru', 'en', 'kaa')),
     audience        text not null
                      check (audience in ('talaba', 'oqituvchi', 'akademik', 'biznes')),
     status          text not null default 'draft'
@@ -298,7 +298,7 @@ create table if not exists decks (
     id              uuid primary key default gen_random_uuid(),
     project_id      uuid not null references projects(id) on delete cascade,
     title           text not null check (char_length(title) between 1 and 200),
-    language        text not null check (language in ('uz', 'ru', 'en')),
+    language        text not null check (language in ('uz', 'ru', 'en', 'kaa')),
     audience        text not null
                      check (audience in ('talaba', 'oqituvchi', 'akademik', 'biznes')),
     deck_json       jsonb not null,

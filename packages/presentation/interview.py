@@ -248,8 +248,14 @@ class PresentationInterviewEngine:
         source_metadata: list[SourceMetadataExtracted],
         chunks: list[SourceChunkCreate] | None = None,
         outline: ArticleOutline | None = None,
+        language: str | Language = Language.UZ,
     ) -> PresentationInterviewAnswers:
-        """Skip the interview entirely and return content-derived defaults."""
+        """Skip the interview entirely and return content-derived defaults.
+
+        ``language`` lets the caller pin the deck to a specific
+        :class:`Language`. The default stays Uzbek so existing callers
+        that pre-date Karakalpak support are unaffected.
+        """
 
         chunks_in = chunks or []
         detection = self._domain_detector.detect_domains(
@@ -262,6 +268,7 @@ class PresentationInterviewEngine:
             claim_count=len(claims),
             stat_count=stat_count,
             people_count=people_count,
+            language=_resolve_language(language),
         )
 
     # ------------------------------------------------------------------
@@ -274,6 +281,7 @@ class PresentationInterviewEngine:
         claim_count: int,
         stat_count: int,
         people_count: int,
+        language: Language = Language.UZ,
     ) -> PresentationInterviewAnswers:
         del stat_count, people_count  # reserved for future heuristics
 
@@ -295,7 +303,7 @@ class PresentationInterviewEngine:
         return PresentationInterviewAnswers(
             audience=AudienceType.UNDERGRADUATE,
             talk_duration_minutes=duration,
-            language=Language.UZ,
+            language=language,
             narrative_emphasis=NarrativeEmphasis.BALANCED,
             title_style=TitleStyle.TAKEAWAY,
             include_interactive=include_interactive,

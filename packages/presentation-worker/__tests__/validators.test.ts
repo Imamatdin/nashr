@@ -58,6 +58,13 @@ describe('validateDeckSpec', () => {
     expect(result.valid).toBe(true);
   });
 
+  it('accepts a deck whose language is Karakalpak (kaa)', () => {
+    const deck = minimalValidDeck();
+    deck.language = 'kaa';
+    const result = validateDeckSpec(deck);
+    expect(result.valid).toBe(true);
+  });
+
   it('rejects an empty slides array', () => {
     const deck = minimalValidDeck();
     deck.slides = [];

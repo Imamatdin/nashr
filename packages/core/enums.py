@@ -11,11 +11,17 @@ from enum import StrEnum
 
 
 class Language(StrEnum):
-    """User-facing language codes."""
+    """User-facing language codes.
+
+    Karakalpak (kaa) is distinct from Uzbek (uz) — different vocabulary
+    for navigation chrome ("Kelesi"/"Artqa" vs "Keyingi"/"Orqaga"),
+    different feedback labels, different orthographic conventions.
+    """
 
     UZ = "uz"
     RU = "ru"
     EN = "en"
+    KAA = "kaa"
 
 
 class Audience(StrEnum):

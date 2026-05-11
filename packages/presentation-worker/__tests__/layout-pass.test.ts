@@ -23,7 +23,7 @@ function loadDeckFixture(): DeckSpec {
   return JSON.parse(raw) as DeckSpec;
 }
 
-function buildDeck(slides: SlideSpec[], language: 'en' | 'uz' | 'ru' = 'en'): DeckSpec {
+function buildDeck(slides: SlideSpec[], language: 'en' | 'uz' | 'ru' | 'kaa' = 'en'): DeckSpec {
   return {
     project_id: 'p-test',
     title: 'Test deck',

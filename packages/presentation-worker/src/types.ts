@@ -91,7 +91,7 @@ export type ExportFormat = 'html' | 'pptx_editable' | 'pptx_studio' | 'pdf';
 
 export type AuditSeverity = 'fail' | 'warn';
 
-export type Language = 'uz' | 'ru' | 'en';
+export type Language = 'uz' | 'ru' | 'en' | 'kaa';
 
 // ---------------------------------------------------------------------------
 // Content primitives (snake_case, wire format)
