@@ -152,6 +152,46 @@ describe('interactive role tagging', () => {
     }
   });
 
+  it('every hidden block has a reveal mechanism on its slide', () => {
+    // Roles that the HTML renderer hides by default. The list must stay
+    // in sync with HIDDEN_ROLES in src/renderers/html-renderer.ts.
+    const HIDDEN_ROLES = new Set([
+      'feedback_correct',
+      'feedback_wrong',
+      'blank_answer',
+      'tf_verdict',
+      'tf_explanation',
+      'debate_framework',
+      'match_right',
+    ]);
+    // Quiz feedback is revealed by clicking an option, not by a
+    // reveal_trigger. So a slide that ONLY hides feedback_* (plus the
+    // companion options) is allowed without a reveal_trigger.
+    const QUIZ_FEEDBACK_ROLES = new Set(['feedback_correct', 'feedback_wrong']);
+
+    for (const type of INTERACTIVE_TYPES) {
+      const deck = buildTestDeck([makeSlide(type, fixtureFor(type))]);
+      const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+      const hiddenBlocks = layout.textBlocks.filter(
+        (b) => b.role !== undefined && HIDDEN_ROLES.has(b.role),
+      );
+      if (hiddenBlocks.length === 0) continue;
+
+      const hasRevealTrigger = layout.textBlocks.some(
+        (b) => b.role === 'reveal_trigger',
+      );
+      const hasOptions = layout.textBlocks.some(
+        (b) => b.role === 'option_correct' || b.role === 'option_wrong',
+      );
+      const onlyQuizFeedback = hiddenBlocks.every(
+        (b) => b.role !== undefined && QUIZ_FEEDBACK_ROLES.has(b.role),
+      );
+
+      const revealable = hasRevealTrigger || (hasOptions && onlyQuizFeedback);
+      expect(revealable, `slide_type=${type} has hidden content but no reveal mechanism`).toBe(true);
+    }
+  });
+
   it('produces sequential dataIndex values across quiz options', () => {
     const deck = buildTestDeck([
       makeSlide('interactive_quiz_mcq', {

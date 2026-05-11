@@ -64,6 +64,7 @@ export function layoutInteractiveFillBlank(slide: SlideSpec, deck: DeckSpec): Sl
   );
 
   const items = (slide.content.fill_blanks ?? []).slice(0, MAX_ITEMS);
+  let lastItemY = ITEMS_BAND_Y;
   items.forEach((item, fIdx) => {
     const groupId = `f${fIdx}`;
     const itemY = ITEMS_BAND_Y + fIdx * ITEM_BLOCK_H;
@@ -100,7 +101,26 @@ export function layoutInteractiveFillBlank(slide: SlideSpec, deck: DeckSpec): Sl
         dataIndex: fIdx,
       }),
     );
+    lastItemY = itemY;
   });
+
+  // Reveal trigger sits below the last item. The HTML renderer keeps
+  // every `blank_answer` block hidden until this trigger is clicked.
+  const triggerY = items.length > 0 ? Math.min(lastItemY + 12, 92) : 92;
+  blocks.push(
+    buildTextBlock({
+      text: labels.interactive.showAnswer,
+      region: { x: 35, y: triggerY, w: 30, h: 4 },
+      fontFamily: design.body_font,
+      fontWeight: 'normal',
+      fontStyle: 'italic',
+      color: design.palette.accent,
+      align: 'center',
+      tier: FONT_SIZES.caption,
+      lineHeight: LINE_HEIGHTS.caption,
+      role: 'reveal_trigger',
+    }),
+  );
 
   const background: SlideBackground = defaultBackground(design);
   return compose(slide, blocks, [], [], background);

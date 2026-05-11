@@ -14,6 +14,7 @@
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, type Region } from '../constants.js';
+import { getLabels } from '../labels.js';
 import type {
   DeckSpec,
   ImageBlock,
@@ -34,6 +35,7 @@ const MAX_POSITIONS = 3;
 
 export function layoutInteractiveDebate(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const { design } = deck;
+  const labels = getLabels(deck.language);
   const blocks: TextBlock[] = [];
 
   blocks.push(
@@ -121,6 +123,23 @@ export function layoutInteractiveDebate(slide: SlideSpec, deck: DeckSpec): Slide
       }),
     );
   });
+
+  // Reveal trigger sits below the last position. The HTML renderer
+  // keeps every `debate_framework` block hidden until clicked.
+  blocks.push(
+    buildTextBlock({
+      text: labels.interactive.showAnswer,
+      region: { x: 35, y: 94, w: 30, h: 4 },
+      fontFamily: design.body_font,
+      fontWeight: 'normal',
+      fontStyle: 'italic',
+      color: design.palette.accent,
+      align: 'center',
+      tier: FONT_SIZES.caption,
+      lineHeight: LINE_HEIGHTS.caption,
+      role: 'reveal_trigger',
+    }),
+  );
 
   const background = buildBackground(slide, deck);
   return compose(slide, blocks, [], [], background);

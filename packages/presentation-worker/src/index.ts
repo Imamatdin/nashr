@@ -10,9 +10,11 @@
  *   cat deck.json | node dist/index.js layout
  */
 
-import { readFileSync, writeFileSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import { Command } from 'commander';
 import { LayoutPass } from './layout-pass.js';
+import { HtmlRenderer } from './renderers/index.js';
 import { validateDeckSpec } from './validators.js';
 import type { DeckSpec } from './types.js';
 
@@ -72,14 +74,41 @@ program
 
 program
   .command('render')
-  .description('Render a DeckSpec to HTML / PPTX / PDF (stub for Task 20+)')
+  .description('Render a DeckSpec to HTML / PPTX / PDF')
   .option('-i, --input <path>', 'Path to DeckSpec JSON file')
   .option('-f, --format <format>', 'Output format: html | pptx_editable | pdf', 'html')
   .option('-o, --output <path>', 'Output directory', './output')
   .action((options: { input?: string; format: string; output: string }) => {
+    const deck = parseInput(options.input);
+    const validation = validateDeckSpec(deck);
+    if (!validation.valid) {
+      process.stderr.write('Invalid DeckSpec:\n');
+      for (const err of validation.errors) {
+        process.stderr.write(`  ${err.path}: ${err.message}\n`);
+      }
+      process.exit(1);
+    }
+    const typed = deck as DeckSpec;
+    const layout = new LayoutPass().layout(typed);
+
+    if (options.format === 'html') {
+      const html = new HtmlRenderer().render(typed, layout);
+      mkdirSync(options.output, { recursive: true });
+      const safe = typed.title
+        .replace(/[^a-zA-Z0-9Ѐ-ӿĀ-ɏ]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 60) || 'deck';
+      const outPath = join(options.output, `${safe}.html`);
+      writeFileSync(outPath, html, 'utf-8');
+      process.stdout.write(`HTML written to ${outPath}\n`);
+      process.stdout.write(
+        `Slides: ${layout.slides.length}, Overflows: ${layout.totalOverflows}\n`,
+      );
+      process.exit(0);
+    }
+
     process.stdout.write(
-      `Render command (format=${options.format}, output=${options.output}). ` +
-        `Rendering is not yet implemented; use the "layout" command.\n`,
+      `Format "${options.format}" not yet implemented. Use "html".\n`,
     );
     process.exit(0);
   });

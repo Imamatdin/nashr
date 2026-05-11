@@ -68,6 +68,7 @@ export function layoutInteractiveTrueFalse(slide: SlideSpec, deck: DeckSpec): Sl
   }
 
   const items = (slide.content.true_false_items ?? []).slice(0, MAX_ITEMS);
+  let lastItemY = ITEMS_BAND_Y;
   items.forEach((item, tIdx) => {
     const groupId = `tf${tIdx}`;
     const itemY = ITEMS_BAND_Y + tIdx * ITEM_BLOCK_H;
@@ -124,7 +125,26 @@ export function layoutInteractiveTrueFalse(slide: SlideSpec, deck: DeckSpec): Sl
         dataIndex: tIdx,
       }),
     );
+    lastItemY = itemY;
   });
+
+  // Reveal trigger sits below the last item. The HTML renderer keeps
+  // every `tf_verdict` and `tf_explanation` block hidden until clicked.
+  const triggerY = items.length > 0 ? Math.min(lastItemY + 14, 92) : 92;
+  blocks.push(
+    buildTextBlock({
+      text: labels.interactive.showAnswer,
+      region: { x: 35, y: triggerY, w: 30, h: 4 },
+      fontFamily: design.body_font,
+      fontWeight: 'normal',
+      fontStyle: 'italic',
+      color: design.palette.accent,
+      align: 'center',
+      tier: FONT_SIZES.caption,
+      lineHeight: LINE_HEIGHTS.caption,
+      role: 'reveal_trigger',
+    }),
+  );
 
   const background: SlideBackground = defaultBackground(design);
   return compose(slide, blocks, [], [], background);

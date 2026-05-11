@@ -85,4 +85,44 @@ describe('layout — INTERACTIVE_TRUE_FALSE', () => {
     expect(tf0.filter((b) => b.role === 'tf_verdict')).toHaveLength(1);
     expect(tf0.filter((b) => b.role === 'tf_explanation')).toHaveLength(1);
   });
+
+  it('emits a reveal_trigger so HTML can reveal verdicts and explanations', () => {
+    const deck = buildTestDeck([
+      makeSlide('interactive_true_false', {
+        title: 'Tf',
+        true_false_items: makeItems(),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const triggers = layout.textBlocks.filter((b) => b.role === 'reveal_trigger');
+    expect(triggers).toHaveLength(1);
+  });
+
+  it('localizes the reveal trigger label (ru / kaa)', () => {
+    const ruDeck = buildTestDeck(
+      [
+        makeSlide('interactive_true_false', {
+          title: 'Верно или нет',
+          true_false_items: makeItems(),
+        }),
+      ],
+      'ru',
+    );
+    const ruLayout = new LayoutPass().layoutSlide(ruDeck.slides[0]!, ruDeck);
+    const ruTrigger = ruLayout.textBlocks.find((b) => b.role === 'reveal_trigger');
+    expect(ruTrigger!.text).toBe('Показать ответ');
+
+    const kaaDeck = buildTestDeck(
+      [
+        makeSlide('interactive_true_false', {
+          title: 'Dúrıs yamasa qáte',
+          true_false_items: makeItems(),
+        }),
+      ],
+      'kaa',
+    );
+    const kaaLayout = new LayoutPass().layoutSlide(kaaDeck.slides[0]!, kaaDeck);
+    const kaaTrigger = kaaLayout.textBlocks.find((b) => b.role === 'reveal_trigger');
+    expect(kaaTrigger!.text).toBe('Jauapdı kórset');
+  });
 });

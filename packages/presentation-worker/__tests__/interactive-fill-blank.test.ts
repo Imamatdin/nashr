@@ -69,4 +69,44 @@ describe('layout — INTERACTIVE_FILL_BLANK', () => {
     );
     expect(subtitle).toBeDefined();
   });
+
+  it('emits a reveal_trigger block so HTML can reveal hidden answers', () => {
+    const deck = buildTestDeck([
+      makeSlide('interactive_fill_blank', {
+        title: 'Fill in',
+        fill_blanks: makeBlanks(3),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const triggers = layout.textBlocks.filter((b) => b.role === 'reveal_trigger');
+    expect(triggers).toHaveLength(1);
+  });
+
+  it('localizes the reveal trigger label (ru / kaa)', () => {
+    const ruDeck = buildTestDeck(
+      [
+        makeSlide('interactive_fill_blank', {
+          title: 'Заполни',
+          fill_blanks: makeBlanks(2),
+        }),
+      ],
+      'ru',
+    );
+    const ruLayout = new LayoutPass().layoutSlide(ruDeck.slides[0]!, ruDeck);
+    const ruTrigger = ruLayout.textBlocks.find((b) => b.role === 'reveal_trigger');
+    expect(ruTrigger!.text).toBe('Показать ответ');
+
+    const kaaDeck = buildTestDeck(
+      [
+        makeSlide('interactive_fill_blank', {
+          title: 'Toltır',
+          fill_blanks: makeBlanks(2),
+        }),
+      ],
+      'kaa',
+    );
+    const kaaLayout = new LayoutPass().layoutSlide(kaaDeck.slides[0]!, kaaDeck);
+    const kaaTrigger = kaaLayout.textBlocks.find((b) => b.role === 'reveal_trigger');
+    expect(kaaTrigger!.text).toBe('Jauapdı kórset');
+  });
 });

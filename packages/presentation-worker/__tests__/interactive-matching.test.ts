@@ -84,6 +84,17 @@ describe('layout — INTERACTIVE_MATCHING', () => {
     expect(layout.textBlocks.filter((b) => b.role === 'match_right')).toHaveLength(6);
   });
 
+  it('emits exactly one reveal_trigger block', () => {
+    const deck = buildTestDeck([
+      makeSlide('interactive_matching', {
+        title: 'Match',
+        matching_pairs: makePairs(3),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    expect(layout.textBlocks.filter((b) => b.role === 'reveal_trigger')).toHaveLength(1);
+  });
+
   it('renders connectors as dashed lines with the "4 4" pattern', () => {
     const deck = buildTestDeck([
       makeSlide('interactive_matching', {

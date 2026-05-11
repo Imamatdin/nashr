@@ -88,4 +88,47 @@ describe('layout — INTERACTIVE_DEBATE', () => {
     expect(prompt).toBeDefined();
     expect(prompt!.align).toBe('center');
   });
+
+  it('emits a reveal_trigger so HTML can reveal framework labels', () => {
+    const deck = buildTestDeck([
+      makeSlide('interactive_debate', {
+        title: 'Debate',
+        debate_prompt: 'Pick one.',
+        debate_options: makeOptions(),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const triggers = layout.textBlocks.filter((b) => b.role === 'reveal_trigger');
+    expect(triggers).toHaveLength(1);
+  });
+
+  it('localizes the reveal trigger label (ru / kaa)', () => {
+    const ruDeck = buildTestDeck(
+      [
+        makeSlide('interactive_debate', {
+          title: 'Debate',
+          debate_prompt: 'Выберите.',
+          debate_options: makeOptions(),
+        }),
+      ],
+      'ru',
+    );
+    const ruLayout = new LayoutPass().layoutSlide(ruDeck.slides[0]!, ruDeck);
+    const ruTrigger = ruLayout.textBlocks.find((b) => b.role === 'reveal_trigger');
+    expect(ruTrigger!.text).toBe('Показать ответ');
+
+    const kaaDeck = buildTestDeck(
+      [
+        makeSlide('interactive_debate', {
+          title: 'Debate',
+          debate_prompt: 'Birewdi tańlań.',
+          debate_options: makeOptions(),
+        }),
+      ],
+      'kaa',
+    );
+    const kaaLayout = new LayoutPass().layoutSlide(kaaDeck.slides[0]!, kaaDeck);
+    const kaaTrigger = kaaLayout.textBlocks.find((b) => b.role === 'reveal_trigger');
+    expect(kaaTrigger!.text).toBe('Jauapdı kórset');
+  });
 });
