@@ -104,47 +104,120 @@ class ArticleSectionStatus(StrEnum):
 
 
 class SlideType(StrEnum):
-    """All slide kinds the presentation pipeline can emit."""
+    """All 22 slide layout types defined by Design Language v2.
 
-    TITLE = "title"
-    SECTION_DIVIDER = "section_divider"
-    CONTENT = "content"
-    TIMELINE = "timeline"
+    Each value maps to a concrete layout specification in the renderer:
+    region geometry, typography hierarchy, and content slot count.
+    """
+
+    TITLE_HERO = "title_hero"
+    CONCEPT_DEFINITION = "concept_definition"
+    GALLERY_PEOPLE = "gallery_people"
+    TYPOGRAPHIC_KEYWORDS = "typographic_keywords"
+    CONTENT_SPLIT = "content_split"
+    DATA_EMPHASIS = "data_emphasis"
     COMPARISON = "comparison"
-    DATA_STAT = "data_stat"
-    QUOTE = "quote"
-    BIBLIOGRAPHY = "bibliography"
-    CLOSING = "closing"
-    QUIZ_MCQ = "quiz_mcq"
-    QUIZ_MATCHING = "quiz_matching"
-    QUIZ_CATEGORIZE = "quiz_categorize"
-    QUIZ_FILL_BLANK = "quiz_fill_blank"
-    QUIZ_TRUE_FALSE = "quiz_true_false"
-    DEBATE_SCENARIO = "debate_scenario"
+    TIMELINE = "timeline"
+    FLOW_PROCESS = "flow_process"
+    QUOTE_PULLQUOTE = "quote_pullquote"
+    CHART_DATA = "chart_data"
+    TABLE_COMPACT = "table_compact"
+    SECTION_BREAK = "section_break"
+    SUMMARY_TAKEAWAY = "summary_takeaway"
+    RESOURCES_LINKS = "resources_links"
+    TEAM_CREDITS = "team_credits"
+    INTERACTIVE_QUIZ_MCQ = "interactive_quiz_mcq"
+    INTERACTIVE_MATCHING = "interactive_matching"
+    INTERACTIVE_CATEGORIZE = "interactive_categorize"
+    INTERACTIVE_FILL_BLANK = "interactive_fill_blank"
+    INTERACTIVE_TRUE_FALSE = "interactive_true_false"
+    INTERACTIVE_DEBATE = "interactive_debate"
 
 
-class LayoutMode(StrEnum):
-    """Per-slide layout mode chosen during the Layout Pass."""
+class PresentationMood(StrEnum):
+    """Aesthetic mood that drives palette, typography, and decorative choices."""
 
-    FULL_BLEED = "full_bleed"
-    SPLIT_LEFT = "split_left"
-    SPLIT_RIGHT = "split_right"
-    CENTERED = "centered"
-    GRID_CARDS = "grid_cards"
-    STAT_HERO = "stat_hero"
-    QUOTE = "quote"
-    QUIZ = "quiz"
-    MATCHING = "matching"
+    WARM_HISTORICAL = "warm_historical"
+    BOLD_TECHNICAL = "bold_technical"
+    CLEAN_PROFESSIONAL = "clean_professional"
+    CALM_MEDICAL = "calm_medical"
+    NATURAL = "natural"
+    INSTITUTIONAL = "institutional"
 
 
-class BackgroundType(StrEnum):
-    """How a slide background is rendered."""
+class BackgroundTreatment(StrEnum):
+    """Deck-level light/dark background polarity."""
 
-    SOLID = "solid"
-    GRADIENT = "gradient"
-    TEXTURE = "texture"
-    PATTERN = "pattern"
-    IMAGE = "image"
+    DARK = "dark"
+    LIGHT = "light"
+
+
+class ExportFormat(StrEnum):
+    """Primary output formats the renderer can emit."""
+
+    HTML = "html"
+    PPTX_EDITABLE = "pptx_editable"
+    PPTX_STUDIO = "pptx_studio"
+    PDF = "pdf"
+
+
+class TitleStyle(StrEnum):
+    """Editorial style for slide titles.
+
+    ``TOPIC`` produces short noun-phrase titles ("Methodology", "Results").
+    ``TAKEAWAY`` produces action/finding titles ("94% water savings in Seattle").
+    Design Language R08 defaults the engine to ``TAKEAWAY``.
+    """
+
+    TOPIC = "topic"
+    TAKEAWAY = "takeaway"
+
+
+class AudienceType(StrEnum):
+    """Granular presentation audience for register and design routing."""
+
+    SCHOOL = "school"
+    UNDERGRADUATE = "undergraduate"
+    GRADUATE = "graduate"
+    ACADEMIC_CONFERENCE = "academic_conference"
+    MIXED_ACADEMIC_INDUSTRY = "mixed_academic_industry"
+    PROFESSIONAL = "professional"
+    GENERAL_PUBLIC = "general_public"
+
+
+class NarrativeEmphasis(StrEnum):
+    """Which arc the deck should prioritise."""
+
+    PROBLEM_FRAMING = "problem_framing"
+    TECHNICAL_MECHANISM = "technical_mechanism"
+    METHODOLOGY = "methodology"
+    RESULTS_NUMBERS = "results_numbers"
+    ROADMAP_SCALABILITY = "roadmap_scalability"
+    BALANCED = "balanced"
+
+
+class SpeakerNotesStyle(StrEnum):
+    """How extensive speaker notes should be on each slide."""
+
+    FULL_SCRIPT = "full_script"
+    BRIEF_TALKING_POINTS = "brief_talking_points"
+    NO_NOTES = "no_notes"
+
+
+class DiagramStrategy(StrEnum):
+    """How the engine should handle diagrams in technical content."""
+
+    BUILD_SVG = "build_svg"
+    PLACEHOLDER = "placeholder"
+    MINIMAL_TEXT = "minimal_text"
+    NONE = "none"
+
+
+class AuditSeverity(StrEnum):
+    """Severity tier for a single quality-audit finding."""
+
+    FAIL = "fail"
+    WARN = "warn"
 
 
 class JobType(StrEnum):

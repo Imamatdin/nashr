@@ -103,22 +103,16 @@ def test_enum_membership(enum_cls: type[Enum], expected: set[str]) -> None:
     assert actual == expected, f"{enum_cls.__name__} differs from spec"
 
 
-def test_slide_type_includes_all_quiz_kinds() -> None:
-    quiz_members = {m.value for m in enums.SlideType if m.value.startswith("quiz_")}
-    assert quiz_members == {
-        "quiz_mcq",
-        "quiz_matching",
-        "quiz_categorize",
-        "quiz_fill_blank",
-        "quiz_true_false",
+def test_slide_type_includes_all_interactive_kinds() -> None:
+    interactive_members = {m.value for m in enums.SlideType if m.value.startswith("interactive_")}
+    assert interactive_members == {
+        "interactive_quiz_mcq",
+        "interactive_matching",
+        "interactive_categorize",
+        "interactive_fill_blank",
+        "interactive_true_false",
+        "interactive_debate",
     }
-
-
-def test_layout_mode_excludes_unrelated_values() -> None:
-    values = {m.value for m in enums.LayoutMode}
-    assert "title" not in values
-    assert "split_left" in values and "split_right" in values
-    assert "grid_cards" in values
 
 
 def test_payment_provider_only_payme_and_click() -> None:
