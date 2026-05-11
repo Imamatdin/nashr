@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { getLabels, type PresentationLabels } from '../src/labels.js';
+import {
+  getLabels,
+  type PresentationLabels,
+  type SupportedLanguage,
+} from '../src/labels.js';
 
 describe('getLabels', () => {
   it('returns Uzbek labels for "uz"', () => {
@@ -60,6 +64,26 @@ describe('getLabels', () => {
       const labels = getLabels(code);
       assertAllStringsNonEmpty(labels, `getLabels(${code})`);
     }
+  });
+
+  it('SupportedLanguage type includes kaa', () => {
+    // The four-element list is exhaustive of SupportedLanguage; any new
+    // entry added to the type without updating this array would surface
+    // here at typecheck time via an `as const` assignment to the union.
+    const supported: readonly SupportedLanguage[] = ['uz', 'ru', 'en', 'kaa'] as const;
+    expect(supported).toHaveLength(4);
+    for (const code of supported) {
+      const labels = getLabels(code);
+      expect(labels.nav.next.length, `${code} nav.next`).toBeGreaterThan(0);
+    }
+  });
+
+  it('getLabels("kaa") routes through the main record (not a separate constant)', () => {
+    const labels = getLabels('kaa');
+    expect(labels.nav.next).toBe('Kelesi');
+    expect(labels.nav.back).toBe('Artqa');
+    expect(labels.interactive.correct).toBe('Dúrıs');
+    expect(labels.content.keyTakeaways).toBe('Tiykarǵı juwmaqlar');
   });
 });
 

@@ -19,7 +19,7 @@
  * robust if the wire format ever picks up a new code.
  */
 
-export type SupportedLanguage = 'uz' | 'ru' | 'en';
+export type SupportedLanguage = 'uz' | 'ru' | 'en' | 'kaa';
 
 export interface NavigationLabels {
   next: string;
@@ -57,6 +57,49 @@ export interface PresentationLabels {
   interactive: InteractiveLabels;
   content: ContentLabels;
 }
+
+/**
+ * Karakalpak (kaa) labels.
+ *
+ * Karakalpak is a distinct Turkic language with its own Latin
+ * orthography. It is the language of the Ag'artıwshılıq golden
+ * reference deck. Although Karakalpak shares some vocabulary with
+ * Uzbek, the navigation and feedback labels diverge:
+ *   - "Kelesi" / "Artqa" (kaa) vs. "Keyingi" / "Orqaga" (uz)
+ *   - "Dúrıs" / "Qáte"  (kaa) vs. "To'g'ri" / "Noto'g'ri" (uz)
+ *
+ * Held as its own constant for documentation; the LABELS record
+ * below references it directly under the `kaa` key.
+ */
+const LABELS_KAA: PresentationLabels = {
+  nav: {
+    next: "Kelesi",
+    back: "Artqa",
+    slideOf: "{current} / {total}",
+  },
+  interactive: {
+    correct: "Dúrıs",
+    wrong: "Qáte",
+    tryAgain: "Qayta urınıp kór",
+    showAnswer: "Jauapdı kórset",
+    hint: "Kenes",
+    checkPairs: "Juplardı tekser",
+    fillBlank: "Bos orındı toltırıń",
+    trueLabel: "Dúrıs",
+    falseLabel: "Qáte",
+    selfAssess: "Ózińdi bahala: neni jaqsı bilesiń, neni qayta oqıysıń?",
+  },
+  content: {
+    keyTakeaways: "Tiykarǵı juwmaqlar",
+    questions: "Sorawlar",
+    tasks: "Tapsırmalar",
+    research: "Izertlew",
+    essay: "Esse",
+    references: "Derekler",
+    credits: "Avtorlar",
+    thankYou: "Raxmet",
+  },
+};
 
 const LABELS: Record<SupportedLanguage, PresentationLabels> = {
   uz: {
@@ -146,66 +189,21 @@ const LABELS: Record<SupportedLanguage, PresentationLabels> = {
       thankYou: "Thank You",
     },
   },
-};
-
-/**
- * Karakalpak (kaa) labels.
- *
- * Karakalpak is a distinct Turkic language with its own Latin
- * orthography. It is the language of the Ag'artıwshılıq golden
- * reference deck. Although Karakalpak shares some vocabulary with
- * Uzbek, the navigation and feedback labels diverge:
- *   - "Kelesi" / "Artqa" (kaa) vs. "Keyingi" / "Orqaga" (uz)
- *   - "Dúrıs" / "Qáte"  (kaa) vs. "To'g'ri" / "Noto'g'ri" (uz)
- *
- * Stored as its own constant rather than a member of `LABELS` because
- * `SupportedLanguage` intentionally lists only the three Tier-1 codes
- * (uz/ru/en). Karakalpak is dispatched on the language prefix before
- * the standard lookup runs.
- */
-const LABELS_KAA: PresentationLabels = {
-  nav: {
-    next: "Kelesi",
-    back: "Artqa",
-    slideOf: "{current} / {total}",
-  },
-  interactive: {
-    correct: "Dúrıs",
-    wrong: "Qáte",
-    tryAgain: "Qayta urınıp kór",
-    showAnswer: "Jauapdı kórset",
-    hint: "Kenes",
-    checkPairs: "Juplardı tekser",
-    fillBlank: "Bos orındı toltırıń",
-    trueLabel: "Dúrıs",
-    falseLabel: "Qáte",
-    selfAssess: "Ózińdi bahala: neni jaqsı bilesiń, neni qayta oqıysıń?",
-  },
-  content: {
-    keyTakeaways: "Tiykarǵı juwmaqlar",
-    questions: "Sorawlar",
-    tasks: "Tapsırmalar",
-    research: "Izertlew",
-    essay: "Esse",
-    references: "Derekler",
-    credits: "Avtorlar",
-    thankYou: "Raxmet",
-  },
+  kaa: LABELS_KAA,
 };
 
 /**
  * Return the label set for the deck's language. Karakalpak (kaa) is
- * checked first because its two-letter prefix ("ka") otherwise collides
- * with no standard ISO 639-1 code we care about, and falling back to
- * the prefix lookup would mis-route it to English.
+ * matched on the full three-letter code so it doesn't collide with the
+ * two-letter prefix lookup used for uz/ru/en.
  *
  * Any language string that doesn't match falls back to English so the
  * deck still renders rather than throwing at the renderer boundary.
  */
 export function getLabels(language: string): PresentationLabels {
   const normalized = language.trim().toLowerCase();
-  if (normalized.startsWith('kaa')) {
-    return LABELS_KAA;
+  if (normalized === 'kaa' || normalized.startsWith('kaa-')) {
+    return LABELS.kaa;
   }
   const code = normalized.slice(0, 2);
   if (code === 'uz' || code === 'ru' || code === 'en') {

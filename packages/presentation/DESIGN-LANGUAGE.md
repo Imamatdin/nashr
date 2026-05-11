@@ -137,18 +137,29 @@ Content touching the slide edge is a quality audit failure (risks projector over
 | Slide type | Max words | Max body lines |
 |------------|-----------|----------------|
 | TITLE-HERO | 15 | 0 (title + subtitle only) |
+| SECTION-BREAK | 6 | 0 |
+| CHART-DATA | 20 | 0 (chart is the slide) |
 | DATA-EMPHASIS | 30 | 0 (numbers + labels only) |
 | QUOTE-PULLQUOTE | 35 | 0 (the quote IS the slide) |
-| SECTION-BREAK | 6 | 0 |
+| TEAM-CREDITS | 40 | 0 (names + roles only) |
 | CONCEPT-DEFINITION | 50 | 5 |
+| TIMELINE | 50 | 0 (node labels only) |
+| FLOW-PROCESS | 50 | 0 (step labels only) |
+| INTERACTIVE-QUIZ-MCQ | 50 | 4 |
+| INTERACTIVE-MATCHING | 50 | 4 |
+| INTERACTIVE-CATEGORIZE | 50 | 4 |
+| INTERACTIVE-FILL-BLANK | 50 | 4 |
+| INTERACTIVE-TRUE-FALSE | 50 | 4 |
+| TYPOGRAPHIC-KEYWORDS | 55 | 0 (terms + explanations) |
 | CONTENT-SPLIT | 60 | 6 |
 | GALLERY-PEOPLE | 60 | 0 (names + captions) |
+| SUMMARY-TAKEAWAY | 60 | 6 |
+| RESOURCES-LINKS | 60 | 0 (resource entries) |
 | COMPARISON | 70 | 5 per column |
+| INTERACTIVE-DEBATE | 70 | 0 (prompt + positions) |
 | TABLE-COMPACT | n/a | n/a (table data) |
-| All interactive types | 50 | 4 |
-| All other types | 55 | 6 |
 
-If the content exceeds the limit, the Editorial Pass MUST cut or split into two slides.
+Limits are sorted from least to most permissive. The authoritative values live in `packages/presentation-worker/src/constants.ts` (`WORD_LIMITS`); this table mirrors that constant. If the content exceeds the limit, the Editorial Pass MUST cut or split into two slides.
 
 **R18 — Three spacing tiers. Used consistently across the deck.**
 
