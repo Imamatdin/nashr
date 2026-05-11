@@ -7,3 +7,5 @@
  */
 
 export { HtmlRenderer } from './html-renderer.js';
+export { PptxRenderer } from './pptx-renderer.js';
+export { PdfRenderer } from './pdf-renderer.js';

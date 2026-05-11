@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json"
   },
   "dependencies": {
-    "commander": "^12.0.0"
+    "commander": "^12.0.0",
+    "playwright": "^1.59.1",
+    "pptxgenjs": "^4.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

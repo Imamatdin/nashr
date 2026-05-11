@@ -1,0 +1,63 @@
+{
+  "project_id": "p-min",
+  "title": "Minimal Test Deck",
+  "subtitle": "For CLI smoke tests",
+  "language": "en",
+  "created_at": "2026-05-11T00:00:00Z",
+  "design": {
+    "mood": "warm_historical",
+    "palette": {
+      "background": "#1A120B",
+      "surface": "#2A1F15",
+      "text": "#F5F0E8",
+      "accent": "#C4923A",
+      "text_secondary": "#A89F91"
+    },
+    "heading_font": "Playfair Display",
+    "body_font": "EB Garamond",
+    "decorative_font": null,
+    "image_style_prefix": "classical",
+    "background_treatment": "dark"
+  },
+  "interview": {},
+  "slides": [
+    {
+      "slide_index": 0,
+      "slide_type": "title_hero",
+      "content": {
+        "title": "Hello PPTX",
+        "subtitle": "Smoke test"
+      },
+      "source_claim_ids": []
+    },
+    {
+      "slide_index": 1,
+      "slide_type": "interactive_quiz_mcq",
+      "content": {
+        "title": "Quick Quiz",
+        "quiz_questions": [
+          {
+            "question": "What is 2 + 2?",
+            "options": [
+              {"text": "3", "is_correct": false},
+              {"text": "4", "is_correct": true},
+              {"text": "5", "is_correct": false}
+            ],
+            "explanation_correct": "Basic arithmetic.",
+            "explanation_wrong": "Try again — count on your fingers."
+          }
+        ]
+      },
+      "source_claim_ids": []
+    },
+    {
+      "slide_index": 2,
+      "slide_type": "section_break",
+      "content": {
+        "title": "End"
+      },
+      "source_claim_ids": []
+    }
+  ],
+  "export_formats": ["html", "pptx_editable", "pdf"]
+}

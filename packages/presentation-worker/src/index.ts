@@ -5,6 +5,8 @@
  *   node dist/index.js validate --input deck.json
  *   node dist/index.js layout   --input deck.json [--output layout.json]
  *   node dist/index.js render   --input deck.json --format html --output ./out
+ *   node dist/index.js render   --input deck.json --format pptx --output ./out
+ *   node dist/index.js render   --input deck.json --format pdf  --output ./out
  *
  * The input may also be piped on stdin in place of --input:
  *   cat deck.json | node dist/index.js layout
@@ -76,9 +78,13 @@ program
   .command('render')
   .description('Render a DeckSpec to HTML / PPTX / PDF')
   .option('-i, --input <path>', 'Path to DeckSpec JSON file')
-  .option('-f, --format <format>', 'Output format: html | pptx_editable | pdf', 'html')
+  .option(
+    '-f, --format <format>',
+    'Output format: html | pptx | pptx_editable | pdf',
+    'html',
+  )
   .option('-o, --output <path>', 'Output directory', './output')
-  .action((options: { input?: string; format: string; output: string }) => {
+  .action(async (options: { input?: string; format: string; output: string }) => {
     const deck = parseInput(options.input);
     const validation = validateDeckSpec(deck);
     if (!validation.valid) {
@@ -90,15 +96,12 @@ program
     }
     const typed = deck as DeckSpec;
     const layout = new LayoutPass().layout(typed);
+    mkdirSync(options.output, { recursive: true });
+    const base = sanitizeFilename(typed.title);
 
     if (options.format === 'html') {
       const html = new HtmlRenderer().render(typed, layout);
-      mkdirSync(options.output, { recursive: true });
-      const safe = typed.title
-        .replace(/[^a-zA-Z0-9Ѐ-ӿĀ-ɏ]+/g, '_')
-        .replace(/^_+|_+$/g, '')
-        .slice(0, 60) || 'deck';
-      const outPath = join(options.output, `${safe}.html`);
+      const outPath = join(options.output, `${base}.html`);
       writeFileSync(outPath, html, 'utf-8');
       process.stdout.write(`HTML written to ${outPath}\n`);
       process.stdout.write(
@@ -107,15 +110,48 @@ program
       process.exit(0);
     }
 
-    process.stdout.write(
-      `Format "${options.format}" not yet implemented. Use "html".\n`,
+    if (options.format === 'pptx' || options.format === 'pptx_editable') {
+      const { PptxRenderer } = await import('./renderers/pptx-renderer.js');
+      const buffer = await new PptxRenderer().render(typed, layout);
+      const outPath = join(options.output, `${base}.pptx`);
+      writeFileSync(outPath, buffer);
+      process.stdout.write(`PPTX written to ${outPath}\n`);
+      process.exit(0);
+    }
+
+    if (options.format === 'pdf') {
+      const { PdfRenderer } = await import('./renderers/pdf-renderer.js');
+      const buffer = await new PdfRenderer().render(typed, layout);
+      const outPath = join(options.output, `${base}.pdf`);
+      writeFileSync(outPath, buffer);
+      process.stdout.write(`PDF written to ${outPath}\n`);
+      process.exit(0);
+    }
+
+    process.stderr.write(
+      `Unknown format: ${options.format}. Supported: html, pptx, pdf\n`,
     );
-    process.exit(0);
+    process.exit(1);
   });
 
 function parseInput(inputPath: string | undefined): unknown {
   const raw = inputPath ? readFileSync(inputPath, 'utf-8') : readFileSync(0, 'utf-8');
   return JSON.parse(raw);
+}
+
+/**
+ * Strip filesystem-hostile characters from the deck title while keeping
+ * Latin Extended (Uzbek/Karakalpak diacritics) and Cyrillic intact.
+ * Falls back to "presentation" on an empty result so writeFileSync never
+ * receives just ".pptx".
+ */
+function sanitizeFilename(title: string): string {
+  return (
+    title
+      .replace(/[^a-zA-Z0-9Ѐ-ӿĀ-ɏ\s]/g, '')
+      .replace(/\s+/g, '_')
+      .slice(0, 60) || 'presentation'
+  );
 }
 
 program.parse();
