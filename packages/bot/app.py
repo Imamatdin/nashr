@@ -23,20 +23,23 @@ from packages.bot.handlers import (
     registration,
 )
 from packages.platform.config import PlatformConfig
+from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
 
 
 async def create_bot(
-    config: PlatformConfig, db: DatabaseClient | None = None
+    config: PlatformConfig,
+    db: DatabaseClient | None = None,
+    credits: CreditLedger | None = None,
 ) -> tuple[Bot, Dispatcher]:
     """Create and configure the bot and dispatcher.
 
-    Handlers declare ``db: DatabaseClient`` as a parameter; aiogram's
-    keyword injection resolves that against the dispatcher's
-    workflow_data, so we stash the client there before returning. The
-    storage class is in-memory for v1 — Redis-backed storage is a
-    drop-in replacement and lands when we wire up the production
-    deployment.
+    Handlers declare ``db: DatabaseClient`` and ``credits: CreditLedger``
+    as parameters; aiogram's keyword injection resolves those against
+    the dispatcher's ``workflow_data`` dict, so we stash both there
+    before returning. The storage class is in-memory for v1 —
+    Redis-backed storage is a drop-in replacement and lands when we
+    wire up the production deployment.
     """
 
     bot = Bot(
@@ -48,7 +51,9 @@ async def create_bot(
     dp = Dispatcher(storage=storage)
 
     resolved_db = db if db is not None else DatabaseClient(config)
+    resolved_credits = credits if credits is not None else CreditLedger(resolved_db)
     dp["db"] = resolved_db
+    dp["credits"] = resolved_credits
     dp["config"] = config
 
     dp.include_router(common.router)
@@ -61,10 +66,14 @@ async def create_bot(
     return bot, dp
 
 
-async def run_polling(config: PlatformConfig, db: DatabaseClient | None = None) -> None:
+async def run_polling(
+    config: PlatformConfig,
+    db: DatabaseClient | None = None,
+    credits: CreditLedger | None = None,
+) -> None:
     """Run the bot in polling mode (development)."""
 
-    bot, dp = await create_bot(config, db=db)
+    bot, dp = await create_bot(config, db=db, credits=credits)
     await dp.start_polling(bot)  # pyright: ignore[reportUnknownMemberType]
 
 
@@ -73,13 +82,14 @@ async def run_webhook(
     webhook_url: str,
     port: int = 8080,
     db: DatabaseClient | None = None,
+    credits: CreditLedger | None = None,
 ) -> None:
     """Run the bot in webhook mode (production)."""
 
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
     from aiohttp import web
 
-    bot, dp = await create_bot(config, db=db)
+    bot, dp = await create_bot(config, db=db, credits=credits)
     await bot.set_webhook(webhook_url)
 
     app = web.Application()
