@@ -10,10 +10,8 @@
  * each slide type live in that file alone — the dispatcher knows
  * nothing about how a chart slide or a section break gets composed.
  *
- * All 14 non-interactive slide types are fully implemented. The 6
- * interactive types (quiz, matching, categorize, fill-blank, true-
- * false, debate) fall back to layoutContentSplit until Task 21
- * replaces them with their interactive renderers.
+ * Every slide type — including the six interactive variants — has its
+ * own layout function. No fallback dispatch remains.
  */
 
 import {
@@ -24,6 +22,12 @@ import {
   layoutDataEmphasis,
   layoutFlowProcess,
   layoutGalleryPeople,
+  layoutInteractiveCategorize,
+  layoutInteractiveDebate,
+  layoutInteractiveFillBlank,
+  layoutInteractiveMatching,
+  layoutInteractiveQuiz,
+  layoutInteractiveTrueFalse,
   layoutQuotePullquote,
   layoutResourcesLinks,
   layoutSectionBreak,
@@ -82,16 +86,18 @@ export class LayoutPass {
         return layoutResourcesLinks(slide, deck);
       case 'team_credits':
         return layoutTeamCredits(slide, deck);
-      // Interactive types (Task 21) — temporarily share the
-      // content_split fallback so a deck with mixed types still
-      // renders end-to-end.
       case 'interactive_quiz_mcq':
+        return layoutInteractiveQuiz(slide, deck);
       case 'interactive_matching':
+        return layoutInteractiveMatching(slide, deck);
       case 'interactive_categorize':
+        return layoutInteractiveCategorize(slide, deck);
       case 'interactive_fill_blank':
+        return layoutInteractiveFillBlank(slide, deck);
       case 'interactive_true_false':
+        return layoutInteractiveTrueFalse(slide, deck);
       case 'interactive_debate':
-        return layoutContentSplit(slide, deck);
+        return layoutInteractiveDebate(slide, deck);
     }
   }
 }

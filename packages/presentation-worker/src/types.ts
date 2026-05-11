@@ -280,6 +280,36 @@ export type FontWeight = 'normal' | 'bold' | 'semibold';
 export type FontStyle = 'normal' | 'italic';
 export type TextAlign = 'left' | 'center' | 'right';
 
+/**
+ * Semantic role for a text block in an interactive slide.
+ * The renderer uses this to attach behavior (click handlers, visibility toggling).
+ * Content slides leave the role unset; only interactive layouts emit roles.
+ */
+export type InteractiveRole =
+  | 'question'
+  | 'option'
+  | 'option_correct'
+  | 'option_wrong'
+  | 'feedback_correct'
+  | 'feedback_wrong'
+  | 'match_left'
+  | 'match_right'
+  | 'match_connector'
+  | 'reveal_trigger'
+  | 'reveal_content'
+  | 'category_label'
+  | 'category_item'
+  | 'blank_statement'
+  | 'blank_answer'
+  | 'tf_statement'
+  | 'tf_verdict'
+  | 'tf_explanation'
+  | 'debate_prompt'
+  | 'debate_position'
+  | 'debate_framework'
+  | 'nav_label'
+  | 'static';
+
 /** A positioned text block ready for rendering. Coordinates are slide percentages. */
 export interface TextBlock {
   text: string;
@@ -295,6 +325,12 @@ export interface TextBlock {
   align: TextAlign;
   lineHeight: number;
   overflow: boolean;
+  /** Only set on interactive slides; renderer uses it to attach behavior. */
+  role?: InteractiveRole;
+  /** Links related interactive elements (e.g. a quiz question + its options + its feedback). */
+  groupId?: string;
+  /** Index within the group (option 0/1/2/3, matching pair index, etc.). */
+  dataIndex?: number;
 }
 
 export interface ImageBlock {

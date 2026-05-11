@@ -15,6 +15,7 @@ import type {
   FontStyle,
   FontWeight,
   ImageBlock,
+  InteractiveRole,
   ScrimBlock,
   ShapeBlock,
   SlideBackground,
@@ -131,6 +132,9 @@ export interface BuildTextBlockOptions {
   align: TextAlign;
   tier: FontTier;
   lineHeight: number;
+  role?: InteractiveRole;
+  groupId?: string;
+  dataIndex?: number;
 }
 
 /**
@@ -168,7 +172,7 @@ export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
     fontSize = Math.max(floor, fontSize - 2);
   }
 
-  return {
+  const block: TextBlock = {
     text: opts.text,
     x: opts.region.x,
     y: opts.region.y,
@@ -183,6 +187,10 @@ export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
     lineHeight: opts.lineHeight,
     overflow,
   };
+  if (opts.role !== undefined) block.role = opts.role;
+  if (opts.groupId !== undefined) block.groupId = opts.groupId;
+  if (opts.dataIndex !== undefined) block.dataIndex = opts.dataIndex;
+  return block;
 }
 
 // ---------------------------------------------------------------------------
