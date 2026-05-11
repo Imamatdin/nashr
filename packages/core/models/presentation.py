@@ -29,6 +29,7 @@ from packages.core.enums import (
     ExportFormat,
     Language,
     NarrativeEmphasis,
+    NarrativePhase,
     PresentationMood,
     SlideType,
     SpeakerNotesStyle,
@@ -486,3 +487,55 @@ class AuditReport(BaseModel):
 def new_deck_id() -> str:
     """Return a fresh deck identifier for use in audit reports and DeckSpec."""
     return str(uuid4())
+
+
+# ---------------------------------------------------------------------------
+# Editorial Pass intermediate models
+# ---------------------------------------------------------------------------
+
+
+class ContentAnalysis(BaseModel):
+    """Curated view of the source material handed to the Editorial Pass.
+
+    The Editorial Pass cannot feed every claim into the LLM call. This
+    analysis pre-groups claims by rhetorical role, surfaces the strongest
+    candidates for emphasis slides, and records detected entities (people,
+    statistics) so the LLM is asked to *select* rather than to *discover*.
+
+    All list-of-claim fields carry the claim text only — full
+    :class:`SourceClaimCreate` objects are intentionally not embedded so
+    the analysis serialises cheaply and the LLM prompt size stays bounded.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    total_claims: int = Field(default=0, ge=0)
+
+    statistical_claims: list[str] = Field(default_factory=list[str], max_length=200)
+    empirical_findings: list[str] = Field(default_factory=list[str], max_length=200)
+    theoretical_arguments: list[str] = Field(default_factory=list[str], max_length=200)
+    definitions: list[str] = Field(default_factory=list[str], max_length=100)
+    comparisons: list[str] = Field(default_factory=list[str], max_length=100)
+
+    people_mentioned: list[str] = Field(default_factory=list[str], max_length=50)
+    key_numbers: list[str] = Field(default_factory=list[str], max_length=100)
+
+    has_timeline_content: bool = False
+    has_comparison_content: bool = False
+    has_process_content: bool = False
+
+    strongest_claims: list[str] = Field(default_factory=list[str], max_length=10)
+
+
+class NarrativeArc(BaseModel):
+    """Ordered list of narrative phases plus the emphasised phase.
+
+    ``phases`` is the canonical phase order (HOOK → CLOSE); ``emphasis_phase``
+    indicates which phase should receive the largest fraction of the slide
+    budget. The Editorial Pass uses both to allocate slides across the deck.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    phases: list[NarrativePhase] = Field(min_length=1, max_length=10)
+    emphasis_phase: NarrativePhase

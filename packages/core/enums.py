@@ -196,6 +196,23 @@ class NarrativeEmphasis(StrEnum):
     BALANCED = "balanced"
 
 
+class NarrativePhase(StrEnum):
+    """One ordered phase in a deck's narrative arc.
+
+    Phases are the high-level story beats that the Editorial Pass uses to
+    place slides; every content slide belongs to exactly one phase, and the
+    ``emphasis_phase`` chosen by the arc selector gets the largest share of
+    the slide budget.
+    """
+
+    HOOK = "hook"
+    CONTEXT = "context"
+    CORE = "core"
+    EVIDENCE = "evidence"
+    IMPLICATIONS = "implications"
+    CLOSE = "close"
+
+
 class SpeakerNotesStyle(StrEnum):
     """How extensive speaker notes should be on each slide."""
 
