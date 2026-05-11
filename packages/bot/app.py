@@ -9,10 +9,16 @@ for local development and a webhook server for production.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+
+if TYPE_CHECKING:
+    from aiohttp import web
 
 from packages.bot.handlers import (
     article_flow,
@@ -77,6 +83,37 @@ async def run_polling(
     await dp.start_polling(bot)  # pyright: ignore[reportUnknownMemberType]
 
 
+MINI_APP_HTML_PATH: Path = Path(__file__).parent / "mini_app" / "presentation_questionnaire.html"
+
+
+def build_aiohttp_app(
+    bot: Bot,
+    dp: Dispatcher,
+    *,
+    mini_app_path: Path = MINI_APP_HTML_PATH,
+) -> web.Application:
+    """Construct the aiohttp app that wraps the webhook and Mini App routes.
+
+    Split from :func:`run_webhook` so tests can exercise the static-file
+    serving without spinning up a TCP listener or contacting Telegram.
+    """
+
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    from aiohttp import web
+
+    app = web.Application()
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path="/webhook")
+    setup_application(app, dp, bot=bot)
+
+    async def serve_mini_app(_: web.Request) -> web.Response:
+        html = mini_app_path.read_text(encoding="utf-8")
+        return web.Response(text=html, content_type="text/html")
+
+    app.router.add_get("/mini-app/presentation", serve_mini_app)
+    return app
+
+
 async def run_webhook(
     config: PlatformConfig,
     webhook_url: str,
@@ -86,16 +123,12 @@ async def run_webhook(
 ) -> None:
     """Run the bot in webhook mode (production)."""
 
-    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
     from aiohttp import web
 
     bot, dp = await create_bot(config, db=db, credits=credits)
     await bot.set_webhook(webhook_url)
 
-    app = web.Application()
-    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    webhook_handler.register(app, path="/webhook")
-    setup_application(app, dp, bot=bot)
+    app = build_aiohttp_app(bot, dp)
 
     runner = web.AppRunner(app)
     await runner.setup()

@@ -34,6 +34,7 @@ class PlatformConfig:
     click_merchant_id: str = ""
     click_secret_key: str = ""
     click_service_id: str = ""
+    mini_app_base_url: str = "https://nashr.uz"
 
     @classmethod
     def from_env(cls) -> PlatformConfig:
@@ -53,4 +54,5 @@ class PlatformConfig:
             click_merchant_id=os.environ.get("CLICK_MERCHANT_ID", ""),
             click_secret_key=os.environ.get("CLICK_SECRET_KEY", ""),
             click_service_id=os.environ.get("CLICK_SERVICE_ID", ""),
+            mini_app_base_url=os.environ.get("MINI_APP_BASE_URL", "https://nashr.uz"),
         )

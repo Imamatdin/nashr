@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Nashr</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --tg-theme-bg-color: #ffffff;
+      --tg-theme-text-color: #000000;
+      --tg-theme-hint-color: #999999;
+      --tg-theme-link-color: #2481cc;
+      --tg-theme-button-color: #2481cc;
+      --tg-theme-button-text-color: #ffffff;
+      --tg-theme-secondary-bg-color: #f0f0f0;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
+      background: var(--tg-theme-bg-color);
+      color: var(--tg-theme-text-color);
+      padding: 16px;
+      padding-bottom: 96px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 24px;
+      line-height: 1.3;
+    }
+
+    .question {
+      margin-bottom: 28px;
+      transition: opacity 0.2s ease, max-height 0.2s ease;
+    }
+
+    .question.hidden {
+      display: none;
+    }
+
+    .question-label {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--tg-theme-text-color);
+    }
+
+    .question-help {
+      font-size: 13px;
+      color: var(--tg-theme-hint-color);
+      margin-bottom: 8px;
+    }
+
+    .pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 14px;
+      border: 1.5px solid var(--tg-theme-hint-color);
+      background: transparent;
+      color: var(--tg-theme-text-color);
+      cursor: pointer;
+      transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      font-family: inherit;
+    }
+
+    .pill:active {
+      transform: scale(0.96);
+    }
+
+    .pill.selected {
+      background: var(--tg-theme-button-color);
+      color: var(--tg-theme-button-text-color);
+      border-color: var(--tg-theme-button-color);
+    }
+
+    .pill.decide {
+      font-style: italic;
+      border-style: dashed;
+    }
+
+    .pill.decide.selected {
+      border-style: solid;
+    }
+
+    .slider-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .slider-container input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--tg-theme-hint-color);
+      outline: none;
+    }
+
+    .slider-container input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--tg-theme-button-color);
+      cursor: pointer;
+    }
+
+    .slider-container input[type="range"]::-moz-range-thumb {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: var(--tg-theme-button-color);
+      cursor: pointer;
+      border: none;
+    }
+
+    .slider-value {
+      font-size: 16px;
+      font-weight: 600;
+      min-width: 30px;
+      text-align: center;
+    }
+
+    .slider-hint {
+      font-size: 12px;
+      color: var(--tg-theme-hint-color);
+      margin-top: 4px;
+    }
+
+    .text-input {
+      width: 100%;
+      padding: 12px;
+      border: 1.5px solid var(--tg-theme-hint-color);
+      border-radius: 12px;
+      font-size: 14px;
+      background: var(--tg-theme-secondary-bg-color);
+      color: var(--tg-theme-text-color);
+      outline: none;
+      resize: vertical;
+      min-height: 48px;
+      font-family: inherit;
+    }
+
+    .text-input:focus {
+      border-color: var(--tg-theme-button-color);
+    }
+
+    .text-input::placeholder {
+      color: var(--tg-theme-hint-color);
+    }
+
+    #submit-btn {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 16px;
+      background: var(--tg-theme-button-color);
+      color: var(--tg-theme-button-text-color);
+      font-size: 16px;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      font-family: inherit;
+    }
+
+    #submit-btn:active {
+      opacity: 0.85;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1 id="title"></h1>
+    <div id="questions"></div>
+    <button id="submit-btn" type="button"></button>
+  </div>
+
+  <script>
+    // ============ INIT ============
+
+    var tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
+
+    var params = new URLSearchParams(window.location.search);
+    var lang = params.get('lang') || 'uz';
+    var projectId = params.get('project_id') || '';
+    var availableStats = parseInt(params.get('stats') || '0', 10);
+    var availablePeople = parseInt(params.get('people') || '0', 10);
+    var detectedDomain = params.get('domain') || 'general';
+
+    if (tg) {
+      try { tg.ready(); } catch (e) {}
+      try { tg.expand(); } catch (e) {}
+
+      var theme = tg.themeParams || {};
+      var root = document.documentElement;
+      if (theme.bg_color) root.style.setProperty('--tg-theme-bg-color', theme.bg_color);
+      if (theme.text_color) root.style.setProperty('--tg-theme-text-color', theme.text_color);
+      if (theme.hint_color) root.style.setProperty('--tg-theme-hint-color', theme.hint_color);
+      if (theme.link_color) root.style.setProperty('--tg-theme-link-color', theme.link_color);
+      if (theme.button_color) root.style.setProperty('--tg-theme-button-color', theme.button_color);
+      if (theme.button_text_color) root.style.setProperty('--tg-theme-button-text-color', theme.button_text_color);
+      if (theme.secondary_bg_color) root.style.setProperty('--tg-theme-secondary-bg-color', theme.secondary_bg_color);
+    }
+
+    // ============ LABELS ============
+
+    var LABELS = {
+      'uz': {
+        title: "Prezentatsiya sozlamalari",
+        submit: "Davom etish",
+        decide: "Menga qaror qiling",
+        audience: "Kim uchun tayyorlanmoqda?",
+        audience_school: "Maktab (9-11 sinf)",
+        audience_undergrad: "Bakalavr",
+        audience_grad: "Magistratura",
+        audience_conference: "Ilmiy konferensiya",
+        audience_mixed: "Aralash (ilmiy + sanoat)",
+        audience_professional: "Professional",
+        audience_public: "Umumiy auditoriya",
+        duration: "Ma'ruza davomiyligi (daqiqa)",
+        duration_hint: "~{n} slayd",
+        emphasis: "Nimani ta'kidlash kerak?",
+        emphasis_problem: "Muammo",
+        emphasis_technical: "Texnik mexanizm",
+        emphasis_methodology: "Metodologiya",
+        emphasis_results: "Natijalar / raqamlar",
+        emphasis_roadmap: "Yo'l xaritasi",
+        title_style: "Sarlavha uslubi",
+        title_topic: "Qisqa mavzu so'zlari (\"Natijalar\", \"Tahlil\")",
+        title_takeaway: "Xulosa sarlavhalar (\"94% suv tejaldi\")",
+        interactive: "Interaktiv elementlar qo'shilsinmi?",
+        interactive_yes: "Ha (viktorina, moslashtirish)",
+        interactive_no: "Yo'q (faqat kontent)",
+        theme: "Vizual tema",
+        theme_light: "Yorug' fon",
+        theme_dark: "Qorong'u fon",
+        notes: "Spiker yozuvlari",
+        notes_full: "To'liq matn",
+        notes_brief: "Qisqa tezislar",
+        notes_none: "Kerak emas",
+        headline: "Qaysi raqamlarni katta ko'rsatish kerak?",
+        headline_help: "Masalan: 94.4% suv tejash, PUE=4055",
+        closing: "Yakuniy so'rov yoki chaqiruv?",
+        closing_help: "Masalan: pilot loyiha, hamkorlik taklifi",
+        diagrams: "Diagrammalar",
+        diagrams_svg: "SVG diagrammalar yaratish",
+        diagrams_placeholder: "Bo'sh joylar qoldirish",
+        diagrams_minimal: "Minimal (matn + raqamlar)"
+      },
+      'ru': {
+        title: "Настройки презентации",
+        submit: "Продолжить",
+        decide: "Решите за меня",
+        audience: "Для кого готовится?",
+        audience_school: "Школа (9-11 класс)",
+        audience_undergrad: "Бакалавриат",
+        audience_grad: "Магистратура",
+        audience_conference: "Научная конференция",
+        audience_mixed: "Смешанная (наука + индустрия)",
+        audience_professional: "Профессионалы",
+        audience_public: "Широкая аудитория",
+        duration: "Длительность доклада (минуты)",
+        duration_hint: "~{n} слайдов",
+        emphasis: "Что подчеркнуть?",
+        emphasis_problem: "Проблема",
+        emphasis_technical: "Технический механизм",
+        emphasis_methodology: "Методология",
+        emphasis_results: "Результаты / цифры",
+        emphasis_roadmap: "Дорожная карта",
+        title_style: "Стиль заголовков",
+        title_topic: "Короткие темы (\"Результаты\", \"Анализ\")",
+        title_takeaway: "Заголовки-выводы (\"94% экономии воды\")",
+        interactive: "Добавить интерактивные элементы?",
+        interactive_yes: "Да (викторины, упражнения)",
+        interactive_no: "Нет (только контент)",
+        theme: "Визуальная тема",
+        theme_light: "Светлый фон",
+        theme_dark: "Тёмный фон",
+        notes: "Заметки спикера",
+        notes_full: "Полный текст",
+        notes_brief: "Краткие тезисы",
+        notes_none: "Не нужны",
+        headline: "Какие цифры выделить крупно?",
+        headline_help: "Например: 94.4% экономия воды, PUE=4055",
+        closing: "Финальный запрос или призыв?",
+        closing_help: "Например: пилотный проект, приглашение к сотрудничеству",
+        diagrams: "Диаграммы",
+        diagrams_svg: "Создать SVG-диаграммы",
+        diagrams_placeholder: "Оставить пустые места",
+        diagrams_minimal: "Минимально (текст + числа)"
+      },
+      'en': {
+        title: "Presentation settings",
+        submit: "Continue",
+        decide: "Decide for me",
+        audience: "Who is the audience?",
+        audience_school: "School (9th-11th grade)",
+        audience_undergrad: "Undergraduate",
+        audience_grad: "Graduate",
+        audience_conference: "Academic conference",
+        audience_mixed: "Mixed academic + industry",
+        audience_professional: "Professional",
+        audience_public: "General public",
+        duration: "Talk duration (minutes)",
+        duration_hint: "~{n} slides",
+        emphasis: "What should the deck emphasize?",
+        emphasis_problem: "Problem framing",
+        emphasis_technical: "Technical mechanism",
+        emphasis_methodology: "Methodology",
+        emphasis_results: "Results / numbers",
+        emphasis_roadmap: "Roadmap / scalability",
+        title_style: "Title style",
+        title_topic: "Short topic phrases (\"Results\", \"Analysis\")",
+        title_takeaway: "Finding titles (\"94% water savings\")",
+        interactive: "Include interactive elements?",
+        interactive_yes: "Yes (quizzes, matching)",
+        interactive_no: "No (content only)",
+        theme: "Visual theme",
+        theme_light: "Light backgrounds",
+        theme_dark: "Dark backgrounds",
+        notes: "Speaker notes",
+        notes_full: "Full script",
+        notes_brief: "Brief talking points",
+        notes_none: "No notes",
+        headline: "Any headline numbers to feature?",
+        headline_help: "e.g. 94.4% water saved, PUE=4055, $1.04M",
+        closing: "Closing ask or call-to-action?",
+        closing_help: "e.g. pilot site at hyperscaler X, co-author invitation",
+        diagrams: "Diagrams",
+        diagrams_svg: "Build SVG diagrams",
+        diagrams_placeholder: "Placeholder slots",
+        diagrams_minimal: "Minimal (text + numbers)"
+      },
+      'kaa': {
+        title: "Prezentatsiya sazlamaları",
+        submit: "Dawam etiw",
+        decide: "Men ushın qarar qabıl etиń",
+        audience: "Kim ushın tayarlanmaqta?",
+        audience_school: "Mektep (9-11 klass)",
+        audience_undergrad: "Bakalavr",
+        audience_grad: "Magistratura",
+        audience_conference: "Ilimiy konferentsiya",
+        audience_mixed: "Aralash (ilimiy + sanaat)",
+        audience_professional: "Professional",
+        audience_public: "Ulıwma auditoriya",
+        duration: "Bayanat dawamıylıǵı (minut)",
+        duration_hint: "~{n} slayd",
+        emphasis: "Neni atap ótиw kerek?",
+        emphasis_problem: "Problema",
+        emphasis_technical: "Texnik mexanizm",
+        emphasis_methodology: "Metodologiya",
+        emphasis_results: "Nátийjeler / sanlar",
+        emphasis_roadmap: "Jol xarıtası",
+        title_style: "Atama stili",
+        title_topic: "Qısqa tema sózleri (\"Nátийjeler\")",
+        title_takeaway: "Juwmaq atamalar (\"94% suw tejaldi\")",
+        interactive: "Interaktiv elementler qosılsın ba?",
+        interactive_yes: "Awa (viktorina, moslashtırıw)",
+        interactive_no: "Yaq (tek kontent)",
+        theme: "Vizual tema",
+        theme_light: "Jarıq fon",
+        theme_dark: "Qaranǵı fon",
+        notes: "Spiker jazbaları",
+        notes_full: "Tolıq tekst",
+        notes_brief: "Qısqa tezisler",
+        notes_none: "Kerek emes",
+        headline: "Qaysı sanlar úlken kórsetilsin?",
+        headline_help: "Máselen: 94.4% suw tejew, PUE=4055",
+        closing: "Juwmaqlawshı soraw yamasa shaqırıw?",
+        closing_help: "Máselen: pilot loyiha, birge islesiw teklifi",
+        diagrams: "Diagrammalar",
+        diagrams_svg: "SVG diagrammalar jaratıw",
+        diagrams_placeholder: "Bos orınlar qaldırıw",
+        diagrams_minimal: "Minimal (tekst + sanlar)"
+      }
+    };
+
+    var L = LABELS[lang] || LABELS['uz'];
+
+    // ============ STATE ============
+
+    var state = {
+      audience: 'decide_for_me',
+      duration: 15,
+      emphasis: [],
+      title_style: 'decide_for_me',
+      include_interactive: 'decide_for_me',
+      theme: 'decide_for_me',
+      speaker_notes: 'decide_for_me',
+      headline_numbers: '',
+      closing_ask: '',
+      diagrams: 'decide_for_me'
+    };
+
+    // ============ UTIL ============
+
+    function esc(str) {
+      var div = document.createElement('div');
+      div.textContent = str == null ? '' : String(str);
+      return div.innerHTML;
+    }
+
+    // ============ UI BUILDERS ============
+
+    function buildSingleSelect(key, label, options) {
+      var div = document.createElement('div');
+      div.className = 'question';
+
+      var lbl = document.createElement('div');
+      lbl.className = 'question-label';
+      lbl.textContent = label;
+      div.appendChild(lbl);
+
+      var pills = document.createElement('div');
+      pills.className = 'pills';
+
+      options.forEach(function(opt) {
+        var pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'pill' + (opt.isDecide ? ' decide' : '') + (state[key] === opt.value ? ' selected' : '');
+        pill.textContent = opt.label;
+        pill.onclick = function() {
+          state[key] = opt.value;
+          var siblings = pills.querySelectorAll('.pill');
+          for (var i = 0; i < siblings.length; i++) {
+            siblings[i].classList.remove('selected');
+          }
+          pill.classList.add('selected');
+          onStateChange();
+        };
+        pills.appendChild(pill);
+      });
+
+      div.appendChild(pills);
+      return div;
+    }
+
+    function buildMultiSelect(key, label, options, maxSelect) {
+      var div = document.createElement('div');
+      div.className = 'question';
+
+      var lbl = document.createElement('div');
+      lbl.className = 'question-label';
+      lbl.textContent = label;
+      div.appendChild(lbl);
+
+      var pills = document.createElement('div');
+      pills.className = 'pills';
+
+      options.forEach(function(opt) {
+        var pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'pill' + (opt.isDecide ? ' decide' : '');
+        if (state[key].indexOf(opt.value) !== -1) pill.classList.add('selected');
+        pill.textContent = opt.label;
+
+        pill.onclick = function() {
+          if (opt.value === 'decide_for_me') {
+            state[key] = ['decide_for_me'];
+            var siblings = pills.querySelectorAll('.pill');
+            for (var i = 0; i < siblings.length; i++) {
+              siblings[i].classList.remove('selected');
+            }
+            pill.classList.add('selected');
+          } else {
+            state[key] = state[key].filter(function(v) { return v !== 'decide_for_me'; });
+            var decidePill = pills.querySelector('.decide');
+            if (decidePill) decidePill.classList.remove('selected');
+
+            var idx = state[key].indexOf(opt.value);
+            if (idx !== -1) {
+              state[key].splice(idx, 1);
+              pill.classList.remove('selected');
+            } else if (state[key].length < maxSelect) {
+              state[key].push(opt.value);
+              pill.classList.add('selected');
+            }
+          }
+          onStateChange();
+        };
+
+        pills.appendChild(pill);
+      });
+
+      div.appendChild(pills);
+      return div;
+    }
+
+    function buildSlider(key, label, min, max, defaultVal, hintTemplate) {
+      var div = document.createElement('div');
+      div.className = 'question';
+
+      var lbl = document.createElement('div');
+      lbl.className = 'question-label';
+      lbl.textContent = label;
+      div.appendChild(lbl);
+
+      var container = document.createElement('div');
+      container.className = 'slider-container';
+
+      var minSpan = document.createElement('span');
+      minSpan.textContent = String(min);
+      container.appendChild(minSpan);
+
+      var slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = String(min);
+      slider.max = String(max);
+      slider.value = String(defaultVal);
+      container.appendChild(slider);
+
+      var maxSpan = document.createElement('span');
+      maxSpan.textContent = String(max);
+      container.appendChild(maxSpan);
+
+      var valueSpan = document.createElement('span');
+      valueSpan.className = 'slider-value';
+      valueSpan.textContent = String(defaultVal);
+      container.appendChild(valueSpan);
+
+      div.appendChild(container);
+
+      var hint = document.createElement('div');
+      hint.className = 'slider-hint';
+      hint.textContent = hintTemplate.replace('{n}', String(defaultVal));
+      div.appendChild(hint);
+
+      slider.addEventListener('input', function(e) {
+        var val = parseInt(e.target.value, 10);
+        state[key] = val;
+        valueSpan.textContent = String(val);
+        hint.textContent = hintTemplate.replace('{n}', String(val));
+      });
+
+      state[key] = defaultVal;
+      return div;
+    }
+
+    function buildTextInput(key, label, helpText) {
+      var div = document.createElement('div');
+      div.className = 'question';
+
+      var lbl = document.createElement('div');
+      lbl.className = 'question-label';
+      lbl.textContent = label;
+      div.appendChild(lbl);
+
+      if (helpText) {
+        var help = document.createElement('div');
+        help.className = 'question-help';
+        help.textContent = helpText;
+        div.appendChild(help);
+      }
+
+      var textarea = document.createElement('textarea');
+      textarea.className = 'text-input';
+      textarea.placeholder = '...';
+      textarea.value = state[key] || '';
+      textarea.addEventListener('input', function(e) {
+        state[key] = e.target.value;
+      });
+      div.appendChild(textarea);
+
+      return div;
+    }
+
+    // ============ RENDER ============
+
+    function render() {
+      document.getElementById('title').textContent = L.title;
+      document.getElementById('submit-btn').textContent = L.submit;
+
+      var container = document.getElementById('questions');
+      container.innerHTML = '';
+
+      container.appendChild(buildSingleSelect('audience', L.audience, [
+        { value: 'school', label: L.audience_school },
+        { value: 'undergraduate', label: L.audience_undergrad },
+        { value: 'graduate', label: L.audience_grad },
+        { value: 'academic_conference', label: L.audience_conference },
+        { value: 'mixed_academic_industry', label: L.audience_mixed },
+        { value: 'professional', label: L.audience_professional },
+        { value: 'general_public', label: L.audience_public },
+        { value: 'decide_for_me', label: L.decide, isDecide: true }
+      ]));
+
+      container.appendChild(buildSlider('duration', L.duration, 5, 45, 15, L.duration_hint));
+
+      container.appendChild(buildMultiSelect('emphasis', L.emphasis, [
+        { value: 'problem_framing', label: L.emphasis_problem },
+        { value: 'technical_mechanism', label: L.emphasis_technical },
+        { value: 'methodology', label: L.emphasis_methodology },
+        { value: 'results_numbers', label: L.emphasis_results },
+        { value: 'roadmap_scalability', label: L.emphasis_roadmap },
+        { value: 'decide_for_me', label: L.decide, isDecide: true }
+      ], 2));
+
+      container.appendChild(buildSingleSelect('title_style', L.title_style, [
+        { value: 'topic', label: L.title_topic },
+        { value: 'takeaway', label: L.title_takeaway },
+        { value: 'decide_for_me', label: L.decide, isDecide: true }
+      ]));
+
+      container.appendChild(buildSingleSelect('include_interactive', L.interactive, [
+        { value: 'yes', label: L.interactive_yes },
+        { value: 'no', label: L.interactive_no },
+        { value: 'decide_for_me', label: L.decide, isDecide: true }
+      ]));
+
+      container.appendChild(buildSingleSelect('theme', L.theme, [
+        { value: 'light', label: L.theme_light },
+        { value: 'dark', label: L.theme_dark },
+        { value: 'decide_for_me', label: L.decide, isDecide: true }
+      ]));
+
+      container.appendChild(buildSingleSelect('speaker_notes', L.notes, [
+        { value: 'full_script', label: L.notes_full },
+        { value: 'brief_talking_points', label: L.notes_brief },
+        { value: 'no_notes', label: L.notes_none },
+        { value: 'decide_for_me', label: L.decide, isDecide: true }
+      ]));
+
+      if (availableStats > 0) {
+        var headlineQ = buildTextInput('headline_numbers', L.headline, L.headline_help);
+        headlineQ.id = 'q-headline';
+        container.appendChild(headlineQ);
+      }
+
+      var closingQ = buildTextInput('closing_ask', L.closing, L.closing_help);
+      closingQ.id = 'q-closing';
+      closingQ.classList.add('hidden');
+      container.appendChild(closingQ);
+
+      var techDomains = ['engineering', 'computer_science', 'medical'];
+      if (techDomains.indexOf(detectedDomain) !== -1) {
+        var diagQ = buildSingleSelect('diagrams', L.diagrams, [
+          { value: 'build_svg', label: L.diagrams_svg },
+          { value: 'placeholder', label: L.diagrams_placeholder },
+          { value: 'minimal_text', label: L.diagrams_minimal },
+          { value: 'decide_for_me', label: L.decide, isDecide: true }
+        ]);
+        diagQ.id = 'q-diagrams';
+        container.appendChild(diagQ);
+      }
+    }
+
+    // ============ STATE CHANGE ============
+
+    function onStateChange() {
+      var closingEl = document.getElementById('q-closing');
+      if (closingEl) {
+        var conferenceAudiences = ['academic_conference', 'mixed_academic_industry', 'professional'];
+        var showClosing = conferenceAudiences.indexOf(state.audience) !== -1;
+        closingEl.classList.toggle('hidden', !showClosing);
+      }
+    }
+
+    // ============ SUBMIT ============
+
+    function submitAnswers() {
+      var emphasis = state.emphasis.length > 0 ? state.emphasis : ['decide_for_me'];
+      var payload = {
+        project_id: projectId,
+        audience: state.audience,
+        talk_duration_minutes: state.duration,
+        narrative_emphasis: emphasis,
+        title_style: state.title_style,
+        include_interactive: state.include_interactive,
+        theme: state.theme,
+        speaker_notes: state.speaker_notes,
+        headline_numbers: state.headline_numbers,
+        closing_ask: state.closing_ask,
+        diagrams: state.diagrams
+      };
+
+      var jsonStr = JSON.stringify(payload);
+
+      if (tg && typeof tg.sendData === 'function') {
+        tg.sendData(jsonStr);
+      } else {
+        console.log('Mini App data:', jsonStr);
+        alert('Data sent (dev mode): ' + jsonStr);
+      }
+    }
+
+    document.getElementById('submit-btn').addEventListener('click', submitAnswers);
+
+    render();
+  </script>
+</body>
+</html>

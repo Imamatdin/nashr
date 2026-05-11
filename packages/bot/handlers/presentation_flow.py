@@ -8,7 +8,9 @@ which produces sensible defaults from the uploaded sources alone.
 
 from __future__ import annotations
 
+import json
 from typing import Any
+from urllib.parse import urlencode
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -21,6 +23,7 @@ from packages.bot.keyboards import (
 )
 from packages.bot.labels import get_bot_labels
 from packages.bot.states import PresentationStates
+from packages.platform.config import PlatformConfig
 from packages.platform.database import DatabaseClient
 
 router = Router()
@@ -30,6 +33,10 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
     {"pdf", "docx", "doc", "txt", "xlsx", "xls", "pptx", "ppt", "jpg", "jpeg", "png"}
 )
 MINI_APP_URL_DEFAULT: str = "https://nashr.uz/mini-app/presentation"
+
+# Source types likely to contain headline statistics — used to decide
+# whether the Mini App shows the "headline numbers" question.
+_STAT_BEARING_FILE_TYPES: frozenset[str] = frozenset({"xlsx", "xls", "csv"})
 
 
 def _extract_extension(filename: str) -> str:
@@ -43,6 +50,37 @@ def _flow_language(data: dict[str, Any]) -> str:
     if isinstance(lang, str) and lang:
         return lang
     return "uz"
+
+
+def _count_stat_bearing_sources(sources: list[dict[str, Any]]) -> int:
+    return sum(1 for s in sources if str(s.get("file_type", "")) in _STAT_BEARING_FILE_TYPES)
+
+
+def build_mini_app_url(
+    *,
+    base_url: str,
+    lang: str,
+    project_id: str,
+    stats: int,
+    domain: str = "general",
+    people: int = 0,
+) -> str:
+    """Compose the URL the Mini App button opens.
+
+    Query params parallel the parameters the Mini App's JS reads, so
+    keep both in sync. ``urlencode`` handles escaping for any value
+    that includes characters that need quoting.
+    """
+
+    params: dict[str, str] = {
+        "lang": lang,
+        "project_id": project_id,
+        "stats": str(stats),
+        "people": str(people),
+        "domain": domain,
+    }
+    base = base_url.rstrip("/")
+    return f"{base}/mini-app/presentation?{urlencode(params)}"
 
 
 @router.message(PresentationStates.uploading_sources, F.document)
@@ -121,8 +159,16 @@ async def upload_more(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(PresentationStates.waiting_for_more_sources, F.data == "continue_flow")
-async def continue_to_questionnaire(callback: CallbackQuery, state: FSMContext) -> None:
-    """Show the Mini App opener (or refuse if no sources)."""
+async def continue_to_questionnaire(
+    callback: CallbackQuery, state: FSMContext, config: PlatformConfig
+) -> None:
+    """Show the Mini App opener (or refuse if no sources).
+
+    Builds the Mini App URL with query params so the questionnaire
+    knows what language to render, which project the answers belong
+    to, and which conditional questions (headline numbers, diagrams)
+    to surface.
+    """
 
     data = await state.get_data()
     lang = _flow_language(data)
@@ -135,10 +181,22 @@ async def continue_to_questionnaire(callback: CallbackQuery, state: FSMContext) 
         await callback.answer()
         return
 
+    project_id = str(data.get("project_id", ""))
+    stat_count = _count_stat_bearing_sources(sources)
+    # Domain detection is part of the source-processing worker; until that
+    # runs we pass "general" so the diagrams question stays hidden by default.
+    mini_app_url = build_mini_app_url(
+        base_url=config.mini_app_base_url,
+        lang=lang,
+        project_id=project_id,
+        stats=stat_count,
+        domain="general",
+    )
+
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
             labels.open_questionnaire,
-            reply_markup=presentation_mini_app_keyboard(lang, MINI_APP_URL_DEFAULT),
+            reply_markup=presentation_mini_app_keyboard(lang, mini_app_url),
         )
     await state.set_state(PresentationStates.opening_mini_app)
     await callback.answer()
@@ -164,6 +222,42 @@ async def skip_questionnaire(callback: CallbackQuery, state: FSMContext) -> None
         )
     await state.set_state(PresentationStates.choosing_tier)
     await callback.answer()
+
+
+@router.message(PresentationStates.opening_mini_app, F.web_app_data)
+async def receive_mini_app_data(message: Message, state: FSMContext) -> None:
+    """Receive questionnaire answers from the Mini App.
+
+    Telegram delivers the Mini App's ``sendData`` payload as a message
+    with a ``web_app_data`` attribute. We parse the JSON, stash the raw
+    dict in FSM state for later use by
+    :meth:`PresentationInterviewEngine.apply_answers`, and advance to
+    tier selection. Malformed payloads (non-JSON, non-object) fall back
+    to defaults rather than aborting the flow.
+    """
+
+    data = await state.get_data()
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+
+    web_app = message.web_app_data
+    if web_app is None:
+        await message.answer(labels.error_generic)
+        return
+
+    try:
+        parsed: object = json.loads(web_app.data)
+    except (json.JSONDecodeError, TypeError):
+        await message.answer(labels.error_generic)
+        return
+
+    if not isinstance(parsed, dict):
+        await message.answer(labels.error_generic)
+        return
+
+    await state.update_data(interview_answers=parsed)
+    await message.answer(labels.choose_tier, reply_markup=tier_keyboard(lang, "presentation"))
+    await state.set_state(PresentationStates.choosing_tier)
 
 
 @router.callback_query(PresentationStates.choosing_tier, F.data.startswith("tier_"))
