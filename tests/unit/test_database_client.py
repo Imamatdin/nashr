@@ -46,6 +46,7 @@ class _FakeQuery:
         self._mode: str = "select"
         self._payload: dict[str, Any] | None = None
         self._filters: list[tuple[str, Any]] = []
+        self._lt_filters: list[tuple[str, Any]] = []
         self._limit: int | None = None
         self._order: tuple[str, bool] | None = None
         self._select_cols: str = "*"
@@ -69,6 +70,10 @@ class _FakeQuery:
         self._filters.append((col, val))
         return self
 
+    def lt(self, col: str, val: Any) -> _FakeQuery:
+        self._lt_filters.append((col, val))
+        return self
+
     def limit(self, n: int) -> _FakeQuery:
         self._limit = n
         return self
@@ -83,6 +88,7 @@ class _FakeQuery:
             mode=self._mode,
             payload=self._payload,
             filters=self._filters,
+            lt_filters=self._lt_filters,
             limit=self._limit,
             order=self._order,
             select_cols=self._select_cols,
@@ -115,13 +121,20 @@ class FakeSupabaseClient:
         mode: str,
         payload: dict[str, Any] | None,
         filters: list[tuple[str, Any]],
+        lt_filters: list[tuple[str, Any]] | None = None,
         limit: int | None,
         order: tuple[str, bool] | None,
         select_cols: str,
     ) -> SimpleNamespace:
+        lt_filters = lt_filters or []
         rows = self.tables.setdefault(table, [])
         if mode == "select":
             filtered = [r for r in rows if all(r.get(c) == v for c, v in filters)]
+            filtered = [
+                r
+                for r in filtered
+                if all(r.get(c) is not None and str(r.get(c)) < str(v) for c, v in lt_filters)
+            ]
             if order is not None:
                 col, desc = order
                 filtered = sorted(filtered, key=lambda r: r.get(col) or "", reverse=desc)
@@ -410,6 +423,57 @@ async def test_mark_invoice_expired_transitions_to_expired() -> None:
     fake.seed("invoices", [{"id": "inv1", "status": "pending"}])
     await db.mark_invoice_expired("inv1")
     assert fake.tables["invoices"][0]["status"] == "expired"
+
+
+async def test_get_invoice_by_number_returns_matching_row() -> None:
+    db, fake = _make_db()
+    fake.seed(
+        "invoices",
+        [
+            {"id": "inv1", "invoice_number": "847291-1001", "status": "pending"},
+            {"id": "inv2", "invoice_number": "847291-1002", "status": "paid"},
+        ],
+    )
+    row = await db.get_invoice_by_number("847291-1002")
+    assert row is not None
+    assert row["id"] == "inv2"
+    assert row["status"] == "paid"
+
+
+async def test_get_invoice_by_number_returns_none_when_absent() -> None:
+    db, _ = _make_db()
+    assert await db.get_invoice_by_number("000000-0000") is None
+
+
+async def test_expire_old_invoices_only_touches_past_pending() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    db, fake = _make_db()
+    now = datetime.now(UTC)
+    past = (now - timedelta(hours=1)).isoformat()
+    future = (now + timedelta(hours=1)).isoformat()
+    fake.seed(
+        "invoices",
+        [
+            {"id": "inv_past_pending", "status": "pending", "expires_at": past},
+            {"id": "inv_future_pending", "status": "pending", "expires_at": future},
+            {"id": "inv_past_paid", "status": "paid", "expires_at": past},
+        ],
+    )
+
+    count = await db.expire_old_invoices()
+
+    assert count == 1
+    rows_by_id = {r["id"]: r for r in fake.tables["invoices"]}
+    assert rows_by_id["inv_past_pending"]["status"] == "expired"
+    assert rows_by_id["inv_future_pending"]["status"] == "pending"
+    assert rows_by_id["inv_past_paid"]["status"] == "paid"
+
+
+async def test_expire_old_invoices_returns_zero_when_nothing_to_expire() -> None:
+    db, fake = _make_db()
+    fake.seed("invoices", [])
+    assert await db.expire_old_invoices() == 0
 
 
 # ------------------------------------------------ subscriber/invoice IDs

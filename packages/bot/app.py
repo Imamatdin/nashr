@@ -28,9 +28,11 @@ from packages.bot.handlers import (
     presentation_flow,
     registration,
 )
+from packages.bot.webhooks.payment_webhooks import register_payment_webhooks
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.platform.invoices import InvoiceService
 
 
 async def create_bot(
@@ -98,6 +100,11 @@ def build_aiohttp_app(
 
     Split from :func:`run_webhook` so tests can exercise the static-file
     serving without spinning up a TCP listener or contacting Telegram.
+    Payment webhook routes (``/webhooks/payme``, ``/webhooks/click``,
+    ``/webhooks/uzum``, ``/api/invoices/{number}``) are registered when
+    the dispatcher carries ``db``, ``credits``, and ``config`` keys —
+    the production startup path always does; tests that only need the
+    Telegram webhook plumbing can omit them.
     """
 
     from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -113,6 +120,17 @@ def build_aiohttp_app(
         return web.Response(text=html, content_type="text/html")
 
     app.router.add_get("/mini-app/presentation", serve_mini_app)
+
+    db = dp.workflow_data.get("db")
+    credits_ledger = dp.workflow_data.get("credits")
+    config = dp.workflow_data.get("config")
+    if (
+        isinstance(db, DatabaseClient)
+        and isinstance(credits_ledger, CreditLedger)
+        and isinstance(config, PlatformConfig)
+    ):
+        invoice_service = InvoiceService(db, credits_ledger)
+        register_payment_webhooks(app, invoice_service, db, config, bot)
     return app
 
 

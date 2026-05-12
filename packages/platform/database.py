@@ -393,6 +393,60 @@ class DatabaseClient:
             return None
         return cast(dict[str, Any], result.data[0])
 
+    async def get_invoice_by_number(self, invoice_number: str) -> dict[str, Any] | None:
+        """Look up an invoice by its human-readable ``invoice_number`` field.
+
+        The payment provider receives this string from the user, so this
+        is the only entry point webhook handlers have into the invoice
+        record. ``invoice_number`` is UNIQUE, so ``.limit(1)`` is a
+        belt-and-braces guard against duplicate rows.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("invoices")
+                .select("*")
+                .eq("invoice_number", invoice_number)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not result.data:
+            return None
+        return cast(dict[str, Any], result.data[0])
+
+    async def expire_old_invoices(self) -> int:
+        """Sweep pending invoices whose ``expires_at`` is in the past.
+
+        Returns the number of invoices that transitioned to ``expired``.
+        Implemented as a fetch-then-update pair rather than a single
+        ``UPDATE ... WHERE`` because the supabase-py builder does not
+        expose a comparison operator chain on update; correctness wins
+        over the extra round-trip at v1 traffic levels.
+        """
+
+        now_iso = datetime.now(UTC).isoformat()
+
+        def fetch() -> Any:
+            return (
+                self._client.table("invoices")
+                .select("id")
+                .eq("status", "pending")
+                .lt("expires_at", now_iso)
+                .execute()
+            )
+
+        fetched = await asyncio.to_thread(fetch)
+        rows = cast(list[dict[str, Any]], list(fetched.data))
+        count = 0
+        for row in rows:
+            invoice_id = row.get("id")
+            if not isinstance(invoice_id, str):
+                continue
+            await self.mark_invoice_expired(invoice_id)
+            count += 1
+        return count
+
     async def mark_invoice_paid(
         self,
         invoice_id: str,

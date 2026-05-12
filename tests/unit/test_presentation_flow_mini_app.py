@@ -282,6 +282,61 @@ async def test_skip_questionnaire_uses_defaults(state: FSMContext) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_webhook_app_registers_payment_routes_when_dependencies_present() -> None:
+    """``build_aiohttp_app`` mounts payment webhooks when db/credits/config are present."""
+
+    from aiogram import Dispatcher
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from packages.bot.app import build_aiohttp_app
+    from packages.platform.config import PlatformConfig
+    from packages.platform.credits import CreditLedger
+    from packages.platform.database import DatabaseClient
+
+    config = PlatformConfig(
+        supabase_url="https://test.supabase.co",
+        supabase_service_key="test-service-key",
+        telegram_bot_token="test-token",
+    )
+    fake_supabase = MagicMock()
+    fake_supabase.table = MagicMock()
+    db = DatabaseClient(config, client=cast(Any, fake_supabase))
+    credits = CreditLedger(db)
+
+    bot = MagicMock()
+    bot.session = MagicMock()
+    bot.session.close = AsyncMock(return_value=None)
+    dp = Dispatcher(storage=MemoryStorage())
+    dp["db"] = db
+    dp["credits"] = credits
+    dp["config"] = config
+
+    app = build_aiohttp_app(bot, dp)
+    paths = {route.resource.canonical for route in app.router.routes() if route.resource}
+    assert "/webhooks/payme" in paths
+    assert "/webhooks/click" in paths
+    assert "/webhooks/uzum" in paths
+    assert any("/api/invoices/" in p for p in paths)
+
+
+async def test_webhook_app_skips_payment_routes_when_dependencies_absent() -> None:
+    """Without db/credits/config in the dispatcher, payment routes are not mounted."""
+
+    from aiogram import Dispatcher
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from packages.bot.app import build_aiohttp_app
+
+    bot = MagicMock()
+    bot.session = MagicMock()
+    bot.session.close = AsyncMock(return_value=None)
+    dp = Dispatcher(storage=MemoryStorage())
+
+    app = build_aiohttp_app(bot, dp)
+    paths = {route.resource.canonical for route in app.router.routes() if route.resource}
+    assert "/webhooks/payme" not in paths
+
+
 async def test_webhook_app_serves_mini_app_html() -> None:
     """The aiohttp app built by ``build_aiohttp_app`` serves the HTML.
 
