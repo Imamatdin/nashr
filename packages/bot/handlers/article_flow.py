@@ -59,6 +59,7 @@ from packages.core.models.evidence import (
 )
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.platform.storage import FileStorage
 
 logger = logging.getLogger("nashr.bot.article")
 
@@ -111,10 +112,15 @@ def _drop_cache(project_id: str) -> None:
     _PROJECT_CACHE.pop(project_id, None)
 
 
-def _orchestrator(bot: Bot, db: DatabaseClient, credits: CreditLedger) -> ArticleOrchestrator:
+def _orchestrator(
+    bot: Bot,
+    db: DatabaseClient,
+    credits: CreditLedger,
+    storage: FileStorage | None = None,
+) -> ArticleOrchestrator:
     """Compose a fresh orchestrator. Cheap; each engine is stateless."""
 
-    return ArticleOrchestrator(bot=bot, db=db, credits=credits)
+    return ArticleOrchestrator(bot=bot, db=db, credits=credits, storage=storage)
 
 
 def _progress_editor(message: Message, labels: BotLabels) -> ProgressCallback:
@@ -568,6 +574,7 @@ async def start_generation(
     bot: Bot,
     db: DatabaseClient,
     credits: CreditLedger,
+    storage: FileStorage | None = None,
 ) -> None:
     """Run draft → verify → export. Called from payment_flow when payment lands."""
 
@@ -586,7 +593,7 @@ async def start_generation(
 
     progress_msg: Message = await target.answer(labels.generating.format(progress="…"))
     progress = _progress_editor(progress_msg, labels)
-    orchestrator = _orchestrator(bot, db, credits)
+    orchestrator = _orchestrator(bot, db, credits, storage=storage)
     await state.set_state(ArticleStates.generating)
 
     try:

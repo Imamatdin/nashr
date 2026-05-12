@@ -33,21 +33,25 @@ from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
 from packages.platform.invoices import InvoiceService
+from packages.platform.storage import FileStorage
 
 
 async def create_bot(
     config: PlatformConfig,
     db: DatabaseClient | None = None,
     credits: CreditLedger | None = None,
+    storage: FileStorage | None = None,
 ) -> tuple[Bot, Dispatcher]:
     """Create and configure the bot and dispatcher.
 
     Handlers declare ``db: DatabaseClient`` and ``credits: CreditLedger``
     as parameters; aiogram's keyword injection resolves those against
     the dispatcher's ``workflow_data`` dict, so we stash both there
-    before returning. The storage class is in-memory for v1 —
-    Redis-backed storage is a drop-in replacement and lands when we
-    wire up the production deployment.
+    before returning. The FSM storage is in-memory for v1 — Redis-backed
+    storage is a drop-in replacement and lands with the production
+    deployment. ``storage`` is the R2 client; when omitted a fresh
+    :class:`FileStorage` is built from ``config`` (which gracefully
+    degrades to local-disk fallback without R2 credentials).
     """
 
     bot = Bot(
@@ -55,16 +59,18 @@ async def create_bot(
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
+    fsm_storage = MemoryStorage()
+    dp = Dispatcher(storage=fsm_storage)
 
     resolved_db = db if db is not None else DatabaseClient(config)
     resolved_credits = (
         credits if credits is not None else CreditLedger(resolved_db, dev_mode=config.dev_mode)
     )
+    resolved_storage = storage if storage is not None else FileStorage(config)
     dp["db"] = resolved_db
     dp["credits"] = resolved_credits
     dp["config"] = config
+    dp["storage"] = resolved_storage
 
     dp.include_router(common.router)
     dp.include_router(registration.router)
@@ -80,10 +86,11 @@ async def run_polling(
     config: PlatformConfig,
     db: DatabaseClient | None = None,
     credits: CreditLedger | None = None,
+    storage: FileStorage | None = None,
 ) -> None:
     """Run the bot in polling mode (development)."""
 
-    bot, dp = await create_bot(config, db=db, credits=credits)
+    bot, dp = await create_bot(config, db=db, credits=credits, storage=storage)
     await dp.start_polling(bot)  # pyright: ignore[reportUnknownMemberType]
 
 
@@ -119,7 +126,11 @@ def build_aiohttp_app(
         html = mini_app_path.read_text(encoding="utf-8")
         return web.Response(text=html, content_type="text/html")
 
+    async def health(_: web.Request) -> web.Response:
+        return web.json_response({"status": "ok", "service": "nashr-bot", "version": "1.0.0"})
+
     app.router.add_get("/mini-app/presentation", serve_mini_app)
+    app.router.add_get("/health", health)
 
     db = dp.workflow_data.get("db")
     credits_ledger = dp.workflow_data.get("credits")
@@ -140,12 +151,21 @@ async def run_webhook(
     port: int = 8080,
     db: DatabaseClient | None = None,
     credits: CreditLedger | None = None,
+    storage: FileStorage | None = None,
 ) -> None:
-    """Run the bot in webhook mode (production)."""
+    """Run the bot in webhook mode (production).
+
+    Sets the Telegram webhook URL and starts an aiohttp listener on
+    ``0.0.0.0:port`` exposing ``/webhook`` (Telegram updates),
+    ``/health`` (Docker / load-balancer probes), ``/mini-app/*``, and
+    the payment provider webhooks. The coroutine returns once the
+    server is up; callers keep the event loop alive (``asyncio.run``
+    or an outer ``Event.wait()``).
+    """
 
     from aiohttp import web
 
-    bot, dp = await create_bot(config, db=db, credits=credits)
+    bot, dp = await create_bot(config, db=db, credits=credits, storage=storage)
     await bot.set_webhook(webhook_url)
 
     app = build_aiohttp_app(bot, dp)

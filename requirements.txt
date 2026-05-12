@@ -1,0 +1,32 @@
+# Production dependencies for the Nashr platform.
+# Pinned to the versions actually exercised by the test suite.
+
+# --- Core / data ---
+pydantic==2.12.5
+httpx==0.28.1
+
+# --- LLM clients ---
+anthropic==0.84.0
+google-genai==2.0.1
+
+# --- Telegram bot ---
+aiogram==3.28.2
+aiohttp==3.13.3
+
+# --- Database ---
+supabase==2.30.0
+
+# --- Document parsing & rendering ---
+python-docx==1.2.0
+openpyxl==3.1.5
+python-pptx==1.0.2
+pymupdf==1.27.2.3
+pillow==12.0.0
+pytesseract==0.3.13
+magika==1.0.3
+
+# --- Academic source providers ---
+feedparser==6.0.12
+
+# --- Object storage (Cloudflare R2 via S3-compatible API) ---
+boto3==1.43.6

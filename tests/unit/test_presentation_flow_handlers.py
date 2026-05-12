@@ -225,7 +225,7 @@ async def test_start_generation_caches_outputs_and_advances_state(
     pptx.write_bytes(b"pptx")
     fake = _FakeOrchestrator(PresentationRenderResult(html_path=html, pptx_path=pptx))
 
-    def _factory(_bot: Any, _db: Any, _credits: Any) -> Any:
+    def _factory(_bot: Any, _db: Any, _credits: Any, **_kwargs: Any) -> Any:
         return fake
 
     monkeypatch.setattr(presentation_flow, "_orchestrator", _factory)
@@ -267,7 +267,7 @@ async def test_start_generation_refunds_on_failure(
 
     fake = _FakeOrchestrator(PresentationRenderResult(), raises=RuntimeError("LLM down"))
 
-    def _factory(_bot: Any, _db: Any, _credits: Any) -> Any:
+    def _factory(_bot: Any, _db: Any, _credits: Any, **_kwargs: Any) -> Any:
         return fake
 
     monkeypatch.setattr(presentation_flow, "_orchestrator", _factory)

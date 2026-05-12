@@ -74,6 +74,7 @@ from packages.core.models.suggestion import SuggestionReport
 from packages.core.models.verification import CitationVerificationReport
 from packages.platform.credits import CreditLedger, FreeCreditsReason
 from packages.platform.database import DatabaseClient
+from packages.platform.storage import FileStorage
 from packages.suggestions.engine import SuggestionEngine
 from packages.workers.article.bibliography import (
     BibliographyFormatter,
@@ -197,6 +198,7 @@ class ArticleOrchestrator:
         db: DatabaseClient,
         credits: CreditLedger,
         *,
+        storage: FileStorage | None = None,
         source_pipeline: SourcePipeline | None = None,
         matrix_builder: EvidenceMatrixBuilder | None = None,
         interview_engine: ResearchInterviewEngine | None = None,
@@ -210,6 +212,7 @@ class ArticleOrchestrator:
         self._bot = bot
         self._db = db
         self._credits = credits
+        self._storage = storage
         self._source_pipeline = source_pipeline if source_pipeline is not None else SourcePipeline()
         self._matrix_builder = (
             matrix_builder if matrix_builder is not None else EvidenceMatrixBuilder()
@@ -655,8 +658,40 @@ class ArticleOrchestrator:
                 "orchestrator_pdf_export_skipped",
                 extra={"error": bundle.pdf.error or "unknown"},
             )
+
+        await self._upload_exports(project_id, docx_path, pdf_path)
+
         await progress("Complete", 8, TOTAL_STEPS)
         return docx_path, pdf_path, bundle
+
+    async def _upload_exports(
+        self,
+        project_id: str,
+        docx_path: Path,
+        pdf_path: Path | None,
+    ) -> None:
+        """Upload rendered exports to R2 when storage is configured.
+
+        Best-effort: failures are logged and swallowed because the local
+        files still ship via Telegram in this iteration. R2-key-as-
+        canonical persistence is a follow-up that needs a DB column.
+        """
+
+        storage = self._storage
+        if storage is None or not storage.available:
+            return
+        targets: list[Path] = [docx_path]
+        if pdf_path is not None:
+            targets.append(pdf_path)
+        for path in targets:
+            try:
+                key = FileStorage.generated_key(project_id, path.name)
+                await storage.upload(path, key)
+            except Exception as exc:
+                logger.warning(
+                    "orchestrator_storage_upload_failed",
+                    extra={"path": path.name, "error_type": type(exc).__name__},
+                )
 
     def _build_bibliography(
         self,

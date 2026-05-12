@@ -58,6 +58,7 @@ from packages.core.enums import ExportFormat
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.platform.storage import FileStorage
 
 logger = logging.getLogger("nashr.bot.presentation")
 
@@ -116,10 +117,15 @@ def _drop_cache(project_id: str) -> None:
     _PROJECT_CACHE.pop(project_id, None)
 
 
-def _orchestrator(bot: Bot, db: DatabaseClient, credits: CreditLedger) -> PresentationOrchestrator:
+def _orchestrator(
+    bot: Bot,
+    db: DatabaseClient,
+    credits: CreditLedger,
+    storage: FileStorage | None = None,
+) -> PresentationOrchestrator:
     """Build a fresh orchestrator. Cheap; each engine is stateless."""
 
-    return PresentationOrchestrator(bot=bot, db=db, credits=credits)
+    return PresentationOrchestrator(bot=bot, db=db, credits=credits, storage=storage)
 
 
 def _progress_editor(message: Message, labels: BotLabels) -> ProgressCallback:
@@ -376,6 +382,7 @@ async def start_generation(
     bot: Bot,
     db: DatabaseClient,
     credits: CreditLedger,
+    storage: FileStorage | None = None,
 ) -> None:
     """Run the full presentation pipeline after payment lands.
 
@@ -400,7 +407,7 @@ async def start_generation(
 
     progress_msg: Message = await target.answer(labels.generating.format(progress="…"))
     progress = _progress_editor(progress_msg, labels)
-    orchestrator = _orchestrator(bot, db, credits)
+    orchestrator = _orchestrator(bot, db, credits, storage=storage)
     await state.set_state(PresentationStates.generating)
 
     try:
@@ -560,6 +567,7 @@ async def regenerate_output(
     bot: Bot,
     db: DatabaseClient,
     credits: CreditLedger,
+    storage: FileStorage | None = None,
 ) -> None:
     """Re-render the deck without charging again."""
 
@@ -567,7 +575,7 @@ async def regenerate_output(
         await callback.answer()
         return
     await callback.answer()
-    await start_generation(callback.message, state, bot, db, credits)
+    await start_generation(callback.message, state, bot, db, credits, storage)
 
 
 @router.callback_query(PresentationStates.reviewing_output, F.data == "done")

@@ -1,124 +1,83 @@
-version: "3.9"
+# Nashr production stack: bot (incl. workers) + Redis.
+#
+# Supabase, Cloudflare R2, and the payment providers are external SaaS;
+# only credentials are passed in via env. Compose v2 ignores the
+# ``version:`` field, but it is preserved for compatibility with older
+# tooling that still expects it.
+
+version: "3.8"
 
 services:
-  postgres:
-    image: postgres:16-alpine
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nashr-bot
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-nashr}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nashr}
-      POSTGRES_DB: ${POSTGRES_DB:-nashr}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./supabase/migrations:/docker-entrypoint-initdb.d:ro
     ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nashr}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - "8080:8080"
+    environment:
+      # --- Telegram ---
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      NASHR_ENV: ${NASHR_ENV:-production}
+      NASHR_ADMIN_IDS: ${NASHR_ADMIN_IDS:-}
+
+      # --- Supabase ---
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+
+      # --- Cloudflare R2 ---
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
+      R2_SECRET_KEY: ${R2_SECRET_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-nashr-files}
+
+      # --- Payment providers ---
+      PAYME_MERCHANT_ID: ${PAYME_MERCHANT_ID:-}
+      PAYME_SECRET_KEY: ${PAYME_SECRET_KEY:-}
+      CLICK_MERCHANT_ID: ${CLICK_MERCHANT_ID:-}
+      CLICK_SECRET_KEY: ${CLICK_SECRET_KEY:-}
+      CLICK_SERVICE_ID: ${CLICK_SERVICE_ID:-}
+
+      # --- LLM API keys ---
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+
+      # --- Redis ---
+      REDIS_URL: redis://redis:6379
+
+      # --- Mini App ---
+      MINI_APP_BASE_URL: ${MINI_APP_BASE_URL:-https://nashr.uz}
+
+      # --- Webhook ---
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      WEBHOOK_PORT: "8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - nashr-temp:/tmp/nashr
+    networks:
+      - nashr-net
 
   redis:
     image: redis:7-alpine
+    container_name: nashr-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  api:
-    build:
-      context: .
-      dockerfile: packages/api/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    ports:
-      - "8000:8000"
+      retries: 3
     volumes:
-      - ./packages:/app/packages:ro
-
-  bot:
-    build:
-      context: .
-      dockerfile: packages/bot/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      api:
-        condition: service_started
-    volumes:
-      - ./packages:/app/packages:ro
-
-  source-worker:
-    build:
-      context: .
-      dockerfile: packages/workers/source/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./packages:/app/packages:ro
-
-  article-worker:
-    build:
-      context: .
-      dockerfile: packages/workers/article/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./packages:/app/packages:ro
-
-  presentation-worker:
-    build:
-      context: .
-      dockerfile: packages/workers/presentation/Dockerfile
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./packages:/app/packages:ro
-      - ./fonts:/app/fonts:ro
-
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - api
+      - redis-data:/data
+    networks:
+      - nashr-net
 
 volumes:
-  postgres_data:
-  redis_data:
-  caddy_data:
-  caddy_config:
+  nashr-temp:
+  redis-data:
+
+networks:
+  nashr-net:
+    driver: bridge

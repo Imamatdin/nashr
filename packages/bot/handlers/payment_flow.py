@@ -47,6 +47,7 @@ from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger, InsufficientCreditsError
 from packages.platform.database import DatabaseClient
 from packages.platform.invoices import InvoiceService
+from packages.platform.storage import FileStorage
 
 logger = logging.getLogger("nashr.bot.payment")
 
@@ -86,6 +87,7 @@ async def select_provider(
     db: DatabaseClient,
     credits: CreditLedger,
     config: PlatformConfig,
+    storage: FileStorage | None = None,
 ) -> None:
     """Route the provider choice: balance hand-off or external invoice."""
 
@@ -100,7 +102,7 @@ async def select_provider(
         return
 
     if provider == "balance":
-        await _handle_balance_payment(callback.message, state, data, bot, db, credits)
+        await _handle_balance_payment(callback.message, state, data, bot, db, credits, storage)
         await callback.answer()
         return
 
@@ -114,6 +116,7 @@ async def select_provider(
             db,
             credits,
             config,
+            storage,
         )
         await callback.answer()
         return
@@ -159,6 +162,7 @@ async def _handle_balance_payment(
     bot: Bot,
     db: DatabaseClient,
     credits: CreditLedger,
+    storage: FileStorage | None = None,
 ) -> None:
     """Deduct credits and hand off to the appropriate generation pipeline."""
 
@@ -190,7 +194,7 @@ async def _handle_balance_payment(
         return
 
     await message.edit_text(labels.payment_confirmed)
-    await _trigger_generation(message, state, tier, bot, db, credits)
+    await _trigger_generation(message, state, tier, bot, db, credits, storage)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +211,7 @@ async def _handle_external_payment(
     db: DatabaseClient,
     credits: CreditLedger,
     config: PlatformConfig,
+    storage: FileStorage | None = None,
 ) -> None:
     """Create an invoice, show the deep link, kick off dev auto-confirm."""
 
@@ -268,6 +273,7 @@ async def _handle_external_payment(
                 bot=bot,
                 db=db,
                 credits=credits,
+                storage=storage,
             )
         )
         _DEV_AUTOCONFIRM_TASKS.add(task)
@@ -285,6 +291,7 @@ async def _dev_mode_auto_confirm(
     bot: Bot,
     db: DatabaseClient,
     credits: CreditLedger,
+    storage: FileStorage | None = None,
 ) -> None:
     """Simulate a successful provider webhook after a short delay."""
 
@@ -320,7 +327,7 @@ async def _dev_mode_auto_confirm(
             )
 
     await message.answer(labels.payment_confirmed)
-    await _trigger_generation(message, state, tier, bot, db, credits)
+    await _trigger_generation(message, state, tier, bot, db, credits, storage)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +342,7 @@ async def _trigger_generation(
     bot: Bot,
     db: DatabaseClient,
     credits: CreditLedger,
+    storage: FileStorage | None = None,
 ) -> None:
     """Route the post-payment hand-off to the right generation pipeline."""
 
@@ -344,11 +352,11 @@ async def _trigger_generation(
 
     if tier.startswith("article"):
         await state.set_state(ArticleStates.generating)
-        await article_flow.start_generation(message, state, bot, db, credits)
+        await article_flow.start_generation(message, state, bot, db, credits, storage)
         return
     if tier.startswith("presentation"):
         await state.set_state(PresentationStates.generating)
-        await presentation_flow.start_generation(message, state, bot, db, credits)
+        await presentation_flow.start_generation(message, state, bot, db, credits, storage)
         return
 
     logger.warning("payment_unknown_tier_prefix", extra={"tier": tier})

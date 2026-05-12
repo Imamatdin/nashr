@@ -341,12 +341,14 @@ def _build_orch(
     design: _StubDesignPass | None = None,
     editorial: _StubEditorialPass | None = None,
     worker: _StubWorkerRunner | None = None,
+    storage: Any = None,
 ) -> tuple[PresentationOrchestrator, DatabaseClient, CreditLedger, FakeSupabaseClient]:
     db, fake, credits = _make_db()
     orch = PresentationOrchestrator(
         bot=cast(Any, bot),
         db=db,
         credits=credits,
+        storage=storage,
         source_pipeline=cast(
             Any, pipeline if pipeline is not None else _StubSourcePipeline([_pipeline_result()])
         ),
@@ -587,6 +589,37 @@ async def test_render_returns_paths_for_successful_formats() -> None:
     assert result.pptx_path is not None and result.pptx_path.exists()
     assert result.pdf_path is None
     assert len(worker.render_calls) == 2
+
+
+async def test_render_uploads_to_storage_with_project_id_namespace() -> None:
+    """When R2 storage is configured, render uploads using project_id-namespaced keys.
+
+    Catches regressions where the orchestrator falls back to the rendered
+    file's stem (the deck title) and collides with other projects.
+    """
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bot = _StubBot()
+    worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
+
+    storage_stub = MagicMock()
+    storage_stub.available = True
+    storage_stub.upload = AsyncMock(return_value="")
+
+    orch, _, _, _ = _build_orch(bot, worker=worker, storage=storage_stub)
+
+    await orch.render(
+        _deck_spec(),
+        [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+        _noop_progress,
+        project_id=PROJECT_ID,
+    )
+
+    assert storage_stub.upload.await_count == 2
+    keys = [call.args[1] for call in storage_stub.upload.await_args_list]
+    for key in keys:
+        assert key.startswith(f"generated/{PROJECT_ID}/")
 
 
 async def test_render_records_timeout_as_warning_and_continues() -> None:

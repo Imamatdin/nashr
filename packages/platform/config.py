@@ -54,6 +54,8 @@ class PlatformConfig:
     click_secret_key: str = ""
     click_service_id: str = ""
     mini_app_base_url: str = "https://nashr.uz"
+    webhook_url: str = ""
+    webhook_port: int = 8080
     dev_mode: bool = False
     admin_telegram_ids: tuple[int, ...] = field(default_factory=tuple)
 
@@ -84,6 +86,20 @@ class PlatformConfig:
             click_secret_key=os.environ.get("CLICK_SECRET_KEY", ""),
             click_service_id=os.environ.get("CLICK_SERVICE_ID", ""),
             mini_app_base_url=os.environ.get("MINI_APP_BASE_URL", "https://nashr.uz"),
+            webhook_url=os.environ.get("WEBHOOK_URL", ""),
+            webhook_port=_parse_port(os.environ.get("WEBHOOK_PORT", "8080")),
             dev_mode=dev_mode,
             admin_telegram_ids=admin_ids,
         )
+
+
+def _parse_port(raw: str) -> int:
+    """Parse a port string, falling back to 8080 on garbage input."""
+
+    try:
+        port = int(raw)
+    except ValueError:
+        return 8080
+    if port < 1 or port > 65535:
+        return 8080
+    return port

@@ -48,6 +48,7 @@ from packages.core.models.presentation import (
 )
 from packages.platform.credits import CreditLedger, FreeCreditsReason
 from packages.platform.database import DatabaseClient
+from packages.platform.storage import FileStorage
 from packages.presentation.design_direction import DesignDirectionPass
 from packages.presentation.editorial import EditorialPass
 from packages.presentation.interview import PresentationInterviewEngine
@@ -123,6 +124,7 @@ class PresentationOrchestrator:
         db: DatabaseClient,
         credits: CreditLedger,
         *,
+        storage: FileStorage | None = None,
         source_pipeline: SourcePipeline | None = None,
         matrix_builder: EvidenceMatrixBuilder | None = None,
         interview_engine: PresentationInterviewEngine | None = None,
@@ -133,6 +135,7 @@ class PresentationOrchestrator:
         self._bot = bot
         self._db = db
         self._credits = credits
+        self._storage = storage
         self._source_pipeline = source_pipeline if source_pipeline is not None else SourcePipeline()
         self._matrix_builder = (
             matrix_builder if matrix_builder is not None else EvidenceMatrixBuilder()
@@ -380,6 +383,7 @@ class PresentationOrchestrator:
         deck_spec: DeckSpec,
         formats: list[ExportFormat],
         progress: ProgressCallback,
+        project_id: str | None = None,
     ) -> PresentationRenderResult:
         """Invoke the Node.js worker to render the deck to disk.
 
@@ -388,6 +392,8 @@ class PresentationOrchestrator:
         export on the internal quality audit; a FAIL-severity audit
         result surfaces as a non-zero exit and is captured as a render
         warning (the format is dropped, others still attempted).
+        ``project_id`` is used to namespace R2 keys when storage upload
+        is enabled; ``None`` falls back to the rendered file's stem.
         """
 
         await progress("Rendering presentation", 6, TOTAL_STEPS)
@@ -444,7 +450,38 @@ class PresentationOrchestrator:
                 continue
             _attach_output(result, ext, produced)
 
+        await self._upload_rendered(result, project_id)
         return result
+
+    async def _upload_rendered(
+        self,
+        result: PresentationRenderResult,
+        project_id: str | None,
+    ) -> None:
+        """Upload every rendered output to R2 when storage is configured.
+
+        Best-effort: failures are logged and a warning is appended to
+        ``result.warnings`` so the bot can surface them, but the local
+        files keep flowing through to Telegram delivery. ``project_id``
+        namespaces the R2 key under ``generated/{project_id}/``; when
+        absent we fall back to the file's stem so the upload still
+        succeeds (older callers that bypass ``run_full_pipeline``).
+        """
+
+        storage = self._storage
+        if storage is None or not storage.available:
+            return
+        for ext, path in result.by_extension().items():
+            try:
+                key_namespace = project_id if project_id else path.stem
+                key = FileStorage.generated_key(key_namespace, path.name)
+                await storage.upload(path, key)
+            except Exception as exc:
+                result.warnings.append(f"{ext}: upload failed ({type(exc).__name__})")
+                logger.warning(
+                    "presentation_storage_upload_failed",
+                    extra={"format": ext, "error_type": type(exc).__name__},
+                )
 
     # ====================================================================
     # FULL PIPELINE
@@ -492,7 +529,7 @@ class PresentationOrchestrator:
             project_id=project_id,
             progress=progress,
         )
-        return await self.render(deck_spec, formats, progress)
+        return await self.render(deck_spec, formats, progress, project_id=project_id)
 
 
 # ---------------------------------------------------------------------------
