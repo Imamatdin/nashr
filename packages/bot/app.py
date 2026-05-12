@@ -57,7 +57,9 @@ async def create_bot(
     dp = Dispatcher(storage=storage)
 
     resolved_db = db if db is not None else DatabaseClient(config)
-    resolved_credits = credits if credits is not None else CreditLedger(resolved_db)
+    resolved_credits = (
+        credits if credits is not None else CreditLedger(resolved_db, dev_mode=config.dev_mode)
+    )
     dp["db"] = resolved_db
     dp["credits"] = resolved_credits
     dp["config"] = config

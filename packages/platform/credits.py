@@ -126,8 +126,15 @@ class CreditLedger:
     FREE_WEEKLY_CAP: ClassVar[int] = 10
     FREE_PROJECT_CAP: ClassVar[int] = 5
 
-    def __init__(self, db: DatabaseClient) -> None:
+    def __init__(self, db: DatabaseClient, *, dev_mode: bool = False) -> None:
         self._db = db
+        self._dev_mode = dev_mode
+
+    @property
+    def dev_mode(self) -> bool:
+        """Whether balance checks are bypassed for development testing."""
+
+        return self._dev_mode
 
     # ---------------------------------------------------------- balance API
 
@@ -138,8 +145,15 @@ class CreditLedger:
         return sum(int(row.get("amount", 0)) for row in rows)
 
     async def has_sufficient_credits(self, user_id: str, product_type: str) -> bool:
-        """Return True iff the user's balance covers the given product price."""
+        """Return True iff the user's balance covers the given product price.
 
+        In dev mode this always returns True so end-to-end flows can run
+        without paid credits; the ledger entry is still recorded by
+        :meth:`deduct_for_generation` so audit trails stay intact.
+        """
+
+        if self._dev_mode:
+            return True
         price = self.PRICING[product_type]
         balance = await self.get_balance(user_id)
         return balance >= price
@@ -205,24 +219,29 @@ class CreditLedger:
 
         Raises :class:`InsufficientCreditsError` if the balance is below
         the price; the error carries the exact deficit so the bot can
-        offer a top-up immediately.
+        offer a top-up immediately. In dev mode the balance check is
+        skipped — the deduction row is still written (so the audit
+        trail / cost telemetry remain intact) but the operation never
+        rejects.
         """
 
         price = self.PRICING[product_type]
-        balance = await self.get_balance(user_id)
-        if balance < price:
-            raise InsufficientCreditsError(balance=balance, required=price)
+        if not self._dev_mode:
+            balance = await self.get_balance(user_id)
+            if balance < price:
+                raise InsufficientCreditsError(balance=balance, required=price)
         action = (
             CreditAction.DEDUCT_ARTICLE
             if product_type.startswith("article")
             else CreditAction.DEDUCT_PRESENTATION
         )
+        reason_prefix = "dev_generation" if self._dev_mode else "generation"
         entry = CreditEntry(
             user_id=user_id,
             project_id=project_id,
             action=action,
             amount=-price,
-            reason=f"generation:{product_type}",
+            reason=f"{reason_prefix}:{product_type}",
         )
         return await self._insert(entry)
 

@@ -16,9 +16,15 @@ from packages.bot.orchestrators.article_orchestrator import (
     map_calibration,
     map_language,
 )
+from packages.bot.orchestrators.presentation_orchestrator import (
+    PresentationOrchestrator,
+    PresentationRenderResult,
+)
 
 __all__ = [
     "ArticleOrchestrator",
+    "PresentationOrchestrator",
+    "PresentationRenderResult",
     "ProgressCallback",
     "SourceProcessingResult",
     "map_calibration",

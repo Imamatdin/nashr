@@ -9,7 +9,23 @@ tests construct directly with explicit values.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+def _parse_admin_ids(raw: str) -> tuple[int, ...]:
+    """Parse a comma-separated list of Telegram user IDs.
+
+    Whitespace around each entry is tolerated. Non-numeric entries are
+    silently skipped so a typo in one ID does not lock every admin out
+    of the bot.
+    """
+
+    out: list[int] = []
+    for piece in raw.split(","):
+        token = piece.strip()
+        if token.isdigit():
+            out.append(int(token))
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -19,6 +35,9 @@ class PlatformConfig:
     Credential fields default to empty strings rather than ``None`` so a
     misconfigured deployment surfaces as an auth error from the relevant
     provider rather than a TypeError deep in client construction.
+    ``dev_mode`` and ``admin_telegram_ids`` exist so the bot can offer
+    free generations and admin-only credit grants during local testing
+    without breaking the prod-grade balance enforcement.
     """
 
     supabase_url: str
@@ -35,10 +54,20 @@ class PlatformConfig:
     click_secret_key: str = ""
     click_service_id: str = ""
     mini_app_base_url: str = "https://nashr.uz"
+    dev_mode: bool = False
+    admin_telegram_ids: tuple[int, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_env(cls) -> PlatformConfig:
-        """Build a config from process environment variables."""
+        """Build a config from process environment variables.
+
+        ``NASHR_ENV=development`` flips :attr:`dev_mode` on so generation
+        flows skip balance checks; any other value (including unset)
+        keeps production behaviour.
+        """
+
+        dev_mode = os.environ.get("NASHR_ENV", "production").strip().lower() == "development"
+        admin_ids = _parse_admin_ids(os.environ.get("NASHR_ADMIN_IDS", ""))
 
         return cls(
             supabase_url=os.environ.get("SUPABASE_URL", ""),
@@ -55,4 +84,6 @@ class PlatformConfig:
             click_secret_key=os.environ.get("CLICK_SECRET_KEY", ""),
             click_service_id=os.environ.get("CLICK_SERVICE_ID", ""),
             mini_app_base_url=os.environ.get("MINI_APP_BASE_URL", "https://nashr.uz"),
+            dev_mode=dev_mode,
+            admin_telegram_ids=admin_ids,
         )
