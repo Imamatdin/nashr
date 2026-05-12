@@ -51,6 +51,7 @@ from packages.bot.orchestrators import (
     ProgressCallback,
     SourceProcessingResult,
 )
+from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
 from packages.bot.states import ArticleStates
 from packages.core.models.article import ArticleDraftResult, ArticleOutline
 from packages.core.models.evidence import (
@@ -143,6 +144,24 @@ def _progress_editor(message: Message, labels: BotLabels) -> ProgressCallback:
             )
 
     return callback
+
+
+async def _send_failed_sources_warning(
+    target: Message, failed: list[tuple[str, str]], labels: BotLabels
+) -> None:
+    """Notify the user about per-file processing failures (best-effort)."""
+
+    if not failed:
+        return
+    details = "\n".join(f"  • {name}: {reason}" for name, reason in failed)
+    message = labels.failed_sources_warning.format(count=len(failed), details=details)
+    try:
+        await target.answer(message)
+    except Exception as exc:
+        logger.debug(
+            "article_flow_failed_sources_notify_failed",
+            extra={"error_type": type(exc).__name__},
+        )
 
 
 def _format_outline_for_review(outline: ArticleOutline) -> str:
@@ -279,6 +298,7 @@ async def continue_to_processing(
             user_id=user_id,
             progress=progress,
         )
+        await _send_failed_sources_warning(progress_msg, sources.failed_sources, labels)
         matrix = await orchestrator.build_evidence_matrix(sources, project_id, progress)
         cache = _cache(project_id)
         cache["sources"] = sources
@@ -290,6 +310,15 @@ async def continue_to_processing(
         )
     except ValueError as exc:
         await progress_msg.edit_text(f"{labels.generation_failed}\n\n{exc}")
+        _drop_cache(project_id)
+        await state.clear()
+        return
+    except _OrchestratorError as exc:
+        logger.exception(
+            "article_flow_processing_failed_step",
+            extra={"project_id": project_id, "step": exc.step},
+        )
+        await progress_msg.edit_text(labels.generation_failed_at_step.format(step=exc.step))
         _drop_cache(project_id)
         await state.clear()
         return
@@ -618,6 +647,16 @@ async def start_generation(
             author_name=str(data.get("author_name") or "Nashr foydalanuvchisi"),
             progress=progress,
         )
+    except _OrchestratorError as exc:
+        logger.exception(
+            "article_flow_generation_failed_step",
+            extra={"project_id": project_id, "step": exc.step},
+        )
+        await progress_msg.edit_text(labels.generation_failed_at_step.format(step=exc.step))
+        await db.update_project_status(project_id, "failed")
+        await _refund_on_failure(credits, data, project_id)
+        await state.clear()
+        return
     except Exception as exc:
         logger.exception(
             "article_flow_generation_failed",

@@ -86,6 +86,9 @@ class BotLabels:
     please_start_first: str
     no_projects_yet: str
 
+    failed_sources_warning: str
+    generation_failed_at_step: str
+
 
 LABELS_UZ = BotLabels(
     welcome="Nashr platformasiga xush kelibsiz! Til tanlang:",
@@ -150,6 +153,10 @@ LABELS_UZ = BotLabels(
     error_no_sources="Avval manba hujjatlarini yuklang.",
     please_start_first="Avval /start buyrug'ini yuboring.",
     no_projects_yet="Hali loyihalaringiz yo'q.",
+    failed_sources_warning=("⚠️ {count} ta fayl qayta ishlanmadi:\n{details}"),
+    generation_failed_at_step=(
+        "Xatolik: {step}. Qayta urinib ko'ring yoki qo'llab-quvvatlash xizmatiga murojaat qiling."
+    ),
 )
 
 
@@ -211,6 +218,10 @@ LABELS_RU = BotLabels(
     error_no_sources="Сначала загрузите исходные документы.",
     please_start_first="Сначала отправьте команду /start.",
     no_projects_yet="У вас пока нет проектов.",
+    failed_sources_warning=("⚠️ Не удалось обработать {count} файл(ов):\n{details}"),
+    generation_failed_at_step=(
+        "Ошибка на этапе: {step}. Попробуйте снова или обратитесь в поддержку."
+    ),
 )
 
 
@@ -272,6 +283,8 @@ LABELS_EN = BotLabels(
     error_no_sources="Please upload source documents first.",
     please_start_first="Please send /start first.",
     no_projects_yet="No projects yet.",
+    failed_sources_warning=("⚠️ {count} file(s) could not be processed:\n{details}"),
+    generation_failed_at_step=("Error at step: {step}. Please try again or contact support."),
 )
 
 
@@ -334,6 +347,10 @@ LABELS_KAA = BotLabels(
     error_no_sources="Aldın derekli hújjetlerdi júklemelisiniz.",
     please_start_first="Aldın /start buyrıǵın jiberiń.",
     no_projects_yet="Sizde hesh qanday loyiha joq.",
+    failed_sources_warning=("⚠️ {count} fayl qayta islenbedi:\n{details}"),
+    generation_failed_at_step=(
+        "Qátelik: {step}. Qayta urınıp kóriń yamasa qollap-quwatlawǵa baylanısıń."
+    ),
 )
 
 

@@ -35,6 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.bot.orchestrators.article_orchestrator import (
     SourceProcessingResult,
+    _OrchestratorError,
 )
 from packages.core.enums import (
     ExportFormat,
@@ -168,8 +169,21 @@ class PresentationOrchestrator:
 
         await progress("Processing sources", 1, TOTAL_STEPS)
         result = SourceProcessingResult()
-        for info in file_infos:
-            await self._process_one_source(info, project_id, user_id, result)
+        try:
+            for info in file_infos:
+                await self._process_one_source(info, project_id, user_id, result)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise _OrchestratorError("process_sources", exc) from exc
+
+        if result.failed_sources:
+            warning = "; ".join(f"{name}: {reason}" for name, reason in result.failed_sources)
+            await progress(
+                f"Warning: {len(result.failed_sources)} file(s) failed — {warning}",
+                1,
+                TOTAL_STEPS,
+            )
 
         if not result.claims and not result.chunks:
             raise ValueError("No usable content could be extracted from the uploaded sources.")
@@ -192,7 +206,9 @@ class PresentationOrchestrator:
                 "presentation_source_download_failed",
                 extra={"source_name": filename, "error_type": type(exc).__name__},
             )
+            reason = f"download failed ({type(exc).__name__})"
             result.warnings.append(f"Could not download {filename}: {type(exc).__name__}")
+            result.failed_sources.append((filename, reason))
             return
 
         try:
@@ -202,13 +218,15 @@ class PresentationOrchestrator:
                 "presentation_source_pipeline_failed",
                 extra={"source_name": filename, "error_type": type(exc).__name__},
             )
+            reason = f"parse failed ({type(exc).__name__})"
             result.warnings.append(f"Could not parse {filename}: {type(exc).__name__}")
+            result.failed_sources.append((filename, reason))
             return
 
         if not pipeline_result.validation.valid:
-            result.warnings.append(
-                f"Rejected {filename}: {pipeline_result.validation.rejection_reason or 'invalid'}"
-            )
+            rejection = pipeline_result.validation.rejection_reason or "invalid"
+            result.warnings.append(f"Rejected {filename}: {rejection}")
+            result.failed_sources.append((filename, rejection))
             return
 
         result.claims.extend(pipeline_result.claims)
@@ -280,12 +298,15 @@ class PresentationOrchestrator:
         """Build the evidence matrix used by the editorial pass."""
 
         await progress("Building evidence matrix", 2, TOTAL_STEPS)
-        return await self._matrix_builder.build_from_claims(
-            project_id=_project_id_to_uuid(project_id),
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_quality=SourceQuality.MEDIUM,
-        )
+        try:
+            return await self._matrix_builder.build_from_claims(
+                project_id=_project_id_to_uuid(project_id),
+                claims=sources.claims,
+                chunks=sources.chunks,
+                source_quality=SourceQuality.MEDIUM,
+            )
+        except Exception as exc:
+            raise _OrchestratorError("evidence_matrix", exc) from exc
 
     # ====================================================================
     # STEP 3 — apply interview answers (or defaults)
@@ -308,24 +329,27 @@ class PresentationOrchestrator:
 
         await progress("Applying preferences", 3, TOTAL_STEPS)
 
-        if raw_answers is None:
-            return self._interview_engine.apply_defaults(
+        try:
+            if raw_answers is None:
+                return self._interview_engine.apply_defaults(
+                    claims=sources.claims,
+                    source_metadata=sources.metadata,
+                    chunks=sources.chunks,
+                    language=language,
+                )
+
+            questions = self._interview_engine.generate_questions(
                 claims=sources.claims,
-                source_metadata=sources.metadata,
                 chunks=sources.chunks,
+                source_metadata=sources.metadata,
                 language=language,
             )
-
-        questions = self._interview_engine.generate_questions(
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_metadata=sources.metadata,
-            language=language,
-        )
-        # Cast: the engine's signature accepts the looser Mapping type
-        # the Mini App actually returns (strings, ints, bool, lists).
-        coerced = cast(Mapping[str, str | int | bool | list[str]], raw_answers)
-        return self._interview_engine.apply_answers(questions=questions, answers=coerced)
+            # Cast: the engine's signature accepts the looser Mapping type
+            # the Mini App actually returns (strings, ints, bool, lists).
+            coerced = cast(Mapping[str, str | int | bool | list[str]], raw_answers)
+            return self._interview_engine.apply_answers(questions=questions, answers=coerced)
+        except Exception as exc:
+            raise _OrchestratorError("interview", exc) from exc
 
     # ====================================================================
     # STEP 4 — design direction (deterministic, no LLM)
@@ -340,12 +364,15 @@ class PresentationOrchestrator:
         """Run the Design Direction Pass. Synchronous engine wrapped in async."""
 
         await progress("Choosing design direction", 4, TOTAL_STEPS)
-        return self._design_pass.generate(
-            interview=interview,
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_metadata=sources.metadata,
-        )
+        try:
+            return self._design_pass.generate(
+                interview=interview,
+                claims=sources.claims,
+                chunks=sources.chunks,
+                source_metadata=sources.metadata,
+            )
+        except Exception as exc:
+            raise _OrchestratorError("design_direction", exc) from exc
 
     # ====================================================================
     # STEP 5 — editorial pass (LLM)
@@ -363,16 +390,19 @@ class PresentationOrchestrator:
         """Run the Editorial Pass to produce the complete deck spec."""
 
         await progress("Creating slide sequence", 5, TOTAL_STEPS)
-        return await self._editorial_pass.generate_deck_spec(
-            interview=interview,
-            design=design,
-            evidence_matrix=matrix,
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_metadata=sources.metadata,
-            outline=None,
-            project_id=project_id,
-        )
+        try:
+            return await self._editorial_pass.generate_deck_spec(
+                interview=interview,
+                design=design,
+                evidence_matrix=matrix,
+                claims=sources.claims,
+                chunks=sources.chunks,
+                source_metadata=sources.metadata,
+                outline=None,
+                project_id=project_id,
+            )
+        except Exception as exc:
+            raise _OrchestratorError("editorial", exc) from exc
 
     # ====================================================================
     # STEP 6 — render via Node worker
@@ -398,15 +428,18 @@ class PresentationOrchestrator:
 
         await progress("Rendering presentation", 6, TOTAL_STEPS)
 
-        output_dir = Path(tempfile.mkdtemp(prefix="nashr_pres_"))
-        deck_json_path = output_dir / "deck.json"
-        await asyncio.to_thread(
-            deck_json_path.write_text,
-            deck_spec.model_dump_json(),
-            "utf-8",
-        )
+        try:
+            output_dir = Path(tempfile.mkdtemp(prefix="nashr_pres_"))
+            deck_json_path = output_dir / "deck.json"
+            await asyncio.to_thread(
+                deck_json_path.write_text,
+                deck_spec.model_dump_json(),
+                "utf-8",
+            )
 
-        worker_entry = await self._worker_runner.ensure_built()
+            worker_entry = await self._worker_runner.ensure_built()
+        except Exception as exc:
+            raise _OrchestratorError("render_prepare", exc) from exc
         result = PresentationRenderResult()
 
         for fmt in formats:

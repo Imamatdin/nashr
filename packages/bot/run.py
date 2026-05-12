@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
+import signal
 import sys
+from types import FrameType
 
 from packages.platform.config import PlatformConfig
 
@@ -27,6 +30,27 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("nashr.bot")
+
+
+def _install_shutdown_handlers() -> None:
+    """Register SIGTERM/SIGINT handlers so Docker can stop the bot cleanly.
+
+    On Linux (the production target) Docker sends SIGTERM and gives the
+    container 10 seconds to exit. We translate that into a logged message
+    and let aiogram's normal task cancellation unwind in-flight handlers.
+    SIGTERM is absent on Windows; ``signal.signal`` would raise there, so
+    we register it conditionally. SIGINT is registered everywhere for
+    local ``Ctrl-C`` exits.
+    """
+
+    def _handle(sig: int, _frame: FrameType | None) -> None:
+        logger.info("Received signal %d. Shutting down gracefully...", sig)
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handle)
+    if hasattr(signal, "SIGTERM"):
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(signal.SIGTERM, _handle)
 
 
 def main() -> None:
@@ -51,6 +75,8 @@ def main() -> None:
     if not config.telegram_bot_token:
         logger.error("TELEGRAM_BOT_TOKEN not set")
         sys.exit(1)
+
+    _install_shutdown_handlers()
 
     if args.webhook:
         webhook_url = config.webhook_url

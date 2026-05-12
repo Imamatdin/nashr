@@ -53,6 +53,7 @@ from packages.bot.orchestrators import (
     PresentationRenderResult,
     ProgressCallback,
 )
+from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
 from packages.bot.states import PresentationStates
 from packages.core.enums import ExportFormat
 from packages.platform.config import PlatformConfig
@@ -420,6 +421,18 @@ async def start_generation(
             requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
             progress=progress,
         )
+    except _OrchestratorError as exc:
+        logger.exception(
+            "presentation_generation_failed_step",
+            extra={"project_id": project_id, "step": exc.step},
+        )
+        with contextlib.suppress(Exception):
+            await progress_msg.edit_text(labels.generation_failed_at_step.format(step=exc.step))
+        with contextlib.suppress(Exception):
+            await db.update_project_status(project_id, "failed")
+        await _refund_on_failure(credits, data, project_id)
+        await state.clear()
+        return
     except Exception as exc:
         logger.exception(
             "presentation_generation_failed",

@@ -553,12 +553,14 @@ async def test_generate_deck_spec_passes_inputs_to_editorial() -> None:
 
 
 async def test_generate_deck_spec_propagates_editorial_failure() -> None:
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
     bot = _StubBot()
     editorial = _StubEditorialPass(raises=RuntimeError("LLM down"))
     orch, _, _, _ = _build_orch(bot, editorial=editorial)
     sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
 
-    with pytest.raises(RuntimeError, match="LLM down"):
+    with pytest.raises(_OrchestratorError) as info:
         await orch.generate_deck_spec(
             interview=_interview_answers(),
             design=_design_spec(),
@@ -567,6 +569,9 @@ async def test_generate_deck_spec_propagates_editorial_failure() -> None:
             project_id=PROJECT_ID,
             progress=_noop_progress,
         )
+    assert info.value.step == "editorial"
+    assert isinstance(info.value.original, RuntimeError)
+    assert "LLM down" in str(info.value.original)
 
 
 # ---------------------------------------------------------------------------
@@ -666,12 +671,17 @@ async def test_render_calls_ensure_built_once() -> None:
 
 
 async def test_render_propagates_build_failure() -> None:
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
     bot = _StubBot()
     worker = _StubWorkerRunner(raise_on_ensure=RuntimeError("npm build failed"))
     orch, _, _, _ = _build_orch(bot, worker=worker)
 
-    with pytest.raises(RuntimeError, match="npm build failed"):
+    with pytest.raises(_OrchestratorError) as info:
         await orch.render(_deck_spec(), [ExportFormat.HTML], _noop_progress)
+    assert info.value.step == "render_prepare"
+    assert isinstance(info.value.original, RuntimeError)
+    assert "npm build failed" in str(info.value.original)
 
 
 # ---------------------------------------------------------------------------
@@ -725,11 +735,13 @@ async def test_full_pipeline_uses_defaults_when_no_answers() -> None:
 
 
 async def test_full_pipeline_propagates_editorial_failure() -> None:
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
     bot = _StubBot(payloads={"f1": b"pdf"})
     editorial = _StubEditorialPass(raises=RuntimeError("LLM unreachable"))
     orch, _, _, _ = _build_orch(bot, editorial=editorial)
 
-    with pytest.raises(RuntimeError, match="LLM unreachable"):
+    with pytest.raises(_OrchestratorError) as info:
         await orch.run_full_pipeline(
             file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
             project_id=PROJECT_ID,
@@ -739,6 +751,7 @@ async def test_full_pipeline_propagates_editorial_failure() -> None:
             requested_formats=[ExportFormat.HTML],
             progress=_noop_progress,
         )
+    assert info.value.step == "editorial"
 
 
 # ---------------------------------------------------------------------------

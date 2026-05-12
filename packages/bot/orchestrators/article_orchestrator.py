@@ -173,7 +173,13 @@ def derive_thesis(claims: list[SourceClaimCreate], fallback_title: str) -> str:
 
 
 class SourceProcessingResult(BaseModel):
-    """Bundle of artefacts produced from a batch of uploaded source files."""
+    """Bundle of artefacts produced from a batch of uploaded source files.
+
+    ``failed_sources`` is a parallel record to ``warnings`` aimed at the
+    user-facing layer: each tuple is ``(filename, short_reason)`` so the
+    handler can show the user exactly which files dropped out and why,
+    rather than burying that in a free-text warning blob.
+    """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -182,6 +188,23 @@ class SourceProcessingResult(BaseModel):
     metadata: list[SourceMetadataExtracted] = Field(default_factory=list[SourceMetadataExtracted])
     source_ids: list[UUID] = Field(default_factory=list[UUID])
     warnings: list[str] = Field(default_factory=list[str])
+    failed_sources: list[tuple[str, str]] = Field(default_factory=list[tuple[str, str]])
+
+
+class _OrchestratorError(Exception):
+    """Wrapper carrying the orchestration step name alongside the cause.
+
+    Public step methods catch the underlying exception and re-raise as
+    :class:`_OrchestratorError` so the handler can render a
+    step-specific user message (e.g. ``"Error at step:
+    process_sources"``). The ``step`` attribute is the canonical
+    method-style identifier so log queries can filter on it.
+    """
+
+    def __init__(self, step: str, original: Exception) -> None:
+        self.step = step
+        self.original = original
+        super().__init__(f"Failed at step '{step}': {original}")
 
 
 class ArticleOrchestrator:
@@ -256,12 +279,28 @@ class ArticleOrchestrator:
         aborting the whole upload; a wholly empty result raises
         :class:`ValueError` so the bot can surface a clear error.
         Successful sources get a ``source_upload`` free credit granted.
+        Per-file failures are listed in ``result.failed_sources`` so the
+        caller can surface "x of y files failed: a.pdf, b.pdf" without
+        parsing the warning blobs.
         """
 
         await progress("Processing sources", 1, TOTAL_STEPS)
         result = SourceProcessingResult()
-        for info in file_infos:
-            await self._process_one_source(info, project_id, user_id, result)
+        try:
+            for info in file_infos:
+                await self._process_one_source(info, project_id, user_id, result)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise _OrchestratorError("process_sources", exc) from exc
+
+        if result.failed_sources:
+            warning = "; ".join(f"{name}: {reason}" for name, reason in result.failed_sources)
+            await progress(
+                f"Warning: {len(result.failed_sources)} file(s) failed — {warning}",
+                1,
+                TOTAL_STEPS,
+            )
 
         if not result.claims and not result.chunks:
             raise ValueError("No usable content could be extracted from the uploaded sources.")
@@ -284,7 +323,9 @@ class ArticleOrchestrator:
                 "orchestrator_source_download_failed",
                 extra={"source_name": filename, "error_type": type(exc).__name__},
             )
+            reason = f"download failed ({type(exc).__name__})"
             result.warnings.append(f"Could not download {filename}: {type(exc).__name__}")
+            result.failed_sources.append((filename, reason))
             return
 
         try:
@@ -294,13 +335,15 @@ class ArticleOrchestrator:
                 "orchestrator_source_pipeline_failed",
                 extra={"source_name": filename, "error_type": type(exc).__name__},
             )
+            reason = f"parse failed ({type(exc).__name__})"
             result.warnings.append(f"Could not parse {filename}: {type(exc).__name__}")
+            result.failed_sources.append((filename, reason))
             return
 
         if not pipeline_result.validation.valid:
-            result.warnings.append(
-                f"Rejected {filename}: {pipeline_result.validation.rejection_reason or 'invalid'}"
-            )
+            rejection = pipeline_result.validation.rejection_reason or "invalid"
+            result.warnings.append(f"Rejected {filename}: {rejection}")
+            result.failed_sources.append((filename, rejection))
             return
 
         result.claims.extend(pipeline_result.claims)
@@ -379,12 +422,15 @@ class ArticleOrchestrator:
         """Build the evidence matrix from extracted claims + chunks."""
 
         await progress("Building evidence matrix", 2, TOTAL_STEPS)
-        return await self._matrix_builder.build_from_claims(
-            project_id=_to_uuid(project_id),
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_quality=SourceQuality.MEDIUM,
-        )
+        try:
+            return await self._matrix_builder.build_from_claims(
+                project_id=_to_uuid(project_id),
+                claims=sources.claims,
+                chunks=sources.chunks,
+                source_quality=SourceQuality.MEDIUM,
+            )
+        except Exception as exc:
+            raise _OrchestratorError("evidence_matrix", exc) from exc
 
     # ====================================================================
     # STEP 3 — research interview
@@ -406,24 +452,27 @@ class ArticleOrchestrator:
         engine does not emit one.
         """
 
-        profile = self._interview_engine.analyze_weaknesses(
-            matrix=matrix,
-            claims=sources.claims,
-            chunks=sources.chunks,
-        )
-        if mode is InterviewMode.FAST:
-            return []
-        return await self._interview_engine.generate_questions(
-            project_id=_to_uuid(project_id),
-            profile=profile,
-            matrix=matrix,
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_metadata=sources.metadata,
-            source_ids=sources.source_ids,
-            language=map_language(language),
-            mode=mode,
-        )
+        try:
+            profile = self._interview_engine.analyze_weaknesses(
+                matrix=matrix,
+                claims=sources.claims,
+                chunks=sources.chunks,
+            )
+            if mode is InterviewMode.FAST:
+                return []
+            return await self._interview_engine.generate_questions(
+                project_id=_to_uuid(project_id),
+                profile=profile,
+                matrix=matrix,
+                claims=sources.claims,
+                chunks=sources.chunks,
+                source_metadata=sources.metadata,
+                source_ids=sources.source_ids,
+                language=map_language(language),
+                mode=mode,
+            )
+        except Exception as exc:
+            raise _OrchestratorError("interview_questions", exc) from exc
 
     async def process_interview_answer(
         self,
@@ -514,19 +563,22 @@ class ArticleOrchestrator:
 
         if progress is not None:
             await progress("Generating outline", 3, TOTAL_STEPS)
-        thesis = derive_thesis(sources.claims, project_title)
-        outline = await self._outline_generator.generate(
-            project_id=_to_uuid(project_id),
-            structure=structure,
-            thesis=thesis,
-            target_pages=tier_to_pages(tier),
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_metadata=sources.metadata,
-            language=map_language(language),
-        )
-        await self._matrix_builder.assign_to_sections(matrix, outline)
-        return outline
+        try:
+            thesis = derive_thesis(sources.claims, project_title)
+            outline = await self._outline_generator.generate(
+                project_id=_to_uuid(project_id),
+                structure=structure,
+                thesis=thesis,
+                target_pages=tier_to_pages(tier),
+                claims=sources.claims,
+                chunks=sources.chunks,
+                source_metadata=sources.metadata,
+                language=map_language(language),
+            )
+            await self._matrix_builder.assign_to_sections(matrix, outline)
+            return outline
+        except Exception as exc:
+            raise _OrchestratorError("outline", exc) from exc
 
     # ====================================================================
     # STEP 5 — suggestions
@@ -543,14 +595,17 @@ class ArticleOrchestrator:
         """Run the suggestion engine over the outline."""
 
         await progress("Finding additional sources", 4, TOTAL_STEPS)
-        return await self._suggestion_engine.analyze_and_suggest(
-            outline=outline,
-            evidence_matrix=matrix,
-            claims=sources.claims,
-            chunks=sources.chunks,
-            source_metadata=sources.metadata,
-            language=language,
-        )
+        try:
+            return await self._suggestion_engine.analyze_and_suggest(
+                outline=outline,
+                evidence_matrix=matrix,
+                claims=sources.claims,
+                chunks=sources.chunks,
+                source_metadata=sources.metadata,
+                language=language,
+            )
+        except Exception as exc:
+            raise _OrchestratorError("suggestions", exc) from exc
 
     # ====================================================================
     # STEP 6 — draft
@@ -570,16 +625,19 @@ class ArticleOrchestrator:
         """Draft every section through :class:`ArticleDrafter`."""
 
         await progress("Writing article", 5, TOTAL_STEPS)
-        return await self._drafter.draft_article(
-            outline=outline,
-            evidence_matrix=matrix,
-            claims=sources.claims,
-            chunks=sources.chunks,
-            user_answers=answers,
-            questions=questions,
-            language=language,
-            calibration_level=map_calibration(calibration),
-        )
+        try:
+            return await self._drafter.draft_article(
+                outline=outline,
+                evidence_matrix=matrix,
+                claims=sources.claims,
+                chunks=sources.chunks,
+                user_answers=answers,
+                questions=questions,
+                language=language,
+                calibration_level=map_calibration(calibration),
+            )
+        except Exception as exc:
+            raise _OrchestratorError("draft", exc) from exc
 
     # ====================================================================
     # STEP 7 — verify citations
@@ -595,13 +653,16 @@ class ArticleOrchestrator:
         """Run citation verification over the drafted sections."""
 
         await progress("Verifying citations", 6, TOTAL_STEPS)
-        sections = [r.section for r in draft.sections]
-        return await self._citation_verifier.verify_article(
-            sections=sections,
-            claims=sources.claims,
-            chunks=sources.chunks,
-            evidence_matrix=matrix,
-        )
+        try:
+            sections = [r.section for r in draft.sections]
+            return await self._citation_verifier.verify_article(
+                sections=sections,
+                claims=sources.claims,
+                chunks=sources.chunks,
+                evidence_matrix=matrix,
+            )
+        except Exception as exc:
+            raise _OrchestratorError("verify_citations", exc) from exc
 
     # ====================================================================
     # STEP 8 — export
@@ -626,43 +687,46 @@ class ArticleOrchestrator:
         """
 
         await progress("Exporting files", 7, TOTAL_STEPS)
-        language_norm = map_language(language)
-        bibliography = self._build_bibliography(sources, language_norm)
-        citation_metadata = _build_citation_metadata(sources.metadata)
-        metadata = ArticleExportMetadata(
-            title=outline.title,
-            author_name=author_name or "Nashr foydalanuvchisi",
-            article_type=outline.structure,
-            citation_format=bibliography.style,
-        )
-
-        bundle = await self._export_pipeline.export(
-            draft=draft,
-            bibliography=bibliography,
-            verification=verification,
-            outline=outline,
-            metadata=metadata,
-            language=str(language_norm.value),
-            citation_metadata=citation_metadata,
-        )
-
-        out_dir = Path(tempfile.mkdtemp(prefix="nashr_export_"))
-        docx_path = out_dir / f"{project_id}.docx"
-        await asyncio.to_thread(docx_path.write_bytes, bundle.docx.file_bytes)
-        pdf_path: Path | None = None
-        if bundle.pdf.success and bundle.pdf.file_bytes:
-            pdf_path = out_dir / f"{project_id}.pdf"
-            await asyncio.to_thread(pdf_path.write_bytes, bundle.pdf.file_bytes)
-        else:
-            logger.info(
-                "orchestrator_pdf_export_skipped",
-                extra={"error": bundle.pdf.error or "unknown"},
+        try:
+            language_norm = map_language(language)
+            bibliography = self._build_bibliography(sources, language_norm)
+            citation_metadata = _build_citation_metadata(sources.metadata)
+            metadata = ArticleExportMetadata(
+                title=outline.title,
+                author_name=author_name or "Nashr foydalanuvchisi",
+                article_type=outline.structure,
+                citation_format=bibliography.style,
             )
 
-        await self._upload_exports(project_id, docx_path, pdf_path)
+            bundle = await self._export_pipeline.export(
+                draft=draft,
+                bibliography=bibliography,
+                verification=verification,
+                outline=outline,
+                metadata=metadata,
+                language=str(language_norm.value),
+                citation_metadata=citation_metadata,
+            )
 
-        await progress("Complete", 8, TOTAL_STEPS)
-        return docx_path, pdf_path, bundle
+            out_dir = Path(tempfile.mkdtemp(prefix="nashr_export_"))
+            docx_path = out_dir / f"{project_id}.docx"
+            await asyncio.to_thread(docx_path.write_bytes, bundle.docx.file_bytes)
+            pdf_path: Path | None = None
+            if bundle.pdf.success and bundle.pdf.file_bytes:
+                pdf_path = out_dir / f"{project_id}.pdf"
+                await asyncio.to_thread(pdf_path.write_bytes, bundle.pdf.file_bytes)
+            else:
+                logger.info(
+                    "orchestrator_pdf_export_skipped",
+                    extra={"error": bundle.pdf.error or "unknown"},
+                )
+
+            await self._upload_exports(project_id, docx_path, pdf_path)
+
+            await progress("Complete", 8, TOTAL_STEPS)
+            return docx_path, pdf_path, bundle
+        except Exception as exc:
+            raise _OrchestratorError("export", exc) from exc
 
     async def _upload_exports(
         self,
@@ -769,6 +833,7 @@ __all__ = [
     "ArticleOrchestrator",
     "ProgressCallback",
     "SourceProcessingResult",
+    "_OrchestratorError",
     "default_citation_format",
     "derive_thesis",
     "map_calibration",

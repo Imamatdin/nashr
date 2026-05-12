@@ -28,6 +28,7 @@ from packages.bot.handlers import (
     presentation_flow,
     registration,
 )
+from packages.bot.middleware import InputValidationMiddleware, RateLimitMiddleware
 from packages.bot.webhooks.payment_webhooks import register_payment_webhooks
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
@@ -71,6 +72,13 @@ async def create_bot(
     dp["credits"] = resolved_credits
     dp["config"] = config
     dp["storage"] = resolved_storage
+
+    rate_limiter = RateLimitMiddleware()
+    input_validator = InputValidationMiddleware()
+    dp.message.middleware(input_validator)
+    dp.callback_query.middleware(input_validator)
+    dp.message.middleware(rate_limiter)
+    dp.callback_query.middleware(rate_limiter)
 
     dp.include_router(common.router)
     dp.include_router(registration.router)
