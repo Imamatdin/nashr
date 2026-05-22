@@ -564,16 +564,16 @@ class EditorialPass:
     ) -> list[_LLMSlide]:
         """One Sonnet call; on bad JSON, retry once with a stricter suffix."""
 
-        first = await self._get_llm().complete(
-            system=system, user=user, model=SONNET_MODEL, max_tokens=6_000
+        first = await self._get_gemini().complete(
+            system=system, user=user, model=GEMINI_FLASH_MODEL, max_tokens=6_000
         )
         parsed = _parse_sequence(first.content)
         if parsed is not None:
             return parsed
-        retry = await self._get_llm().complete(
+        retry = await self._get_gemini().complete(
             system=system,
             user=user + EDITORIAL_RETRY_SUFFIX,
-            model=SONNET_MODEL,
+            model=GEMINI_FLASH_MODEL,
             max_tokens=6_000,
         )
         parsed = _parse_sequence(retry.content)

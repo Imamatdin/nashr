@@ -98,12 +98,24 @@ async def select_provider(
     labels = get_bot_labels(lang)
 
     if not isinstance(callback.message, Message):
-        await callback.answer()
+        try:
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+        except Exception:
+            pass
         return
 
     if provider == "balance":
         await _handle_balance_payment(callback.message, state, data, bot, db, credits, storage)
-        await callback.answer()
+        try:
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+        except Exception:
+            pass
         return
 
     if provider in EXTERNAL_PROVIDERS:
@@ -118,7 +130,13 @@ async def select_provider(
             config,
             storage,
         )
-        await callback.answer()
+        try:
+            try:
+                await callback.answer()
+            except Exception:
+                pass
+        except Exception:
+            pass
         return
 
     await callback.message.edit_text(f"{labels.payment_pending}\n\nProvider: {provider}")

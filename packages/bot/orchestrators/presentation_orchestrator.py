@@ -333,7 +333,7 @@ class PresentationOrchestrator:
             if raw_answers is None:
                 return self._interview_engine.apply_defaults(
                     claims=sources.claims,
-                    source_metadata=sources.metadata,
+                    source_metadata=getattr(sources, "metadata", []),
                     chunks=sources.chunks,
                     language=language,
                 )
@@ -341,7 +341,7 @@ class PresentationOrchestrator:
             questions = self._interview_engine.generate_questions(
                 claims=sources.claims,
                 chunks=sources.chunks,
-                source_metadata=sources.metadata,
+                source_metadata=getattr(sources, "metadata", []),
                 language=language,
             )
             # Cast: the engine's signature accepts the looser Mapping type
@@ -369,7 +369,7 @@ class PresentationOrchestrator:
                 interview=interview,
                 claims=sources.claims,
                 chunks=sources.chunks,
-                source_metadata=sources.metadata,
+                source_metadata=getattr(sources, "metadata", []),
             )
         except Exception as exc:
             raise _OrchestratorError("design_direction", exc) from exc
@@ -397,7 +397,7 @@ class PresentationOrchestrator:
                 evidence_matrix=matrix,
                 claims=sources.claims,
                 chunks=sources.chunks,
-                source_metadata=sources.metadata,
+                source_metadata=getattr(sources, "metadata", []),
                 outline=None,
                 project_id=project_id,
             )

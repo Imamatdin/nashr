@@ -70,7 +70,7 @@ class EvidenceMatrixBuilder:
         now = datetime.now(UTC)
 
         for claim in claims:
-            chunk_uuid = chunk_lookup.get(claim.source_chunk_id)
+            chunk_uuid = chunk_lookup.get(claim.source_chunk_id or "0")
             if chunk_uuid is None:
                 logger.warning(
                     "evidence_matrix_skip_unresolved_chunk",

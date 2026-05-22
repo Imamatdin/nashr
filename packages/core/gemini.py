@@ -36,17 +36,17 @@ from packages.core.llm import LLMResponse
 logger = logging.getLogger(__name__)
 
 
-GEMINI_FLASH_MODEL: Final[str] = "gemini-3-flash"
+GEMINI_FLASH_MODEL: Final[str] = "gemini-2.5-flash"
 
 # Per million tokens (input, output)
 GEMINI_COSTS: Final[dict[str, tuple[float, float]]] = {
-    "gemini-3-flash": (0.50, 3.00),
+    "gemini-2.5-flash": (0.50, 3.00),
     "gemini-3.1-flash-lite-preview": (0.25, 1.00),
     "gemini-3.1-pro-preview": (2.50, 15.00),
 }
 
-GEMINI_FLASH_INPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3-flash"][0]
-GEMINI_FLASH_OUTPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3-flash"][1]
+GEMINI_FLASH_INPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-2.5-flash"][0]
+GEMINI_FLASH_OUTPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-2.5-flash"][1]
 GEMINI_FLASH_LITE_INPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3.1-flash-lite-preview"][
     0
 ]
@@ -165,13 +165,19 @@ class GeminiClient:
         max_retries: int = DEFAULT_LLM_MAX_RETRIES,
     ) -> None:
         if generate_content_fn is None:
-            api_key = os.environ.get("GOOGLE_API_KEY")
-            if not api_key:
-                raise RuntimeError(
-                    "GOOGLE_API_KEY environment variable is not set; "
-                    "GeminiClient cannot be initialized without it."
-                )
-            client = genai.Client(api_key=api_key)
+            vertex_project = os.environ.get("VERTEX_PROJECT")
+            if vertex_project and os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+                client = genai.Client(vertexai=True, project=vertex_project, location="us-central1")
+                logger.info("GeminiClient using Vertex AI (project=%s)", vertex_project)
+            else:
+                api_key = os.environ.get("GOOGLE_API_KEY")
+                if not api_key:
+                    raise RuntimeError(
+                        "GOOGLE_API_KEY environment variable is not set; "
+                        "GeminiClient cannot be initialized without it."
+                    )
+                client = genai.Client(api_key=api_key)
+                logger.info("GeminiClient using AI Studio API key")
             self._generate_content_fn: GenerateContentFn = _default_generate_content_fn(client)
         else:
             self._generate_content_fn = generate_content_fn
