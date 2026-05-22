@@ -121,8 +121,8 @@ export interface SlideRegions {
 
 export const SLIDE_REGIONS: Partial<Record<SlideType, SlideRegions>> = {
   title_hero: {
-    title: { x: 5, y: 30, w: 70, h: 15 },
-    subtitle: { x: 5, y: 48, w: 70, h: 8 },
+    title: { x: 5, y: 26, w: 85, h: 34 },
+    subtitle: { x: 5, y: 64, w: 80, h: 8 },
     caption: { x: 5, y: 90, w: 40, h: 4 },
   },
   concept_definition: {

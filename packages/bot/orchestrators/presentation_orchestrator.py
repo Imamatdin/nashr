@@ -468,7 +468,9 @@ class PresentationOrchestrator:
                 continue
 
             if completed.returncode != 0:
-                tail = (completed.stderr or "").strip().splitlines()
+                full_err = (completed.stderr or "").strip()
+                logger.warning("RENDER_STDERR_FULL fmt=%s code=%s err=%s", ext, completed.returncode, full_err[:3000])
+                tail = full_err.splitlines()
                 snippet = tail[-1] if tail else "non-zero exit"
                 result.warnings.append(f"{ext}: {snippet}")
                 logger.warning(

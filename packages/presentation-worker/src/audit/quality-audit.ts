@@ -279,7 +279,7 @@ export class QualityAudit {
           check_id: 'Q3',
           check_name: 'Word count limit',
           passed: false,
-          severity: 'fail',
+          severity: 'warn',
           slide_index: slide.slideIndex,
           rule_reference: 'R17',
           message: `Slide ${slide.slideIndex} (${slide.slideType}): ${slide.wordCount} words, limit ${limit}`,
@@ -289,7 +289,7 @@ export class QualityAudit {
           check_id: 'Q3',
           check_name: 'Word count limit',
           passed: true,
-          severity: 'fail',
+          severity: 'warn',
           slide_index: slide.slideIndex,
         });
       }

@@ -784,11 +784,12 @@ def _parse_sequence(text: str) -> list[_LLMSlide] | None:
 
     obj = _try_parse_object(text)
     if obj is None:
+        logger.warning("editorial_parse_failed_not_json len=%d head=%s", len(text), text[:300])
         return None
     try:
         wrapper = _LLMSequence.model_validate(obj)
     except ValidationError as exc:
-        logger.warning("editorial_invalid_schema", extra={"error": str(exc)[:200]})
+        logger.warning("editorial_invalid_schema: %s", str(exc)[:3000])
         return None
     return wrapper.slides
 

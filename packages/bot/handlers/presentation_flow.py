@@ -449,7 +449,7 @@ async def start_generation(
     _stash_outputs(project_id, files)
     await _register_outputs(db, project_id, files)
     try:
-        await db.update_project_status(project_id, "completed")
+        await db.update_project_status(project_id, "ready")
     except Exception as exc:
         logger.warning(
             "presentation_update_status_failed",
