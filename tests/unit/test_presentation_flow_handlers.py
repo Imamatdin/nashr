@@ -250,7 +250,7 @@ async def test_start_generation_caches_outputs_and_advances_state(
     assert cache["files"]["pptx"] == str(pptx)
     # Two generated_files rows: html + pptx.
     assert db_spy.create_generated_file.await_count == 2
-    db_spy.update_project_status.assert_awaited_with("proj_x", "completed")
+    db_spy.update_project_status.assert_awaited_with("proj_x", "ready")
 
 
 async def test_start_generation_refunds_on_failure(
