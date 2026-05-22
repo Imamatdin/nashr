@@ -34,6 +34,7 @@ from packages.core.llm import LLMResponse
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
     ColorPalette,
+    ContentAnalysis,
     DeckSpec,
     DesignDirectionSpec,
     PresentationInterviewAnswers,
@@ -264,34 +265,71 @@ def test_narrative_arc_results() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Slide count estimation
+# Deck sizing (content-driven, not duration-driven)
 # ---------------------------------------------------------------------------
 
 
-def test_estimate_count_15min_no_interactive() -> None:
-    count = EditorialPass._estimate_slide_count(
-        _interview(talk_duration_minutes=15, include_interactive=False)
+def _analysis_with_claims(n: int) -> ContentAnalysis:
+    """Build a ContentAnalysis whose total_claims is exactly ``n``."""
+
+    return EditorialPass._analyze_content(
+        [_claim(f"Substantive claim number {i} that carries an idea.") for i in range(n)]
     )
-    # 15 content + 3 section breaks
+
+
+def _size(interview: PresentationInterviewAnswers, n_claims: int) -> int:
+    return EditorialPass()._size_deck(interview, _analysis_with_claims(n_claims))
+
+
+def test_size_deck_thin_content_clamps_to_floor() -> None:
+    # 5 claims -> content base floors at 6 (not 30). 6 + max(1, 6//5)=1 break.
+    count = _size(_interview(include_interactive=False), n_claims=5)
+    assert count == 7
+
+
+def test_size_deck_rich_content_clamps_to_ceiling() -> None:
+    # 60 claims -> content base caps at 15 (not 60). 15 + 15//5=3 breaks.
+    count = _size(_interview(include_interactive=False), n_claims=60)
     assert count == 18
 
 
-def test_estimate_count_with_interactive() -> None:
-    with_int = EditorialPass._estimate_slide_count(
-        _interview(talk_duration_minutes=15, include_interactive=True)
-    )
-    without_int = EditorialPass._estimate_slide_count(
-        _interview(talk_duration_minutes=15, include_interactive=False)
-    )
-    assert with_int > without_int
-
-
-def test_estimate_count_without_interactive_excludes_quizzes() -> None:
-    count = EditorialPass._estimate_slide_count(
-        _interview(talk_duration_minutes=10, include_interactive=False)
-    )
-    # 10 content + 2 section breaks (10//5)
+def test_size_deck_mid_content_lands_between_floor_and_ceiling() -> None:
+    # 10 claims -> content base 10, between floor and ceiling. 10 + 10//5=2.
+    count = _size(_interview(include_interactive=False), n_claims=10)
     assert count == 12
+
+
+def test_size_deck_scales_with_claim_volume() -> None:
+    # More substantive claims -> a larger deck, within the clamp band.
+    fewer = _size(_interview(include_interactive=False), n_claims=8)
+    more = _size(_interview(include_interactive=False), n_claims=12)
+    assert fewer < more
+
+
+def test_size_deck_long_duration_thin_content_still_clamps_low() -> None:
+    # Proves talk_duration no longer drives the count: a 60-minute slot with
+    # only 5 claims still produces a tight deck, not 60+ slides.
+    count = _size(
+        _interview(talk_duration_minutes=60, include_interactive=False),
+        n_claims=5,
+    )
+    assert count == 7
+
+
+def test_size_deck_short_duration_rich_content_still_gets_real_deck() -> None:
+    # Proves talk_duration no longer starves the count: a 3-minute slot with
+    # 40 claims still earns a full deck up to the ceiling.
+    count = _size(
+        _interview(talk_duration_minutes=3, include_interactive=False),
+        n_claims=40,
+    )
+    assert count == 18
+
+
+def test_size_deck_interactive_adds_on_top_of_content_base() -> None:
+    with_int = _size(_interview(include_interactive=True), n_claims=10)
+    without_int = _size(_interview(include_interactive=False), n_claims=10)
+    assert with_int > without_int
 
 
 # ---------------------------------------------------------------------------

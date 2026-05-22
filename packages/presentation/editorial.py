@@ -7,8 +7,8 @@ cannot be rescued by colors or layout.
 
 Pipeline:
 
-1. Estimate slide count from talk duration plus optional interactive
-   slides.
+1. Size the deck from content volume (extracted claim count) plus
+   optional interactive slides.
 2. Analyse content (pure Python) — group claims by rhetorical type,
    detect people/numbers/comparisons, surface the strongest claims.
 3. Select a narrative arc from the user's emphasis choice.
@@ -97,6 +97,13 @@ logger = logging.getLogger(__name__)
 
 SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
 DEFAULT_PROJECT_ID: Final[str] = "presentation"
+
+# Deck sizing is driven by content volume, not talk duration. Floor 6:
+# anything thinner is not a deck. Ceiling 15: anything fatter is a
+# document, not a presentation (a human making a real 5-minute pitch deck
+# tops out around 15 content slides).
+MIN_CONTENT_SLIDES: Final[int] = 6
+MAX_CONTENT_SLIDES: Final[int] = 15
 
 # R17 word-count limits keyed by slide type. The post-processor enforces
 # these by truncating body text and moving the excess to speaker notes.
@@ -396,7 +403,7 @@ class EditorialPass:
         del evidence_matrix, chunks, source_metadata, outline
         analysis = self._analyze_content(claims)
         arc = self._determine_narrative_arc(interview, analysis)
-        target_count = self._estimate_slide_count(interview)
+        target_count = self._size_deck(interview, analysis)
 
         raw_slides = await self._generate_slide_sequence(
             interview=interview,
@@ -420,14 +427,32 @@ class EditorialPass:
         return self._assemble_deck(merged, interview, design, project_id)
 
     # ------------------------------------------------------------------
-    # Step 1 - slide count
+    # Step 1 - deck sizing
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _estimate_slide_count(interview: PresentationInterviewAnswers) -> int:
-        """Estimate total slide count from talk duration and interactivity."""
+    def _size_deck(
+        self,
+        interview: PresentationInterviewAnswers,
+        analysis: ContentAnalysis,
+    ) -> int:
+        """Size the deck from content volume, not talk duration.
 
-        content_slides = interview.talk_duration_minutes
+        Heuristic: each substantive claim seeds roughly one content slide
+        (SPEC: "one main idea per slide"), so ``analysis.total_claims`` is a
+        direct proxy for how many content slides the source material can
+        actually fill. This is the only uncapped volume signal the analysis
+        exposes — ``strongest_claims`` is capped at 10 and the grouped
+        claim lists at 100-200 — so it is what scales with real content.
+        Thin material now yields a tight deck instead of being padded out
+        to match a requested running time.
+
+        Section breaks and (optional) interactive slides are layered on top
+        of the clamped content base, preserving the prior meaning of the
+        returned total (content + breaks + interactive).
+        """
+
+        content_supported = analysis.total_claims
+        content_slides = max(MIN_CONTENT_SLIDES, min(MAX_CONTENT_SLIDES, content_supported))
         section_breaks = max(1, content_slides // 5)
         interactive_slides = 0
         if interview.include_interactive:
