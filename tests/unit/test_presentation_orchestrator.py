@@ -237,7 +237,7 @@ class _StubDesignPass:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    def generate(self, **kwargs: Any) -> DesignDirectionSpec:
+    async def generate(self, **kwargs: Any) -> DesignDirectionSpec:
         self.calls.append(kwargs)
         return _design_spec()
 

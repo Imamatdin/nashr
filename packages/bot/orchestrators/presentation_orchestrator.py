@@ -352,7 +352,7 @@ class PresentationOrchestrator:
             raise _OrchestratorError("interview", exc) from exc
 
     # ====================================================================
-    # STEP 4 — design direction (deterministic, no LLM)
+    # STEP 4 — design direction (LLM, deterministic fallback)
     # ====================================================================
 
     async def generate_design(
@@ -361,11 +361,11 @@ class PresentationOrchestrator:
         sources: SourceProcessingResult,
         progress: ProgressCallback,
     ) -> DesignDirectionSpec:
-        """Run the Design Direction Pass. Synchronous engine wrapped in async."""
+        """Run the Design Direction Pass (one Sonnet call, deterministic fallback)."""
 
         await progress("Choosing design direction", 4, TOTAL_STEPS)
         try:
-            return self._design_pass.generate(
+            return await self._design_pass.generate(
                 interview=interview,
                 claims=sources.claims,
                 chunks=sources.chunks,
