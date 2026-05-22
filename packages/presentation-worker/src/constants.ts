@@ -50,7 +50,7 @@ export const SPACING = {
 // ---------------------------------------------------------------------------
 
 export const FONT_SIZES = {
-  displayJumbo: { min: 72, max: 96 },
+  displayJumbo: { min: 44, max: 96 },
   displayLarge: { min: 48, max: 64 },
   heading: { min: 28, max: 40 },
   subheading: { min: 20, max: 24 },

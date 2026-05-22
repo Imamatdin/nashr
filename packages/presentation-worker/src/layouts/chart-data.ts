@@ -15,7 +15,7 @@
  * renders whatever title it's given.
  */
 
-import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS } from '../constants.js';
+import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../constants.js';
 import type {
   DeckSpec,
   ShapeBlock,
@@ -23,9 +23,11 @@ import type {
   SlideSpec,
   TextBlock,
 } from '../types.js';
-import { buildTextBlock, compose, defaultBackground } from './shared.js';
+import { buildTextBlock, compose, defaultBackground, stackBelow } from './shared.js';
 
 const CHART_PLACEHOLDER_TEXT = '[Chart placeholder]';
+const TITLE_GAP = 2;
+const MIN_CHART_HEIGHT = 20;
 
 export function layoutChartData(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const regions = SLIDE_REGIONS.chart_data!;
@@ -33,20 +35,31 @@ export function layoutChartData(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const blocks: TextBlock[] = [];
   const shapes: ShapeBlock[] = [];
 
-  blocks.push(
-    buildTextBlock({
-      text: slide.content.title,
-      region: regions.title!,
-      fontFamily: design.heading_font,
-      fontWeight: 'bold',
-      color: design.palette.text,
-      align: 'left',
-      tier: FONT_SIZES.heading,
-      lineHeight: LINE_HEIGHTS.heading,
-    }),
-  );
+  const titleBlock = buildTextBlock({
+    text: slide.content.title,
+    region: regions.title!,
+    fontFamily: design.heading_font,
+    fontWeight: 'bold',
+    color: design.palette.text,
+    align: 'left',
+    tier: FONT_SIZES.heading,
+    lineHeight: LINE_HEIGHTS.heading,
+  });
+  blocks.push(titleBlock);
 
-  const chartRegion = regions.body!;
+  // Anchor the chart box (and its annotation column) to the title's
+  // measured bottom rather than the fixed region y, so a multi-line title
+  // can never overlap the chart. A short title leaves them at the designed
+  // top (max with the region default). Pin the chart bottom and shrink the
+  // box from the top so it stays on-slide when pushed down.
+  const baseChart = regions.body!;
+  const chartBottom = baseChart.y + baseChart.h;
+  const contentTop = Math.max(baseChart.y, stackBelow(titleBlock, TITLE_GAP));
+  const chartRegion: Region = {
+    ...baseChart,
+    y: contentTop,
+    h: Math.max(MIN_CHART_HEIGHT, chartBottom - contentTop),
+  };
   shapes.push({
     type: 'rect',
     x: chartRegion.x,
@@ -71,10 +84,11 @@ export function layoutChartData(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   );
 
   if (slide.content.body_text) {
+    const annotationRegion: Region = { ...regions.caption!, y: contentTop };
     blocks.push(
       buildTextBlock({
         text: slide.content.body_text,
-        region: regions.caption!,
+        region: annotationRegion,
         fontFamily: design.body_font,
         fontWeight: 'normal',
         color: design.palette.text,

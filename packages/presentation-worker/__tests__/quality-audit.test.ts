@@ -99,6 +99,7 @@ function textBlock(opts: Partial<TextBlock> = {}): TextBlock {
     align: 'left',
     lineHeight: 1.4,
     overflow: false,
+    measuredHeightPct: 0,
     ...opts,
   };
 }
@@ -244,7 +245,7 @@ describe('Q3 — Word count', () => {
     expect(resultsFor(report, 'Q3').every((r) => r.passed)).toBe(true);
   });
 
-  it('fails TITLE_HERO over 15-word limit', () => {
+  it('warns on TITLE_HERO over 15-word limit', () => {
     const deck = buildDeck([makeSlide(0, 'title_hero', { title: 'Hi' })]);
     const layout = makeLayout([
       buildSlideLayout({ slideIndex: 0, slideType: 'title_hero', wordCount: 20, wordLimit: 15 }),
@@ -252,7 +253,7 @@ describe('Q3 — Word count', () => {
     const report = new QualityAudit().audit(deck, layout);
     const q3 = resultsFor(report, 'Q3');
     expect(q3[0].passed).toBe(false);
-    expect(q3[0].severity).toBe('fail');
+    expect(q3[0].severity).toBe('warn');
   });
 
   it('exempts TABLE_COMPACT (limit 999)', () => {

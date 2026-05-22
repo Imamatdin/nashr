@@ -151,26 +151,28 @@ export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
   const maxHeightPx = regionHeightPx(opts.region);
   const floor = Math.max(FONT_SIZES.minimum, Math.min(opts.tier.min, opts.tier.max));
 
-  let fontSize = opts.tier.max;
-  let overflow = true;
-
-  while (fontSize >= floor) {
-    const measurement = measureText({
+  const measure = (size: number) =>
+    measureText({
       text: opts.text,
-      fontSize,
+      fontSize: size,
       fontFamily: opts.fontFamily,
       fontWeight: opts.fontWeight,
       maxWidth: maxWidthPx,
       maxHeight: maxHeightPx,
       lineHeight: opts.lineHeight,
     });
-    if (measurement.fitsInBox) {
-      overflow = false;
-      break;
-    }
-    if (fontSize === floor) break;
+
+  // Shrink from the tier max by 2px until the text fits or we hit the
+  // floor. Keep the measurement from the iteration we stop on (the one
+  // that fit, or the floor measurement if nothing fit) — its wrapped px
+  // height is what callers stack downstream elements against.
+  let fontSize = opts.tier.max;
+  let measurement = measure(fontSize);
+  while (!measurement.fitsInBox && fontSize > floor) {
     fontSize = Math.max(floor, fontSize - 2);
+    measurement = measure(fontSize);
   }
+  const overflow = !measurement.fitsInBox;
 
   const block: TextBlock = {
     text: opts.text,
@@ -186,11 +188,23 @@ export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
     align: opts.align,
     lineHeight: opts.lineHeight,
     overflow,
+    measuredHeightPct: (measurement.height / SLIDE_HEIGHT) * 100,
   };
   if (opts.role !== undefined) block.role = opts.role;
   if (opts.groupId !== undefined) block.groupId = opts.groupId;
   if (opts.dataIndex !== undefined) block.dataIndex = opts.dataIndex;
   return block;
+}
+
+/**
+ * Y-coordinate (slide percentage) at which the next stacked element
+ * should begin: the measured bottom of `block` plus `gapPct`. Stacking
+ * layouts (a subtitle/caption under a title, an annotation beside a
+ * chart) use this instead of a fixed region y, so a wrapped multi-line
+ * block pushes whatever follows it down rather than overlapping it.
+ */
+export function stackBelow(block: TextBlock, gapPct: number): number {
+  return block.y + block.measuredHeightPct + gapPct;
 }
 
 // ---------------------------------------------------------------------------

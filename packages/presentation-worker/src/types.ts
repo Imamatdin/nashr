@@ -325,6 +325,16 @@ export interface TextBlock {
   align: TextAlign;
   lineHeight: number;
   overflow: boolean;
+  /**
+   * Real rendered height of this block as a PERCENTAGE of slide height —
+   * the same unit as `y`/`h`. Captured from measureText at construction
+   * (measurement.height px ÷ SLIDE_HEIGHT × 100) so stacking layouts can
+   * place the next element at the block's *measured* bottom
+   * (`y + measuredHeightPct`) instead of a fixed region y, which is what
+   * causes a wrapped multi-line title to overlap the element below it.
+   * `h` stays the nominal region height for backward compatibility.
+   */
+  measuredHeightPct: number;
   /** Only set on interactive slides; renderer uses it to attach behavior. */
   role?: InteractiveRole;
   /** Links related interactive elements (e.g. a quiz question + its options + its feedback). */

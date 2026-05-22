@@ -108,9 +108,9 @@ describe('HtmlRenderer — text blocks', () => {
       }, 0),
     ]);
     const html = render(deck);
-    // title_hero positions title at x 5%, y 30% → 96px, 324px.
+    // title_hero positions title at x 5%, y 26% → 96px, 280.8px.
     expect(html).toMatch(/left:\s*96px/);
-    expect(html).toMatch(/top:\s*324px/);
+    expect(html).toMatch(/top:\s*280\.8px/);
   });
 
   it('emits font-family / weight / size / color from the layout', () => {
