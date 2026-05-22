@@ -58,6 +58,10 @@ export class QualityAudit {
     'jetbrains mono',
     'geist',
     'geist mono',
+    'source serif 4',
+    'ibm plex sans',
+    'ibm plex serif',
+    'lora',
   ]);
 
   /** Single-word or two-word titles that signal a topic-not-takeaway slide (R08). */
