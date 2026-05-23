@@ -61,6 +61,7 @@ services:
         condition: service_healthy
     volumes:
       - nashr-temp:/tmp/nashr
+      - ./debug:/app/debug
       - ./vertex-key.json:/app/vertex-key.json:ro
     networks:
       - nashr-net

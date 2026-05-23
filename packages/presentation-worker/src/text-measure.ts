@@ -63,7 +63,11 @@ export function measureText(options: MeasureOptions): TextMeasurement {
     lineHeight,
   } = options;
 
-  const charWidthRatio = getCharWidthRatio(fontFamily, fontWeight);
+  // Safety margin: the char-width model errs optimistic (too few lines),
+  // which causes titles to overflow their region. Bias ~12% wider so
+  // wrapping is conservative — better a slightly smaller font than a collision.
+  const WIDTH_SAFETY = 1.12;
+  const charWidthRatio = getCharWidthRatio(fontFamily, fontWeight) * WIDTH_SAFETY;
   const avgCharWidth = fontSize * charWidthRatio;
   const spaceWidth = avgCharWidth * 0.5;
 
@@ -128,7 +132,7 @@ function getCharWidthRatio(fontFamily: string, fontWeight: string): number {
     return 0.6 * boldMultiplier;
   }
   if (family.includes('sans')) {
-    return 0.48 * boldMultiplier;
+    return 0.52 * boldMultiplier;
   }
   if (family.includes('serif') || isKnownSerifFamily(family)) {
     return 0.52 * boldMultiplier;

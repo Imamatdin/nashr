@@ -12,7 +12,7 @@
  *   cat deck.json | node dist/index.js layout
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { Command } from 'commander';
 import { QualityAudit } from './audit/index.js';
@@ -160,10 +160,23 @@ program
     }
 
     if (options.format === 'pdf') {
-      const { PdfRenderer } = await import('./renderers/pdf-renderer.js');
-      const buffer = await new PdfRenderer().render(typed, layout);
+      // PDF = the PPTX converted by LibreOffice. One source of truth: the
+      // deck the user also receives as .pptx. No headless browser.
+      const { PptxRenderer } = await import('./renderers/pptx-renderer.js');
+      const { execFileSync } = await import('node:child_process');
+      const pptxBuffer = await new PptxRenderer().render(typed, layout);
+      const pptxPath = join(options.output, `${base}.pptx`);
+      writeFileSync(pptxPath, pptxBuffer);
+      execFileSync(
+        'soffice',
+        ['--headless', '--convert-to', 'pdf', '--outdir', options.output, pptxPath],
+        { stdio: 'pipe', timeout: 120000 },
+      );
       const outPath = join(options.output, `${base}.pdf`);
-      writeFileSync(outPath, buffer);
+      if (!existsSync(outPath)) {
+        process.stderr.write('PDF conversion failed: soffice produced no output.\n');
+        process.exit(1);
+      }
       process.stdout.write(`PDF written to ${outPath}\n`);
       process.exit(0);
     }

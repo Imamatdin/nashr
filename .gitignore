@@ -42,3 +42,4 @@ desktop.ini
 *.swp
 *.swo
 vertex-key.json
+debug/

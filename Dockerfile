@@ -31,6 +31,7 @@ RUN apt-get update \
         tesseract-ocr-uzb \
         tesseract-ocr-rus \
         libreoffice-writer \
+        libreoffice-impress \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*

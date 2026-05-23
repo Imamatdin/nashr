@@ -437,6 +437,13 @@ class PresentationOrchestrator:
                 "utf-8",
             )
 
+            try:
+                Path("/app/debug").mkdir(parents=True, exist_ok=True)
+                Path("/app/debug/last_deck.json").write_text(
+                    deck_spec.model_dump_json(), "utf-8"
+                )
+            except Exception:
+                pass
             worker_entry = await self._worker_runner.ensure_built()
         except Exception as exc:
             raise _OrchestratorError("render_prepare", exc) from exc
