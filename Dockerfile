@@ -35,8 +35,21 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Python dependencies first — copy only requirements.txt so the layer
-# stays cached across source changes.
+# Fonts the Design Direction Pass can emit (R50 diacritic-safe set).
+# apt for the reliable ones; the four apt lacks are vendored in fonts/.
+# Installed so Chromium renders the REQUESTED font (fallbacks also break
+# text measurement via wrong glyph widths).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        fonts-inter \
+        fonts-noto-core \
+        fonts-noto-extra \
+        fonts-ebgaramond \
+        fonts-jetbrains-mono \
+    && rm -rf /var/lib/apt/lists/*
+COPY fonts/ /usr/share/fonts/truetype/nashr/
+RUN fc-cache -f
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
