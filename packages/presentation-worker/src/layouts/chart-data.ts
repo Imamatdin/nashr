@@ -47,11 +47,13 @@ export function layoutChartData(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   });
   blocks.push(titleBlock);
 
-  // Anchor the chart box (and its annotation column) to the title's
-  // measured bottom rather than the fixed region y, so a multi-line title
-  // can never overlap the chart. A short title leaves them at the designed
-  // top (max with the region default). Pin the chart bottom and shrink the
-  // box from the top so it stays on-slide when pushed down.
+  // Never-stack-upward floor: the chart box (and its annotation column)
+  // start at max(the designed body region y, the title's measured bottom).
+  // The max() — never a min-clamp — means the content can only ever move
+  // DOWN to clear a multi-line title, never up into it, so the title can't
+  // overlap the chart. A short title leaves the content at its designed top.
+  // Pin the chart bottom and shrink the box from the top so it stays
+  // on-slide when pushed down.
   const baseChart = regions.body!;
   const chartBottom = baseChart.y + baseChart.h;
   const contentTop = Math.max(baseChart.y, stackBelow(titleBlock, TITLE_GAP));

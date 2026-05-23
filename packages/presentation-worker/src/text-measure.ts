@@ -1,27 +1,23 @@
 /**
  * Text measurement.
  *
- * v1 implementation: character-width estimation.
+ * Width comes from true glyph advances via fontkit (see font-metrics.ts):
+ * each word and the space glyph are measured against the actual font
+ * outlines, so greedy word-wrapping reflects what the renderer will draw.
+ * The Layout Pass runs in pure Node with no browser, which is why the
+ * measurement backend must work without a DOM or canvas.
  *
- * Why not Pretext? `@chenglou/pretext` is published on npm and is the
- * library we want long-term — its README advertises "Allows rendering
- * to DOM, Canvas, SVG and soon, server-side". Today (0.0.7) its
- * `prepare()` requires either `OffscreenCanvas` or `document.createElement`,
- * neither of which exists in vanilla Node 22. Polyfilling OffscreenCanvas
- * with `@napi-rs/canvas` works but pulls a ~20MB native module just to
- * measure text during the Layout Pass.
+ * When a family resolves to no real font file (neither vendored nor
+ * installed), font-metrics falls back to a character-width ratio. That
+ * fallback is only an approximation good enough to catch gross overflow;
+ * the previous interim WIDTH_SAFETY inflation hack is gone now that the
+ * primary path measures real widths.
  *
- * The spec's accepted v1 path is therefore character-width estimation,
- * good enough to catch gross overflows (>15% over) which is what the
- * Layout Pass needs to know to drop a font tier. Pixel-accurate
- * measurement matters for the renderer (Tasks 20-23) and the quality
- * audit (Q1), and we can swap the backend without changing this module's
- * public interface.
- *
- * Average character widths come from inspecting a few representative
- * Google Fonts metrics: sans-serif ~ 0.48em, serif ~ 0.52em, mono ~ 0.60em,
- * with bold weights inflating ~4-8%.
+ * The public interface (TextMeasurement / MeasureOptions) is unchanged so
+ * callers and the quality audit are unaffected.
  */
+
+import { measureLineWidthPx } from './font-metrics.js';
 
 export interface TextMeasurement {
   /** Width of the longest line after wrapping, in px. */
@@ -49,8 +45,8 @@ export interface MeasureOptions {
 /**
  * Measure text under the given font and box constraints.
  *
- * Approximates per-character widths, simulates greedy word wrapping,
- * and reports whether the resulting block fits the box.
+ * Measures per-word and per-space glyph widths, simulates greedy word
+ * wrapping, and reports whether the resulting block fits the box.
  */
 export function measureText(options: MeasureOptions): TextMeasurement {
   const {
@@ -63,25 +59,19 @@ export function measureText(options: MeasureOptions): TextMeasurement {
     lineHeight,
   } = options;
 
-  // Safety margin: the char-width model errs optimistic (too few lines),
-  // which causes titles to overflow their region. Bias ~12% wider so
-  // wrapping is conservative — better a slightly smaller font than a collision.
-  const WIDTH_SAFETY = 1.12;
-  const charWidthRatio = getCharWidthRatio(fontFamily, fontWeight) * WIDTH_SAFETY;
-  const avgCharWidth = fontSize * charWidthRatio;
-  const spaceWidth = avgCharWidth * 0.5;
-
   const words = text.split(/\s+/).filter((w) => w.length > 0);
   if (words.length === 0) {
     return { width: 0, height: 0, lineCount: 0, overflow: false, fitsInBox: true };
   }
+
+  const spaceWidth = measureLineWidthPx(' ', fontFamily, fontWeight, fontSize);
 
   let lineCount = 1;
   let currentLineWidth = 0;
   let maxLineWidth = 0;
 
   for (const word of words) {
-    const wordWidth = word.length * avgCharWidth;
+    const wordWidth = measureLineWidthPx(word, fontFamily, fontWeight, fontSize);
     const isLineStart = currentLineWidth === 0;
     const neededWidth = isLineStart ? wordWidth : currentLineWidth + spaceWidth + wordWidth;
 
@@ -107,53 +97,6 @@ export function measureText(options: MeasureOptions): TextMeasurement {
     overflow: totalHeight > maxHeight,
     fitsInBox: totalHeight <= maxHeight && maxLineWidth <= maxWidth,
   };
-}
-
-/**
- * Average character-width ratio (as a fraction of fontSize) for the
- * supplied font family and weight. The lookup uses substring matching
- * because deck designs commonly request fonts by display name
- * ("EB Garamond", "Playfair Display") rather than a structured spec.
- *
- * Order matters: "Noto Sans Mono" must match mono before sans, and the
- * sans branch must beat the serif branch when both substrings appear
- * (e.g. "Noto Sans Serif", a real Google Fonts name).
- */
-function getCharWidthRatio(fontFamily: string, fontWeight: string): number {
-  const family = fontFamily.toLowerCase();
-  const boldMultiplier =
-    fontWeight === 'bold' ? 1.08 : fontWeight === 'semibold' ? 1.04 : 1.0;
-
-  if (
-    family.includes('mono') ||
-    family.includes('jetbrains') ||
-    family.includes('courier')
-  ) {
-    return 0.6 * boldMultiplier;
-  }
-  if (family.includes('sans')) {
-    return 0.52 * boldMultiplier;
-  }
-  if (family.includes('serif') || isKnownSerifFamily(family)) {
-    return 0.52 * boldMultiplier;
-  }
-  return 0.48 * boldMultiplier;
-}
-
-/**
- * Display-named serif families that don't carry "serif" in the name.
- * Kept small on purpose — extend only when the renderer is told to
- * use one of these by the Design Direction Pass.
- */
-function isKnownSerifFamily(family: string): boolean {
-  return (
-    family.includes('garamond') ||
-    family.includes('playfair') ||
-    family.includes('baskerville') ||
-    family.includes('cormorant') ||
-    family.includes('georgia') ||
-    family.includes('times')
-  );
 }
 
 // ---------------------------------------------------------------------------

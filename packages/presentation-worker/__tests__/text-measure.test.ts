@@ -98,6 +98,43 @@ describe('measureText', () => {
   });
 });
 
+describe('measureText — true glyph widths (IBM Plex Sans, vendored variable font)', () => {
+  const SC02 = 'Supercritical CO2 Is the Future of Data Center Cooling';
+  const TITLE_REGION_PX = 1632; // 85% of the 1920px slide, the title_hero title region
+
+  function plex(text: string, maxWidth: number): MeasureOptions {
+    return {
+      text,
+      fontSize: 64,
+      fontFamily: 'IBM Plex Sans',
+      fontWeight: 'bold',
+      maxWidth,
+      maxHeight: 10000,
+      lineHeight: 1.1,
+    };
+  }
+
+  it('measures the sCO2 title as a single line in the real 1632px title region', () => {
+    // True glyph width of this title at bold 64 is ~1617px, which fits the
+    // 1632px region on one line. The old char-ratio model (with its 1.12
+    // inflation hack) wrongly reported 2 lines here.
+    const result = measureText(plex(SC02, TITLE_REGION_PX));
+    expect(result.lineCount).toBe(1);
+    expect(result.width).toBeGreaterThan(1500);
+    expect(result.width).toBeLessThan(TITLE_REGION_PX);
+  });
+
+  it('wraps the sCO2 title to three lines in a narrow 800px box', () => {
+    const result = measureText(plex(SC02, 800));
+    expect(result.lineCount).toBe(3);
+  });
+
+  it('measures a short title as a single line', () => {
+    const result = measureText(plex('The Crisis', TITLE_REGION_PX));
+    expect(result.lineCount).toBe(1);
+  });
+});
+
 describe('checkSlideOverflow', () => {
   it('returns no issues when every block fits', () => {
     const issues = checkSlideOverflow([

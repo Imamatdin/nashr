@@ -39,11 +39,11 @@ describe('buildTextBlock — measuredHeightPct capture', () => {
   });
 });
 
-describe('TITLE_HERO — subtitle stacks below the measured title bottom', () => {
+describe('TITLE_HERO — never-stack-upward floor for the subtitle', () => {
   // Known multi-line case: this title wraps in the title_hero title region.
   const LONG_TITLE = 'Supercritical CO2 Is the Future of Data Center Cooling';
 
-  it('places the subtitle at or below where the title actually ends', () => {
+  it('places the subtitle at or below the title bottom and never above its region y', () => {
     const deck = buildTestDeck([
       makeSlide('title_hero', {
         title: LONG_TITLE,
@@ -60,12 +60,13 @@ describe('TITLE_HERO — subtitle stacks below the measured title bottom', () =>
 
     // No overlap: the subtitle begins at or after the title's measured bottom.
     expect(subtitle.y).toBeGreaterThanOrEqual(title.y + title.measuredHeightPct);
-    // Dynamic: the subtitle is pulled up under the title, not left at the
-    // fixed region y it would have had with the old positioning.
-    expect(subtitle.y).toBeLessThan(SLIDE_REGIONS.title_hero!.subtitle!.y);
+    // Floor: the subtitle is never pulled UP above its designed region y.
+    // (The old behaviour pulled it up snug under the title; that upward pull
+    // was the collision class and is deliberately gone.)
+    expect(subtitle.y).toBeGreaterThanOrEqual(SLIDE_REGIONS.title_hero!.subtitle!.y);
   });
 
-  it('keeps a short title valid — subtitle sits snug below it, not floating low', () => {
+  it('keeps a short title valid — subtitle rests at its region y, never pulled up', () => {
     const deck = buildTestDeck([
       makeSlide('title_hero', {
         title: 'Hi',
@@ -77,12 +78,41 @@ describe('TITLE_HERO — subtitle stacks below the measured title bottom', () =>
     const title = layout.textBlocks.find((b) => b.text === 'Hi')!;
     const subtitle = layout.textBlocks.find((b) => b.text === 'Short subtitle')!;
 
-    // Below the title's measured bottom...
+    // Below the title's measured bottom (no overlap)...
     expect(subtitle.y).toBeGreaterThanOrEqual(title.y + title.measuredHeightPct);
-    // ...but not floating at the fixed low region y...
-    expect(subtitle.y).toBeLessThan(SLIDE_REGIONS.title_hero!.subtitle!.y);
-    // ...and close to the title, not absurdly far below it.
-    expect(subtitle.y - (title.y + title.measuredHeightPct)).toBeLessThan(10);
+    // ...and floored at the designed region y, not pulled up under the title.
+    expect(subtitle.y).toBe(SLIDE_REGIONS.title_hero!.subtitle!.y);
+  });
+});
+
+describe('TITLE_HERO — integration with true glyph measurement (IBM Plex Sans)', () => {
+  // The sCO2 title rendered with a vendored variable font, so the layout
+  // pass measures real glyph advances rather than the char-ratio fallback.
+  const SC02_TITLE = 'Supercritical CO2 Is the Future of Data Center Cooling';
+
+  function plexDeck() {
+    const deck = buildTestDeck([
+      makeSlide('title_hero', {
+        title: SC02_TITLE,
+        subtitle: 'A grounded italic subtitle line',
+      }),
+    ]);
+    deck.design.heading_font = 'IBM Plex Sans';
+    return deck;
+  }
+
+  it('keeps the subtitle clear of the measured title and at/below its region y', () => {
+    const deck = plexDeck();
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    const title = layout.textBlocks.find((b) => b.text === SC02_TITLE)!;
+    const subtitle = layout.textBlocks.find((b) => b.text.includes('grounded'))!;
+    expect(title.measuredHeightPct).toBeGreaterThan(0);
+
+    // The whole point: subtitle.y >= title.y + title.measuredHeightPct.
+    expect(subtitle.y).toBeGreaterThanOrEqual(title.y + title.measuredHeightPct);
+    // And the floor holds with real measurement too.
+    expect(subtitle.y).toBeGreaterThanOrEqual(SLIDE_REGIONS.title_hero!.subtitle!.y);
   });
 });
 

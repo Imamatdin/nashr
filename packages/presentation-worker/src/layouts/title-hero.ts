@@ -7,11 +7,15 @@
  * left-anchored gradient scrim so the text reads against any imagery
  * the Design Direction Pass picked.
  *
- * The subtitle and caption stack against the *measured* bottom of the
- * block above them (stackBelow) rather than their fixed region y. A
- * displayJumbo title that wraps to several lines therefore pushes the
- * subtitle down instead of overlapping it, and a one-line title pulls
- * the subtitle up snug instead of leaving it floating low.
+ * The subtitle and caption obey a never-stack-upward floor: their final y
+ * is max(their designed region y, the measured bottom of the block above
+ * them). A displayJumbo title that wraps far enough to reach past the
+ * subtitle's region pushes the subtitle down instead of overlapping it;
+ * an ordinary title leaves the subtitle resting at its designed position.
+ * Crucially the subtitle is never pulled *up* into the title — that
+ * upward pull (an old min-clamp ceiling) was the title/subtitle collision
+ * class. With accurate glyph measurement the title also fits its own
+ * region honestly, so the floor rarely has to move anything.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS } from '../constants.js';
@@ -43,10 +47,13 @@ export function layoutTitleHero(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   let anchor = titleBlock;
 
   if (slide.content.subtitle) {
-    // Sit just under the title's measured bottom, but never so low that the
-    // subtitle would clash with the caption footer near the slide bottom.
-    const maxSubtitleY = regions.caption!.y - regions.subtitle!.h - SUBTITLE_GAP;
-    const subtitleY = Math.min(stackBelow(titleBlock, SUBTITLE_GAP), maxSubtitleY);
+    // Never-stack-upward floor: rest at the designed subtitle region y, and
+    // move DOWN only if the title's measured bottom reaches past it. Using
+    // max() (not the old min-clamp) means the subtitle can never be pulled
+    // up into the title, which is the collision this fixes. If a pathological
+    // title pushes the subtitle off-slide, the quality audit's overflow
+    // check surfaces it — better than a silent overlap.
+    const subtitleY = Math.max(regions.subtitle!.y, stackBelow(titleBlock, SUBTITLE_GAP));
     const subtitleBlock = buildTextBlock({
       text: slide.content.subtitle,
       region: { ...regions.subtitle!, y: subtitleY },
