@@ -113,7 +113,7 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
 function pickDefinition(subtitle?: string | null, body?: string | null): string | null {
   if (subtitle && subtitle.trim()) return subtitle.trim();
   if (body && body.trim()) {
-    const match = body.match(/^[^.!?]+[.!?]/);
+    const match = body.match(/^.*?[.!?](?=\s|$)/); // dont break on decimals like "73.8"
     return (match ? match[0] : body).trim();
   }
   return null;

@@ -54,10 +54,19 @@ export function measureText(options: MeasureOptions): TextMeasurement {
     fontSize,
     fontFamily,
     fontWeight,
-    maxWidth,
+    maxWidth: nominalMaxWidth,
     maxHeight,
     lineHeight,
   } = options;
+  // Render-engine safety margin. We measure widths with fontkit but the deck
+  // is rendered by PowerPoint/LibreOffice (PPTX/PDF) and the browser (HTML),
+  // which wrap text at a narrower effective width (text-box insets + metric
+  // drift). Empirically a 906px title wraps to 2 lines inside a 960px region
+  // (94% full), so fontkit's raw "fits on one line" overcounts. Cap usable
+  // width at 85% of nominal so a line only counts as fitting when the real
+  // renderers also fit it. DO NOT remove — fontkit is not the renderer.
+  const RENDER_WIDTH_SAFETY = 0.78;
+  const maxWidth = nominalMaxWidth * RENDER_WIDTH_SAFETY;
 
   const words = text.split(/\s+/).filter((w) => w.length > 0);
   if (words.length === 0) {
@@ -88,7 +97,14 @@ export function measureText(options: MeasureOptions): TextMeasurement {
   maxLineWidth = Math.max(maxLineWidth, currentLineWidth);
 
   const lineHeightPx = fontSize * lineHeight;
-  const totalHeight = lineCount * lineHeightPx;
+  // Render-engine height safety. PowerPoint/LibreOffice render lines taller
+  // than the nominal fontSize*lineHeight (their own line spacing + paragraph
+  // metrics), so a block occupies more vertical space than fontkit computes.
+  // Inflate measured height so stacked blocks reserve enough room and do not
+  // overlap. Calibrated against observed PPTX line spacing. DO NOT remove —
+  // fontkit is not the renderer.
+  const HEIGHT_SAFETY = 1.3;
+  const totalHeight = lineCount * lineHeightPx * HEIGHT_SAFETY;
 
   return {
     width: maxLineWidth,
