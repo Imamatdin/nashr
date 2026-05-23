@@ -21,8 +21,17 @@ tests; a step is DONE only when a commit changes this file.
 | E | "[Chart placeholder]" — chart renderer unbuilt | UNBUILT (Step 2) | free | chart-data.ts placeholder by design |
 | F | chart title collides with chart box (2-line title under-measured) | RENDERER (Step 11) | free | floor logic correct, fed wrong title height |
 
+## SHIPPED
+- A (data-emphasis value/unit split + measured CENTERED stacking) — 48f713b. Verified:
+  worker `layout` on crafted sCO2 deck = no jammed units, each unit in one block,
+  gaps ~1.2%; chromium screenshot reads number→unit→label→comparison clean.
+- C2 (stripListPrefix at all four bullet/point sites, not just summary) — 48f713b.
+  "1. " stripped, "1.08" preserved; screenshot shows single "• " markers.
+- B-interim (breather seeded from real stat; skip when no stat) — 48f713b. INTERIM:
+  real model-authored breathing content is plan item 2. Carries the R27 trade noted above.
+
 ## PLAN
-1. [ ] Free batch: A (data-emphasis) · C2 (strip prefixes) · B-interim (real stat, never hollow)
+1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [ ] Paid editorial pass: B-real (model writes breathing takeaways) · C (no dropped items) · D (structured chart series)
 3. [ ] Step 2 chart renderer (free) — SVG bars from series; folds in F via Step 11 measurement
 4-12. [ ] image engine (3/4/5) · intent (6/7) · grounding (8) · convo edit (9) · honest failure (10) · fontkit accuracy (11) · font library (12)
