@@ -8,7 +8,7 @@
  * counting, background composition, the SlideLayout composer.
  */
 
-import { FONT_SIZES, SLIDE_HEIGHT, SLIDE_WIDTH, WORD_LIMITS, type Region } from '../constants.js';
+import { FONT_SIZES, MARGIN, SLIDE_HEIGHT, SLIDE_WIDTH, WORD_LIMITS, type Region } from '../constants.js';
 import { measureText } from '../text-measure.js';
 import type {
   DesignDirectionSpec,
@@ -205,6 +205,44 @@ export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
  */
 export function stackBelow(block: TextBlock, gapPct: number): number {
   return block.y + block.measuredHeightPct + gapPct;
+}
+
+/** Hairline added when hugging a box to its content, so sub-pixel rounding in
+ *  the browser/PPTX render can't shave the last line. Smaller than any stacking
+ *  gap, so it never makes two stacked boxes overlap. */
+const HUG_EPSILON_PCT = 0.2;
+
+/**
+ * Vertical space (in slide percent) available to a stacked block whose top is
+ * at `y`, measured down to the bottom content margin (R16).
+ *
+ * Document-flow layouts pass this as a block's region height so buildTextBlock
+ * measures against the *real* space left on the slide and only shrinks when the
+ * content genuinely can't fit — rather than shrinking (or clipping) against a
+ * too-short fixed nominal region, which is the text-clipping bug this replaces.
+ */
+export function availableHeightBelow(y: number): number {
+  return Math.max(0, 100 - MARGIN.bottom - y);
+}
+
+/**
+ * Shrink a block's rendered box to its measured content height and return it.
+ *
+ * The HTML renderer sizes every text box to `block.h` with `overflow:hidden`,
+ * so for top-down document flow each block's `h` must cover its measured
+ * content or the tail clips. Setting `h` to `measuredHeightPct` makes the box
+ * hug the text exactly: nothing clips, and the next element placed at
+ * `stackBelow(block, gap)` sits flush with no transparent dead box overlapping
+ * it.
+ *
+ * This deliberately diverges from TITLE_HERO / CHART_DATA, which keep their
+ * nominal region height — their slots are pre-tuned, and chart_data pins the
+ * box bottom instead. Do NOT "simplify" this back to the region height: that
+ * reintroduces the clipping anti-pattern this exists to kill.
+ */
+export function hugHeightToMeasured(block: TextBlock): TextBlock {
+  block.h = block.measuredHeightPct + HUG_EPSILON_PCT;
+  return block;
 }
 
 // ---------------------------------------------------------------------------

@@ -2,21 +2,26 @@
  * CONCEPT_DEFINITION layout.
  *
  * Introduce a concept with a one-sentence definition plus 3-5
- * supporting bullets. Text lives on the left 53% of the slide;
+ * supporting bullets. Text lives on the left ~50% of the slide;
  * topic imagery (when provided) goes full-bleed behind with a
  * left-anchored gradient scrim so the text stays readable.
  *
- * Region breakdown (from DESIGN-LANGUAGE.md):
- *   Title       x:5%  y:5%  w:50% h:8%   heading tier
- *   Definition  x:5%  y:16% w:48% h:12%  italic subheading
- *   Bullets     x:5%  y:32% w:48% h:50%  caption tier, 3-5 items
+ * Stacking discipline (the fix for the clipping class):
+ *   The three text zones — title, definition, bullets — are NOT pinned to
+ *   fixed y/h regions. Each block is built against the real vertical space
+ *   remaining on the slide, then its box is hugged to its measured height
+ *   (see hugHeightToMeasured), and the next block starts below that measured
+ *   bottom (stackBelow). A title that wraps to two lines therefore pushes the
+ *   definition DOWN instead of overflowing into it, and the definition gets
+ *   exactly the height its wrapped text needs instead of being clipped to a
+ *   fixed 12% slot. Blocks only ever flow downward.
  *
- * The definition prefers `slide.content.subtitle`; if that's
- * missing it falls back to the first sentence of `body_text` so
- * the editorial pass can supply either field.
+ * The definition prefers `slide.content.subtitle`; if that's missing it falls
+ * back to the first sentence of `body_text` so the editorial pass can supply
+ * either field.
  */
 
-import { FONT_SIZES, LINE_HEIGHTS, type Region } from '../constants.js';
+import { FONT_SIZES, LINE_HEIGHTS } from '../constants.js';
 import type {
   DeckSpec,
   ImageBlock,
@@ -25,24 +30,33 @@ import type {
   SlideSpec,
   TextBlock,
 } from '../types.js';
-import { buildScrim, buildTextBlock, compose, defaultBackground } from './shared.js';
+import {
+  availableHeightBelow,
+  buildScrim,
+  buildTextBlock,
+  compose,
+  defaultBackground,
+  hugHeightToMeasured,
+  stackBelow,
+} from './shared.js';
 
-const TITLE: Region = { x: 5, y: 5, w: 50, h: 8 };
-const DEFINITION: Region = { x: 5, y: 16, w: 48, h: 12 };
-const BULLETS_TOP = 32;
-const BULLETS_HEIGHT = 50;
-const BULLETS_X = 5;
-const BULLETS_W = 48;
-const BULLET_SPACING_FACTOR = 0.9;
+const LEFT_X = 5;
+const TITLE_W = 50;
+const COLUMN_W = 48; // definition and bullets share the left text column
+const TITLE_TOP = 5;
+const TITLE_GAP = 2; // below the title before the definition
+const DEFINITION_GAP = 3; // below the definition before the bullets
+const BULLET_GAP = 1.5; // between consecutive bullets
+const MAX_BULLETS = 5;
 
 export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const { design } = deck;
   const blocks: TextBlock[] = [];
 
-  blocks.push(
+  const titleBlock = hugHeightToMeasured(
     buildTextBlock({
       text: slide.content.title,
-      region: TITLE,
+      region: { x: LEFT_X, y: TITLE_TOP, w: TITLE_W, h: availableHeightBelow(TITLE_TOP) },
       fontFamily: design.heading_font,
       fontWeight: 'bold',
       color: design.palette.text,
@@ -51,13 +65,16 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
       lineHeight: LINE_HEIGHTS.heading,
     }),
   );
+  blocks.push(titleBlock);
+
+  let cursorY = stackBelow(titleBlock, TITLE_GAP);
 
   const definition = pickDefinition(slide.content.subtitle, slide.content.body_text);
   if (definition) {
-    blocks.push(
+    const definitionBlock = hugHeightToMeasured(
       buildTextBlock({
         text: definition,
-        region: DEFINITION,
+        region: { x: LEFT_X, y: cursorY, w: COLUMN_W, h: availableHeightBelow(cursorY) },
         fontFamily: design.body_font,
         fontWeight: 'normal',
         fontStyle: 'italic',
@@ -67,32 +84,27 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
         lineHeight: LINE_HEIGHTS.body,
       }),
     );
+    blocks.push(definitionBlock);
+    cursorY = stackBelow(definitionBlock, DEFINITION_GAP);
   }
 
-  const bullets = (slide.content.bullets ?? []).slice(0, 5);
-  if (bullets.length > 0) {
-    const slotH = BULLETS_HEIGHT / bullets.length;
-    bullets.forEach((bullet, idx) => {
-      const region: Region = {
-        x: BULLETS_X,
-        y: BULLETS_TOP + idx * slotH,
-        w: BULLETS_W,
-        h: slotH * BULLET_SPACING_FACTOR,
-      };
-      blocks.push(
-        buildTextBlock({
-          text: `• ${bullet}`,
-          region,
-          fontFamily: design.body_font,
-          fontWeight: 'normal',
-          color: design.palette.text,
-          align: 'left',
-          tier: FONT_SIZES.caption,
-          lineHeight: LINE_HEIGHTS.body,
-        }),
-      );
-    });
-  }
+  const bullets = (slide.content.bullets ?? []).slice(0, MAX_BULLETS);
+  bullets.forEach((bullet) => {
+    const bulletBlock = hugHeightToMeasured(
+      buildTextBlock({
+        text: `• ${bullet}`,
+        region: { x: LEFT_X, y: cursorY, w: COLUMN_W, h: availableHeightBelow(cursorY) },
+        fontFamily: design.body_font,
+        fontWeight: 'normal',
+        color: design.palette.text,
+        align: 'left',
+        tier: FONT_SIZES.caption,
+        lineHeight: LINE_HEIGHTS.body,
+      }),
+    );
+    blocks.push(bulletBlock);
+    cursorY = stackBelow(bulletBlock, BULLET_GAP);
+  });
 
   const background = buildBackground(slide, deck);
   return compose(slide, blocks, [], [], background);
