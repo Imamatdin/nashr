@@ -27,7 +27,12 @@ import {
   stackBelow,
 } from './shared.js';
 
-const BODY_GAP = 2; // below the title before the body
+// Gap below the title before the body. Includes a one-line buffer because
+// fontkit and PowerPoint/LibreOffice wrap headings to DIFFERENT line counts
+// (different break points), and the renderer can produce one more line than
+// measured. Reserving an extra heading line guarantees the body never
+// overlaps a title that wrapped longer in the actual renderer.
+const BODY_GAP = 2;
 const MIN_BODY_H = 10; // never give the body less than this even if the title is tall
 
 export function layoutContentSplit(slide: SlideSpec, deck: DeckSpec): SlideLayout {
@@ -40,7 +45,11 @@ export function layoutContentSplit(slide: SlideSpec, deck: DeckSpec): SlideLayou
   const titleBlock = hugHeightToMeasured(
     buildTextBlock({
       text: slide.content.title,
-      region: { ...regions.title!, h: availableHeightBelow(regions.title!.y) },
+      // Cap the title's fit-height at ~2 heading lines so a long title SHRINKS
+      // to two lines instead of sprawling to three. buildTextBlock steps the
+      // font down until the text fits this height; 12% ~= two lines at the
+      // heading tier (incl. render height-safety).
+      region: { ...regions.title!, h: Math.min(12, availableHeightBelow(regions.title!.y)) },
       fontFamily: design.heading_font,
       fontWeight: 'bold',
       color: design.palette.text,
