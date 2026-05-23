@@ -40,6 +40,7 @@ from packages.core.models.presentation import (
     PresentationInterviewAnswers,
     SlideContent,
     SlideSpec,
+    StatItem,
 )
 from packages.core.models.source import SourceClaimCreate
 from packages.presentation.editorial import (
@@ -47,6 +48,7 @@ from packages.presentation.editorial import (
     SONNET_MODEL,
     WORD_LIMITS,
     EditorialPass,
+    _insert_breathing_after_data,
 )
 
 # ---------------------------------------------------------------------------
@@ -421,10 +423,36 @@ def test_post_process_enforces_word_limits() -> None:
     assert _count_words_in_content(target.content) <= WORD_LIMITS[SlideType.CONTENT_SPLIT]
 
 
+def _data_slide_with_stat(
+    title: str,
+    *,
+    value: str,
+    label: str,
+    unit: str = "",
+    highlight: bool = False,
+) -> SlideSpec:
+    return SlideSpec(
+        slide_index=0,
+        slide_type=SlideType.DATA_EMPHASIS,
+        content=SlideContent(
+            title=title,
+            stats=[StatItem(value=value, unit=unit, label=label, highlight=highlight)],
+        ),
+    )
+
+
+def _only_bullet(slide: SlideSpec) -> str:
+    """The single bullet of a breather slide, narrowed for the type checker."""
+
+    bullets = slide.content.bullets
+    assert bullets is not None and len(bullets) == 1
+    return bullets[0]
+
+
 def test_post_process_inserts_breathing_after_data() -> None:
     slides = [
         _slide(SlideType.TITLE_HERO, "Title"),
-        _slide(SlideType.DATA_EMPHASIS, "Stat"),
+        _data_slide_with_stat("Stat", value="1.58", unit="PUE", label="Power Usage Effectiveness"),
         _slide(SlideType.CHART_DATA, "Chart"),
     ]
     out = EditorialPass._post_process(slides, _interview())
@@ -432,6 +460,66 @@ def test_post_process_inserts_breathing_after_data() -> None:
     # No two consecutive data-heavy slides should remain.
     for prev, curr in pairwise(types):
         assert not (prev in _DATA_HEAVY_TYPES and curr in _DATA_HEAVY_TYPES)
+    # The breather is a SUMMARY_TAKEAWAY carrying real content, never the old filler.
+    breather = next(s for s in out if s.slide_type is SlideType.SUMMARY_TAKEAWAY)
+    assert breather.content.bullets is not None
+    assert "preceding data underscores" not in breather.content.bullets[0]
+
+
+def test_breathing_slide_carries_real_stat_not_filler() -> None:
+    # FIX B-interim: the injected breather is seeded from the preceding data
+    # slide's stat — a digit plus the stat label — not a hardcoded sentence.
+    slides = [
+        _data_slide_with_stat(
+            "Energy", value="1.58", unit="PUE", label="Power Usage Effectiveness", highlight=True
+        ),
+        _slide(SlideType.CHART_DATA, "Chart"),
+    ]
+    out = _insert_breathing_after_data(slides, _interview())
+    assert [s.slide_type for s in out] == [
+        SlideType.DATA_EMPHASIS,
+        SlideType.SUMMARY_TAKEAWAY,
+        SlideType.CHART_DATA,
+    ]
+    bullet = _only_bullet(out[1])
+    assert "preceding data underscores" not in bullet
+    assert any(ch.isdigit() for ch in bullet)
+    assert "Power Usage Effectiveness" in bullet
+    # A word unit is spaced off the value; the value+unit is not jammed.
+    assert "1.58 PUE" in bullet
+
+
+def test_breathing_slide_prefers_highlighted_stat_and_keeps_symbol_unit() -> None:
+    multi = SlideSpec(
+        slide_index=0,
+        slide_type=SlideType.DATA_EMPHASIS,
+        content=SlideContent(
+            title="Numbers",
+            stats=[
+                StatItem(value="10", unit="%", label="first stat"),
+                StatItem(value="35", unit="%", label="highlighted stat", highlight=True),
+            ],
+        ),
+    )
+    out = _insert_breathing_after_data(
+        [multi, _slide(SlideType.TABLE_COMPACT, "Table")], _interview()
+    )
+    bullet = _only_bullet(out[1])
+    assert "highlighted stat" in bullet
+    # Symbol unit stays attached to the value.
+    assert "35%" in bullet
+
+
+def test_no_breathing_slide_when_preceding_data_has_no_stat() -> None:
+    # CHART_DATA / TABLE_COMPACT carry numbers in prose/rows, not stats. With no
+    # usable stat, no breather is injected — absent beats hollow (R27 trade).
+    slides = [
+        _slide(SlideType.CHART_DATA, "Chart with prose numbers"),
+        _slide(SlideType.TABLE_COMPACT, "Table"),
+    ]
+    out = _insert_breathing_after_data(slides, _interview())
+    assert [s.slide_type for s in out] == [SlideType.CHART_DATA, SlideType.TABLE_COMPACT]
+    assert all(s.slide_type is not SlideType.SUMMARY_TAKEAWAY for s in out)
 
 
 def test_post_process_keeps_first_three_sparse() -> None:

@@ -1056,29 +1056,67 @@ def _insert_breathing_after_data(
     slides: list[SlideSpec],
     interview: PresentationInterviewAnswers,
 ) -> list[SlideSpec]:
-    """R27: insert a breathing slide when two data-heavy slides would run."""
+    """R27: insert a breathing slide between two consecutive data-heavy slides.
+
+    Only ever fires on a *cross-type* data-heavy run (e.g. DATA_EMPHASIS →
+    CHART_DATA): a same-type run was already split by ``_fix_consecutive_repeats``
+    earlier in the pipeline, which interposes a SECTION_BREAK (a breathing type).
+
+    The breather is seeded with a REAL takeaway pulled from the preceding data
+    slide's highlighted (else first) stat, so it never ships as hollow filler.
+    When that slide exposes no usable stat — CHART_DATA and TABLE_COMPACT carry
+    their numbers in prose/rows, not ``stats`` — no breather is injected; absent
+    beats hollow. The trade is deliberate: a chart→table run now gets no auto
+    breather. The model-authored breathing content lands in the paid editorial
+    pass (BUILD_STATE plan item 2) and will replace this stat-derived stub.
+    """
 
     del interview
     out: list[SlideSpec] = []
-    prev_data = False
+    prev_slide: SlideSpec | None = None
     for slide in slides:
         is_data = slide.slide_type in _DATA_HEAVY_TYPES
         is_breath = slide.slide_type in _BREATHING_TYPES
+        prev_data = prev_slide is not None and prev_slide.slide_type in _DATA_HEAVY_TYPES
         if prev_data and is_data and not is_breath:
-            out.append(
-                SlideSpec(
-                    slide_index=0,
-                    slide_type=SlideType.SUMMARY_TAKEAWAY,
-                    content=SlideContent(
-                        title="Key takeaway",
-                        bullets=["The preceding data underscores the central finding."],
-                    ),
-                    narrative_role=NarrativePhase.EVIDENCE.value,
-                )
-            )
+            assert prev_slide is not None  # implied by prev_data
+            breather = _build_breathing_slide(prev_slide)
+            if breather is not None:
+                out.append(breather)
         out.append(slide)
-        prev_data = is_data
+        prev_slide = slide
     return out
+
+
+def _build_breathing_slide(data_slide: SlideSpec) -> SlideSpec | None:
+    """Seed a SUMMARY_TAKEAWAY breather from a real stat, or None if there is none."""
+
+    stat = _pick_breathing_stat(data_slide.content.stats)
+    if stat is None:
+        return None
+    # Space a word unit off the value ("1.58 PUE"), but keep a symbol unit
+    # attached ("94.4%", "35°C") — the same value/unit split FIX A renders.
+    if stat.unit and stat.unit[:1].isalpha():
+        measure = f"{stat.value} {stat.unit}"
+    else:
+        measure = f"{stat.value}{stat.unit}"
+    return SlideSpec(
+        slide_index=0,
+        slide_type=SlideType.SUMMARY_TAKEAWAY,
+        content=SlideContent(title="Key takeaway", bullets=[f"{measure} — {stat.label}"]),
+        narrative_role=NarrativePhase.EVIDENCE.value,
+    )
+
+
+def _pick_breathing_stat(stats: list[StatItem] | None) -> StatItem | None:
+    """The highlighted stat if any, else the first; None when there are none."""
+
+    if not stats:
+        return None
+    for stat in stats:
+        if stat.highlight:
+            return stat
+    return stats[0]
 
 
 def _enforce_density_arc(slides: list[SlideSpec]) -> list[SlideSpec]:

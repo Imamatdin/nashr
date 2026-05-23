@@ -352,6 +352,26 @@ export function compose(
 }
 
 // ---------------------------------------------------------------------------
+// Bullet text normalisation
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip a single leading list enumerator ("1. ", "2) ") from bullet text.
+ *
+ * The editorial model sometimes bakes its own numbering into bullets; every
+ * bullet-rendering layout then prepends "• ", producing "• 1. …" — doubled
+ * numbering. Removing the enumerator at the point of render keeps the stored
+ * deck untouched and is idempotent.
+ *
+ * The trailing `\s+` is REQUIRED: it makes the match a real enumerator
+ * followed by whitespace ("1. ", "10) "), so a decimal that opens a bullet —
+ * "1.08 PUE improvement" — is left intact (no space after the dot to consume).
+ */
+export function stripListPrefix(text: string): string {
+  return text.replace(/^\s*\d+[.)]\s+/, '');
+}
+
+// ---------------------------------------------------------------------------
 // Body-text composition for fallback layouts that need a single block
 // ---------------------------------------------------------------------------
 
@@ -364,7 +384,7 @@ export function composeBodyText(content: SlideContent): string | null {
   const parts: string[] = [];
   if (content.body_text) parts.push(content.body_text);
   if (content.bullets) {
-    for (const bullet of content.bullets) parts.push(`• ${bullet}`);
+    for (const bullet of content.bullets) parts.push(`• ${stripListPrefix(bullet)}`);
   }
   if (parts.length === 0) return null;
   return parts.join('\n');

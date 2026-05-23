@@ -30,6 +30,7 @@ import {
   defaultBackground,
   hugHeightToMeasured,
   stackBelow,
+  stripListPrefix,
 } from './shared.js';
 
 const COLUMN_GAP = 2; // below the title before the columns
@@ -111,7 +112,7 @@ function layoutComparisonColumn(
   points.forEach((point) => {
     const pointBlock = hugHeightToMeasured(
       buildTextBlock({
-        text: `• ${point}`,
+        text: `• ${stripListPrefix(point)}`,
         region: {
           x: region.x,
           y: cursorY,

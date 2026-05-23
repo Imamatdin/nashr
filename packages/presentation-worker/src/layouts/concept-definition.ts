@@ -38,6 +38,7 @@ import {
   defaultBackground,
   hugHeightToMeasured,
   stackBelow,
+  stripListPrefix,
 } from './shared.js';
 
 const LEFT_X = 5;
@@ -92,7 +93,7 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
   bullets.forEach((bullet) => {
     const bulletBlock = hugHeightToMeasured(
       buildTextBlock({
-        text: `• ${bullet}`,
+        text: `• ${stripListPrefix(bullet)}`,
         region: { x: LEFT_X, y: cursorY, w: COLUMN_W, h: availableHeightBelow(cursorY) },
         fontFamily: design.body_font,
         fontWeight: 'normal',

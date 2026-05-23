@@ -18,6 +18,7 @@ import {
   defaultBackground,
   hugHeightToMeasured,
   stackBelow,
+  stripListPrefix,
 } from './shared.js';
 
 const TITLE_GAP = 2; // below the title before the first bullet/body
@@ -51,7 +52,7 @@ export function layoutSummaryTakeaway(slide: SlideSpec, deck: DeckSpec): SlideLa
     bullets.forEach((bullet) => {
       const bulletBlock = hugHeightToMeasured(
         buildTextBlock({
-          text: `• ${bullet}`,
+          text: `• ${stripListPrefix(bullet)}`,
           region: {
             x: regions.body!.x,
             y: cursorY,
