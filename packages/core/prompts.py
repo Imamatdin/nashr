@@ -410,6 +410,11 @@ STRUCTURED FIELDS — populate the field that matches the slide_type, or the sli
 - table_compact: you MUST fill table_headers (the column labels) AND table_rows (one object per row, each with a "cells" array aligned 1:1 to the headers). Put the data ONLY in these fields — never in body_text, bullets, or speaker_notes. 2-5 columns, 2-7 rows. Example: "table_headers": ["Cooling", "Density", "PUE"], "table_rows": [{{"cells": ["Air", "8 kW/rack", "1.58"]}}, {{"cells": ["Liquid", "40 kW/rack", "1.10"]}}].
 - comparison: you MUST fill BOTH left_column and right_column (each a heading plus 2-4 points), contrasting two genuinely opposable things (e.g. "Air cooling" vs "Liquid cooling"). If the content is NOT a two-sided contrast — a framing point, a narrative beat, a single subject — DO NOT use comparison; use content_split or summary_takeaway instead. NEVER emit a comparison slide with null or empty columns.
 - chart_data: you MUST fill chart_series with the actual data points — each an object {{"label", "value" (a number), "unit"}}. body_text may carry a ONE-LINE caption only; never put the data in prose. Example: "chart_series": [{{"label": "Air", "value": 8, "unit": "kW/rack"}}, {{"label": "Liquid", "value": 40, "unit": "kW/rack"}}, {{"label": "sCO2", "value": 120, "unit": "kW/rack"}}].
+  Set chart_type to match the data (defaults to "bar" if omitted):
+  - "bar": one value per category, comparing magnitudes (the example above).
+  - "line": an ORDERED series showing a trend over time/steps, e.g. "chart_type": "line", "chart_series": [{{"label": "2020", "value": 12, "unit": "GW"}}, {{"label": "2023", "value": 44, "unit": "GW"}}].
+  - "single_value": ONE headline figure in context. For a percentage give one point ("chart_type": "single_value", "chart_series": [{{"label": "Water saved", "value": 94.4, "unit": "%"}}]); for a value-of-target give two points where the second is the target ([{{"label": "ARR", "value": 1.04, "unit": "$M"}}, {{"label": "target", "value": 5, "unit": "$M"}}]).
+  - "grouped_bar" / "stacked_bar": several sub-values per category. Provide chart_group_labels (the sub-series names) and give each chart_series point a "values" array aligned 1:1 to chart_group_labels. Example: "chart_type": "stacked_bar", "chart_group_labels": ["IT load", "Cooling", "Other"], "chart_series": [{{"label": "Air", "value": 8, "values": [6, 1.5, 0.5]}}, {{"label": "sCO2", "value": 120, "values": [90, 25, 5]}}]. Keep "value" set to the point's total for fallback.
 
 AVAILABLE SLIDE TYPES (pick the right one per slide):
 {slide_type_descriptions}
@@ -446,7 +451,9 @@ Return ONLY a JSON object. No prose, no markdown fences. Schema:
       "right_column": {{"heading": "...", "points": ["...", "..."]}} or null,
       "table_headers": ["Column A", "Column B", "Column C"] or null,
       "table_rows": [{{"cells": ["a1", "b1", "c1"]}}, {{"cells": ["a2", "b2", "c2"]}}] or null,
-      "chart_series": [{{"label": "Air", "value": 8.0, "unit": "kW/rack"}}] or null,
+      "chart_series": [{{"label": "Air", "value": 8.0, "unit": "kW/rack", "values": [6, 1.5, 0.5] or null}}] or null,
+      "chart_type": "bar" | "line" | "single_value" | "grouped_bar" | "stacked_bar" or null,
+      "chart_group_labels": ["IT load", "Cooling", "Other"] or null,
       "timeline_nodes": [{{"date": "...", "label": "..."}}] or null,
       "steps": [{{"label": "...", "description": "..."}}] or null,
       "quote_text": "..." or null,

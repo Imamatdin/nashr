@@ -13,6 +13,7 @@ from packages.core.enums import (
     AudienceType,
     AuditSeverity,
     BackgroundTreatment,
+    ChartType,
     DiagramStrategy,
     ExportFormat,
     Language,
@@ -276,6 +277,54 @@ def test_slide_content_chart_series_round_trips() -> None:
     assert again == content
     assert again.chart_series is not None
     assert [p.value for p in again.chart_series] == [8.0, 40.0, 120.0]
+
+
+def test_chart_series_point_with_values_round_trips() -> None:
+    # Grouped/stacked charts carry per-group magnitudes in `values`; the scalar
+    # `value` stays present for the flat-chart fallback.
+    point = ChartSeriesPoint(label="sCO2", value=120.0, unit="kW", values=[90.0, 25.0, 5.0])
+    again = ChartSeriesPoint.model_validate(point.model_dump(mode="json"))
+    assert again == point
+    assert again.values == [90.0, 25.0, 5.0]
+
+
+def test_chart_series_point_without_values_defaults_none() -> None:
+    point = ChartSeriesPoint(label="Air", value=8.0)
+    assert point.values is None
+
+
+def test_slide_content_grouped_chart_round_trips() -> None:
+    content = SlideContent(
+        title="Power split widens with density",
+        chart_type=ChartType.GROUPED_BAR,
+        chart_group_labels=["IT load", "Cooling", "Other"],
+        chart_series=[
+            ChartSeriesPoint(label="Air", value=8, values=[6.0, 1.5, 0.5]),
+            ChartSeriesPoint(label="sCO2", value=120, values=[90.0, 25.0, 5.0]),
+        ],
+    )
+    again = SlideContent.model_validate(content.model_dump(mode="json"))
+    assert again == content
+    assert again.chart_type is ChartType.GROUPED_BAR
+    assert again.chart_group_labels == ["IT load", "Cooling", "Other"]
+
+
+def test_slide_content_chart_type_defaults_none() -> None:
+    # A chart_data slide that omits chart_type leaves the renderer to default
+    # to "bar"; the model itself stores None.
+    content = SlideContent(title="x", chart_series=[ChartSeriesPoint(label="A", value=1)])
+    assert content.chart_type is None
+    assert content.chart_group_labels is None
+
+
+def test_chart_type_enum_size() -> None:
+    assert {c.value for c in ChartType} == {
+        "bar",
+        "line",
+        "single_value",
+        "grouped_bar",
+        "stacked_bar",
+    }
 
 
 def test_slide_content_table_round_trips() -> None:

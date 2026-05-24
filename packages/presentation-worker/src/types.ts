@@ -68,6 +68,8 @@ export const ALL_SLIDE_TYPES: readonly SlideType[] = [
   'interactive_debate',
 ] as const;
 
+export type ChartType = 'bar' | 'line' | 'single_value' | 'grouped_bar' | 'stacked_bar';
+
 export type PresentationMood =
   | 'warm_historical'
   | 'bold_technical'
@@ -146,6 +148,9 @@ export interface ChartSeriesPoint {
   label: string;
   value: number;
   unit?: string | null;
+  /** Per-group magnitudes for grouped/stacked charts, aligned to
+   *  SlideContent.chart_group_labels. Absent for flat bar/line/single_value. */
+  values?: number[] | null;
 }
 
 export interface QuizOption {
@@ -215,6 +220,8 @@ export interface SlideContent {
   table_headers?: string[] | null;
   table_rows?: TableRow[] | null;
   chart_series?: ChartSeriesPoint[] | null;
+  chart_type?: ChartType | null;
+  chart_group_labels?: string[] | null;
   quiz_questions?: QuizQuestion[] | null;
   matching_pairs?: MatchingPair[] | null;
   category_labels?: string[] | null;
@@ -382,6 +389,17 @@ export interface ShapeBlock {
   fill?: string;
   opacity?: number;
   dashArray?: string;
+  /**
+   * Endpoint for a diagonal `line`. When `x2`/`y2` are set (slide
+   * percentages, same units as `x`/`y`), the line is drawn as a true
+   * segment from (`x`,`y`) to (`x2`,`y2`) — the HTML renderer rotates a
+   * hairline rect, the PPTX renderer uses pptxgenjs `flipV`. Without them a
+   * `line` keeps its axis-aligned behaviour (horizontal/vertical bar). The
+   * bounding box (`w`/`h`) is still the |dx|/|dy| of the segment so bounds
+   * checks remain meaningful. Chart line segments are the only current user.
+   */
+  x2?: number;
+  y2?: number;
 }
 
 export interface SlideBackground {

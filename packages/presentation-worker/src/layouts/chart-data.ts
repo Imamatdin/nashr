@@ -5,17 +5,13 @@
  * annotation column on the right, and a citation strip at the
  * bottom-right (R33).
  *
- * The chart itself is a placeholder for v1: a centred text block
- * inside a faint palette.surface rectangle. The real chart
- * component (recharts or generated SVG) will drop into this region
- * in a later task without disturbing the rest of the layout.
- *
- * NOTE (chart data/renderer split): the editorial pass now emits the
- * underlying data in `slide.content.chart_series` (ChartSeriesPoint[]),
- * so the numbers reach the worker intact. This layout still renders the
- * placeholder by design — the VISUAL renderer that consumes chart_series
- * (SVG bars from the series) is the next task (BUILD_STATE Step 2/3).
- * Until then chart_series is carried but not drawn.
+ * The chart is drawn natively from `slide.content.chart_series` by
+ * `drawChart` (src/charts) — rect / line / circle ShapeBlocks plus text,
+ * the same primitives every other layout uses, so it renders in HTML, PPTX,
+ * and the PPTX→PDF alike. `chart_type` selects bar / line / single_value /
+ * grouped_bar / stacked_bar (default bar). When the series is empty or
+ * missing, the layout falls back to the centred `[Chart placeholder]` text
+ * inside a faint panel rather than drawing an empty axis.
  *
  * The title takes the R35 phrasing: the *insight*, not the chart
  * type. That decision is the editorial pass's — the layout just
@@ -23,6 +19,7 @@
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../constants.js';
+import { drawChart } from '../charts/draw-chart.js';
 import type {
   DeckSpec,
   ShapeBlock,
@@ -79,18 +76,26 @@ export function layoutChartData(slide: SlideSpec, deck: DeckSpec): SlideLayout {
     opacity: 0.03,
   });
 
-  blocks.push(
-    buildTextBlock({
-      text: CHART_PLACEHOLDER_TEXT,
-      region: chartRegion,
-      fontFamily: design.body_font,
-      fontWeight: 'normal',
-      color: design.palette.text_secondary,
-      align: 'center',
-      tier: FONT_SIZES.body,
-      lineHeight: LINE_HEIGHTS.body,
-    }),
-  );
+  // Draw the real chart into the reserved box. A missing/empty series falls
+  // back to the placeholder text so the slide never renders an empty axis.
+  const chart = drawChart(chartRegion, slide.content, design);
+  if (chart) {
+    shapes.push(...chart.shapes);
+    blocks.push(...chart.blocks);
+  } else {
+    blocks.push(
+      buildTextBlock({
+        text: CHART_PLACEHOLDER_TEXT,
+        region: chartRegion,
+        fontFamily: design.body_font,
+        fontWeight: 'normal',
+        color: design.palette.text_secondary,
+        align: 'center',
+        tier: FONT_SIZES.body,
+        lineHeight: LINE_HEIGHTS.body,
+      }),
+    );
+  }
 
   if (slide.content.body_text) {
     const annotationRegion: Region = { ...regions.caption!, y: contentTop };

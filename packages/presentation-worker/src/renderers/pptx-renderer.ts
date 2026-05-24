@@ -255,17 +255,29 @@ export class PptxRenderer {
     const transparency = Math.round((1 - opacity) * 100);
 
     if (shape.type === 'line') {
-      slide.addShape('line', {
-        x,
-        y,
-        w,
-        h,
-        line: {
-          color: this.stripHash(shape.stroke ?? '000000'),
-          width: shape.strokeWidth ?? 1,
-          dashType: shape.dashArray ? 'dash' : 'solid',
-        },
-      });
+      const lineStyle = {
+        color: this.stripHash(shape.stroke ?? '000000'),
+        width: shape.strokeWidth ?? 1,
+        dashType: (shape.dashArray ? 'dash' : 'solid') as 'dash' | 'solid',
+      };
+      // Diagonal segment (x2/y2 set): emit the bounding box and flip
+      // vertically when the slope runs bottom-left → top-right, so the line
+      // connects the two real endpoints instead of the box's TL→BR corners.
+      if (shape.x2 !== undefined && shape.y2 !== undefined) {
+        const bx = Math.min(shape.x, shape.x2);
+        const by = Math.min(shape.y, shape.y2);
+        const flipV = (shape.x2 - shape.x) * (shape.y2 - shape.y) < 0;
+        slide.addShape('line', {
+          x: this.pctToInchesX(bx),
+          y: this.pctToInchesY(by),
+          w: this.pctToInchesW(Math.abs(shape.x2 - shape.x)),
+          h: this.pctToInchesH(Math.abs(shape.y2 - shape.y)),
+          flipV,
+          line: lineStyle,
+        });
+        return;
+      }
+      slide.addShape('line', { x, y, w, h, line: lineStyle });
       return;
     }
 

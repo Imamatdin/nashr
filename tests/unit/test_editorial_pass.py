@@ -268,6 +268,30 @@ def test_chart_series_parses_and_materialises() -> None:
     assert content.body_text == "Heat capacity sets the ceiling."
 
 
+def test_chart_type_and_grouped_fields_parse_and_materialise() -> None:
+    # Regression guard: _LLMSlide must DECLARE chart_type / chart_group_labels
+    # and ChartSeriesPoint must declare `values`, or extra="ignore"/extra=
+    # "forbid" drops them and the worker silently falls back to a flat bar.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "chart_data",
+            "title": "Power split widens with rack density",
+            "chart_type": "grouped_bar",
+            "chart_group_labels": ["IT load", "Cooling", "Other"],
+            "chart_series": [
+                {"label": "Air", "value": 8, "values": [6, 1.5, 0.5]},
+                {"label": "sCO2", "value": 120, "values": [90, 25, 5]},
+            ],
+        }
+    )
+    assert content.chart_type is not None
+    assert content.chart_type.value == "grouped_bar"
+    assert content.chart_group_labels == ["IT load", "Cooling", "Other"]
+    assert content.chart_series is not None
+    assert content.chart_series[1].values == [90.0, 25.0, 5.0]
+
+
 # ---------------------------------------------------------------------------
 # Content analysis (no LLM)
 # ---------------------------------------------------------------------------

@@ -38,10 +38,9 @@ describe('layout — CHART_DATA', () => {
     expect(annotation!.y).toBeLessThanOrEqual(20);
   });
 
-  it('carries chart_series in the wire format while still rendering the placeholder', () => {
-    // FIX 3: the data now flows through SlideContent.chart_series. The VISUAL
-    // renderer that plots it is the next task (BUILD_STATE Step 2/3); until
-    // then the placeholder is still drawn and the series is carried, not lost.
+  it('draws real bars (not the placeholder) when chart_series is present', () => {
+    // Step 2: chart_series now drives a native bar chart. The placeholder is
+    // reserved for the empty-series fallback only.
     const series: ChartSeriesPoint[] = [
       { label: 'Air', value: 8, unit: 'kW/rack' },
       { label: 'Liquid', value: 40, unit: 'kW/rack' },
@@ -56,10 +55,18 @@ describe('layout — CHART_DATA', () => {
     const slide = deck.slides[0]!;
     expect(slide.content.chart_series).toEqual(series);
     const layout = new LayoutPass().layoutSlide(slide, deck);
+
     const placeholder = layout.textBlocks.find((b) =>
       b.text.includes('[Chart placeholder]'),
     );
-    expect(placeholder).toBeDefined();
+    expect(placeholder).toBeUndefined();
+
+    // One bar rect per point, in the accent colour, plus value + category labels.
+    const accent = deck.design.palette.accent;
+    const bars = layout.shapes.filter((s) => s.type === 'rect' && s.fill === accent);
+    expect(bars).toHaveLength(3);
+    expect(layout.textBlocks.some((b) => b.text === '120 kW/rack')).toBe(true);
+    expect(layout.textBlocks.some((b) => b.text === 'sCO2')).toBe(true);
   });
 
   it('places the source citation small and bottom-right', () => {

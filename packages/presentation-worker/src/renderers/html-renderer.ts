@@ -294,6 +294,30 @@ html, body {
     if (shape.type === 'line') {
       const stroke = shape.stroke ?? '#000';
       const strokeWidth = shape.strokeWidth ?? 2;
+
+      // Diagonal segment (x2/y2 set): rotate a hairline rect from (x,y) to
+      // (x2,y2). CSS `line` shapes are otherwise axis-aligned, which would
+      // turn a line chart's slopes into flat bars.
+      if (shape.x2 !== undefined && shape.y2 !== undefined) {
+        const x2 = (shape.x2 * SLIDE_WIDTH) / 100;
+        const y2 = (shape.y2 * SLIDE_HEIGHT) / 100;
+        const dx = x2 - x;
+        const dy = y2 - y;
+        const length = Math.hypot(dx, dy);
+        const angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+        const style = [
+          `left:${x}px`,
+          `top:${y - strokeWidth / 2}px`,
+          `width:${length}px`,
+          `height:${strokeWidth}px`,
+          `background:${stroke}`,
+          `opacity:${opacity}`,
+          `transform:rotate(${angle}deg)`,
+          `transform-origin:0 50%`,
+        ];
+        return `<div class="shape" style="${style.join(';')}"></div>`;
+      }
+
       const isHorizontal = w >= h;
       const renderedW = isHorizontal ? w : strokeWidth;
       const renderedH = isHorizontal ? strokeWidth : h;

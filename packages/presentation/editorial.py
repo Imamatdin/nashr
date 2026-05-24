@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from packages.core.enums import (
     AudienceType,
+    ChartType,
     ClaimStrength,
     ClaimType,
     ExportFormat,
@@ -332,6 +333,8 @@ class _LLMSlide(BaseModel):
     table_headers: list[str] | None = Field(default=None, max_length=6)
     table_rows: list[TableRow] | None = Field(default=None, max_length=7)
     chart_series: list[ChartSeriesPoint] | None = Field(default=None, max_length=8)
+    chart_type: ChartType | None = None
+    chart_group_labels: list[str] | None = Field(default=None, max_length=6)
     timeline_nodes: list[TimelineNode] | None = Field(default=None, max_length=8)
     steps: list[FlowStep] | None = Field(default=None, max_length=6)
     quote_text: str | None = Field(default=None, max_length=300)
@@ -884,6 +887,8 @@ def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
             table_headers=raw.table_headers,
             table_rows=raw.table_rows,
             chart_series=raw.chart_series,
+            chart_type=raw.chart_type,
+            chart_group_labels=raw.chart_group_labels,
             timeline_nodes=raw.timeline_nodes,
             steps=raw.steps,
             quote_text=raw.quote_text,

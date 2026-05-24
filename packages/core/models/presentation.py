@@ -25,6 +25,7 @@ from packages.core.enums import (
     AudienceType,
     AuditSeverity,
     BackgroundTreatment,
+    ChartType,
     DiagramStrategy,
     ExportFormat,
     Language,
@@ -169,6 +170,13 @@ class ChartSeriesPoint(BaseModel):
     because it is plotted, not typeset — the renderer needs the magnitude to
     size a bar or place a point. Formatting (thousands separators, decimals) is
     the renderer's job, so this model stays the raw datum.
+
+    ``values`` carries the per-group magnitudes for GROUPED_BAR / STACKED_BAR
+    charts, aligned 1:1 to :attr:`SlideContent.chart_group_labels`. It is
+    additive: the flat ``value`` stays the source of truth for bar/line/
+    single_value, and a point that omits ``values`` validates unchanged. When
+    a grouped/stacked chart sees a point with ``values``, it plots those; a
+    point without falls back to the scalar ``value`` as a single group.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -176,6 +184,7 @@ class ChartSeriesPoint(BaseModel):
     label: str = Field(min_length=1, max_length=60)
     value: float
     unit: str | None = Field(default=None, max_length=10)
+    values: list[float] | None = Field(default=None, max_length=6)
 
 
 class QuizOption(BaseModel):
@@ -299,6 +308,8 @@ class SlideContent(BaseModel):
     table_rows: list[TableRow] | None = Field(default=None, max_length=7)
 
     chart_series: list[ChartSeriesPoint] | None = Field(default=None, max_length=8)
+    chart_type: ChartType | None = None
+    chart_group_labels: list[str] | None = Field(default=None, max_length=6)
 
     quiz_questions: list[QuizQuestion] | None = Field(default=None, max_length=5)
 

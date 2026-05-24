@@ -140,6 +140,23 @@ class SlideType(StrEnum):
     INTERACTIVE_DEBATE = "interactive_debate"
 
 
+class ChartType(StrEnum):
+    """Visual form a CHART_DATA slide plots its ``chart_series`` as.
+
+    Drives the presentation worker's chart renderer. ``BAR`` is the default
+    when a chart_data slide omits ``chart_type``. ``BAR``/``LINE``/
+    ``SINGLE_VALUE`` read the flat ``chart_series`` (one scalar value per
+    point); ``GROUPED_BAR``/``STACKED_BAR`` read the per-point ``values``
+    list aligned to ``chart_group_labels`` when present.
+    """
+
+    BAR = "bar"
+    LINE = "line"
+    SINGLE_VALUE = "single_value"
+    GROUPED_BAR = "grouped_bar"
+    STACKED_BAR = "stacked_bar"
+
+
 class PresentationMood(StrEnum):
     """Aesthetic mood that drives palette, typography, and decorative choices."""
 

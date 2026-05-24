@@ -72,12 +72,53 @@ tests; a step is DONE only when a commit changes this file.
   wire format reaches the render layer intact. debug/last_deck.json absent (gitignored), so the
   check used a fabricated sCO2 deck via the durable loop.
 
+## SHIPPED (Step 2 — chart renderer)
+- E (chart renderer) — THIS BRANCH (feat/chart-renderer, off fix/editorial-structured-fields
+  HEAD, NOT main: main lacks the FIX3 chart_series data flow this renderer consumes + BUILD_STATE).
+  Replaced "[Chart placeholder]" with native-shape charts drawn into the collision-safe chartRegion.
+  - FOUR TYPES: bar · line · single_value · grouped_bar (+ stacked_bar variant). chart-data.ts
+    delegates to src/charts/draw-chart.ts; empty/missing series still falls back to the placeholder.
+  - NATIVE SHAPES ONLY: rect/line/circle ShapeBlocks + text, the same primitives every layout uses.
+    No SVG, no chart lib, no browser. One drawing path serves HTML, PPTX, and PPTX→LibreOffice PDF.
+  - SCHEMA (Step A): added ChartType enum (enums.py) + chart_type/chart_group_labels on SlideContent
+    + values on ChartSeriesPoint (presentation.py), mirrored in types.ts, wired through editorial
+    _LLMSlide + _materialise_slides + EDITORIAL_SYSTEM. Flat chart_series unchanged (bar/line/
+    single_value); values[] aligned to chart_group_labels drives grouped/stacked. No SQL migration —
+    ChartType lives in the deck JSONB, not a column.
+  - COLOUR RAMP (Step B) — DEVIATION, deliberate: the palette is BESPOKE per deck (LLM-generated;
+    the six-mood table is only the fallback), so a hardcoded per-mood ramp would clash. Instead the
+    ramp is DERIVED from the deck's actual palette in the worker (resolveChartRamp): hero = accent,
+    supporting = accent stepped toward text + the secondary neutral, each contrast-guarded vs the
+    background. Cohesive on any palette, bespoke or fallback (verified by eyeball on BOTH dark and
+    light palettes). Count-aware: generates as many distinct steps as a grouped/stacked chart has
+    groups (cap 6), so a legend never reuses a colour. Avoids the design_direction.py extra="forbid"
+    round-trip trap too.
+  - DIAGONAL LINES (renderer fix) — the web prompt assumed line shapes render identically everywhere;
+    the HTML renderer only drew AXIS-ALIGNED lines, so a line chart would break in the HTML export.
+    Added optional x2/y2 endpoints to ShapeBlock: HTML rotates a hairline rect, PPTX uses pptxgenjs
+    flipV. Axis-aligned lines unchanged. (Production PDF = PPTX→soffice, so it was already fine there;
+    PdfRenderer/Playwright HTML→PDF is test-only.)
+  - VERIFIED: tsc (src+tests) clean; vitest +16 chart tests (draw-chart.test.ts), per-type shape
+    counts + within-region bounds + empty→placeholder fallback; pytest 1126 passed / 30 skipped
+    (+6 round-trip/parse tests); ruff clean on changed files; pyright clean. EYEBALLED: built a
+    chart-types deck (one slide per type, BOLD_TECHNICAL palette), rendered HTML, screenshotted all
+    five via chromium — bar shows orange-red bars on near-black with Air/Liquid/sCO2 labelled and
+    8/40/120 kW/rack values; line shows connected diagonal slope; single_value shows hero number +
+    progress bar; grouped/stacked show ramp-coloured sub-bars + legend + totals. PPTX generates
+    without error (the flipV/circle path). NOT done locally (documented gap): live Sonnet regen (no
+    API key) and soffice→PDF (not installed) — server eyeball before merge.
+  - LEAN/WEB SPLIT: charts are LEAN static for pptx/pdf export. Rich/animated/interactive charts +
+    full type set = WEB surface, deferred, consuming the same chart_series/chart_type spec. Web
+    surface is the next major phase after the Telegram product ships; the deck spec is the synced
+    source of truth across both surfaces. Deferred niceties: currency-prefix unit formatting
+    ("$1.04M" vs "1.04$M"); per-sub-bar value labels on dense (>8) grouped charts.
+
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [~] Editorial structured fields: H tables + G comparison + D-data chart_series — DONE this branch.
    STILL OPEN (separate model-quality concerns, not this fix): B-real (model writes breathing
    takeaways) · C (model drops its own numbered items).
-3. [ ] Step 2 chart renderer (free) — SVG bars from chart_series (now AVAILABLE, FIX3); folds in F via Step 11 measurement
+3. [x] Step 2 chart renderer (free) — native-shape charts from chart_series — DONE this branch (see SHIPPED below).
 4-12. [ ] image engine (3/4/5) · intent (6/7) · grounding (8) · convo edit (9) · honest failure (10) · fontkit accuracy (11) · font library (12)
 
 ## NOTES (load-bearing, don't rediscover the hard way)
