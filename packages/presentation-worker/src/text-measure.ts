@@ -81,11 +81,43 @@ export function measureText(options: MeasureOptions): TextMeasurement {
 
   for (const word of words) {
     const wordWidth = measureLineWidthPx(word, fontFamily, fontWeight, fontSize);
+
+    // A token wider than the line cannot sit on one line: the browser and
+    // PPTX/LibreOffice break it across characters, so it occupies
+    // ceil(wordWidth / maxWidth) lines. fontkit can't tell us where the
+    // character break lands, but the line COUNT must reflect it — otherwise a
+    // block stacked beneath a wrapped value (the data_emphasis unit/label
+    // under an over-long stat number) is placed against an undercounted height
+    // and collides with the token's real lower lines. Guard maxWidth > 0 so a
+    // degenerate region never divides by zero or yields NaN.
+    if (maxWidth > 0 && wordWidth > maxWidth) {
+      const spannedLines = Math.ceil(wordWidth / maxWidth);
+      if (currentLineWidth > 0) {
+        // The current line already holds earlier words: finalize it, then the
+        // over-long token starts fresh and consumes spannedLines NEW lines.
+        maxLineWidth = Math.max(maxLineWidth, currentLineWidth);
+        lineCount += spannedLines;
+      } else {
+        // The current line is the still-counted empty line (the initial state,
+        // or just after another over-long token): the token reuses it as its
+        // first line and adds spannedLines - 1, so a single over-long token
+        // yields exactly ceil(wordWidth / maxWidth), not 1 + ceil.
+        lineCount += spannedLines - 1;
+      }
+      // The token fills whole lines; its longest line is one full line, so cap
+      // its width contribution at maxWidth — never the raw token width, which
+      // is a width no single line can reach and would always fail the width
+      // fit check. Leaving currentLineWidth at that full width forces the next
+      // word onto a new line via the normal break test below: the "start
+      // fresh" intent, but through a path that keeps the count correct
+      // (resetting to 0 would let the next word reclaim this line uncounted).
+      currentLineWidth = Math.min(wordWidth, maxWidth);
+      maxLineWidth = Math.max(maxLineWidth, currentLineWidth);
+      continue;
+    }
+
     const isLineStart = currentLineWidth === 0;
     const neededWidth = isLineStart ? wordWidth : currentLineWidth + spaceWidth + wordWidth;
-
-    // A single word longer than maxWidth still occupies a line on its own;
-    // we don't simulate character-level breaking here.
     if (!isLineStart && neededWidth > maxWidth) {
       maxLineWidth = Math.max(maxLineWidth, currentLineWidth);
       lineCount += 1;

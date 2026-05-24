@@ -4,6 +4,15 @@ import {
   measureText,
   type MeasureOptions,
 } from '../src/text-measure.js';
+import { measureLineWidthPx } from '../src/font-metrics.js';
+
+/**
+ * Mirrors RENDER_WIDTH_SAFETY in text-measure.ts. Replicated (not imported) so
+ * these tests don't force exporting an internal safety constant, and so the
+ * expected line counts are computed the same way the function computes the
+ * effective max width: nominal * RENDER_WIDTH_SAFETY.
+ */
+const RENDER_WIDTH_SAFETY = 0.78;
 
 function baseOpts(overrides: Partial<MeasureOptions> = {}): MeasureOptions {
   return {
@@ -90,11 +99,98 @@ describe('measureText', () => {
     expect(mono.width).toBeGreaterThan(sans.width);
   });
 
-  it('treats a single very long word as a single line that may exceed maxWidth', () => {
+  it('wraps a single over-long word to ceil(width / effectiveMaxWidth) lines', () => {
+    // Corrects the prior contract ("a single very long word stays one line that
+    // may exceed maxWidth"): the browser and PPTX/LibreOffice character-break an
+    // over-long token, so the measurer must count ceil(tokenWidth / effective
+    // maxWidth) lines or anything stacked beneath it is placed too high.
+    const text = 'Supercalifragilisticexpialidocious';
+    const fontSize = 24;
+    const nominalMaxWidth = 100;
+    const tokenWidth = measureLineWidthPx(text, 'Inter', 'normal', fontSize);
+    const expected = Math.ceil(tokenWidth / (nominalMaxWidth * RENDER_WIDTH_SAFETY));
+    expect(expected).toBeGreaterThan(1); // sanity: this token is genuinely over-long
     const result = measureText(
-      baseOpts({ text: 'Supercalifragilisticexpialidocious', maxWidth: 100, maxHeight: 80 }),
+      baseOpts({ text, fontSize, maxWidth: nominalMaxWidth, maxHeight: 10000 }),
     );
-    expect(result.lineCount).toBe(1);
+    expect(result.lineCount).toBe(expected);
+  });
+});
+
+describe('measureText — over-long token wrapping (intra-token line count)', () => {
+  // The data_emphasis layout stacks a stat's unit/label/comparison beneath the
+  // number using the number's MEASURED height. If an over-long value is counted
+  // as one line but rendered across two, the unit collides with its lower line.
+  // These tests pin the corrected line count at the real font/size/width the
+  // layout uses. Widths come from measureLineWidthPx so expectations track the
+  // actual vendored-font advances, not a guessed constant.
+
+  const DISPLAY_LARGE = 64; // FONT_SIZES.displayLarge.max — the data_emphasis number tier
+  const STAT_COL_3_NOMINAL = (28 / 100) * 1920; // 3-stat column width: 537.6px
+
+  function num(text: string, maxWidth: number, fontSize = DISPLAY_LARGE): MeasureOptions {
+    return {
+      text,
+      fontSize,
+      fontFamily: 'IBM Plex Sans',
+      fontWeight: 'bold',
+      maxWidth,
+      maxHeight: 10000,
+      lineHeight: 1.1,
+    };
+  }
+
+  it('counts a single over-long token as ceil(tokenWidth / effectiveMaxWidth) (acceptance 1)', () => {
+    const text = 'Supercalifragilisticexpialidocious';
+    const nominalMaxWidth = 300;
+    const tokenWidth = measureLineWidthPx(text, 'IBM Plex Sans', 'bold', DISPLAY_LARGE);
+    const expected = Math.ceil(tokenWidth / (nominalMaxWidth * RENDER_WIDTH_SAFETY));
+    expect(expected).toBeGreaterThan(1); // sanity: genuinely over-long at this size/box
+    const result = measureText(num(text, nominalMaxWidth));
+    expect(result.lineCount).toBe(expected);
+  });
+
+  it('wraps a genuinely over-long stat value to >= 2 lines at the number tier (acceptance 2)', () => {
+    // A triple-range value, wider than the 3-stat column even at the display
+    // tier. (The task originally named "1.56–1.58", but that value measures
+    // 307.7px < the 419px effective column — it is NOT over-long and renders on
+    // one line; see the regression test below. This is a value that genuinely
+    // triggers the wrap.)
+    const text = '1.560–1.580–1.600';
+    const tokenWidth = measureLineWidthPx(text, 'IBM Plex Sans', 'bold', DISPLAY_LARGE);
+    const expected = Math.ceil(tokenWidth / (STAT_COL_3_NOMINAL * RENDER_WIDTH_SAFETY));
+    const result = measureText(num(text, STAT_COL_3_NOMINAL));
+    expect(result.lineCount).toBeGreaterThanOrEqual(2);
+    expect(result.lineCount).toBe(expected);
+  });
+
+  it('keeps a short stat value on one line (acceptance 3, no regression)', () => {
+    expect(measureText(num('1.08', STAT_COL_3_NOMINAL)).lineCount).toBe(1);
+    // "1.56–1.58" from the original report is in fact NOT over-long: it fits the
+    // 3-stat column on one line. Pinning this guards against re-introducing a
+    // spurious wrap for the value the fix was mistakenly thought to break.
+    expect(measureText(num('1.56–1.58', STAT_COL_3_NOMINAL)).lineCount).toBe(1);
+  });
+
+  it('caps an over-long token width at the effective maxWidth, not the raw token width (acceptance 4)', () => {
+    const text = '1.560–1.580–1.600';
+    const nominalMaxWidth = STAT_COL_3_NOMINAL;
+    const effectiveMaxWidth = nominalMaxWidth * RENDER_WIDTH_SAFETY;
+    const rawTokenWidth = measureLineWidthPx(text, 'IBM Plex Sans', 'bold', DISPLAY_LARGE);
+    expect(rawTokenWidth).toBeGreaterThan(effectiveMaxWidth); // precondition: over-long
+    const result = measureText(num(text, nominalMaxWidth));
+    expect(result.width).toBeLessThanOrEqual(effectiveMaxWidth);
+    expect(result.width).toBeLessThan(rawTokenWidth);
+  });
+
+  it('counts a token following an over-long token on its own line', () => {
+    // Regression guard for the off-by-one that a literal "reset currentLineWidth
+    // to 0" would introduce: the word after an over-long token must land on a
+    // new, counted line rather than silently reclaiming the token's last line.
+    const overLong = 'Supercalifragilisticexpialidocious';
+    const overLongLines = measureText(num(overLong, 300)).lineCount;
+    const withTrailingWord = measureText(num(`${overLong} tail`, 300)).lineCount;
+    expect(withTrailingWord).toBe(overLongLines + 1);
   });
 });
 

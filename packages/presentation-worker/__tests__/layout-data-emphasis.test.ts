@@ -126,3 +126,40 @@ describe('DATA_EMPHASIS — hero stat shows its unit', () => {
     expect(JAMMED_UNIT.test(number.text)).toBe(false);
   });
 });
+
+describe('DATA_EMPHASIS — over-long stat value does not collide with its unit', () => {
+  // A value wider than its column wraps to two lines in the browser and
+  // PPTX/LibreOffice. measureText now counts that second line, so the number
+  // block reserves its true height and the unit stacked beneath it clears the
+  // value's lower line. NOTE: "1.56–1.58" from the original report is NOT
+  // over-long (it fits the column on one line), so it never collided; this uses
+  // a genuinely over-long triple-range value to exercise the wrap.
+  const stats: StatItem[] = [
+    { value: '1.560–1.580–1.600', unit: 'PUE', label: 'Industry average', highlight: false },
+    { value: '1.08', unit: 'PUE', label: 'Best in class' },
+    { value: '35', unit: '%', label: 'Overhead reduction' },
+  ];
+  const deck = buildDeck([makeSlide(0, 'data_emphasis', { title: 'Cooling economics', stats })]);
+  const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+  const overLongNumber = findExact(layout.textBlocks, '1.560–1.580–1.600')!;
+  const shortNumber = findExact(layout.textBlocks, '1.08')!;
+  const overLongUnit = layout.textBlocks.find((b) => b.text === 'PUE' && b.y > overLongNumber.y)!;
+
+  it('measures the over-long value as a multi-line block (not collapsed to one line)', () => {
+    // The fix's effect: the over-long number stays in the display tier and its
+    // measured height reflects >= 2 lines. Without the fix it would shrink to
+    // the font floor and measure a SINGLE line — coming out shorter than the
+    // one-line "1.08" block rather than ~twice its height.
+    expect(overLongNumber.fontSize).toBeGreaterThanOrEqual(FONT_SIZES.displayLarge.min);
+    expect(overLongNumber.measuredHeightPct).toBeGreaterThan(1.8 * shortNumber.measuredHeightPct);
+  });
+
+  it('places the unit at or below the number block bottom (no overlap)', () => {
+    expect(overLongUnit).toBeDefined();
+    expect(overLongUnit.x).toBe(overLongNumber.x);
+    // Unit top must clear the number's measured bottom (1px epsilon in % units).
+    const epsilon = (1 / 1080) * 100;
+    expect(overLongUnit.y).toBeGreaterThanOrEqual(overLongNumber.y + overLongNumber.h - epsilon);
+  });
+});
