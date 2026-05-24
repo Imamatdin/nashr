@@ -25,6 +25,7 @@ from packages.core.enums import (
 from packages.core.models.presentation import (
     AuditCheckResult,
     AuditReport,
+    ChartSeriesPoint,
     ColorPalette,
     DeckSpec,
     DesignDirectionSpec,
@@ -35,6 +36,7 @@ from packages.core.models.presentation import (
     SlideContent,
     SlideSpec,
     StatItem,
+    TableRow,
     new_deck_id,
 )
 
@@ -242,6 +244,54 @@ def test_slide_content_quiz_round_trip() -> None:
     )
     again = SlideContent.model_validate(content.model_dump(mode="json"))
     assert again == content
+
+
+def test_chart_series_point_round_trips() -> None:
+    point = ChartSeriesPoint(label="sCO2 rack density", value=120.0, unit="kW/rack")
+    again = ChartSeriesPoint.model_validate(point.model_dump(mode="json"))
+    assert again == point
+    assert again.value == 120.0
+    assert again.unit == "kW/rack"
+
+
+def test_chart_series_point_coerces_numeric_string_value() -> None:
+    # The editorial LLM may emit the value as a JSON string; pydantic coerces
+    # it to float so the renderer always receives a plottable magnitude.
+    point = ChartSeriesPoint.model_validate({"label": "Air", "value": "8", "unit": None})
+    assert point.value == 8.0
+    assert point.unit is None
+
+
+def test_slide_content_chart_series_round_trips() -> None:
+    content = SlideContent(
+        title="Rack density climbs 15x from air to sCO2",
+        body_text="Heat capacity, not airflow, sets the ceiling.",
+        chart_series=[
+            ChartSeriesPoint(label="Air", value=8, unit="kW/rack"),
+            ChartSeriesPoint(label="Liquid", value=40, unit="kW/rack"),
+            ChartSeriesPoint(label="sCO2", value=120, unit="kW/rack"),
+        ],
+    )
+    again = SlideContent.model_validate(content.model_dump(mode="json"))
+    assert again == content
+    assert again.chart_series is not None
+    assert [p.value for p in again.chart_series] == [8.0, 40.0, 120.0]
+
+
+def test_slide_content_table_round_trips() -> None:
+    content = SlideContent(
+        title="sCO2 wins on every dimension",
+        table_headers=["Cooling", "Density", "PUE"],
+        table_rows=[
+            TableRow(cells=["Air", "8 kW/rack", "1.58"]),
+            TableRow(cells=["Liquid", "40 kW/rack", "1.10"]),
+            TableRow(cells=["sCO2", "120 kW/rack", "1.04"]),
+        ],
+    )
+    again = SlideContent.model_validate(content.model_dump(mode="json"))
+    assert again == content
+    assert again.table_rows is not None
+    assert again.table_rows[2].cells[0] == "sCO2"
 
 
 # ---------------------------------------------------------------------------

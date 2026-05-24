@@ -49,6 +49,8 @@ from packages.presentation.editorial import (
     WORD_LIMITS,
     EditorialPass,
     _insert_breathing_after_data,
+    _materialise_slides,
+    _parse_sequence,
 )
 
 # ---------------------------------------------------------------------------
@@ -159,6 +161,111 @@ def _slide(
 
 def _llm_slides_payload(slides: list[dict[str, Any]]) -> str:
     return json.dumps({"slides": slides})
+
+
+# ---------------------------------------------------------------------------
+# Structured field parsing (tables / comparison / chart series)
+#
+# These lock the prompt<->parser contract. _LLMSlide uses extra="ignore", so it
+# SILENTLY DROPS any field it does not declare. The editorial prompt instructs
+# the model to emit table_headers/table_rows, left_column/right_column, and
+# chart_series; if the schema ever stops declaring one of those, the data is
+# dropped and the slide renders blank. These tests fail loudly if that drift
+# returns.
+# ---------------------------------------------------------------------------
+
+
+def _materialise_one(slide_payload: dict[str, Any]) -> SlideContent:
+    """Parse a single LLM slide payload and return its materialised content."""
+
+    parsed = _parse_sequence(_llm_slides_payload([slide_payload]))
+    assert parsed is not None and len(parsed) == 1
+    slides = _materialise_slides(parsed)
+    assert len(slides) == 1
+    return slides[0].content
+
+
+def test_table_fields_parse_and_materialise() -> None:
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "table_compact",
+            "title": "sCO2 wins on every dimension",
+            "table_headers": ["Cooling", "Density", "PUE"],
+            "table_rows": [
+                {"cells": ["Air", "8 kW/rack", "1.58"]},
+                {"cells": ["Liquid", "40 kW/rack", "1.10"]},
+                {"cells": ["sCO2", "120 kW/rack", "1.04"]},
+            ],
+        }
+    )
+    assert content.table_headers == ["Cooling", "Density", "PUE"]
+    assert content.table_rows is not None
+    assert len(content.table_rows) == 3
+    assert content.table_rows[0].cells == ["Air", "8 kW/rack", "1.58"]
+
+
+def test_comparison_columns_parse_from_top_level_keys() -> None:
+    # The prompt now emits left_column/right_column at the TOP level (not a
+    # nested "comparison" object). These are the keys _LLMSlide declares, so
+    # they survive parsing and reach SlideContent.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "comparison",
+            "title": "Air cooling vs liquid cooling",
+            "left_column": {"heading": "Air", "points": ["Cheap", "Low density"]},
+            "right_column": {"heading": "Liquid", "points": ["Dense", "Higher capex"]},
+        }
+    )
+    assert content.left_column is not None
+    assert content.left_column.heading == "Air"
+    assert content.left_column.points == ["Cheap", "Low density"]
+    assert content.right_column is not None
+    assert content.right_column.heading == "Liquid"
+    assert content.right_column.points == ["Dense", "Higher capex"]
+
+
+def test_nested_comparison_key_is_dropped() -> None:
+    # Regression guard documenting the bug the prompt fix removes: the OLD
+    # prompt told the model to emit {"comparison": {"left": ..., "right": ...}}.
+    # _LLMSlide does not declare "comparison", so extra="ignore" silently drops
+    # it and both columns stay null — which is exactly why comparison slides
+    # rendered as blank scaffolding.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "comparison",
+            "title": "Air vs liquid",
+            "comparison": {
+                "left": {"heading": "Air", "points": ["Cheap"]},
+                "right": {"heading": "Liquid", "points": ["Dense"]},
+            },
+        }
+    )
+    assert content.left_column is None
+    assert content.right_column is None
+
+
+def test_chart_series_parses_and_materialises() -> None:
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "chart_data",
+            "title": "Rack density climbs 15x from air to sCO2",
+            "body_text": "Heat capacity sets the ceiling.",
+            "chart_series": [
+                {"label": "Air", "value": 8, "unit": "kW/rack"},
+                {"label": "Liquid", "value": 40, "unit": "kW/rack"},
+                {"label": "sCO2", "value": 120, "unit": "kW/rack"},
+            ],
+        }
+    )
+    assert content.chart_series is not None
+    assert [p.label for p in content.chart_series] == ["Air", "Liquid", "sCO2"]
+    assert [p.value for p in content.chart_series] == [8.0, 40.0, 120.0]
+    # The data lives in chart_series, not buried in prose.
+    assert content.body_text == "Heat capacity sets the ceiling."
 
 
 # ---------------------------------------------------------------------------

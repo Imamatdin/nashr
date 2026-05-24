@@ -161,6 +161,23 @@ class TableRow(BaseModel):
     cells: list[str] = Field(default_factory=list[str], max_length=6)
 
 
+class ChartSeriesPoint(BaseModel):
+    """One data point in a CHART_DATA series: a label, a numeric value, and an
+    optional unit.
+
+    The value is a float (not a display string like :class:`StatItem.value`)
+    because it is plotted, not typeset — the renderer needs the magnitude to
+    size a bar or place a point. Formatting (thousands separators, decimals) is
+    the renderer's job, so this model stays the raw datum.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    label: str = Field(min_length=1, max_length=60)
+    value: float
+    unit: str | None = Field(default=None, max_length=10)
+
+
 class QuizOption(BaseModel):
     """One option for an INTERACTIVE_QUIZ_MCQ question."""
 
@@ -280,6 +297,8 @@ class SlideContent(BaseModel):
 
     table_headers: list[str] | None = Field(default=None, max_length=6)
     table_rows: list[TableRow] | None = Field(default=None, max_length=7)
+
+    chart_series: list[ChartSeriesPoint] | None = Field(default=None, max_length=8)
 
     quiz_questions: list[QuizQuestion] | None = Field(default=None, max_length=5)
 

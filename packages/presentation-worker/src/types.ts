@@ -142,6 +142,12 @@ export interface TableRow {
   cells: string[];
 }
 
+export interface ChartSeriesPoint {
+  label: string;
+  value: number;
+  unit?: string | null;
+}
+
 export interface QuizOption {
   text: string;
   is_correct: boolean;
@@ -208,6 +214,7 @@ export interface SlideContent {
   quote_attribution?: string | null;
   table_headers?: string[] | null;
   table_rows?: TableRow[] | null;
+  chart_series?: ChartSeriesPoint[] | null;
   quiz_questions?: QuizQuestion[] | null;
   matching_pairs?: MatchingPair[] | null;
   category_labels?: string[] | null;

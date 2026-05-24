@@ -406,6 +406,11 @@ ABSOLUTE RULES:
 13. Density arc (R26): the first three slides MUST be sparse (TITLE_HERO, CONCEPT_DEFINITION, CONTENT_SPLIT, QUOTE_PULLQUOTE, DATA_EMPHASIS with 1-2 stats). Dense types (TABLE_COMPACT, COMPARISON, TIMELINE) only appear in the middle or late deck.
 14. NEVER emit an interactive slide type (interactive_quiz_mcq, interactive_matching, interactive_categorize, interactive_fill_blank, interactive_true_false, interactive_debate). A separate pass generates those.
 
+STRUCTURED FIELDS — populate the field that matches the slide_type, or the slide renders BLANK:
+- table_compact: you MUST fill table_headers (the column labels) AND table_rows (one object per row, each with a "cells" array aligned 1:1 to the headers). Put the data ONLY in these fields — never in body_text, bullets, or speaker_notes. 2-5 columns, 2-7 rows. Example: "table_headers": ["Cooling", "Density", "PUE"], "table_rows": [{{"cells": ["Air", "8 kW/rack", "1.58"]}}, {{"cells": ["Liquid", "40 kW/rack", "1.10"]}}].
+- comparison: you MUST fill BOTH left_column and right_column (each a heading plus 2-4 points), contrasting two genuinely opposable things (e.g. "Air cooling" vs "Liquid cooling"). If the content is NOT a two-sided contrast — a framing point, a narrative beat, a single subject — DO NOT use comparison; use content_split or summary_takeaway instead. NEVER emit a comparison slide with null or empty columns.
+- chart_data: you MUST fill chart_series with the actual data points — each an object {{"label", "value" (a number), "unit"}}. body_text may carry a ONE-LINE caption only; never put the data in prose. Example: "chart_series": [{{"label": "Air", "value": 8, "unit": "kW/rack"}}, {{"label": "Liquid", "value": 40, "unit": "kW/rack"}}, {{"label": "sCO2", "value": 120, "unit": "kW/rack"}}].
+
 AVAILABLE SLIDE TYPES (pick the right one per slide):
 {slide_type_descriptions}
 
@@ -437,10 +442,11 @@ Return ONLY a JSON object. No prose, no markdown fences. Schema:
           "description": "..." or null}}
       ] or null,
       "keywords": [{{"term": "...", "explanation": "..."}}] or null,
-      "comparison": {{
-        "left": {{"heading": "...", "points": ["...", "..."]}},
-        "right": {{"heading": "...", "points": ["...", "..."]}}
-      }} or null,
+      "left_column": {{"heading": "...", "points": ["...", "..."]}} or null,
+      "right_column": {{"heading": "...", "points": ["...", "..."]}} or null,
+      "table_headers": ["Column A", "Column B", "Column C"] or null,
+      "table_rows": [{{"cells": ["a1", "b1", "c1"]}}, {{"cells": ["a2", "b2", "c2"]}}] or null,
+      "chart_series": [{{"label": "Air", "value": 8.0, "unit": "kW/rack"}}] or null,
       "timeline_nodes": [{{"date": "...", "label": "..."}}] or null,
       "steps": [{{"label": "...", "description": "..."}}] or null,
       "quote_text": "..." or null,

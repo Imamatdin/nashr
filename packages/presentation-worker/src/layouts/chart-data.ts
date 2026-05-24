@@ -10,6 +10,13 @@
  * component (recharts or generated SVG) will drop into this region
  * in a later task without disturbing the rest of the layout.
  *
+ * NOTE (chart data/renderer split): the editorial pass now emits the
+ * underlying data in `slide.content.chart_series` (ChartSeriesPoint[]),
+ * so the numbers reach the worker intact. This layout still renders the
+ * placeholder by design — the VISUAL renderer that consumes chart_series
+ * (SVG bars from the series) is the next task (BUILD_STATE Step 2/3).
+ * Until then chart_series is carried but not drawn.
+ *
  * The title takes the R35 phrasing: the *insight*, not the chart
  * type. That decision is the editorial pass's — the layout just
  * renders whatever title it's given.

@@ -58,6 +58,7 @@ from packages.core.models.article import ArticleOutline
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
     CategoryItem,
+    ChartSeriesPoint,
     ComparisonColumn,
     ContentAnalysis,
     DebateOption,
@@ -328,6 +329,9 @@ class _LLMSlide(BaseModel):
     keywords: list[KeywordItem] | None = Field(default=None, max_length=6)
     left_column: _LLMComparison | None = None
     right_column: _LLMComparison | None = None
+    table_headers: list[str] | None = Field(default=None, max_length=6)
+    table_rows: list[TableRow] | None = Field(default=None, max_length=7)
+    chart_series: list[ChartSeriesPoint] | None = Field(default=None, max_length=8)
     timeline_nodes: list[TimelineNode] | None = Field(default=None, max_length=8)
     steps: list[FlowStep] | None = Field(default=None, max_length=6)
     quote_text: str | None = Field(default=None, max_length=300)
@@ -877,6 +881,9 @@ def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
             keywords=raw.keywords,
             left_column=left_col,
             right_column=right_col,
+            table_headers=raw.table_headers,
+            table_rows=raw.table_rows,
+            chart_series=raw.chart_series,
             timeline_nodes=raw.timeline_nodes,
             steps=raw.steps,
             quote_text=raw.quote_text,
@@ -1297,7 +1304,13 @@ def _wrap_interactive(slide_type: SlideType, title: str, **fields: Any) -> Slide
     )
 
 
-# Re-export for tests that need to construct a TableRow without importing from
-# the models module directly. Kept here intentionally — the editorial pass
-# does not currently emit tables, but adding them later goes through this file.
-__all__ = ["SLIDE_TYPE_DESCRIPTIONS", "WORD_LIMITS", "EditorialPass", "TableRow"]
+# Re-export the structured primitives the editorial pass now materialises from
+# the LLM response (tables and chart series), so tests can construct them
+# without reaching into the models module directly.
+__all__ = [
+    "SLIDE_TYPE_DESCRIPTIONS",
+    "WORD_LIMITS",
+    "ChartSeriesPoint",
+    "EditorialPass",
+    "TableRow",
+]

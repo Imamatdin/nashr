@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { LayoutPass } from '../src/layout-pass.js';
+import type { ChartSeriesPoint } from '../src/types.js';
 import { buildTestDeck, makeSlide } from './helpers.js';
 
 describe('layout — CHART_DATA', () => {
@@ -35,6 +36,30 @@ describe('layout — CHART_DATA', () => {
     expect(annotation).toBeDefined();
     expect(annotation!.x).toBeGreaterThanOrEqual(70);
     expect(annotation!.y).toBeLessThanOrEqual(20);
+  });
+
+  it('carries chart_series in the wire format while still rendering the placeholder', () => {
+    // FIX 3: the data now flows through SlideContent.chart_series. The VISUAL
+    // renderer that plots it is the next task (BUILD_STATE Step 2/3); until
+    // then the placeholder is still drawn and the series is carried, not lost.
+    const series: ChartSeriesPoint[] = [
+      { label: 'Air', value: 8, unit: 'kW/rack' },
+      { label: 'Liquid', value: 40, unit: 'kW/rack' },
+      { label: 'sCO2', value: 120, unit: 'kW/rack' },
+    ];
+    const deck = buildTestDeck([
+      makeSlide('chart_data', {
+        title: 'Rack density climbs 15x from air to sCO2',
+        chart_series: series,
+      }),
+    ]);
+    const slide = deck.slides[0]!;
+    expect(slide.content.chart_series).toEqual(series);
+    const layout = new LayoutPass().layoutSlide(slide, deck);
+    const placeholder = layout.textBlocks.find((b) =>
+      b.text.includes('[Chart placeholder]'),
+    );
+    expect(placeholder).toBeDefined();
   });
 
   it('places the source citation small and bottom-right', () => {
