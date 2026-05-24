@@ -27,6 +27,7 @@
  */
 
 import PptxGenJS from 'pptxgenjs';
+import { SLIDE_WIDTH } from '../constants.js';
 import { getLabels } from '../labels.js';
 import type {
   DeckLayout,
@@ -460,9 +461,21 @@ export class PptxRenderer {
     return (pct / 100) * this.SLIDE_H_INCHES;
   }
 
-  /** Convert CSS px to PPT pt. 1pt = 1.333px @ 96dpi. */
+  /**
+   * Convert a layout px font size to PowerPoint points using the SAME
+   * canvas→slide scale the geometry uses.
+   *
+   * The Layout Pass sizes text on a SLIDE_WIDTH-px canvas and reserves every
+   * box as a percentage of that canvas; geometry (pctToInches*) maps the canvas
+   * onto a SLIDE_W_INCHES-wide slide. A font must scale by that SAME factor —
+   * px / SLIDE_WIDTH * SLIDE_W_INCHES * 72 — or it no longer fits the box the
+   * layout measured for it. The previous constant 0.75 (the 96dpi CSS px→pt
+   * ratio) silently assumed a 20in-wide canvas; the slide is 13.33in, so every
+   * run came out 1.5× too large and tall/wide text (hero stat numbers, long
+   * titles) overflowed its box and collided with the block below.
+   */
   pxToPt(px: number): number {
-    return Math.round(px * 0.75);
+    return Math.round((px / SLIDE_WIDTH) * this.SLIDE_W_INCHES * 72);
   }
 
   stripHash(hex: string): string {

@@ -224,11 +224,17 @@ describe('PptxRenderer — conversions', () => {
     expect(r.pctToInchesH(100)).toBeCloseTo(7.5, 3);
   });
 
-  it('pxToPt converts via 0.75 multiplier', () => {
+  it('pxToPt scales fonts on the same canvas→slide factor as geometry', () => {
+    // The Layout Pass sizes text on a 1920px canvas mapped onto a 13.33in
+    // slide, so 1px ≈ 0.5pt — the SAME factor geometry uses. The previous fixed
+    // 0.75 (a 96dpi px→pt ratio) assumed a 20in canvas, oversized every run by
+    // 1.5×, and overflowed boxes — that was the data-emphasis collision. A font
+    // must come out SMALLER than its px value or it no longer fits its box.
     const r = new PptxRenderer();
-    expect(r.pxToPt(24)).toBe(18);
-    expect(r.pxToPt(72)).toBe(54);
-    expect(r.pxToPt(14)).toBe(11); // rounded
+    expect(r.pxToPt(64)).toBe(32); // displayLarge/Jumbo hero number
+    expect(r.pxToPt(24)).toBe(12);
+    expect(r.pxToPt(72)).toBe(36);
+    expect(r.pxToPt(64)).toBeLessThan(64);
   });
 
   it('stripHash removes leading #', () => {
@@ -414,16 +420,18 @@ describe('PptxRenderer — text properties', () => {
     expect(centerAligned!.options.align).toBe('center');
   });
 
-  it('converts px font sizes to pt (0.75 ratio)', async () => {
+  it('converts px font sizes to pt on the geometry-derived scale (~0.5)', async () => {
     const deck = buildTestDeck([makeSlide('title_hero', { title: 'Big' })]);
     await renderDeck(deck);
     const sizes = mockState.slides[0]!.textCalls.map(
       (c) => c.options.fontSize as number,
     );
-    // Every emitted fontSize must be an integer in pt, not px.
+    // Every emitted fontSize must be an integer pt, and smaller than the px
+    // value it came from — the 64px display tier becomes ~32pt. A pt larger than
+    // its px tier was the 0.75 over-scaling that pushed text out of its box.
     for (const s of sizes) {
       expect(Number.isInteger(s)).toBe(true);
-      expect(s).toBeLessThan(80); // pt, not px — the 72-96px title becomes 54-72pt
+      expect(s).toBeLessThanOrEqual(40);
     }
   });
 });
