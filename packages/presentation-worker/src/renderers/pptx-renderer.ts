@@ -27,7 +27,7 @@
  */
 
 import PptxGenJS from 'pptxgenjs';
-import { SLIDE_WIDTH } from '../constants.js';
+import { SLIDE_WIDTH, isPlaceholderImageSrc } from '../constants.js';
 import { getLabels } from '../labels.js';
 import type {
   DeckLayout,
@@ -500,9 +500,6 @@ export class PptxRenderer {
    * can't render those — skip them.
    */
   private isPlaceholder(src: string | undefined): boolean {
-    if (!src) return true;
-    if (src.startsWith('[')) return true;
-    if (src.length > 500) return true;
-    return false;
+    return isPlaceholderImageSrc(src);
   }
 }

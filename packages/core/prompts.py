@@ -420,6 +420,8 @@ OBJECT FIGURE (figure_prompt) — OPTIONAL, only on concept_definition or conten
 - When a slide's point is best supported by a single CONTAINED technical subject — a physical device or apparatus (a server rack, a turbine, a gear, a cold plate, a sensor) or a concrete diagram of one mechanism — emit figure_prompt: a short, vivid description of THAT subject alone (the object on a clean background, no scene, no text). Also set figure_subject_type to "object" (a physical thing) or "concept" (an abstract idea visualised). Example: "figure_prompt": "a liquid cold plate heat exchanger, copper microchannels, isolated on a neutral background", "figure_subject_type": "object".
 - figure_prompt is DIFFERENT from a full-bleed scene and from a person. Do NOT use it for a named real person (those go in "people") nor for an atmospheric backdrop. Most slides have NO figure — only emit one when a contained object genuinely strengthens the point. Leave it null otherwise.
 
+TIMELINE PORTRAITS: on a timeline slide, when a node centers on a specific REAL person, set that node's "portrait_prompt" to the person's full name (e.g. "Isaac Newton"). Leave it null for nodes that are events, not people. A portrait is then sourced for that node automatically.
+
 AVAILABLE SLIDE TYPES (pick the right one per slide):
 {slide_type_descriptions}
 
@@ -458,7 +460,7 @@ Return ONLY a JSON object. No prose, no markdown fences. Schema:
       "chart_series": [{{"label": "Air", "value": 8.0, "unit": "kW/rack", "values": [6, 1.5, 0.5] or null}}] or null,
       "chart_type": "bar" | "line" | "single_value" | "grouped_bar" | "stacked_bar" or null,
       "chart_group_labels": ["IT load", "Cooling", "Other"] or null,
-      "timeline_nodes": [{{"date": "...", "label": "..."}}] or null,
+      "timeline_nodes": [{{"date": "...", "label": "...", "portrait_prompt": "<real person's name>" or null}}] or null,
       "steps": [{{"label": "...", "description": "..."}}] or null,
       "quote_text": "..." or null,
       "quote_attribution": "..." or null,

@@ -689,7 +689,7 @@ async def test_render_propagates_build_failure() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_full_pipeline_emits_six_progress_steps() -> None:
+async def test_full_pipeline_emits_seven_progress_steps() -> None:
     bot = _StubBot(payloads={"f1": b"pdf"})
     pipeline = _StubSourcePipeline([_pipeline_result()])
     worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
@@ -712,7 +712,8 @@ async def test_full_pipeline_emits_six_progress_steps() -> None:
 
     assert isinstance(result, PresentationRenderResult)
     assert result.html_path is not None
-    assert seen_steps == [1, 2, 3, 4, 5, 6]
+    # source → matrix → interview → design → editorial → images → render
+    assert seen_steps == [1, 2, 3, 4, 5, 6, 7]
 
 
 async def test_full_pipeline_uses_defaults_when_no_answers() -> None:

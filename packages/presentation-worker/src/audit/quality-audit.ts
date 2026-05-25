@@ -23,7 +23,7 @@ import type {
   DeckSpec,
   SlideType,
 } from '../types.js';
-import { WORD_LIMITS } from '../constants.js';
+import { WORD_LIMITS, isPlaceholderImageSrc } from '../constants.js';
 
 export class QualityAudit {
   /**
@@ -375,7 +375,7 @@ export class QualityAudit {
     for (const slide of layout.slides) {
       if (slide.background.image) {
         const src = slide.background.image.src;
-        if (!src || src.startsWith('[') || src.length > 500) {
+        if (isPlaceholderImageSrc(src)) {
           results.push({
             check_id: 'Q6',
             check_name: 'Image resolution',

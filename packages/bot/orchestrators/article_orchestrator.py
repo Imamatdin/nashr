@@ -68,6 +68,7 @@ from packages.core.models.export import (
 from packages.core.models.source import (
     SourceChunkCreate,
     SourceClaimCreate,
+    SourceFigure,
     SourceMetadataExtracted,
 )
 from packages.core.models.suggestion import SuggestionReport
@@ -187,6 +188,9 @@ class SourceProcessingResult(BaseModel):
     chunks: list[SourceChunkCreate] = Field(default_factory=list[SourceChunkCreate])
     metadata: list[SourceMetadataExtracted] = Field(default_factory=list[SourceMetadataExtracted])
     source_ids: list[UUID] = Field(default_factory=list[UUID])
+    # Raster figures extracted from sources, fed to the image engine's grounding
+    # (presentation pipeline only; the article worker ignores this field).
+    figures: list[SourceFigure] = Field(default_factory=list[SourceFigure])
     warnings: list[str] = Field(default_factory=list[str])
     failed_sources: list[tuple[str, str]] = Field(default_factory=list[tuple[str, str]])
 

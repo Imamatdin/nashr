@@ -100,6 +100,23 @@ export const WORD_LIMITS: Record<SlideType, number> = {
 };
 
 // ---------------------------------------------------------------------------
+// Image source classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an image `src` is an unresolved placeholder rather than a loadable
+ * reference. A real reference — an http(s)/file/data URL or an absolute path —
+ * is loadable at ANY length (signed object-store URLs routinely exceed 500
+ * chars), so it is never a placeholder. Only a `[`-prefixed prompt marker or a
+ * long bare string (leftover prompt text the image engine never resolved) is.
+ */
+export function isPlaceholderImageSrc(src: string | null | undefined): boolean {
+  if (!src) return true;
+  if (/^(https?:|file:|data:|\/|[a-zA-Z]:[\\/])/.test(src)) return false;
+  return src.startsWith('[') || src.length > 500;
+}
+
+// ---------------------------------------------------------------------------
 // Region specs per slide type. Percentages of slide dimensions.
 // ---------------------------------------------------------------------------
 
