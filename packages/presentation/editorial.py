@@ -48,6 +48,7 @@ from packages.core.enums import (
     ClaimStrength,
     ClaimType,
     ExportFormat,
+    ImageSubjectType,
     Language,
     NarrativeEmphasis,
     NarrativePhase,
@@ -339,6 +340,8 @@ class _LLMSlide(BaseModel):
     steps: list[FlowStep] | None = Field(default=None, max_length=6)
     quote_text: str | None = Field(default=None, max_length=300)
     quote_attribution: str | None = Field(default=None, max_length=100)
+    figure_prompt: str | None = Field(default=None, max_length=300)
+    figure_subject_type: ImageSubjectType | None = None
     speaker_notes: str | None = Field(default=None, max_length=2000)
     narrative_role: NarrativePhase | None = None
     section_name: str | None = Field(default=None, max_length=100)
@@ -857,6 +860,27 @@ def _try_parse_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _normalise_figure(
+    prompt: str | None,
+    subject_type: ImageSubjectType | None,
+) -> tuple[str | None, ImageSubjectType | None]:
+    """Clamp a figure slot to its legal shape.
+
+    A figure depicts a contained object or concept, never a real person —
+    real people flow through the ``people`` slot and resolve to gated
+    Commons portraits. So if the LLM emits a figure with no subject type,
+    or mistakenly tags it ``PERSON``/``SCENE``, coerce it to ``OBJECT`` so
+    the image engine never routes a figure into person sourcing. With no
+    prompt there is no figure: drop a stray subject type too.
+    """
+
+    if not prompt:
+        return None, None
+    if subject_type in (None, ImageSubjectType.PERSON, ImageSubjectType.SCENE):
+        return prompt, ImageSubjectType.OBJECT
+    return prompt, subject_type
+
+
 def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
     """Convert parsed LLM slides into validated :class:`SlideSpec` objects."""
 
@@ -874,6 +898,9 @@ def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
                 heading=raw.right_column.heading or "—",
                 points=list(raw.right_column.points),
             )
+        figure_prompt, figure_subject_type = _normalise_figure(
+            raw.figure_prompt, raw.figure_subject_type
+        )
         content = SlideContent(
             title=raw.title,
             subtitle=raw.subtitle,
@@ -893,6 +920,8 @@ def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
             steps=raw.steps,
             quote_text=raw.quote_text,
             quote_attribution=raw.quote_attribution,
+            figure_prompt=figure_prompt,
+            figure_subject_type=figure_subject_type,
             speaker_notes=raw.speaker_notes,
         )
         out.append(

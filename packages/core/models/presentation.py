@@ -28,6 +28,7 @@ from packages.core.enums import (
     ChartType,
     DiagramStrategy,
     ExportFormat,
+    ImageSubjectType,
     Language,
     NarrativeEmphasis,
     NarrativePhase,
@@ -135,13 +136,20 @@ class ComparisonColumn(BaseModel):
 
 
 class TimelineNode(BaseModel):
-    """One node on a TIMELINE slide."""
+    """One node on a TIMELINE slide.
+
+    ``portrait_prompt`` carries the editorial hint (a name + context) and
+    ``portrait_url`` the resolved Commons image the renderer draws. Both
+    optional: a timeline node without a person renders as a plain dated
+    label, exactly as before.
+    """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     date: str = Field(min_length=1, max_length=30)
     label: str = Field(min_length=1, max_length=150)
     portrait_prompt: str | None = Field(default=None, max_length=300)
+    portrait_url: str | None = Field(default=None, max_length=1000)
 
 
 class FlowStep(BaseModel):
@@ -329,6 +337,10 @@ class SlideContent(BaseModel):
 
     background_prompt: str | None = Field(default=None, max_length=500)
     background_url: str | None = Field(default=None, max_length=1000)
+
+    figure_prompt: str | None = Field(default=None, max_length=300)
+    figure_url: str | None = Field(default=None, max_length=1000)
+    figure_subject_type: ImageSubjectType | None = None
 
     speaker_notes: str | None = Field(default=None, max_length=2000)
 

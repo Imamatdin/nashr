@@ -157,6 +157,27 @@ class ChartType(StrEnum):
     STACKED_BAR = "stacked_bar"
 
 
+class ImageSubjectType(StrEnum):
+    """What an image slot depicts — routes the image engine's resolver.
+
+    ``PERSON`` slots route to gated Wikimedia Commons sourcing (real
+    likenesses, never AI-generated). ``OBJECT`` / ``CONCEPT`` / ``SCENE``
+    route to source-informed generation. The slots map as: a person
+    portrait is always ``PERSON``, a full-bleed background is always
+    ``SCENE``, and a contained object-figure carries ``OBJECT`` or
+    ``CONCEPT`` (a physical device/apparatus vs. an abstract idea), which
+    the Editorial Pass chooses when it emits ``figure_prompt``.
+
+    Stored only inside the ``deck_json`` jsonb blob, never a typed column,
+    so it needs no SQL CHECK constraint.
+    """
+
+    PERSON = "person"
+    OBJECT = "object"
+    CONCEPT = "concept"
+    SCENE = "scene"
+
+
 class PresentationMood(StrEnum):
     """Aesthetic mood that drives palette, typography, and decorative choices."""
 

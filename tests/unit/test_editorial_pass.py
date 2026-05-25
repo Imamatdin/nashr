@@ -23,6 +23,7 @@ from packages.core.enums import (
     ClaimStrength,
     ClaimType,
     ExportFormat,
+    ImageSubjectType,
     Language,
     NarrativeEmphasis,
     NarrativePhase,
@@ -290,6 +291,99 @@ def test_chart_type_and_grouped_fields_parse_and_materialise() -> None:
     assert content.chart_group_labels == ["IT load", "Cooling", "Other"]
     assert content.chart_series is not None
     assert content.chart_series[1].values == [90.0, 25.0, 5.0]
+
+
+# ---------------------------------------------------------------------------
+# Object-figure slot parsing (image engine, PART 1)
+#
+# Same contract guard as the chart/table tests: _LLMSlide must DECLARE
+# figure_prompt/figure_subject_type and _materialise_slides must copy them,
+# or extra="ignore" drops the figure the editorial prompt asks for and the
+# image engine never has a figure to resolve. _normalise_figure additionally
+# clamps a figure away from PERSON/SCENE so it never mis-routes into person
+# sourcing. figure_url is never emitted by editorial — the image stage writes
+# it later — so it must materialise as None here.
+# ---------------------------------------------------------------------------
+
+
+def test_figure_prompt_parses_and_materialises() -> None:
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "concept_definition",
+            "title": "The cold plate is where the heat leaves the chip",
+            "subtitle": "A liquid-cooled heat exchanger bolted to the die.",
+            "figure_prompt": "a liquid cold plate heat exchanger, copper "
+            "microchannels, isolated on a neutral background",
+            "figure_subject_type": "object",
+        }
+    )
+    assert (
+        content.figure_prompt == "a liquid cold plate heat exchanger, copper microchannels, "
+        "isolated on a neutral background"
+    )
+    assert content.figure_subject_type is ImageSubjectType.OBJECT
+    # The image stage fills figure_url later; editorial never emits it.
+    assert content.figure_url is None
+
+
+def test_figure_subject_type_concept_survives() -> None:
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "Entropy always increases in a closed loop",
+            "figure_prompt": "an abstract visualisation of rising entropy",
+            "figure_subject_type": "concept",
+        }
+    )
+    assert content.figure_subject_type is ImageSubjectType.CONCEPT
+
+
+def test_figure_without_subject_type_defaults_to_object() -> None:
+    # The model may emit a figure_prompt and forget the subject type; the
+    # materialiser must default it to OBJECT, never leave a figure unrouted.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "A turbine spins the generator",
+            "figure_prompt": "a steam turbine rotor, isolated on neutral grey",
+        }
+    )
+    assert content.figure_prompt is not None
+    assert content.figure_subject_type is ImageSubjectType.OBJECT
+
+
+def test_figure_tagged_person_is_coerced_to_object() -> None:
+    # A figure is a contained object/concept, never a real person (people go
+    # through the people slot and resolve to gated Commons portraits). A
+    # figure mistakenly tagged "person" must NOT route into person sourcing.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "The reactor core",
+            "figure_prompt": "a nuclear reactor pressure vessel cutaway",
+            "figure_subject_type": "person",
+        }
+    )
+    assert content.figure_subject_type is ImageSubjectType.OBJECT
+
+
+def test_no_figure_prompt_leaves_both_fields_null() -> None:
+    # No prompt means no figure: a stray subject type is dropped too, so the
+    # image stage sees a clean "no figure here" signal.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "A slide with no figure",
+            "figure_subject_type": "object",
+        }
+    )
+    assert content.figure_prompt is None
+    assert content.figure_subject_type is None
 
 
 # ---------------------------------------------------------------------------
