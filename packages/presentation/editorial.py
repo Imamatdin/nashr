@@ -38,7 +38,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -107,6 +107,10 @@ DEFAULT_PROJECT_ID: Final[str] = "presentation"
 # tops out around 15 content slides).
 MIN_CONTENT_SLIDES: Final[int] = 6
 MAX_CONTENT_SLIDES: Final[int] = 15
+
+# Upper bound for a title synthesised during coercion; mirrors
+# SlideContent.title / _LLMSlide.title so the salvaged value re-validates.
+_TITLE_MAX: Final[int] = 300
 
 # R17 word-count limits keyed by slide type. The post-processor enforces
 # these by truncating body text and moving the excess to speaker notes.
@@ -815,7 +819,15 @@ def _format_headline_numbers(numbers: list[str]) -> str:
 
 
 def _parse_sequence(text: str) -> list[_LLMSlide] | None:
-    """Decode an editorial LLM response into typed slide objects."""
+    """Decode an editorial LLM response into typed slide objects.
+
+    On a validation failure the response is not thrown away outright: a single
+    fixable field — an over-long unit/label, a slide that forgot its title —
+    must not collapse the whole deck into the emergency fallback. We attempt
+    targeted field-level salvage (see :func:`_coerce_llm_object`) and
+    re-validate once; only output that is still invalid after coercion (i.e.
+    genuinely unusable) is rejected.
+    """
 
     obj = _try_parse_object(text)
     if obj is None:
@@ -824,9 +836,172 @@ def _parse_sequence(text: str) -> list[_LLMSlide] | None:
     try:
         wrapper = _LLMSequence.model_validate(obj)
     except ValidationError as exc:
-        logger.warning("editorial_invalid_schema: %s", str(exc)[:3000])
-        return None
+        coerced = _coerce_llm_object(obj, exc)
+        if coerced is None:
+            logger.warning("editorial_invalid_schema: %s", str(exc)[:3000])
+            return None
+        try:
+            wrapper = _LLMSequence.model_validate(coerced)
+        except ValidationError as exc2:
+            logger.warning("editorial_invalid_after_coercion: %s", str(exc2)[:3000])
+            return None
+        logger.info("editorial_coerced_and_recovered slides=%d", len(wrapper.slides))
     return wrapper.slides
+
+
+def _coerce_llm_object(obj: dict[str, Any], exc: ValidationError) -> dict[str, Any] | None:
+    """Salvage the two recurring LLM failure modes that nuke a whole deck.
+
+    The editorial schema is intentionally tighter than the model's natural
+    output, so a single field on a single slide can fail validation and drop
+    the entire deck to the "insufficient source material" fallback. This reacts
+    to exactly two pydantic error classes and leaves everything else to that
+    fallback (so genuinely garbage output is not masked):
+
+    * ``string_too_long`` on any field → clamp the offending string to the
+      field's declared ``max_length`` (cut at a word boundary). A unit truncated
+      to 32 chars is vastly better than a lost deck.
+    * a slide ``title`` that is null / empty / missing → synthesise a terse
+      title from that slide's own text, or drop that one slide.
+
+    Mutates ``obj`` in place and returns it for one re-validation, or ``None``
+    when nothing was coercible (the caller then falls back unchanged).
+    """
+
+    raw_slides = obj.get("slides")
+    if not isinstance(raw_slides, list):
+        return None
+    slides = cast("list[Any]", raw_slides)
+
+    drop_indices: set[int] = set()
+    changed = False
+    for error in exc.errors():
+        loc = error["loc"]
+        etype = error["type"]
+        if etype == "string_too_long":
+            ctx = error.get("ctx")
+            limit = ctx.get("max_length") if isinstance(ctx, dict) else None
+            if isinstance(limit, int) and _truncate_field(obj, loc, limit):
+                changed = True
+        elif _is_missing_title(loc, etype):
+            slide_index = loc[1]
+            if not isinstance(slide_index, int) or not 0 <= slide_index < len(slides):
+                continue
+            raw_slide = slides[slide_index]
+            if not isinstance(raw_slide, dict):
+                continue
+            slide = cast("dict[str, Any]", raw_slide)
+            synthesised = _synthesise_title(slide)
+            if synthesised is not None:
+                slide["title"] = synthesised
+            else:
+                drop_indices.add(slide_index)
+            changed = True
+
+    if drop_indices:
+        obj["slides"] = [s for i, s in enumerate(slides) if i not in drop_indices]
+    return obj if changed else None
+
+
+def _is_missing_title(loc: tuple[int | str, ...], etype: str) -> bool:
+    """True when ``loc``/``etype`` describe a slide whose title is absent.
+
+    A too-long title is handled by the generic truncation branch, so only the
+    "no usable title" error classes route here.
+    """
+
+    return (
+        len(loc) == 3
+        and loc[0] == "slides"
+        and loc[2] == "title"
+        and etype in ("string_type", "string_too_short", "missing")
+    )
+
+
+def _truncate_field(obj: dict[str, Any], loc: tuple[int | str, ...], limit: int) -> bool:
+    """Walk ``loc`` into ``obj`` and clamp the terminal string to ``limit``.
+
+    Returns ``True`` when a string was actually shortened. Any structural
+    mismatch along the path (wrong container type, out-of-range index, terminal
+    value not an over-long string) is treated as not-coercible and returns
+    ``False`` — coercion only ever touches what the schema itself rejected.
+    """
+
+    if not loc:
+        return False
+    node: Any = obj
+    for step in loc[:-1]:
+        node = _index_raw(node, step)
+        if node is None:
+            return False
+    last = loc[-1]
+    if isinstance(node, dict) and isinstance(last, str):
+        container = cast("dict[str, Any]", node)
+        value = container.get(last)
+        if isinstance(value, str) and len(value) > limit:
+            container[last] = _truncate_at_word(value, limit)
+            return True
+    elif isinstance(node, list) and isinstance(last, int):
+        seq = cast("list[Any]", node)
+        if 0 <= last < len(seq):
+            value = seq[last]
+            if isinstance(value, str) and len(value) > limit:
+                seq[last] = _truncate_at_word(value, limit)
+                return True
+    return False
+
+
+def _index_raw(node: Any, step: int | str) -> Any:
+    """Take one navigation step into a raw JSON node.
+
+    Returns the child at ``step`` (a dict key or list index), or ``None`` when
+    the step does not fit the node's shape — the caller treats that as
+    not-coercible.
+    """
+
+    if isinstance(step, str) and isinstance(node, dict):
+        return cast("dict[str, Any]", node).get(step)
+    if isinstance(step, int) and isinstance(node, list):
+        seq = cast("list[Any]", node)
+        if 0 <= step < len(seq):
+            return seq[step]
+    return None
+
+
+def _truncate_at_word(value: str, limit: int) -> str:
+    """Clamp ``value`` to ``limit`` chars, preferring a nearby word boundary."""
+
+    if len(value) <= limit:
+        return value
+    hard = value[:limit].rstrip()
+    space = hard.rfind(" ")
+    if space >= limit // 2:
+        return hard[:space].rstrip()
+    return hard
+
+
+def _synthesise_title(slide: dict[str, Any]) -> str | None:
+    """Derive a terse title from a slide that emitted none.
+
+    Falls through the slide's own visible text (subtitle, body, first bullet,
+    first stat label, quote) and returns ``None`` when nothing usable remains —
+    the caller then drops that one slide instead of the whole deck.
+    """
+
+    candidates: list[Any] = [slide.get("subtitle"), slide.get("body_text")]
+    bullets = slide.get("bullets")
+    if isinstance(bullets, list) and bullets:
+        candidates.append(cast("list[Any]", bullets)[0])
+    stats = slide.get("stats")
+    if isinstance(stats, list) and stats:
+        first_stat = cast("list[Any]", stats)[0]
+        if isinstance(first_stat, dict):
+            candidates.append(cast("dict[str, Any]", first_stat).get("label"))
+    candidates.append(slide.get("quote_text"))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return _truncate_at_word(candidate.strip(), _TITLE_MAX)
+    return None
 
 
 def _parse_interactive(text: str) -> _LLMInteractive | None:

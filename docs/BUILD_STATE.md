@@ -168,6 +168,46 @@ tests; a step is DONE only when a commit changes this file.
     must be confirmed by regenerating the sCO2 deck on the server. "All tests pass" ≠ "verified
     end-to-end." Live tests are gated behind NASHR_LIVE_NET=1 (Commons) and the server's Vertex creds.
 
+## SHIPPED (editorial resilience — branch feat/image-engine)
+- WHY HERE, not a hardening branch: the editorial pass was collapsing every run to the 2-slide
+  "Insufficient source material" fallback, which BLOCKED testing the image engine on this branch
+  (no real deck → no slots to resolve). So the fix lands on feat/image-engine to unblock the image
+  eyeball, not as a separate initiative.
+- ROOT CAUSE = the recurring CLASS, not two fields. The editorial schema is tighter than the
+  model's natural output, and the whole LLM response is validated as ONE _LLMSequence — so a SINGLE
+  bad field on a SINGLE slide rejected the WHOLE deck. Same family as FIX1/FIX2/FIX3 above
+  (table_rows, comparison, chart_series), which were patched one field at a time; this one keeps
+  returning on new fields, so the fix is the MECHANISM.
+- THREE LAYERS:
+  - LOOSEN over-tight caps (the genuine schema bug): StatItem.unit and ChartSeriesPoint.unit
+    10 → 32. Real units the model emits — "liters/year", "of facility energy", "of waste heat" —
+    were nuking the deck at 10. 32 covers descriptive units without inviting prose. Conservative on
+    purpose: only the two units confirmed from live logs were raised. StatItem.trend (4) is the only
+    other notably-tight cap but the prompt never tells the model to emit it (absent from the schema
+    example), so it is low-risk and the coercion net below would catch a rare overflow anyway.
+  - SYNC prompt → schema (preventive): EDITORIAL_SYSTEM now states the limits the model fills —
+    "unit max 32 chars, terse, put descriptive words in the label" and "every slide MUST have a
+    non-empty title" — so the model stops emitting the violations in the first place.
+  - COERCE at the one choke point (_parse_sequence, the real safety net): on ValidationError, before
+    falling back, attempt FIELD-LEVEL salvage on exactly two safe-to-fix classes, then re-validate
+    ONCE. (1) string_too_long on any field → truncate to the field's declared max_length at a word
+    boundary; (2) a slide title that is null/empty/missing → synthesise a terse title from the
+    slide's own text (subtitle/body/bullet/stat label/quote), or drop that ONE slide. Anything else
+    is left untouched, so genuinely garbage output STILL falls back (coercion never masks real
+    failure). Logs editorial_coerced_and_recovered on success; keeps editorial_invalid_schema on the
+    genuine-failure path. It is a bounded salvage at one site, NOT a coercion framework.
+- VERIFIED (the gates this Python-only change affects): pytest tests/unit/test_editorial_pass.py +
+  test_presentation_models.py 102 passed (+11 new — over-long unit truncated not rejected; null /
+  empty / missing title repaired; untitled-with-no-text dropped not whole-deck; unknown slide_type
+  still falls back; full pipeline with BOTH violations yields a full multi-slide deck not the
+  2-slide fallback; uncoercible output → emergency deck; the three real units validate at the new
+  cap). pyright packages/ clean; ruff check + format clean on changed files. The Node renderer
+  (vitest/tsc) is untouched by this change — pure Python.
+- NOT done locally (be honest, per master prompt): the live sCO2 regen on the server (needs running
+  services + real Sonnet key) — the proof that the deck now comes back full instead of 2 slides, and
+  that editorial_invalid_schema is gone/coerced-and-recovered in the logs — must be run on the
+  server BEFORE merging anywhere.
+
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [~] Editorial structured fields: H tables + G comparison + D-data chart_series — DONE this branch.

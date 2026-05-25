@@ -199,6 +199,32 @@ def test_stat_item_with_trend_and_comparison_round_trips() -> None:
     assert again.trend == "↑"
 
 
+def test_stat_item_unit_accepts_descriptive_real_units() -> None:
+    # The 10-char cap rejected real units the editorial model naturally emits,
+    # collapsing the whole deck. The cap is 32; these must validate verbatim.
+    for unit in ("liters/year", "of facility energy", "of waste heat"):
+        stat = StatItem(value="42", unit=unit, label="Recovered")
+        assert stat.unit == unit
+
+
+def test_stat_item_unit_accepts_full_32_chars_rejects_33() -> None:
+    StatItem(value="1", unit="x" * 32, label="L")
+    with pytest.raises(ValidationError):
+        StatItem(value="1", unit="x" * 33, label="L")
+
+
+def test_chart_series_point_unit_accepts_descriptive_real_units() -> None:
+    for unit in ("liters/year", "of facility energy", "of waste heat"):
+        point = ChartSeriesPoint(label="Recovered heat", value=42.0, unit=unit)
+        assert point.unit == unit
+
+
+def test_chart_series_point_unit_accepts_full_32_chars_rejects_33() -> None:
+    ChartSeriesPoint(label="L", value=1.0, unit="x" * 32)
+    with pytest.raises(ValidationError):
+        ChartSeriesPoint(label="L", value=1.0, unit="x" * 33)
+
+
 def test_quiz_question_rejects_single_option() -> None:
     with pytest.raises(ValidationError):
         QuizQuestion(

@@ -387,6 +387,205 @@ def test_no_figure_prompt_leaves_both_fields_null() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Editorial validation coercion (the resilience net)
+#
+# The editorial schema is intentionally tighter than the model's natural
+# output, so a SINGLE bad field on a SINGLE slide used to fail _LLMSequence
+# validation and collapse the whole deck to the 2-slide "Insufficient source
+# material" fallback. _parse_sequence now salvages the two recurring failure
+# modes — an over-long string and a slide missing its title — and re-validates
+# once, falling back only when the output is genuinely unusable. These tests
+# lock that behaviour: a fixable field must never throw away the deck, and a
+# real defect must still fall back (coercion must not mask it).
+# ---------------------------------------------------------------------------
+
+
+def test_overlong_unit_is_truncated_not_whole_deck_rejected() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {
+                    "slide_index": 0,
+                    "slide_type": "data_emphasis",
+                    "title": "Recovered heat pays for the retrofit",
+                    "stats": [
+                        {
+                            "value": "1.04",
+                            "unit": "M USD of facility energy recovered annually",
+                            "label": "Annual saving",
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 1
+    assert parsed[0].stats is not None
+    # 43-char unit clamped at the nearest word boundary inside the 32 cap.
+    assert parsed[0].stats[0].unit == "M USD of facility energy"
+
+
+def test_null_title_repaired_from_body_keeps_slide() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"},
+                {
+                    "slide_index": 1,
+                    "slide_type": "content_split",
+                    "title": None,
+                    "body_text": "A dry cooler rejects rack heat without evaporating water.",
+                },
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 2
+    assert parsed[1].title == "A dry cooler rejects rack heat without evaporating water."
+
+
+def test_empty_string_title_repaired_from_stat_label() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Real title"},
+                {
+                    "slide_index": 1,
+                    "slide_type": "data_emphasis",
+                    "title": "   ",
+                    "stats": [{"value": "94.4", "unit": "%", "label": "Water saved"}],
+                },
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 2
+    assert parsed[1].title == "Water saved"
+
+
+def test_missing_title_key_repaired_from_body() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Real title"},
+                {
+                    "slide_index": 1,
+                    "slide_type": "content_split",
+                    "body_text": "Liquid cooling moves five times the heat of air.",
+                },
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 2
+    assert parsed[1].title == "Liquid cooling moves five times the heat of air."
+
+
+def test_untitled_slide_with_no_text_is_dropped_not_whole_deck() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"},
+                {"slide_index": 1, "slide_type": "content_split", "title": None},
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 1
+    assert parsed[0].title == "Cooling that pays"
+
+
+def test_genuinely_invalid_output_is_not_coerced() -> None:
+    # An unknown slide_type is a real defect, not a fixable field. Coercion must
+    # not mask it: parsing fails so the pipeline can fall back as before.
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [{"slide_index": 0, "slide_type": "not_a_real_slide_type", "title": "x"}]
+        )
+    )
+    assert parsed is None
+
+
+def _coercible_payload() -> str:
+    """A realistic editorial response carrying both salvageable violations:
+    one slide with an over-long stat unit and one slide with a null title."""
+
+    slides = [
+        _minimal_slide_payload("title_hero", "Water savings reach 94.4% in mild climates"),
+        _minimal_slide_payload("concept_definition", "Direct evaporative cooling defined"),
+        {
+            "slide_index": 2,
+            "slide_type": "data_emphasis",
+            "title": "Recovered heat pays for the retrofit",
+            "stats": [
+                {
+                    "value": "1.04",
+                    "unit": "M USD of facility energy recovered annually",
+                    "label": "Annual saving",
+                }
+            ],
+            "narrative_role": "evidence",
+        },
+        _minimal_slide_payload("section_break", "Method"),
+        {
+            "slide_index": 4,
+            "slide_type": "content_split",
+            "title": None,
+            "body_text": "A three-stage pipeline moves heat off the rack into a dry cooler.",
+            "narrative_role": "core",
+        },
+        _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot"),
+    ]
+    return _llm_slides_payload(slides)
+
+
+@pytest.mark.asyncio
+async def test_coercible_violations_yield_full_deck_not_fallback() -> None:
+    # The regression that proves the CLASS is fixed, not just the instance: a
+    # response with an over-long unit AND a null title must coerce to a FULL
+    # multi-slide deck, never the 2-slide "insufficient source" fallback.
+    llm = _StubLLM([_coercible_payload()])
+    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    claims = [
+        _claim(
+            f"Empirical finding {i} from the cooling pilot.",
+            claim_type=ClaimType.EMPIRICAL_FINDING,
+            strength=ClaimStrength.STRONG,
+        )
+        for i in range(20)
+    ]
+    deck = await pass_.generate_deck_spec(
+        interview=_interview(include_interactive=False),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=claims,
+        chunks=[],
+        source_metadata=[],
+    )
+    titles = [s.content.title for s in deck.slides]
+    assert "Insufficient source material" not in titles
+    assert len(deck.slides) > 2
+    units = [st.unit for s in deck.slides if s.content.stats for st in s.content.stats]
+    assert "M USD of facility energy" in units
+
+
+@pytest.mark.asyncio
+async def test_uncoercible_output_falls_back_to_minimal_deck() -> None:
+    # Garbage that coercion can't fix (unknown slide_type on every slide) must
+    # still produce the emergency deck — the safety net must not hide real
+    # failure. Two responses: the first call plus its one retry.
+    bad = _llm_slides_payload([{"slide_index": 0, "slide_type": "bogus", "title": "x"}])
+    llm = _StubLLM([bad, bad])
+    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    deck = await pass_.generate_deck_spec(
+        interview=_interview(include_interactive=False),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=[_claim("A finding that matters.")],
+        chunks=[],
+        source_metadata=[],
+    )
+    titles = [s.content.title for s in deck.slides]
+    assert "Insufficient source material" in titles
+
+
+# ---------------------------------------------------------------------------
 # Content analysis (no LLM)
 # ---------------------------------------------------------------------------
 
