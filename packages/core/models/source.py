@@ -187,6 +187,27 @@ class SourceMetadataExtracted(BaseModel):
     creation_date: str | None = Field(default=None, max_length=64)
 
 
+class SourceFigure(BaseModel):
+    """One raster image extracted from a source file, with its nearby text.
+
+    The image engine topic-matches a slide's subject against ``caption`` /
+    ``context`` to decide whether a source figure is relevant. If it is, the
+    figure is captioned (vision) to STEER generation as art direction — the
+    bytes are never copied into the deck and the source image is never used
+    directly. ``data`` is therefore an input to understanding, not output.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    page_number: int = Field(ge=1)
+    data: bytes
+    content_type: str = Field(min_length=1, max_length=100)
+    width: int = Field(ge=0)
+    height: int = Field(ge=0)
+    caption: str | None = Field(default=None, max_length=2000)
+    context: str = Field(default="", max_length=4000)
+
+
 class ParsedSource(BaseModel):
     """The complete parse result for one uploaded file."""
 
@@ -199,6 +220,7 @@ class ParsedSource(BaseModel):
     metadata: SourceMetadataExtracted = Field(default_factory=SourceMetadataExtracted)
     full_text: str = ""
     needs_ocr_pages: list[int] = Field(default_factory=list[int])
+    figures: list[SourceFigure] = Field(default_factory=list["SourceFigure"], max_length=40)
     parse_errors: list[str] = Field(default_factory=list)
 
 

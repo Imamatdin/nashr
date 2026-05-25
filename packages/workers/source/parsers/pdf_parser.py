@@ -21,6 +21,7 @@ import fitz  # type: ignore[reportMissingTypeStubs]
 from packages.core.models.source import (
     ParsedPage,
     ParsedSource,
+    SourceFigure,
     SourceMetadataExtracted,
 )
 from packages.workers.source.parsers.lang_detect import detect_language
@@ -35,6 +36,19 @@ DOI_RE: Final[re.Pattern[str]] = re.compile(
 
 HEADING_FONT_SIZE: Final[float] = 14.0
 HEADING_FLAG_BOLD: Final[int] = 16
+
+# Figure extraction (image engine source grounding). Skip icons/rules/logos
+# below the threshold; cap per source so a slide-heavy PDF can't balloon memory.
+MIN_FIGURE_PX: Final[int] = 150
+MAX_FIGURES_PER_SOURCE: Final[int] = 24
+FIGURE_CONTEXT_CHARS: Final[int] = 2000
+FIGURE_CAPTION_CHARS: Final[int] = 500
+
+# Lines that open a figure caption, across en / ru / uz.
+CAPTION_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(fig(?:ure)?\.?|рис(?:унок)?\.?|расм\.?|diagram|scheme|schema)\b",
+    re.IGNORECASE,
+)
 
 
 class PDFParser:
@@ -68,6 +82,7 @@ class PDFParser:
 
         pages: list[ParsedPage] = []
         needs_ocr_pages: list[int] = []
+        figures: list[SourceFigure] = []
         has_images = False
 
         for page_index in range(len(doc)):
@@ -82,6 +97,15 @@ class PDFParser:
             pages.append(parsed_page)
             if parsed_page.needs_ocr:
                 needs_ocr_pages.append(parsed_page.page_number)
+            if page_has_images and len(figures) < MAX_FIGURES_PER_SOURCE:
+                figures.extend(
+                    self._extract_figures(
+                        doc,
+                        page_index,
+                        parsed_page.text,
+                        MAX_FIGURES_PER_SOURCE - len(figures),
+                    )
+                )
 
         full_text = "\n\n".join(p.text for p in pages)
         word_count = len(full_text.split()) if full_text else 0
@@ -103,6 +127,7 @@ class PDFParser:
             metadata=metadata,
             full_text=full_text,
             needs_ocr_pages=needs_ocr_pages,
+            figures=figures,
             parse_errors=errors,
         )
 
@@ -133,6 +158,68 @@ class PDFParser:
             ),
             page_has_images,
         )
+
+    def _extract_figures(
+        self,
+        doc: fitz.Document,
+        page_index: int,
+        page_text: str,
+        limit: int,
+    ) -> list[SourceFigure]:
+        """Extract embedded raster images from one page with their caption/context.
+
+        Icons, rules, and logos below :data:`MIN_FIGURE_PX` are skipped. Each
+        figure carries the page's caption lines (matched in order) and a
+        truncated slice of the page text as broader context — both feed the
+        image engine's topic match, never the rendered deck. Every fitz call is
+        defensive: a single un-extractable image is skipped, never fatal.
+        """
+
+        page = doc[page_index]
+        captions = _figure_captions(page_text)
+        context = page_text.strip()[:FIGURE_CONTEXT_CHARS]
+        out: list[SourceFigure] = []
+        seen: set[int] = set()
+
+        for raw in cast("list[tuple[object, ...]]", page.get_images(full=True)):  # type: ignore[reportUnknownMemberType]
+            if len(out) >= limit:
+                break
+            if not raw:
+                continue
+            xref = raw[0]
+            if not isinstance(xref, int) or xref in seen:
+                continue
+            seen.add(xref)
+            try:
+                extracted = cast("dict[str, object]", doc.extract_image(xref))  # type: ignore[reportUnknownMemberType]
+            except Exception as exc:
+                logger.warning("pdf_extract_image_failed", extra={"xref": xref, "error": str(exc)})
+                continue
+
+            data = extracted.get("image")
+            ext = extracted.get("ext")
+            width = extracted.get("width")
+            height = extracted.get("height")
+            if not isinstance(data, bytes) or not isinstance(ext, str):
+                continue
+            if not isinstance(width, int) or not isinstance(height, int):
+                continue
+            if width < MIN_FIGURE_PX or height < MIN_FIGURE_PX:
+                continue
+
+            caption = captions[len(out)] if len(out) < len(captions) else None
+            out.append(
+                SourceFigure(
+                    page_number=page_index + 1,
+                    data=data,
+                    content_type=f"image/{ext}",
+                    width=width,
+                    height=height,
+                    caption=caption,
+                    context=context,
+                )
+            )
+        return out
 
     @staticmethod
     def _extract_headings(page: fitz.Page) -> list[str]:
@@ -234,3 +321,14 @@ class PDFParser:
 
 def _metadata_blob(raw: dict[str, str]) -> str:
     return " ".join(value for value in raw.values() if value)
+
+
+def _figure_captions(page_text: str) -> list[str]:
+    """Caption lines on a page, in reading order ("Figure 3: …", "Рис. 2 …")."""
+
+    captions: list[str] = []
+    for line in page_text.splitlines():
+        stripped = line.strip()
+        if stripped and CAPTION_PREFIX_RE.match(stripped):
+            captions.append(stripped[:FIGURE_CAPTION_CHARS])
+    return captions

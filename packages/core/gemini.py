@@ -117,6 +117,29 @@ def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
     return (input_tokens / 1_000_000.0) * input_rate + (output_tokens / 1_000_000.0) * output_rate
 
 
+def build_default_genai_client() -> genai.Client:
+    """Construct a ``google-genai`` client, preferring Vertex AI over AI Studio.
+
+    Vertex is used when ``VERTEX_PROJECT`` and ``GOOGLE_APPLICATION_CREDENTIALS``
+    are both set; otherwise an AI Studio ``GOOGLE_API_KEY`` is required. Shared
+    by :class:`GeminiClient` and the image/vision client so both providers route
+    through the same credentials with one definition.
+    """
+
+    vertex_project = os.environ.get("VERTEX_PROJECT")
+    if vertex_project and os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        logger.info("genai client using Vertex AI (project=%s)", vertex_project)
+        return genai.Client(vertexai=True, project=vertex_project, location="us-central1")
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GOOGLE_API_KEY environment variable is not set; "
+            "the Gemini client cannot be initialized without it."
+        )
+    logger.info("genai client using AI Studio API key")
+    return genai.Client(api_key=api_key)
+
+
 def _default_generate_content_fn(client: genai.Client) -> GenerateContentFn:
     """Bind a ``google.genai.Client`` into the injected-fn shape."""
 
@@ -165,20 +188,9 @@ class GeminiClient:
         max_retries: int = DEFAULT_LLM_MAX_RETRIES,
     ) -> None:
         if generate_content_fn is None:
-            vertex_project = os.environ.get("VERTEX_PROJECT")
-            if vertex_project and os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-                client = genai.Client(vertexai=True, project=vertex_project, location="us-central1")
-                logger.info("GeminiClient using Vertex AI (project=%s)", vertex_project)
-            else:
-                api_key = os.environ.get("GOOGLE_API_KEY")
-                if not api_key:
-                    raise RuntimeError(
-                        "GOOGLE_API_KEY environment variable is not set; "
-                        "GeminiClient cannot be initialized without it."
-                    )
-                client = genai.Client(api_key=api_key)
-                logger.info("GeminiClient using AI Studio API key")
-            self._generate_content_fn: GenerateContentFn = _default_generate_content_fn(client)
+            self._generate_content_fn: GenerateContentFn = _default_generate_content_fn(
+                build_default_genai_client()
+            )
         else:
             self._generate_content_fn = generate_content_fn
         self._timeout_seconds = timeout_seconds
