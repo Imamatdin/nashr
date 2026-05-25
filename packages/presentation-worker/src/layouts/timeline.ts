@@ -13,6 +13,7 @@
 import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../constants.js';
 import type {
   DeckSpec,
+  ImageBlock,
   ShapeBlock,
   SlideLayout,
   SlideSpec,
@@ -31,11 +32,19 @@ const LABEL_W = 20;
 const LABEL_H = 12;
 const LABEL_Y = 50;
 
+// Portrait thumbnail above the date for nodes the image engine resolved a
+// face for. Sized so six portraits (the node cap) never touch horizontally
+// (6 nodes sit 16% apart) and the box clears both the title and the date band.
+const PORTRAIT_W = 9;
+const PORTRAIT_H = 15;
+const PORTRAIT_Y = 16;
+
 export function layoutTimeline(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const regions = SLIDE_REGIONS.timeline!;
   const { design } = deck;
   const blocks: TextBlock[] = [];
   const shapes: ShapeBlock[] = [];
+  const images: ImageBlock[] = [];
 
   blocks.push(
     buildTextBlock({
@@ -69,6 +78,19 @@ export function layoutTimeline(slide: SlideSpec, deck: DeckSpec): SlideLayout {
 
   nodes.forEach((node, idx) => {
     const nodeX = nodeXFor(idx, nodes.length);
+
+    if (node.portrait_url) {
+      images.push({
+        src: node.portrait_url,
+        x: clamp(nodeX - PORTRAIT_W / 2, 0, 100 - PORTRAIT_W),
+        y: PORTRAIT_Y,
+        w: PORTRAIT_W,
+        h: PORTRAIT_H,
+        objectFit: 'cover',
+        opacity: 1,
+        isBackground: false,
+      });
+    }
 
     shapes.push({
       type: 'circle',
@@ -120,7 +142,7 @@ export function layoutTimeline(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   });
 
   const background = defaultBackground(design);
-  return compose(slide, blocks, [], shapes, background);
+  return compose(slide, blocks, images, shapes, background);
 }
 
 function nodeXFor(idx: number, count: number): number {

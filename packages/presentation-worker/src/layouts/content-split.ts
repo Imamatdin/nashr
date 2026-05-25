@@ -23,6 +23,7 @@ import {
   compose,
   composeBodyText,
   defaultBackground,
+  figureImageBlock,
   hugHeightToMeasured,
   stackBelow,
 } from './shared.js';
@@ -106,8 +107,15 @@ export function layoutContentSplit(slide: SlideSpec, deck: DeckSpec): SlideLayou
     );
   }
 
+  // The right panel carries, in priority order: a contained object-figure
+  // (the explicit object slot, shown whole via objectFit:'contain'), else a
+  // legacy full-panel cover image from background_url. Neither present → no
+  // image block at all, so the slide renders text-only exactly as before.
   const images: ImageBlock[] = [];
-  if (slide.content.background_url) {
+  const figure = figureImageBlock(slide.content.figure_url, regions.figure!);
+  if (figure) {
+    images.push(figure);
+  } else if (slide.content.background_url) {
     images.push({
       src: slide.content.background_url,
       x: regions.image!.x,

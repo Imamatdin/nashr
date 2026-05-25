@@ -324,6 +324,38 @@ export function buildScrim(
 }
 
 // ---------------------------------------------------------------------------
+// Contained object-figure (image engine PART 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a contained-figure ImageBlock, or null when there is no figure.
+ *
+ * The figure is the deck's "workhorse" object slot: a rack, a turbine, a cold
+ * plate. It renders with objectFit:'contain' (the whole object stays visible,
+ * never cropped) and isBackground:false (it is foreground content, not a
+ * full-bleed scene), inside a region that lives clear of the slide's text
+ * column. A null `figureUrl` yields null — the caller adds nothing, so a slide
+ * with no resolved figure renders exactly as it did before the image engine
+ * (no empty box, no placeholder rect).
+ */
+export function figureImageBlock(
+  figureUrl: string | null | undefined,
+  region: Region,
+): ImageBlock | null {
+  if (!figureUrl) return null;
+  return {
+    src: figureUrl,
+    x: region.x,
+    y: region.y,
+    w: region.w,
+    h: region.h,
+    objectFit: 'contain',
+    opacity: 1,
+    isBackground: false,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Final SlideLayout composer
 // ---------------------------------------------------------------------------
 
