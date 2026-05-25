@@ -196,6 +196,33 @@ def test_stat_item_with_trend_and_comparison_round_trips() -> None:
     assert again.trend == "↑"
 
 
+def test_stat_item_unit_accepts_descriptive_units_up_to_32() -> None:
+    # Regression for the editorial-resilience fix: the model naturally emits
+    # descriptive units ("of facility energy" = 18 chars) that the old cap of 10
+    # rejected, nuking the whole deck. These must now validate natively.
+    for unit in ("liters/year", "of facility energy", "of waste heat"):
+        assert StatItem(value="30", unit=unit, label="metric").unit == unit
+    assert StatItem(value="1", unit="x" * 32, label="metric").unit == "x" * 32
+    with pytest.raises(ValidationError):
+        StatItem(value="1", unit="x" * 33, label="metric")
+
+
+def test_stat_item_trend_accepts_short_descriptive_trend() -> None:
+    # The old cap of 4 rejected natural trend tokens like "+150% YoY"; 12 covers
+    # them without inviting prose.
+    assert StatItem(value="1", unit="%", label="m", trend="+150% YoY").trend == "+150% YoY"
+    with pytest.raises(ValidationError):
+        StatItem(value="1", unit="%", label="m", trend="x" * 13)
+
+
+def test_chart_series_point_unit_accepts_descriptive_unit_up_to_32() -> None:
+    point = ChartSeriesPoint(label="sCO2", value=120.0, unit="kWh per server rack")
+    assert point.unit == "kWh per server rack"
+    assert ChartSeriesPoint(label="a", value=1.0, unit="x" * 32).unit == "x" * 32
+    with pytest.raises(ValidationError):
+        ChartSeriesPoint(label="a", value=1.0, unit="x" * 33)
+
+
 def test_quiz_question_rejects_single_option() -> None:
     with pytest.raises(ValidationError):
         QuizQuestion(

@@ -113,6 +113,50 @@ tests; a step is DONE only when a commit changes this file.
     source of truth across both surfaces. Deferred niceties: currency-prefix unit formatting
     ("$1.04M" vs "1.04$M"); per-sub-bar value labels on dense (>8) grouped charts.
 
+## SHIPPED (editorial resilience — the schema-vs-model mismatch CLASS)
+- An editorial deck no longer collapses to the 2-slide "Insufficient source material" fallback when
+  ONE field on ONE slide violates the schema. ROOT CAUSE (live logs, reproducible on main — NOT the
+  image branch): the editorial LLM output is validated as a single _LLMSequence, so ANY single field
+  error rejected the WHOLE deck. Observed killers: StatItem.unit cap of 10 vs the model's natural
+  units ("of facility energy"=18, "liters/year"=11, "of waste heat"=13) and a null _LLMSlide/
+  SlideContent title. Same CLASS we'd patched per-field before (table_rows, chart_series); this fixes
+  the MECHANISM. Branch fix/editorial-resilience, OFF MAIN (does NOT contain feat/image-engine).
+  - LAYER 1 (caps match reality): StatItem.unit + ChartSeriesPoint.unit 10→32 (a descriptive unit is
+    legitimate; 32 covers it without inviting prose); StatItem.trend 4→12 ("+150% YoY", "rising").
+    After this, the three reported units VALIDATE NATIVELY — no coercion needed for the instances.
+    Renderer-safe: types.ts carries unit/trend uncapped (the audit only reads trend presence).
+  - LAYER 2 (prompt↔schema sync): EDITORIAL_SYSTEM now states the hard caps the model fills — title
+    REQUIRED non-empty; value ≤20 bare number; unit ≤32 TERSE with descriptive words in the LABEL not
+    the unit; keyword term / timeline date / step label / person years caps. Preventive layer.
+  - LAYER 3 (THE safety net — field-level coercion): _parse_sequence, on ValidationError, now calls
+    _coerce_sequence instead of giving up. Driven by ValidationError.errors(): string_too_long →
+    truncate to the field's max_length at a word boundary; null/empty/missing title → synthesise from
+    the slide's subtitle/section/quote/body/bullet/stat-label, else drop just that slide;
+    extra_forbidden (stray key on an extra="forbid" sub-model) → delete the key; any OTHER per-slide
+    error → drop that ONE slide, not the deck. Re-validate ONCE; fall back only if STILL invalid or
+    nothing salvageable remains (garbage still falls back — coercion does not mask real failures).
+    Greppable recovery log: `editorial_coerced_and_recovered truncated=.. titles_synthesized=..
+    extra_fields_dropped=.. slides_dropped_uncoercible=.. kept=..` — slides_dropped_uncoercible>0 in
+    prod is the smell signal for a NEW error type to add to coercion next. The original
+    editorial_invalid_schema line is kept (now "(attempting coercion)") so the old signal still greps.
+    This is the CLASS fix: a future too-tight string cap degrades that one field, never the deck.
+  - ACCEPTANCE-WORDING NOTE: the master prompt's "20-char unit truncates" assumed the cap stayed 10;
+    with Layer 1 at 32 a 20-char unit passes natively. The regression test therefore uses a 39-char
+    unit to actually fire truncation (→ "kilowatt hours per server rack"=30), and a separate model
+    test locks the reported descriptive units passing natively.
+  - VERIFIED (no live LLM): pytest 1136 passed / 30 skipped; pyright packages/ clean; ruff check +
+    format clean (LF-normalised); presentation-worker typecheck (tsc src+tests) clean; vitest 288
+    passed — the lone red is the PRE-EXISTING text-measure sCO2-title 1-vs-2 (item 11/F, documented in
+    NOTES; TS untouched this branch). New tests: full-pipeline coercion → FULL deck not fallback;
+    unit-level truncate + title-synthesise + extra-key-drop + drop-only-the-uncoercible-slide; garbage
+    (all-bad-enum, slides-not-a-list) still falls back. NOT done locally (honest gap, per the master
+    prompt's FINISH): live Sonnet regen of the sCO2 deck on the server — no API key in env. DO NOT
+    MERGE until the server produces a full multi-slide deck and logs show coerced-and-recovered (or no
+    editorial_invalid_schema).
+  - MERGE NOTE: integrating with feat/image-engine will hit a TRIVIAL EDITORIAL_SYSTEM conflict — both
+    branches insert a block right after the chart_data grouped_bar line (this one adds FIELD LENGTH
+    LIMITS; image adds OBJECT FIGURE). Keep both.
+
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [~] Editorial structured fields: H tables + G comparison + D-data chart_series — DONE this branch.

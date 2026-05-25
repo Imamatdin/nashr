@@ -416,6 +416,13 @@ STRUCTURED FIELDS — populate the field that matches the slide_type, or the sli
   - "single_value": ONE headline figure in context. For a percentage give one point ("chart_type": "single_value", "chart_series": [{{"label": "Water saved", "value": 94.4, "unit": "%"}}]); for a value-of-target give two points where the second is the target ([{{"label": "ARR", "value": 1.04, "unit": "$M"}}, {{"label": "target", "value": 5, "unit": "$M"}}]).
   - "grouped_bar" / "stacked_bar": several sub-values per category. Provide chart_group_labels (the sub-series names) and give each chart_series point a "values" array aligned 1:1 to chart_group_labels. Example: "chart_type": "stacked_bar", "chart_group_labels": ["IT load", "Cooling", "Other"], "chart_series": [{{"label": "Air", "value": 8, "values": [6, 1.5, 0.5]}}, {{"label": "sCO2", "value": 120, "values": [90, 25, 5]}}]. Keep "value" set to the point's total for fallback.
 
+FIELD LENGTH LIMITS (hard caps — keep within them so the slide is never dropped):
+- title: REQUIRED on EVERY slide. Non-empty, max 70 chars of takeaway. NEVER null, never omitted — a slide with no title is discarded.
+- stats[].value: the bare number only, max 20 chars ("94.4", "516,120", "$1.04M"). Do NOT put units or words here.
+- stats[].unit and chart_series[].unit: max 32 chars, TERSE — a symbol or short token ("%", "kW/rack", "liters/yr", "°C"). Put descriptive words in the LABEL, never in the unit. Write label "of facility energy" with unit "%", NOT unit "% of facility energy".
+- keywords[].term: max 50 chars. timeline_nodes[].date: max 30 chars. steps[].label: max 50 chars. people[].years: max 30 chars.
+Everything else obeys the per-type WORD LIMITS below.
+
 AVAILABLE SLIDE TYPES (pick the right one per slide):
 {slide_type_descriptions}
 

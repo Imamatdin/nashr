@@ -293,6 +293,124 @@ def test_chart_type_and_grouped_fields_parse_and_materialise() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Editorial resilience: field-level coercion (LAYER 3)
+#
+# A single field violation on one slide used to reject the ENTIRE _LLMSequence,
+# collapsing the deck into the 2-slide "Insufficient source material" fallback.
+# These pin the mechanism fix: over-long strings are truncated, missing titles
+# synthesised, stray keys dropped, and only the genuinely unsalvageable slide
+# (or a wholly broken response) is discarded — never the whole deck for a
+# fixable single field.
+# ---------------------------------------------------------------------------
+
+
+def test_coercion_truncates_long_unit_and_synthesizes_missing_title() -> None:
+    # The exact live failure shape: a unit longer than its 32-char cap on one
+    # slide, plus a null title on another. Coercion recovers BOTH and returns the
+    # full slide list — never None.
+    long_unit = "kilowatt hours per server rack per year"  # 39 chars > 32
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {
+                    "slide_index": 0,
+                    "slide_type": "data_emphasis",
+                    "title": "Energy savings are dramatic",
+                    "stats": [{"value": "30", "unit": long_unit, "label": "facility energy"}],
+                },
+                {
+                    "slide_index": 1,
+                    "slide_type": "concept_definition",
+                    "title": None,
+                    "body_text": "Supercritical CO2 is a dense fluid above its critical point.",
+                },
+            ]
+        )
+    )
+    assert parsed is not None
+    assert len(parsed) == 2
+    slides = _materialise_slides(parsed)
+    assert slides[0].content.stats is not None
+    truncated_unit = slides[0].content.stats[0].unit
+    assert len(truncated_unit) <= 32
+    assert truncated_unit == "kilowatt hours per server rack"  # cut at a word boundary
+    assert slides[1].content.title.strip() != ""
+    assert "Supercritical CO2" in slides[1].content.title
+
+
+def test_coercion_drops_stray_extra_key_keeps_slide() -> None:
+    # An extra key on a strict sub-model (StatItem is extra="forbid") would nuke
+    # the deck; coercion drops the key and keeps the slide.
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {
+                    "slide_index": 0,
+                    "slide_type": "data_emphasis",
+                    "title": "Results",
+                    "stats": [{"value": "94.4", "unit": "%", "label": "saved", "note": "stray"}],
+                }
+            ]
+        )
+    )
+    assert parsed is not None
+    assert len(parsed) == 1
+    slides = _materialise_slides(parsed)
+    assert slides[0].content.stats is not None
+    assert slides[0].content.stats[0].value == "94.4"
+
+
+def test_coercion_drops_only_the_uncoercible_slide() -> None:
+    # Two valid slides plus one with an invalid slide_type enum: the deck survives
+    # with the two good slides, not a whole-deck collapse.
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Good one"},
+                {"slide_index": 1, "slide_type": "NOT_A_REAL_TYPE", "title": "Doomed"},
+                {"slide_index": 2, "slide_type": "summary_takeaway", "title": "Good two"},
+            ]
+        )
+    )
+    assert parsed is not None
+    assert [s.title for s in parsed] == ["Good one", "Good two"]
+
+
+def test_coercion_drops_slide_with_unsynthesizable_title() -> None:
+    # A slide with no title and nothing to synthesise one from is dropped; the
+    # sibling slide survives.
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Keeper"},
+                {"slide_index": 1, "slide_type": "section_break"},
+            ]
+        )
+    )
+    assert parsed is not None
+    assert [s.title for s in parsed] == ["Keeper"]
+
+
+def test_coercion_returns_none_when_all_slides_uncoercible() -> None:
+    # Genuinely unusable output (every slide has an invalid enum) still falls
+    # back — coercion does not mask real failures.
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "BOGUS_A", "title": "x"},
+                {"slide_index": 1, "slide_type": "BOGUS_B", "title": "y"},
+            ]
+        )
+    )
+    assert parsed is None
+
+
+def test_coercion_returns_none_when_slides_not_a_list() -> None:
+    # A structurally broken response (slides is not an array) is unsalvageable.
+    assert _parse_sequence(json.dumps({"slides": "definitely not a list"})) is None
+
+
+# ---------------------------------------------------------------------------
 # Content analysis (no LLM)
 # ---------------------------------------------------------------------------
 
@@ -911,6 +1029,61 @@ async def test_generate_deck_spec_empty_claims_returns_minimal_deck() -> None:
     )
     assert deck.slides[0].slide_type is SlideType.TITLE_HERO
     assert len(deck.slides) >= 1
+
+
+def _coercion_pipeline_payload() -> str:
+    long_unit = "kilowatt hours per server rack per year"  # 39 chars > 32-char cap
+    slides = [
+        _minimal_slide_payload("title_hero", "Supercritical CO2 reshapes data-center cooling"),
+        {
+            "slide_index": 1,
+            "slide_type": "data_emphasis",
+            "title": "Facility energy drops sharply",
+            "stats": [{"value": "30", "unit": long_unit, "label": "facility energy saved"}],
+            "narrative_role": "evidence",
+        },
+        {
+            "slide_index": 2,
+            "slide_type": "concept_definition",
+            "title": None,  # missing title -> synthesised, NOT a deck killer
+            "body_text": "Supercritical CO2 stays dense yet flows like a gas above critical.",
+            "narrative_role": "context",
+        },
+        _minimal_slide_payload("section_break", "Mechanism"),
+        _minimal_slide_payload("flow_process", "Heat moves chip to ambient in three stages"),
+        _minimal_slide_payload("summary_takeaway", "Three reasons sCO2 wins"),
+    ]
+    return _llm_slides_payload(slides)
+
+
+@pytest.mark.asyncio
+async def test_generate_deck_spec_coerces_instead_of_falling_back() -> None:
+    # THE regression test for the class fix: an editorial response carrying a
+    # too-long unit AND a null title yields a FULL multi-slide deck, not the
+    # 2-slide "Insufficient source material" fallback.
+    llm = _StubLLM([_coercion_pipeline_payload()])
+    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    claims = [
+        _claim(f"Empirical finding {i}.", claim_type=ClaimType.EMPIRICAL_FINDING) for i in range(12)
+    ]
+    deck = await pass_.generate_deck_spec(
+        interview=_interview(include_interactive=False),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=claims,
+        chunks=[],
+        source_metadata=[],
+    )
+    titles = [s.content.title for s in deck.slides]
+    assert "Insufficient source material" not in titles
+    assert len(deck.slides) > 2
+    assert deck.slides[0].slide_type is SlideType.TITLE_HERO
+    # The over-long unit survived as a truncated unit, not by dropping the slide.
+    units = [stat.unit for s in deck.slides if s.content.stats for stat in s.content.stats]
+    assert units
+    assert all(len(u) <= 32 for u in units)
+    # Every slide has a non-empty title (the null one was synthesised).
+    assert all(s.content.title.strip() for s in deck.slides)
 
 
 @pytest.mark.asyncio

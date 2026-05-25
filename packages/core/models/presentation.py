@@ -95,10 +95,10 @@ class StatItem(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     value: str = Field(min_length=1, max_length=20)
-    unit: str = Field(default="", max_length=10)
+    unit: str = Field(default="", max_length=32)
     label: str = Field(min_length=1, max_length=100)
     highlight: bool = False
-    trend: str | None = Field(default=None, max_length=4)
+    trend: str | None = Field(default=None, max_length=12)
     comparison: str | None = Field(default=None, max_length=100)
 
 
@@ -183,7 +183,7 @@ class ChartSeriesPoint(BaseModel):
 
     label: str = Field(min_length=1, max_length=60)
     value: float
-    unit: str | None = Field(default=None, max_length=10)
+    unit: str | None = Field(default=None, max_length=32)
     values: list[float] | None = Field(default=None, max_length=6)
 
 

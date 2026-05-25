@@ -38,9 +38,10 @@ import json
 import logging
 import re
 from collections import defaultdict
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic_core import ErrorDetails
 
 from packages.core.enums import (
     AudienceType,
@@ -812,17 +813,219 @@ def _format_headline_numbers(numbers: list[str]) -> str:
 
 
 def _parse_sequence(text: str) -> list[_LLMSlide] | None:
-    """Decode an editorial LLM response into typed slide objects."""
+    """Decode an editorial LLM response into typed slide objects.
+
+    On strict-validation failure the parser does NOT immediately give up: it
+    attempts field-level coercion (see :func:`_coerce_sequence`) so a single
+    over-long string, missing title, or stray key degrades that one field
+    instead of collapsing the entire deck into the emergency fallback.
+    """
 
     obj = _try_parse_object(text)
     if obj is None:
         logger.warning("editorial_parse_failed_not_json len=%d head=%s", len(text), text[:300])
         return None
     try:
-        wrapper = _LLMSequence.model_validate(obj)
+        return _LLMSequence.model_validate(obj).slides
     except ValidationError as exc:
-        logger.warning("editorial_invalid_schema: %s", str(exc)[:3000])
+        logger.warning("editorial_invalid_schema (attempting coercion): %s", str(exc)[:1500])
+        return _coerce_sequence(obj, exc)
+
+
+# Slide keys, in priority order, a missing/empty title is synthesised from.
+_TITLE_SOURCE_KEYS: Final[tuple[str, ...]] = ("subtitle", "section_name", "quote_text", "body_text")
+# A synthesised fallback title stays short so it reads as a title, not a paragraph.
+_SYNTH_TITLE_MAX: Final[int] = 80
+
+
+# A parsed-JSON node. Coercion walks the raw LLM object before re-validating it
+# into ``_LLMSequence``; this alias keeps that walk fully typed (no ``Any``).
+type _JsonValue = dict[str, _JsonValue] | list[_JsonValue] | str | int | float | bool | None
+
+
+def _descend(node: _JsonValue, key: int | str) -> _JsonValue:
+    """Return the child of ``node`` at ``key``, or None if the path is invalid."""
+
+    if isinstance(node, list) and isinstance(key, int) and 0 <= key < len(node):
+        return node[key]
+    if isinstance(node, dict) and isinstance(key, str) and key in node:
+        return node[key]
+    return None
+
+
+def _set_by_loc(root: dict[str, Any], loc: tuple[int | str, ...], value: str) -> bool:
+    """Set the value at a pydantic-error ``loc`` path inside a parsed JSON object."""
+
+    if not loc:
+        return False
+    node: _JsonValue = root
+    for key in loc[:-1]:
+        node = _descend(node, key)
+        if node is None:
+            return False
+    last = loc[-1]
+    if isinstance(node, list) and isinstance(last, int) and 0 <= last < len(node):
+        node[last] = value
+        return True
+    if isinstance(node, dict) and isinstance(last, str):
+        node[last] = value
+        return True
+    return False
+
+
+def _del_by_loc(root: dict[str, Any], loc: tuple[int | str, ...]) -> bool:
+    """Delete the key at a pydantic-error ``loc`` path (used for stray extra keys)."""
+
+    if not loc:
+        return False
+    node: _JsonValue = root
+    for key in loc[:-1]:
+        node = _descend(node, key)
+        if node is None:
+            return False
+    last = loc[-1]
+    if isinstance(node, dict) and isinstance(last, str) and last in node:
+        del node[last]
+        return True
+    return False
+
+
+def _truncate_at_word_boundary(text: str, max_length: int) -> str:
+    """Clip ``text`` to ``max_length`` chars, cutting at the last word boundary.
+
+    A slightly-truncated unit ("kilowatt hours per ser") is vastly better than a
+    lost deck. The boundary is only honoured when it does not gut more than half
+    the budget; otherwise the string is hard-cut so the result always fits.
+    """
+
+    if len(text) <= max_length:
+        return text
+    window = text[:max_length].rstrip()
+    boundary = window.rfind(" ")
+    if boundary >= max(1, max_length // 2):
+        window = window[:boundary].rstrip()
+    return window
+
+
+def _synthesize_title(slide: dict[str, Any]) -> str | None:
+    """Derive a minimal title from a slide's other content, or None if none exists."""
+
+    for key in _TITLE_SOURCE_KEYS:
+        value = slide.get(key)
+        if isinstance(value, str) and value.strip():
+            return _truncate_at_word_boundary(value.strip(), _SYNTH_TITLE_MAX)
+    bullets: _JsonValue = slide.get("bullets")
+    if isinstance(bullets, list):
+        for bullet in bullets:
+            if isinstance(bullet, str) and bullet.strip():
+                return _truncate_at_word_boundary(bullet.strip(), _SYNTH_TITLE_MAX)
+    stats: _JsonValue = slide.get("stats")
+    if isinstance(stats, list):
+        for stat in stats:
+            if isinstance(stat, dict):
+                label = stat.get("label")
+                if isinstance(label, str) and label.strip():
+                    return _truncate_at_word_boundary(label.strip(), _SYNTH_TITLE_MAX)
+    return None
+
+
+def _coerce_one_error(
+    obj: dict[str, Any],
+    slides: list[Any],
+    err: ErrorDetails,
+) -> tuple[str, int | None]:
+    """Apply one safe coercion for a single validation error.
+
+    Returns ``(action, slide_index)``. Field-level fixes mutate ``obj`` in place
+    and keep the slide — ``"truncated"`` (over-long string clipped), ``"title"``
+    (missing/empty title synthesised), ``"extra"`` (stray forbidden key removed).
+    ``"drop"`` tells the caller to discard that one slide (an un-coercible
+    per-slide error — the smell signal for a new error type worth handling here).
+    ``"fatal"`` means the error is not localised to a slide and the whole
+    response is unsalvageable.
+    """
+
+    loc = err["loc"]
+    if len(loc) < 2 or loc[0] != "slides":
+        return ("fatal", None)
+    idx = loc[1]
+    if not isinstance(idx, int) or not 0 <= idx < len(slides):
+        return ("fatal", None)
+
+    error_type = err["type"]
+    if error_type == "string_too_long":
+        raw = err.get("input")
+        ctx = err.get("ctx") or {}
+        max_len = ctx.get("max_length")
+        if (
+            isinstance(raw, str)
+            and isinstance(max_len, int)
+            and _set_by_loc(obj, loc, _truncate_at_word_boundary(raw, max_len))
+        ):
+            return ("truncated", idx)
+        return ("drop", idx)
+    if error_type == "extra_forbidden" and _del_by_loc(obj, loc):
+        return ("extra", idx)
+    if loc == ("slides", idx, "title"):
+        synthesized = _synthesize_title(slides[idx])
+        if synthesized:
+            slides[idx]["title"] = synthesized
+            return ("title", idx)
+    return ("drop", idx)
+
+
+def _coerce_sequence(obj: dict[str, Any], exc: ValidationError) -> list[_LLMSlide] | None:
+    """Salvage an editorial response that failed strict ``_LLMSequence`` validation.
+
+    The common, safe-to-fix violations are coerced at the field level (over-long
+    strings truncated, missing titles synthesised, stray keys dropped); a slide
+    carrying an un-coercible error is discarded on its own rather than collapsing
+    the whole deck. The coerced object is re-validated ONCE: on success the
+    recovered slides are returned and the recovery is logged; if it is still
+    invalid — or nothing salvageable remains — None is returned so the caller
+    falls back. This targets the recurring CLASS of schema-vs-model mismatches,
+    not any single field.
+    """
+
+    slides_value = obj.get("slides")
+    if not isinstance(slides_value, list):
         return None
+    slides = cast(list[Any], slides_value)
+
+    truncated = synthesized = extra_dropped = 0
+    drop: set[int] = set()
+    for err in exc.errors():
+        action, idx = _coerce_one_error(obj, slides, err)
+        if action == "fatal":
+            logger.warning("editorial_coercion_fatal: unlocalised error at loc=%s", err["loc"])
+            return None
+        if action == "truncated":
+            truncated += 1
+        elif action == "title":
+            synthesized += 1
+        elif action == "extra":
+            extra_dropped += 1
+        elif idx is not None:
+            drop.add(idx)
+
+    kept = [slide for i, slide in enumerate(slides) if i not in drop]
+    if not kept:
+        logger.warning("editorial_coercion_empty: all %d slide(s) unsalvageable", len(slides))
+        return None
+    try:
+        wrapper = _LLMSequence.model_validate({**obj, "slides": kept})
+    except ValidationError as exc2:
+        logger.warning("editorial_coercion_failed: %s", str(exc2)[:1500])
+        return None
+    logger.warning(
+        "editorial_coerced_and_recovered truncated=%d titles_synthesized=%d "
+        "extra_fields_dropped=%d slides_dropped_uncoercible=%d kept=%d",
+        truncated,
+        synthesized,
+        extra_dropped,
+        len(drop),
+        len(kept),
+    )
     return wrapper.slides
 
 
