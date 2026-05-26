@@ -5,31 +5,78 @@
  * trio of number/icon, bold label, descriptive body text. Faint
  * accent-colour connector lines bridge consecutive steps.
  *
- * Step columns occupy the central 80% of the slide; the number
- * region sits centred above the label so the whole step reads as a
- * single column.
+ * Geometry is REGION-RELATIVE, not hardcoded. The step row is centred
+ * vertically within the content region (title bottom → bottom margin)
+ * and the number tier is sized adaptively against that region. Three
+ * shared rows result: every step's number sits at the same y (so the
+ * connector line cuts horizontally across them); every step's label
+ * sits at the same y; every step's description starts at the same y
+ * but its rendered height is measured (long descriptions push into
+ * the band, short ones don't strand). Long descriptions get a real
+ * body tier — small (12-14px) wastes the band.
+ *
+ * Do NOT re-introduce NUMBER_Y/LABEL_Y/DESCRIPTION_Y/CONNECTOR_Y
+ * constants — that's the hardcoded-geometry violation of
+ * docs/INVARIANTS.md this file exists to kill. Positions are computed
+ * from the region and the measured content.
  */
 
-import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../constants.js';
-import type {
-  DeckSpec,
-  ShapeBlock,
-  SlideLayout,
-  SlideSpec,
-  TextBlock,
-} from '../types.js';
-import { buildTextBlock, compose, defaultBackground } from './shared.js';
+import {
+  FONT_SIZES,
+  LINE_HEIGHTS,
+  MARGIN,
+  SLIDE_HEIGHT,
+  SLIDE_REGIONS,
+  type Region,
+} from '../constants.js';
+import type { DeckSpec, ShapeBlock, SlideLayout, SlideSpec, TextBlock } from '../types.js';
+import { buildTextBlock, compose, defaultBackground, hugHeightToMeasured, type FontTier } from './shared.js';
 
+/** Horizontal layout: the step grid occupies the central 80% of the slide. */
 const FLOW_LEFT_MARGIN = 10;
 const FLOW_TOTAL_WIDTH = 80;
-const NUMBER_Y = 28;
-const NUMBER_H = 8;
-const NUMBER_W = 6;
-const LABEL_Y = 42;
-const LABEL_H = 6;
-const DESCRIPTION_Y = 50;
-const DESCRIPTION_H = 15;
-const CONNECTOR_Y = 35;
+
+/** Vertical breather between the title bottom and the step row. */
+const TITLE_GAP = 3;
+
+/** Inter-block gaps within a step column (slide %). */
+const NUMBER_TO_LABEL_GAP = 2;
+const LABEL_TO_DESCRIPTION_GAP = 1.5;
+
+/** Adaptive number tier ceiling (px) and target fraction of region height.
+ *  Mirrors the data_emphasis tuning: aim for ~30% of region height as the
+ *  rendered number height, cap at 240px to match the data_emphasis hero
+ *  cap so the two layouts read at the same headline scale. */
+const NUMBER_CEILING_PX = 240;
+const NUMBER_TARGET_REGION_FRACTION = 0.3;
+const NUMBER_FLOOR_PX = 64;
+
+/** Render-cost multiplier mirrored from text-measure.HEIGHT_SAFETY (1.3)
+ *  × LINE_HEIGHTS.heading (1.1). */
+const RENDER_LINE_FACTOR = LINE_HEIGHTS.heading * 1.3;
+
+/** Connector line stroke (raw px in the renderer). */
+const CONNECTOR_STROKE_PX = 2;
+const CONNECTOR_OPACITY = 0.3;
+
+/**
+ * Compute the adaptive number font max (px) for the given region height.
+ * Bigger region → bigger numbers, bounded by NUMBER_CEILING_PX and never
+ * smaller than NUMBER_FLOOR_PX (the floor is what gives 3-5 step decks
+ * with skinny regions a still-readable number).
+ */
+function adaptiveNumberMaxPx(regionHeightPct: number): number {
+  const regionHeightPx = (regionHeightPct / 100) * SLIDE_HEIGHT;
+  const targetHeightPx = regionHeightPx * NUMBER_TARGET_REGION_FRACTION;
+  const fontSize = Math.round(targetHeightPx / RENDER_LINE_FACTOR);
+  return Math.min(NUMBER_CEILING_PX, Math.max(NUMBER_FLOOR_PX, fontSize));
+}
+
+interface StepBlocks {
+  number: TextBlock;
+  label: TextBlock;
+  description: TextBlock;
+}
 
 export function layoutFlowProcess(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const regions = SLIDE_REGIONS.flow_process!;
@@ -56,81 +103,121 @@ export function layoutFlowProcess(slide: SlideSpec, deck: DeckSpec): SlideLayout
     return compose(slide, blocks, [], shapes, background);
   }
 
+  const titleBottom = regions.title!.y + regions.title!.h;
+  const regionTop = titleBottom + TITLE_GAP;
+  const regionBottom = 100 - MARGIN.bottom;
+  const regionHeight = regionBottom - regionTop;
+
   const columnWidth = FLOW_TOTAL_WIDTH / steps.length;
+  const numberMaxPx = adaptiveNumberMaxPx(regionHeight);
+  const numberTier: FontTier = { min: NUMBER_FLOOR_PX, max: numberMaxPx };
+  // Labels and descriptions are bumped up two tiers from the old (caption,
+  // small) — that pairing was sized against the old 6%/15% pre-cut slots
+  // and looks anaemic next to a 200px+ number. Labels are the step name
+  // (heading, bold) so they hold their own under the headline number;
+  // descriptions read at subheading so they fill the remaining band.
+  const labelTier = FONT_SIZES.heading;
+  const descriptionTier = FONT_SIZES.subheading;
 
-  steps.forEach((step, idx) => {
+  // BUILD PASS: measure each step's three blocks. The label and description
+  // probe against the full region height (not a pre-cut slot) so a wrapped
+  // multi-line block measures its real height rather than overflowing a
+  // fixed 6%/15% box.
+  const stepBlocks: StepBlocks[] = steps.map((step, idx) => {
     const stepX = FLOW_LEFT_MARGIN + idx * columnWidth;
-
-    const numberRegion: Region = {
-      x: stepX + columnWidth / 2 - NUMBER_W / 2,
-      y: NUMBER_Y,
-      w: NUMBER_W,
-      h: NUMBER_H,
+    const fullRegion: Region = {
+      x: stepX,
+      y: regionTop,
+      w: columnWidth,
+      h: regionHeight,
     };
-    blocks.push(
+
+    const number = hugHeightToMeasured(
       buildTextBlock({
         text: step.icon ?? String(idx + 1),
-        region: numberRegion,
+        region: fullRegion,
         fontFamily: design.heading_font,
         fontWeight: 'bold',
         color: design.palette.accent,
         align: 'center',
-        tier: FONT_SIZES.displayLarge,
+        tier: numberTier,
         lineHeight: LINE_HEIGHTS.heading,
       }),
     );
 
-    const labelRegion: Region = {
-      x: stepX,
-      y: LABEL_Y,
-      w: columnWidth,
-      h: LABEL_H,
-    };
-    blocks.push(
+    const label = hugHeightToMeasured(
       buildTextBlock({
         text: step.label,
-        region: labelRegion,
+        region: fullRegion,
         fontFamily: design.body_font,
         fontWeight: 'bold',
         color: design.palette.text,
         align: 'center',
-        tier: FONT_SIZES.caption,
+        tier: labelTier,
         lineHeight: LINE_HEIGHTS.body,
       }),
     );
 
-    const descRegion: Region = {
-      x: stepX,
-      y: DESCRIPTION_Y,
-      w: columnWidth,
-      h: DESCRIPTION_H,
-    };
-    blocks.push(
+    const description = hugHeightToMeasured(
       buildTextBlock({
         text: step.description,
-        region: descRegion,
+        region: fullRegion,
         fontFamily: design.body_font,
         fontWeight: 'normal',
         color: design.palette.text_secondary,
         align: 'center',
-        tier: FONT_SIZES.small,
+        tier: descriptionTier,
         lineHeight: LINE_HEIGHTS.body,
       }),
     );
+
+    return { number, label, description };
   });
 
+  // PLACE PASS: compute shared row y's. Numbers and labels use the row
+  // maxima so the whole grid reads as horizontal strips. Descriptions
+  // share a top-y so they hang off the label strip uniformly, but each
+  // column keeps its own measured height — a longer description renders
+  // taller than its short neighbours rather than clipping.
+  const maxNumberH = Math.max(...stepBlocks.map((s) => s.number.measuredHeightPct));
+  const maxLabelH = Math.max(...stepBlocks.map((s) => s.label.measuredHeightPct));
+  const maxDescriptionH = Math.max(...stepBlocks.map((s) => s.description.measuredHeightPct));
+
+  const stackHeight =
+    maxNumberH + NUMBER_TO_LABEL_GAP + maxLabelH + LABEL_TO_DESCRIPTION_GAP + maxDescriptionH;
+  const stackTop = regionTop + Math.max(0, (regionHeight - stackHeight) / 2);
+
+  const numberY = stackTop;
+  const labelY = numberY + maxNumberH + NUMBER_TO_LABEL_GAP;
+  const descriptionY = labelY + maxLabelH + LABEL_TO_DESCRIPTION_GAP;
+
+  for (const sb of stepBlocks) {
+    sb.number.y = numberY;
+    sb.label.y = labelY;
+    sb.description.y = descriptionY;
+    blocks.push(sb.number, sb.label, sb.description);
+  }
+
+  // Connector: a thin horizontal line at the vertical centre of the number
+  // row. Hairlines are positioned by their TOP-y in slide %, with stroke
+  // applied as raw px — 2px is 0.18pp on a 1080-px slide, so the visual
+  // misalignment of using "centre y" as "top y" is invisible and the test
+  // only asserts opacity + count. Bridging the gap between consecutive
+  // columns at 80%/20% of the column width leaves the number/label
+  // glyphs clear of the line.
+  const connectorY = numberY + maxNumberH / 2;
   for (let i = 0; i < steps.length - 1; i++) {
     const startX = FLOW_LEFT_MARGIN + i * columnWidth + columnWidth * 0.8;
     const endX = FLOW_LEFT_MARGIN + (i + 1) * columnWidth + columnWidth * 0.2;
     shapes.push({
       type: 'line',
       x: startX,
-      y: CONNECTOR_Y,
+      y: connectorY,
       w: endX - startX,
       h: 0,
       stroke: design.palette.accent,
-      strokeWidth: 2,
-      opacity: 0.3,
+      strokeWidth: CONNECTOR_STROKE_PX,
+      opacity: CONNECTOR_OPACITY,
     });
   }
 

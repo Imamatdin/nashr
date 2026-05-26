@@ -221,22 +221,35 @@ export const GRID = {
 // Stat positions for DATA_EMPHASIS by count
 // ---------------------------------------------------------------------------
 
+/**
+ * Column bands for the stat row(s). Horizontal positions match the
+ * original 1/2/3/4 layouts; vertical bands span the full content envelope
+ * — title bottom (y≈14 after a 1pp breather) to the bottom margin
+ * (y=94) — so the number can read big like a Canva headline instead of
+ * being trapped in a 50% mid-slide strip. For 4 stats the band splits
+ * into two equal rows so the 2×2 grid still reads as two distinct rows.
+ *
+ * The data_emphasis layout consumes y/h as the band envelope; an
+ * adaptive font tier (computed from band height) decides how big the
+ * number actually renders. Do NOT shrink these back to 50% — the under-
+ * fill bug this fixes lives in band geometry.
+ */
 export const STAT_POSITIONS: Record<1 | 2 | 3 | 4, readonly Region[]> = {
-  1: [{ x: 25, y: 25, w: 50, h: 50 }],
+  1: [{ x: 25, y: 14, w: 50, h: 80 }],
   2: [
-    { x: 10, y: 25, w: 35, h: 50 },
-    { x: 55, y: 25, w: 35, h: 50 },
+    { x: 10, y: 14, w: 35, h: 80 },
+    { x: 55, y: 14, w: 35, h: 80 },
   ],
   3: [
-    { x: 5, y: 25, w: 28, h: 50 },
-    { x: 36, y: 25, w: 28, h: 50 },
-    { x: 67, y: 25, w: 28, h: 50 },
+    { x: 5, y: 14, w: 28, h: 80 },
+    { x: 36, y: 14, w: 28, h: 80 },
+    { x: 67, y: 14, w: 28, h: 80 },
   ],
   4: [
-    { x: 8, y: 15, w: 37, h: 32 },
-    { x: 55, y: 15, w: 37, h: 32 },
-    { x: 8, y: 53, w: 37, h: 32 },
-    { x: 55, y: 53, w: 37, h: 32 },
+    { x: 8, y: 14, w: 37, h: 39 },
+    { x: 55, y: 14, w: 37, h: 39 },
+    { x: 8, y: 55, w: 37, h: 39 },
+    { x: 55, y: 55, w: 37, h: 39 },
   ],
 };
 

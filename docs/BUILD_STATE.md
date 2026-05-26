@@ -466,6 +466,57 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
 - DONE = this commit + this BUILD_STATE entry + live regen on server (slide 10
   headlines 1.08, slide 14 is bars) gate the merge to main.
 
+## SHIPPED (layout fill — branch feat/layout-fill)
+- data_emphasis + flow_process were structurally under-filling the slide (live sCO2 deck:
+  stat numbers squatting in a 50% mid-slide strip at the 64px tier cap; flow steps nailed to
+  y=28..65 by hardcoded y-constants, leaving y=12..28 and y=65..94 as dead space). Fixed at
+  the RENDERER layer — no editorial/model/schema changes — by attacking the real causes:
+  band geometry on stats, hardcoded-y constants on flow.
+  - STAT_POSITIONS (constants.ts) keeps the original horizontal layouts but expands the
+    vertical band to the full content envelope: 1–3 stat rows now span y=14..94, the 4-stat
+    2×2 grid splits into two y=14..53 + y=55..94 bands. Title region unchanged.
+  - data-emphasis.ts now sizes the number tier ADAPTIVELY against the band height minus
+    the measured below-stack height (unit/label/comparison): terse labels → big number,
+    verbose labels → smaller number, ceiling 240px (matches the new flow_process cap).
+    `maxSingleLineFontSize` probes each value for one-line fit in its column so a digit
+    never wraps into "94" / "4"; pathological long values fall back to displayLarge.min
+    instead of dragging the row down.
+  - data-emphasis.ts: number blocks across a row now share a COMMON BASELINE (their
+    measured bottoms align) AND render at a UNIFORM FONT SIZE (the MIN of per-stat single-
+    line fits across the row). Pure baseline alignment with mismatched font sizes still
+    reads staggered; the uniform-size pass costs one extra build per stat and is commented
+    against future "simplification". 4-stat 2×2 baselines are per-row, not shared.
+  - flow-process.ts removed every hardcoded y-constant (NUMBER_Y / LABEL_Y /
+    DESCRIPTION_Y / DESCRIPTION_H / CONNECTOR_Y). Geometry is computed from the actual
+    content region (title bottom → bottom margin) and the measured content: shared number
+    row y, shared label row y, shared description top y with each description hugged to
+    its OWN measured height (no fixed 15% description slot). Stack is vertically centred
+    in the region. Connector y = midpoint of the number row, not a magic 35%. Number
+    ceiling 240px, label promoted to FONT_SIZES.heading, description to FONT_SIZES.subheading
+    so the larger band reads with real hierarchy. Honors INVARIANTS spirit (I1): no
+    hardcoded constant stands in for measured layout on a visible path.
+  - Tests added (`__tests__/layout-data-emphasis.test.ts` + `layout-flow-process.test.ts`):
+    shared baseline within 0.5pp tolerance, uniform font size across a row, displayLarge
+    floor under pathological values, per-row baselines for 4-stat 2×2, content spans >50%
+    of band/region height, never overflow bottom margin (94pp), connector below
+    descriptions, no adjacent-column overlap. Existing tests (uniform tier floor, hero
+    unit separation, over-long value wrap) still green.
+  - Render proof: `packages/presentation-worker/debug/render-fixture.mjs` produces a
+    3-stat data_emphasis + 5-step flow_process fixture, screenshot via chromium. BEFORE
+    (main): 64px stat numbers mid-slide with vast dead space, 1/2/3/4/5 digits the size
+    of body text and microscopic descriptions. AFTER (this branch): ~200px stat numbers
+    at a shared baseline with unit/label/comparison hierarchy filling toward the bottom
+    margin, big bold step numbers with promoted labels and descriptions wrapping
+    naturally. Screenshots at
+    `packages/presentation-worker/debug/out/slide_1_data_emphasis_{before,after}.png`
+    and `slide_2_flow_process_{before,after}.png`.
+  - tsc green (src + tests). vitest: 346/350 + 3 skipped, 1 pre-existing red unrelated
+    (`text-measure.test.ts` sCO2 title 1 vs 2 — plan item 11 / F, present on main before
+    this branch; verified by `git stash` round-trip).
+  - NEEDS SERVER EYEBALL: live regen of the sCO2 deck on the server to confirm the
+    real-content (not fixture) data_emphasis + flow_process slides fill cleanly with
+    actual editorial output.
+
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [~] Editorial structured fields: H tables + G comparison + D-data chart_series — DONE this branch.
