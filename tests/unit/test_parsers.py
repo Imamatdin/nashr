@@ -123,6 +123,50 @@ def _make_pdf_with_image_page() -> bytes:
     return buffer.getvalue()
 
 
+def _make_pdf_with_captioned_figure() -> bytes:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, title="figure pdf")
+    styles = getSampleStyleSheet()
+    image_buffer = BytesIO()
+    Image.new("RGB", (300, 300), color=(20, 120, 160)).save(image_buffer, format="PNG")
+    image_buffer.seek(0)
+    story: list[object] = [
+        Paragraph(
+            "Datacenter thermal management is the subject of this section, with "
+            "enough body text to comfortably clear the OCR density threshold used "
+            "by the parser heuristic so the page is treated as real text.",
+            styles["BodyText"],
+        ),
+        RLImage(image_buffer, width=200, height=200),
+        Paragraph(
+            "Figure 1: A supercritical CO2 cooling loop for a server rack.",
+            styles["BodyText"],
+        ),
+    ]
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def _make_pdf_with_tiny_image() -> bytes:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, title="tiny image pdf")
+    styles = getSampleStyleSheet()
+    image_buffer = BytesIO()
+    Image.new("RGB", (40, 40), color=(0, 0, 0)).save(image_buffer, format="PNG")
+    image_buffer.seek(0)
+    story: list[object] = [
+        Paragraph(
+            "Body text long enough to parse cleanly and clear the density check "
+            "while the only embedded image is a tiny decorative icon below the "
+            "figure threshold the parser enforces.",
+            styles["BodyText"],
+        ),
+        RLImage(image_buffer, width=20, height=20),
+    ]
+    doc.build(story)
+    return buffer.getvalue()
+
+
 def _make_pdf_with_headings() -> bytes:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, title="heading pdf")
@@ -186,6 +230,38 @@ async def test_pdf_parse_detects_scanned_pages() -> None:
     assert result.pages[0].needs_ocr is False
     assert result.pages[1].needs_ocr is True
     assert 2 in result.needs_ocr_pages
+
+
+async def test_pdf_parse_extracts_figure_with_caption() -> None:
+    # Image engine source grounding: embedded raster + its "Figure N:" caption
+    # + surrounding page text, so the engine can topic-match a slide subject.
+    parser = PDFParser()
+    result = await parser.parse(_make_pdf_with_captioned_figure(), "figure.pdf")
+
+    assert len(result.figures) == 1
+    figure = result.figures[0]
+    assert figure.content_type.startswith("image/")
+    assert len(figure.data) > 0
+    assert figure.width >= 150
+    assert figure.height >= 150
+    assert figure.page_number == 1
+    assert figure.caption is not None
+    assert "supercritical CO2 cooling loop" in figure.caption
+    # The broader page text rides along as context for topic matching.
+    assert "thermal management" in figure.context
+
+
+async def test_pdf_parse_skips_tiny_images() -> None:
+    parser = PDFParser()
+    result = await parser.parse(_make_pdf_with_tiny_image(), "tiny.pdf")
+    assert result.figures == []
+
+
+async def test_pdf_parse_no_figures_when_no_images() -> None:
+    parser = PDFParser()
+    payload = (GOLDEN / "sample_3page.pdf").read_bytes()
+    result = await parser.parse(payload, "sample_3page.pdf")
+    assert result.figures == []
 
 
 async def test_pdf_parse_extracts_doi() -> None:

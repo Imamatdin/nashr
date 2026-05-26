@@ -16,6 +16,7 @@ from packages.core.enums import (
     ChartType,
     DiagramStrategy,
     ExportFormat,
+    ImageSubjectType,
     Language,
     NarrativeEmphasis,
     PresentationMood,
@@ -31,6 +32,7 @@ from packages.core.models.presentation import (
     DeckSpec,
     DesignDirectionSpec,
     MatchingPair,
+    PersonItem,
     PresentationInterviewAnswers,
     QuizOption,
     QuizQuestion,
@@ -38,6 +40,7 @@ from packages.core.models.presentation import (
     SlideSpec,
     StatItem,
     TableRow,
+    TimelineNode,
     new_deck_id,
 )
 
@@ -196,6 +199,32 @@ def test_stat_item_with_trend_and_comparison_round_trips() -> None:
     assert again.trend == "↑"
 
 
+def test_stat_item_unit_accepts_descriptive_real_units() -> None:
+    # The 10-char cap rejected real units the editorial model naturally emits,
+    # collapsing the whole deck. The cap is 32; these must validate verbatim.
+    for unit in ("liters/year", "of facility energy", "of waste heat"):
+        stat = StatItem(value="42", unit=unit, label="Recovered")
+        assert stat.unit == unit
+
+
+def test_stat_item_unit_accepts_full_32_chars_rejects_33() -> None:
+    StatItem(value="1", unit="x" * 32, label="L")
+    with pytest.raises(ValidationError):
+        StatItem(value="1", unit="x" * 33, label="L")
+
+
+def test_chart_series_point_unit_accepts_descriptive_real_units() -> None:
+    for unit in ("liters/year", "of facility energy", "of waste heat"):
+        point = ChartSeriesPoint(label="Recovered heat", value=42.0, unit=unit)
+        assert point.unit == unit
+
+
+def test_chart_series_point_unit_accepts_full_32_chars_rejects_33() -> None:
+    ChartSeriesPoint(label="L", value=1.0, unit="x" * 32)
+    with pytest.raises(ValidationError):
+        ChartSeriesPoint(label="L", value=1.0, unit="x" * 33)
+
+
 def test_quiz_question_rejects_single_option() -> None:
     with pytest.raises(ValidationError):
         QuizQuestion(
@@ -307,6 +336,53 @@ def test_slide_content_grouped_chart_round_trips() -> None:
     assert again == content
     assert again.chart_type is ChartType.GROUPED_BAR
     assert again.chart_group_labels == ["IT load", "Cooling", "Other"]
+
+
+def test_slide_content_figure_slot_round_trips() -> None:
+    # The object-figure slot (image engine PART 1): prompt + subject type are
+    # authored by editorial, the url filled by the image stage. All three must
+    # survive a json round-trip through the deck_json blob without loss.
+    content = SlideContent(
+        title="The cold plate moves the heat",
+        figure_prompt="a liquid cold plate, copper microchannels, neutral background",
+        figure_url="https://cdn.example.com/temp/p1/figure_03.png",
+        figure_subject_type=ImageSubjectType.OBJECT,
+    )
+    again = SlideContent.model_validate(content.model_dump(mode="json"))
+    assert again == content
+    assert again.figure_subject_type is ImageSubjectType.OBJECT
+    assert again.figure_url == "https://cdn.example.com/temp/p1/figure_03.png"
+
+
+def test_slide_content_figure_fields_default_none() -> None:
+    content = SlideContent(title="No figure here")
+    assert content.figure_prompt is None
+    assert content.figure_url is None
+    assert content.figure_subject_type is None
+
+
+def test_timeline_node_portrait_url_round_trips() -> None:
+    # TimelineNode gains a portrait_url the image engine fills from Commons;
+    # both portrait fields must round-trip so timeline portraits survive.
+    node = TimelineNode(
+        date="1687",
+        label="Newton publishes the Principia",
+        portrait_prompt="Isaac Newton, English physicist",
+        portrait_url="https://cdn.example.com/temp/p1/newton.png",
+    )
+    again = TimelineNode.model_validate(node.model_dump(mode="json"))
+    assert again == node
+    assert again.portrait_url == "https://cdn.example.com/temp/p1/newton.png"
+
+
+def test_person_item_portrait_fields_default_none() -> None:
+    person = PersonItem(name="Voltaire")
+    assert person.portrait_prompt is None
+    assert person.portrait_url is None
+
+
+def test_image_subject_type_enum_size() -> None:
+    assert {s.value for s in ImageSubjectType} == {"person", "object", "concept", "scene"}
 
 
 def test_slide_content_chart_type_defaults_none() -> None:

@@ -282,7 +282,7 @@ describe('Q4 — Consecutive layout repeats', () => {
     expect(resultsFor(report, 'Q4').every((r) => r.passed)).toBe(true);
   });
 
-  it('fails on consecutive same type', () => {
+  it('warns on consecutive same type but does NOT block export (invariant I5)', () => {
     const deck = buildDeck([
       makeSlide(0, 'content_split', { title: 'A' }),
       makeSlide(1, 'content_split', { title: 'B' }),
@@ -290,9 +290,17 @@ describe('Q4 — Consecutive layout repeats', () => {
     const layout = makeLayout(deck.slides.map((s) => buildSlideLayout({ slideIndex: s.slide_index, slideType: s.slide_type })));
     const report = new QualityAudit().audit(deck, layout);
     const q4 = resultsFor(report, 'Q4');
-    const fails = q4.filter((r) => !r.passed);
-    expect(fails).toHaveLength(1);
-    expect(fails[0].slide_index).toBe(1);
+    const flagged = q4.filter((r) => !r.passed);
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].slide_index).toBe(1);
+    // CRITICAL: Q4 is COSMETIC. It must warn, never fail — otherwise a
+    // stylistic concern would block export. Invariant I5.
+    expect(flagged[0].severity).toBe('warn');
+    // Whole-deck assertion: a deck whose only issue is adjacent duplicates
+    // still exports.
+    expect(report.is_exportable).toBe(true);
+    expect(report.failed).toBe(0);
+    expect(report.warnings).toBeGreaterThanOrEqual(1);
   });
 });
 

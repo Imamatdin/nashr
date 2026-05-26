@@ -309,6 +309,143 @@ describe('LayoutPass overflow handling', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Image engine PART 2 — contained object-figure + timeline portraits
+// ---------------------------------------------------------------------------
+
+describe('LayoutPass.layoutSlide — object figure (content_split)', () => {
+  it('places a resolved figure as a contained, non-background image in the right column, clear of the text', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'content_split', {
+        title: 'The cold plate moves the heat',
+        body_text: 'A liquid-cooled heat exchanger bolted to the die.',
+        figure_url: 'https://cdn.example.com/temp/p/figure.png',
+        figure_subject_type: 'object',
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    expect(layout.imageBlocks).toHaveLength(1);
+    const fig = layout.imageBlocks[0]!;
+    expect(fig.src).toBe('https://cdn.example.com/temp/p/figure.png');
+    expect(fig.objectFit).toBe('contain');
+    expect(fig.isBackground).toBe(false);
+    // Inside the slide bounds.
+    expect(fig.x).toBeGreaterThanOrEqual(0);
+    expect(fig.x + fig.w).toBeLessThanOrEqual(100);
+    expect(fig.y).toBeGreaterThanOrEqual(0);
+    expect(fig.y + fig.h).toBeLessThanOrEqual(100);
+    // Right column, clear of the left-hand title/body (which sit at x<=53).
+    const title = findBlock(layout.textBlocks, 'cold plate')!;
+    expect(title.x + title.w).toBeLessThanOrEqual(fig.x);
+  });
+
+  it('renders no image block at all when neither figure_url nor background_url is present', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'content_split', {
+        title: 'Text only slide',
+        body_text: 'No visual was resolved for this slide.',
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    expect(layout.imageBlocks).toHaveLength(0);
+  });
+
+  it('prefers a contained figure over a legacy cover background_url', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'content_split', {
+        title: 'Figure wins',
+        body_text: 'Both fields set; the explicit object figure takes the panel.',
+        figure_url: 'https://cdn.example.com/temp/p/figure.png',
+        background_url: 'https://cdn.example.com/temp/p/scene.jpg',
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    expect(layout.imageBlocks).toHaveLength(1);
+    expect(layout.imageBlocks[0]!.src).toBe('https://cdn.example.com/temp/p/figure.png');
+    expect(layout.imageBlocks[0]!.objectFit).toBe('contain');
+  });
+});
+
+describe('LayoutPass.layoutSlide — object figure (concept_definition)', () => {
+  it('adds a contained figure on the right and suppresses the full-bleed background image', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'concept_definition', {
+        title: 'Entropy rises in a closed loop',
+        subtitle: 'The second law, made concrete.',
+        figure_url: 'https://cdn.example.com/temp/p/entropy.png',
+        background_url: 'https://cdn.example.com/temp/p/scene.jpg',
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    expect(layout.imageBlocks).toHaveLength(1);
+    const fig = layout.imageBlocks[0]!;
+    expect(fig.objectFit).toBe('contain');
+    expect(fig.isBackground).toBe(false);
+    expect(fig.x).toBeGreaterThanOrEqual(50);
+    expect(fig.x + fig.w).toBeLessThanOrEqual(100);
+    // The figure is the visual: no competing full-bleed background image.
+    expect(layout.background.image).toBeUndefined();
+    // Text stays in the left column.
+    const title = findBlock(layout.textBlocks, 'Entropy')!;
+    expect(title.x).toBeLessThan(50);
+  });
+
+  it('renders no figure block and leaves the slide unchanged when figure_url is null', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'concept_definition', {
+        title: 'A plain concept',
+        subtitle: 'No figure resolved.',
+        bullets: ['One', 'Two'],
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    expect(layout.imageBlocks).toHaveLength(0);
+  });
+});
+
+describe('LayoutPass.layoutSlide — timeline portraits', () => {
+  it('renders a cover portrait above the date band for each node that has one, within bounds', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'timeline', {
+        title: 'Key dates',
+        timeline_nodes: [
+          { date: '1687', label: 'Principia', portrait_url: 'https://cdn.example.com/n/a.png' },
+          { date: '1905', label: 'Relativity' },
+          { date: '1953', label: 'DNA', portrait_url: 'https://cdn.example.com/n/c.png' },
+        ],
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    // Two of three nodes carry a portrait.
+    expect(layout.imageBlocks).toHaveLength(2);
+    for (const img of layout.imageBlocks) {
+      expect(img.objectFit).toBe('cover');
+      expect(img.isBackground).toBe(false);
+      expect(img.x).toBeGreaterThanOrEqual(0);
+      expect(img.x + img.w).toBeLessThanOrEqual(100);
+      // Sits above the date band (dates render at y=33).
+      expect(img.y + img.h).toBeLessThanOrEqual(33);
+    }
+  });
+
+  it('renders no portraits when no node carries one', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'timeline', {
+        title: 'Key dates',
+        timeline_nodes: [
+          { date: '1687', label: 'Principia' },
+          { date: '1905', label: 'Relativity' },
+        ],
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    expect(layout.imageBlocks).toHaveLength(0);
+  });
+});
+
 describe('LayoutPass deck-level outputs', () => {
   it('counts words across all content fields on a slide', () => {
     const deck = buildDeck([

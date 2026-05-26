@@ -70,6 +70,8 @@ export const ALL_SLIDE_TYPES: readonly SlideType[] = [
 
 export type ChartType = 'bar' | 'line' | 'single_value' | 'grouped_bar' | 'stacked_bar';
 
+export type ImageSubjectType = 'person' | 'object' | 'concept' | 'scene';
+
 export type PresentationMood =
   | 'warm_historical'
   | 'bold_technical'
@@ -132,6 +134,7 @@ export interface TimelineNode {
   date: string;
   label: string;
   portrait_prompt?: string | null;
+  portrait_url?: string | null;
 }
 
 export interface FlowStep {
@@ -233,6 +236,9 @@ export interface SlideContent {
   resources?: ResourceLink[] | null;
   background_prompt?: string | null;
   background_url?: string | null;
+  figure_prompt?: string | null;
+  figure_url?: string | null;
+  figure_subject_type?: ImageSubjectType | null;
   speaker_notes?: string | null;
 }
 

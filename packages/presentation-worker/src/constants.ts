@@ -100,6 +100,23 @@ export const WORD_LIMITS: Record<SlideType, number> = {
 };
 
 // ---------------------------------------------------------------------------
+// Image source classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an image `src` is an unresolved placeholder rather than a loadable
+ * reference. A real reference — an http(s)/file/data URL or an absolute path —
+ * is loadable at ANY length (signed object-store URLs routinely exceed 500
+ * chars), so it is never a placeholder. Only a `[`-prefixed prompt marker or a
+ * long bare string (leftover prompt text the image engine never resolved) is.
+ */
+export function isPlaceholderImageSrc(src: string | null | undefined): boolean {
+  if (!src) return true;
+  if (/^(https?:|file:|data:|\/|[a-zA-Z]:[\\/])/.test(src)) return false;
+  return src.startsWith('[') || src.length > 500;
+}
+
+// ---------------------------------------------------------------------------
 // Region specs per slide type. Percentages of slide dimensions.
 // ---------------------------------------------------------------------------
 
@@ -115,6 +132,10 @@ export interface SlideRegions {
   subtitle?: Region;
   body?: Region;
   image?: Region;
+  /** Bounding box for a contained object-figure (objectFit:'contain'). Lives
+   *  in the right column, clear of the left-hand text, so a figure never
+   *  overlaps title/body. Only the layouts that can carry a figure define it. */
+  figure?: Region;
   caption?: Region;
   citation?: Region;
 }
@@ -129,11 +150,16 @@ export const SLIDE_REGIONS: Partial<Record<SlideType, SlideRegions>> = {
     title: { x: 5, y: 5, w: 50, h: 8 },
     subtitle: { x: 5, y: 16, w: 48, h: 12 },
     body: { x: 5, y: 32, w: 48, h: 50 },
+    // Right column, clear of the left text (which ends at x=53).
+    figure: { x: 55, y: 18, w: 40, h: 64 },
   },
   content_split: {
     title: { x: 5, y: 5, w: 48, h: 8 },
     body: { x: 5, y: 18, w: 48, h: 65 },
     image: { x: 52, y: 0, w: 48, h: 100 },
+    // A contained figure sits inset from the full-bleed `image` panel so the
+    // object reads as a clean specimen rather than a cropped edge-to-edge photo.
+    figure: { x: 55, y: 12, w: 41, h: 76 },
     caption: { x: 5, y: 88, w: 48, h: 5 },
   },
   data_emphasis: {

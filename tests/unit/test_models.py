@@ -63,6 +63,7 @@ from packages.core.models import (
     SourceClaim,
     SourceClaimCreate,
     SourceCreate,
+    SourceFigure,
     SourceMetadata,
     SourceMetadataExtracted,
     SourcePipelineResult,
@@ -350,6 +351,43 @@ def test_source_pipeline_result_round_trip() -> None:
     dumped = result.model_dump()
     restored = SourcePipelineResult.model_validate(dumped)
     assert restored == result
+
+
+def test_source_figure_round_trip() -> None:
+    # Image engine: the figure carries raw binary bytes and lives in-memory
+    # (SourceProcessingResult), so a python-dict round-trip must reconstruct the
+    # bytes losslessly. It is never JSON-persisted (that path would need base64).
+    figure = SourceFigure(
+        page_number=3,
+        data=b"\x89PNG\r\n\x1a\n raw figure bytes",
+        content_type="image/png",
+        width=600,
+        height=400,
+        caption="Figure 2: a cold plate heat exchanger",
+        context="surrounding page text about datacenter cooling",
+    )
+    restored = SourceFigure.model_validate(figure.model_dump())
+    assert restored == figure
+    assert restored.data == figure.data
+
+
+def test_parsed_source_carries_figures() -> None:
+    figure = SourceFigure(
+        page_number=1,
+        data=b"bytes",
+        content_type="image/jpeg",
+        width=300,
+        height=300,
+    )
+    parsed = ParsedSource(
+        filename="x.pdf",
+        file_type="pdf",
+        file_size_bytes=10,
+        figures=[figure],
+    )
+    restored = ParsedSource.model_validate(parsed.model_dump())
+    assert len(restored.figures) == 1
+    assert restored.figures[0].caption is None
 
 
 # ---------------------------------------------------------------------------

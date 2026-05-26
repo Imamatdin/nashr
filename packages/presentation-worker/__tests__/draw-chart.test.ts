@@ -206,6 +206,119 @@ describe('drawChart — empty series', () => {
   });
 });
 
+describe('drawChart — encoding guard', () => {
+  it('renders a low-spread bar as multi_stat with the subject highlighted', () => {
+    // The sCO2 deck slide 10 case: title argues for sCO2 PUE 1.08, series
+    // is Air/Liquid/sCO2. The OLD path headlined series[0] (Air, 1.57) —
+    // the value the slide BEATS. The new path keeps every point as a stat
+    // card and accents sCO2.
+    const pue = [
+      { label: 'Air', value: 1.57, unit: 'PUE' },
+      { label: 'Liquid', value: 1.25, unit: 'PUE' },
+      { label: 'sCO2', value: 1.08, unit: 'PUE' },
+    ];
+    const result = drawChart(
+      REGION,
+      content({ title: 'sCO₂ Achieves PUE 1.08', chart_type: 'bar', chart_series: pue }),
+      DESIGN,
+    )!;
+    // No bars are drawn — the stat-card layout has no rect shapes.
+    expect(result.shapes.filter((s) => s.type === 'rect')).toHaveLength(0);
+    // Every value appears as its own number block (each card carries the
+    // raw number without unit; unit lives on its own row).
+    expect(result.blocks.some((b) => b.text === '1.08')).toBe(true);
+    expect(result.blocks.some((b) => b.text === '1.25')).toBe(true);
+    expect(result.blocks.some((b) => b.text === '1.57')).toBe(true);
+    // The subject card (sCO2) is the only one rendered in the deck accent.
+    const sco2Number = result.blocks.find((b) => b.text === '1.08')!;
+    const airNumber = result.blocks.find((b) => b.text === '1.57')!;
+    expect(sco2Number.color).toBe(DESIGN.palette.accent);
+    expect(airNumber.color).not.toBe(DESIGN.palette.accent);
+    // Labels appear so the comparison is intact.
+    expect(result.blocks.some((b) => b.text === 'sCO2')).toBe(true);
+    expect(result.blocks.some((b) => b.text === 'Air')).toBe(true);
+    expect(result.blocks.some((b) => b.text === 'Liquid')).toBe(true);
+  });
+
+  it('re-routes a 2-point payback line off line into a clean two-bar chart', () => {
+    // The sCO2 deck slide 14 case: payback Liquid 5yr vs sCO2 3.2yr was
+    // emitted as `line` (which implies a continuous trend across discrete
+    // categories). After the line<3 → bar re-route, the ratio 5/3.2 = 1.56
+    // is above the spread threshold, so the bar guards leave the chart at
+    // a clean two-bar comparison.
+    const payback = [
+      { label: 'Liquid', value: 5, unit: 'yr' },
+      { label: 'sCO2', value: 3.2, unit: 'yr' },
+    ];
+    const result = drawChart(
+      REGION,
+      content({
+        title: 'sCO2 cuts payback to 3.2 years',
+        chart_type: 'line',
+        chart_series: payback,
+      }),
+      DESIGN,
+    )!;
+    // Two accent bars drawn (rects), with a baseline rule below.
+    const bars = result.shapes.filter((s) => s.type === 'rect');
+    expect(bars).toHaveLength(2);
+    // No diagonal line segments (the visual that misled the reader).
+    expect(
+      result.shapes.filter((s) => s.type === 'line' && s.x2 !== undefined),
+    ).toHaveLength(0);
+    // Both values appear as labels.
+    expect(result.blocks.some((b) => b.text === '5 yr')).toBe(true);
+    expect(result.blocks.some((b) => b.text === '3.2 yr')).toBe(true);
+  });
+
+  it('renders a big-spread bar untouched (3 accent bars, baseline, value + category labels)', () => {
+    const result = drawChart(
+      REGION,
+      content({
+        chart_type: 'bar',
+        chart_series: [
+          { label: 'Air', value: 8, unit: 'kW/rack' },
+          { label: 'Liquid', value: 40, unit: 'kW/rack' },
+          { label: 'sCO2', value: 120, unit: 'kW/rack' },
+        ],
+      }),
+      DESIGN,
+    )!;
+    const bars = result.shapes.filter((s) => s.type === 'rect');
+    expect(bars).toHaveLength(3);
+    expect(bars.every((b) => b.h > 0.5)).toBe(true); // no zero-ticks here
+  });
+
+  it('renders explicit zero-ticks for zero entries in a partial-zero bar', () => {
+    const result = drawChart(
+      REGION,
+      content({
+        chart_type: 'bar',
+        chart_series: [
+          { label: 'Air', value: 0, unit: '%' },
+          { label: 'Liquid (low)', value: 0, unit: '%' },
+          { label: 'Liquid (high)', value: 5, unit: '%' },
+          { label: 'sCO2', value: 20, unit: '%' },
+        ],
+      }),
+      DESIGN,
+    )!;
+    const bars = result.shapes.filter((s) => s.type === 'rect');
+    // 4 columns total: 2 zero-ticks + 2 real bars.
+    expect(bars).toHaveLength(4);
+    const tinyBars = bars.filter((b) => b.h < 1);
+    const realBars = bars.filter((b) => b.h >= 1);
+    expect(tinyBars).toHaveLength(2);
+    expect(realBars).toHaveLength(2);
+    // Zero-ticks sit at the baseline (their bottoms align with the others' bottoms).
+    const bottoms = bars.map((b) => b.y + b.h);
+    const refBottom = bottoms[0]!;
+    for (const b of bottoms) expect(b).toBeCloseTo(refBottom, 1);
+    // Zero values still get their "0%" labels.
+    expect(result.blocks.filter((b) => b.text === '0%')).toHaveLength(2);
+  });
+});
+
 describe('chart-style helpers', () => {
   it('formatChartValue: separators, decimals, unit spacing', () => {
     expect(formatChartValue(120, 'kW/rack')).toBe('120 kW/rack');

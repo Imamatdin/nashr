@@ -1,7 +1,7 @@
 """Presentation generation orchestrator wired to the real engines.
 
 Sequences the presentation pipeline (sources → matrix → interview →
-design → editorial → render) and reports progress via a callback
+design → editorial → images → render) and reports progress via a callback
 supplied by the bot handler. The orchestrator is the only place that
 knows both Telegram (it owns the :class:`Bot` reference for file
 downloads) and the presentation engines/worker; handlers stay thin and
@@ -13,9 +13,9 @@ internally and gates export on FAIL-severity findings (see
 again from Python would just duplicate that work. Audit warnings emitted
 by the CLI surface in render stderr and are logged but not blocking.
 
-CLAUDE.md's 300-line cap is intentionally exceeded: the six pipeline
-stages share state (project_id, language, claims/chunks/metadata, the
-running design + interview specs) and splitting them across modules
+CLAUDE.md's 300-line cap is intentionally exceeded: the seven pipeline
+stages share state (project_id, language, claims/chunks/metadata/figures,
+the running design + interview specs) and splitting them across modules
 would fragment a single coherent operation.
 """
 
@@ -37,8 +37,10 @@ from packages.bot.orchestrators.article_orchestrator import (
     SourceProcessingResult,
     _OrchestratorError,
 )
+from packages.core.constants import image_budget_for_package
 from packages.core.enums import (
     ExportFormat,
+    GenerationPackage,
     SourceQuality,
 )
 from packages.core.models.evidence import EvidenceMatrix
@@ -52,6 +54,7 @@ from packages.platform.database import DatabaseClient
 from packages.platform.storage import FileStorage
 from packages.presentation.design_direction import DesignDirectionPass
 from packages.presentation.editorial import EditorialPass
+from packages.presentation.image_pass import ImagePass
 from packages.presentation.interview import PresentationInterviewEngine
 from packages.workers.article.evidence_matrix import EvidenceMatrixBuilder
 from packages.workers.source.pipeline import SourcePipeline
@@ -60,8 +63,8 @@ logger = logging.getLogger("nashr.orchestrator.presentation")
 
 ProgressCallback = Callable[[str, int, int], Awaitable[None]]
 
-# source → matrix → interview → design → editorial → render
-TOTAL_STEPS: Final[int] = 6
+# source → matrix → interview → design → editorial → images → render
+TOTAL_STEPS: Final[int] = 7
 
 # Map :class:`ExportFormat` to the worker CLI's ``--format`` argument
 # and the on-disk extension the renderer writes.
@@ -131,6 +134,7 @@ class PresentationOrchestrator:
         interview_engine: PresentationInterviewEngine | None = None,
         design_pass: DesignDirectionPass | None = None,
         editorial_pass: EditorialPass | None = None,
+        image_pass: ImagePass | None = None,
         worker_runner: _WorkerRunner | None = None,
     ) -> None:
         self._bot = bot
@@ -146,6 +150,7 @@ class PresentationOrchestrator:
         )
         self._design_pass = design_pass if design_pass is not None else DesignDirectionPass()
         self._editorial_pass = editorial_pass if editorial_pass is not None else EditorialPass()
+        self._image_pass = image_pass if image_pass is not None else ImagePass()
         self._worker_runner = worker_runner if worker_runner is not None else _WorkerRunner()
 
     # ====================================================================
@@ -233,6 +238,7 @@ class PresentationOrchestrator:
         result.chunks.extend(pipeline_result.chunks)
         if pipeline_result.parsed is not None:
             result.metadata.append(pipeline_result.parsed.metadata)
+            result.figures.extend(pipeline_result.parsed.figures)
         result.source_ids.append(uuid4())
 
         await self._register_source(info, project_id, file_bytes, filename)
@@ -405,7 +411,52 @@ class PresentationOrchestrator:
             raise _OrchestratorError("editorial", exc) from exc
 
     # ====================================================================
-    # STEP 6 — render via Node worker
+    # STEP 6 — resolve image slots (Commons portraits + generated figures/bg)
+    # ====================================================================
+
+    async def resolve_images(
+        self,
+        deck_spec: DeckSpec,
+        sources: SourceProcessingResult,
+        project_id: str,
+        progress: ProgressCallback,
+        *,
+        package: GenerationPackage,
+    ) -> DeckSpec:
+        """Fill the deck's image slots (parallel); abstain rather than fail.
+
+        Best-effort and non-fatal: the image engine never blocks a deck. When
+        no storage is configured we skip resolution entirely (nothing to write a
+        retrievable url against) but still advance the progress step so the step
+        count stays stable. Any unexpected error is swallowed — a deck with no
+        images still renders.
+
+        ``package`` derives the per-deck generated-image budget (invariant I1).
+        Required keyword-only so a caller cannot silently default a paid tier.
+        """
+
+        await progress("Resolving images", 6, TOTAL_STEPS)
+        storage = self._storage
+        if storage is None:
+            return deck_spec
+        budget = image_budget_for_package(package)
+        try:
+            return await self._image_pass.resolve_deck(
+                deck_spec,
+                storage=storage,
+                project_id=project_id,
+                figures=sources.figures,
+                max_generated_images=budget,
+            )
+        except Exception as exc:
+            logger.warning(
+                "presentation_image_stage_failed",
+                extra={"error_type": type(exc).__name__},
+            )
+            return deck_spec
+
+    # ====================================================================
+    # STEP 7 — render via Node worker
     # ====================================================================
 
     async def render(
@@ -426,7 +477,7 @@ class PresentationOrchestrator:
         is enabled; ``None`` falls back to the rendered file's stem.
         """
 
-        await progress("Rendering presentation", 6, TOTAL_STEPS)
+        await progress("Rendering presentation", 7, TOTAL_STEPS)
 
         try:
             output_dir = Path(tempfile.mkdtemp(prefix="nashr_pres_"))
@@ -439,9 +490,7 @@ class PresentationOrchestrator:
 
             try:
                 Path("/app/debug").mkdir(parents=True, exist_ok=True)
-                Path("/app/debug/last_deck.json").write_text(
-                    deck_spec.model_dump_json(), "utf-8"
-                )
+                Path("/app/debug/last_deck.json").write_text(deck_spec.model_dump_json(), "utf-8")
             except Exception:
                 pass
             worker_entry = await self._worker_runner.ensure_built()
@@ -476,7 +525,12 @@ class PresentationOrchestrator:
 
             if completed.returncode != 0:
                 full_err = (completed.stderr or "").strip()
-                logger.warning("RENDER_STDERR_FULL fmt=%s code=%s err=%s", ext, completed.returncode, full_err[:3000])
+                logger.warning(
+                    "RENDER_STDERR_FULL fmt=%s code=%s err=%s",
+                    ext,
+                    completed.returncode,
+                    full_err[:3000],
+                )
                 tail = full_err.splitlines()
                 snippet = tail[-1] if tail else "non-zero exit"
                 result.warnings.append(f"{ext}: {snippet}")
@@ -538,6 +592,8 @@ class PresentationOrchestrator:
         raw_answers: Mapping[str, object] | None,
         requested_formats: list[ExportFormat] | None,
         progress: ProgressCallback,
+        *,
+        package: GenerationPackage,
     ) -> PresentationRenderResult:
         """Drive the full presentation pipeline end-to-end.
 
@@ -545,6 +601,10 @@ class PresentationOrchestrator:
         raises on unrecoverable errors (no usable sources, editorial
         pass failure); the caller (the bot handler) is responsible for
         refunding credits when this raises.
+
+        ``package`` is the paid tier; it threads through to the image stage to
+        set the per-deck generated-image budget. Required keyword-only so a
+        caller cannot silently default a paid path (invariant I1).
         """
 
         formats = requested_formats or [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
@@ -570,6 +630,9 @@ class PresentationOrchestrator:
             sources=sources,
             project_id=project_id,
             progress=progress,
+        )
+        deck_spec = await self.resolve_images(
+            deck_spec, sources, project_id, progress, package=package
         )
         return await self.render(deck_spec, formats, progress, project_id=project_id)
 

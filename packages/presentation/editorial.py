@@ -14,10 +14,13 @@ Pipeline:
 3. Select a narrative arc from the user's emphasis choice.
 4. LLM call (Sonnet) — generate the slide sequence with takeaway titles,
    typed content, and narrative roles.
-5. Post-process — enforce R01 (no consecutive layout repeats), R03
-   (section breaks every 4-5 slides), R17 (word-count limits), R27
-   (breathing after data-heavy), R26 (density arc), first-slide is
-   TITLE_HERO, and re-index.
+5. Post-process — drop hollow SECTION_BREAK dividers that carry no thesis
+   (invariant I2, ``docs/INVARIANTS.md``); ensure first-slide is TITLE_HERO;
+   enforce R17 (word-count limits) and R26 (density arc); re-index. The
+   breather device (R27) is retained but defaults OFF — see
+   :func:`_insert_breathing_after_data`. R01/R03 are now model-prompt
+   concerns (EDITORIAL_SYSTEM rules 7-8), not post-process invariants:
+   the old auto-injected hollow dividers that satisfied them are slop.
 6. Optional LLM call (Gemini Flash) — generate quiz / matching /
    fill-blank / true-false / debate / categorise content for interactive
    slides.
@@ -38,7 +41,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -48,6 +51,7 @@ from packages.core.enums import (
     ClaimStrength,
     ClaimType,
     ExportFormat,
+    ImageSubjectType,
     Language,
     NarrativeEmphasis,
     NarrativePhase,
@@ -107,6 +111,10 @@ DEFAULT_PROJECT_ID: Final[str] = "presentation"
 MIN_CONTENT_SLIDES: Final[int] = 6
 MAX_CONTENT_SLIDES: Final[int] = 15
 
+# Upper bound for a title synthesised during coercion; mirrors
+# SlideContent.title / _LLMSlide.title so the salvaged value re-validates.
+_TITLE_MAX: Final[int] = 300
+
 # R17 word-count limits keyed by slide type. The post-processor enforces
 # these by truncating body text and moving the excess to speaker notes.
 WORD_LIMITS: Final[dict[SlideType, int]] = {
@@ -155,7 +163,14 @@ SLIDE_TYPE_DESCRIPTIONS: Final[dict[SlideType, str]] = {
     SlideType.QUOTE_PULLQUOTE: "One powerful quote or finding. The quote IS the slide. Max 35 words.",
     SlideType.CHART_DATA: "One chart/graph. Title states the insight. Max 20 words of text.",
     SlideType.TABLE_COMPACT: "Structured data. Max 5 columns x 6 rows.",
-    SlideType.SECTION_BREAK: "Section transition. Just the section name. Max 6 words.",
+    SlideType.SECTION_BREAK: (
+        "Section transition. Put the section LABEL in section_name, and put a"
+        " ONE-LINE THESIS for the section in subtitle (the section's argument,"
+        " not its name). A SECTION_BREAK with no subtitle is dropped — invariant"
+        " I2: a slide that only names a section carries no weight. Most decks"
+        " flow content→content; emit a SECTION_BREAK only when a thesis earns it."
+        " Title max 6 words; subtitle max 130 chars."
+    ),
     SlideType.SUMMARY_TAKEAWAY: "3-5 numbered takeaways from preceding section. Max 60 words.",
     SlideType.RESOURCES_LINKS: "3-6 resource links with descriptions. Max 60 words.",
     SlideType.TEAM_CREDITS: "Team members with names + roles. Max 40 words.",
@@ -339,6 +354,8 @@ class _LLMSlide(BaseModel):
     steps: list[FlowStep] | None = Field(default=None, max_length=6)
     quote_text: str | None = Field(default=None, max_length=300)
     quote_attribution: str | None = Field(default=None, max_length=100)
+    figure_prompt: str | None = Field(default=None, max_length=300)
+    figure_subject_type: ImageSubjectType | None = None
     speaker_notes: str | None = Field(default=None, max_length=2000)
     narrative_role: NarrativePhase | None = None
     section_name: str | None = Field(default=None, max_length=100)
@@ -671,16 +688,22 @@ class EditorialPass:
         slides: list[SlideSpec],
         interview: PresentationInterviewAnswers,
     ) -> list[SlideSpec]:
-        """Enforce R01, R03, R17, R27, R26 on the LLM-emitted sequence."""
+        """De-slop the LLM-emitted sequence and enforce content invariants.
+
+        Order matters: hollow dividers are dropped FIRST so a stray bare
+        ``slides[0]`` SECTION_BREAK never gets promoted to a title-hero by
+        :func:`_ensure_first_is_title`. The breather call is retained for the
+        scaffold of plan item 2 (model-authored breathers) but defaults OFF —
+        an invariant-I2 violation if enabled with the current stat-echo seed.
+        """
 
         if not slides:
             return _emergency_minimal_deck(interview)
+        slides = _drop_hollow_dividers(slides)
         slides = _ensure_first_is_title(slides, interview)
         slides = _enforce_word_limits(slides)
         slides = _enforce_density_arc(slides)
-        slides = _fix_consecutive_repeats(slides)
-        slides = _insert_section_breaks(slides, interview)
-        slides = _insert_breathing_after_data(slides, interview)
+        slides = _insert_breathing_after_data(slides, interview)  # no-op by default
         slides = _reindex(slides)
         return slides
 
@@ -812,7 +835,15 @@ def _format_headline_numbers(numbers: list[str]) -> str:
 
 
 def _parse_sequence(text: str) -> list[_LLMSlide] | None:
-    """Decode an editorial LLM response into typed slide objects."""
+    """Decode an editorial LLM response into typed slide objects.
+
+    On a validation failure the response is not thrown away outright: a single
+    fixable field — an over-long unit/label, a slide that forgot its title —
+    must not collapse the whole deck into the emergency fallback. We attempt
+    targeted field-level salvage (see :func:`_coerce_llm_object`) and
+    re-validate once; only output that is still invalid after coercion (i.e.
+    genuinely unusable) is rejected.
+    """
 
     obj = _try_parse_object(text)
     if obj is None:
@@ -821,9 +852,172 @@ def _parse_sequence(text: str) -> list[_LLMSlide] | None:
     try:
         wrapper = _LLMSequence.model_validate(obj)
     except ValidationError as exc:
-        logger.warning("editorial_invalid_schema: %s", str(exc)[:3000])
-        return None
+        coerced = _coerce_llm_object(obj, exc)
+        if coerced is None:
+            logger.warning("editorial_invalid_schema: %s", str(exc)[:3000])
+            return None
+        try:
+            wrapper = _LLMSequence.model_validate(coerced)
+        except ValidationError as exc2:
+            logger.warning("editorial_invalid_after_coercion: %s", str(exc2)[:3000])
+            return None
+        logger.info("editorial_coerced_and_recovered slides=%d", len(wrapper.slides))
     return wrapper.slides
+
+
+def _coerce_llm_object(obj: dict[str, Any], exc: ValidationError) -> dict[str, Any] | None:
+    """Salvage the two recurring LLM failure modes that nuke a whole deck.
+
+    The editorial schema is intentionally tighter than the model's natural
+    output, so a single field on a single slide can fail validation and drop
+    the entire deck to the "insufficient source material" fallback. This reacts
+    to exactly two pydantic error classes and leaves everything else to that
+    fallback (so genuinely garbage output is not masked):
+
+    * ``string_too_long`` on any field → clamp the offending string to the
+      field's declared ``max_length`` (cut at a word boundary). A unit truncated
+      to 32 chars is vastly better than a lost deck.
+    * a slide ``title`` that is null / empty / missing → synthesise a terse
+      title from that slide's own text, or drop that one slide.
+
+    Mutates ``obj`` in place and returns it for one re-validation, or ``None``
+    when nothing was coercible (the caller then falls back unchanged).
+    """
+
+    raw_slides = obj.get("slides")
+    if not isinstance(raw_slides, list):
+        return None
+    slides = cast("list[Any]", raw_slides)
+
+    drop_indices: set[int] = set()
+    changed = False
+    for error in exc.errors():
+        loc = error["loc"]
+        etype = error["type"]
+        if etype == "string_too_long":
+            ctx = error.get("ctx")
+            limit = ctx.get("max_length") if isinstance(ctx, dict) else None
+            if isinstance(limit, int) and _truncate_field(obj, loc, limit):
+                changed = True
+        elif _is_missing_title(loc, etype):
+            slide_index = loc[1]
+            if not isinstance(slide_index, int) or not 0 <= slide_index < len(slides):
+                continue
+            raw_slide = slides[slide_index]
+            if not isinstance(raw_slide, dict):
+                continue
+            slide = cast("dict[str, Any]", raw_slide)
+            synthesised = _synthesise_title(slide)
+            if synthesised is not None:
+                slide["title"] = synthesised
+            else:
+                drop_indices.add(slide_index)
+            changed = True
+
+    if drop_indices:
+        obj["slides"] = [s for i, s in enumerate(slides) if i not in drop_indices]
+    return obj if changed else None
+
+
+def _is_missing_title(loc: tuple[int | str, ...], etype: str) -> bool:
+    """True when ``loc``/``etype`` describe a slide whose title is absent.
+
+    A too-long title is handled by the generic truncation branch, so only the
+    "no usable title" error classes route here.
+    """
+
+    return (
+        len(loc) == 3
+        and loc[0] == "slides"
+        and loc[2] == "title"
+        and etype in ("string_type", "string_too_short", "missing")
+    )
+
+
+def _truncate_field(obj: dict[str, Any], loc: tuple[int | str, ...], limit: int) -> bool:
+    """Walk ``loc`` into ``obj`` and clamp the terminal string to ``limit``.
+
+    Returns ``True`` when a string was actually shortened. Any structural
+    mismatch along the path (wrong container type, out-of-range index, terminal
+    value not an over-long string) is treated as not-coercible and returns
+    ``False`` — coercion only ever touches what the schema itself rejected.
+    """
+
+    if not loc:
+        return False
+    node: Any = obj
+    for step in loc[:-1]:
+        node = _index_raw(node, step)
+        if node is None:
+            return False
+    last = loc[-1]
+    if isinstance(node, dict) and isinstance(last, str):
+        container = cast("dict[str, Any]", node)
+        value = container.get(last)
+        if isinstance(value, str) and len(value) > limit:
+            container[last] = _truncate_at_word(value, limit)
+            return True
+    elif isinstance(node, list) and isinstance(last, int):
+        seq = cast("list[Any]", node)
+        if 0 <= last < len(seq):
+            value = seq[last]
+            if isinstance(value, str) and len(value) > limit:
+                seq[last] = _truncate_at_word(value, limit)
+                return True
+    return False
+
+
+def _index_raw(node: Any, step: int | str) -> Any:
+    """Take one navigation step into a raw JSON node.
+
+    Returns the child at ``step`` (a dict key or list index), or ``None`` when
+    the step does not fit the node's shape — the caller treats that as
+    not-coercible.
+    """
+
+    if isinstance(step, str) and isinstance(node, dict):
+        return cast("dict[str, Any]", node).get(step)
+    if isinstance(step, int) and isinstance(node, list):
+        seq = cast("list[Any]", node)
+        if 0 <= step < len(seq):
+            return seq[step]
+    return None
+
+
+def _truncate_at_word(value: str, limit: int) -> str:
+    """Clamp ``value`` to ``limit`` chars, preferring a nearby word boundary."""
+
+    if len(value) <= limit:
+        return value
+    hard = value[:limit].rstrip()
+    space = hard.rfind(" ")
+    if space >= limit // 2:
+        return hard[:space].rstrip()
+    return hard
+
+
+def _synthesise_title(slide: dict[str, Any]) -> str | None:
+    """Derive a terse title from a slide that emitted none.
+
+    Falls through the slide's own visible text (subtitle, body, first bullet,
+    first stat label, quote) and returns ``None`` when nothing usable remains —
+    the caller then drops that one slide instead of the whole deck.
+    """
+
+    candidates: list[Any] = [slide.get("subtitle"), slide.get("body_text")]
+    bullets = slide.get("bullets")
+    if isinstance(bullets, list) and bullets:
+        candidates.append(cast("list[Any]", bullets)[0])
+    stats = slide.get("stats")
+    if isinstance(stats, list) and stats:
+        first_stat = cast("list[Any]", stats)[0]
+        if isinstance(first_stat, dict):
+            candidates.append(cast("dict[str, Any]", first_stat).get("label"))
+    candidates.append(slide.get("quote_text"))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return _truncate_at_word(candidate.strip(), _TITLE_MAX)
+    return None
 
 
 def _parse_interactive(text: str) -> _LLMInteractive | None:
@@ -857,6 +1051,27 @@ def _try_parse_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _normalise_figure(
+    prompt: str | None,
+    subject_type: ImageSubjectType | None,
+) -> tuple[str | None, ImageSubjectType | None]:
+    """Clamp a figure slot to its legal shape.
+
+    A figure depicts a contained object or concept, never a real person —
+    real people flow through the ``people`` slot and resolve to gated
+    Commons portraits. So if the LLM emits a figure with no subject type,
+    or mistakenly tags it ``PERSON``/``SCENE``, coerce it to ``OBJECT`` so
+    the image engine never routes a figure into person sourcing. With no
+    prompt there is no figure: drop a stray subject type too.
+    """
+
+    if not prompt:
+        return None, None
+    if subject_type in (None, ImageSubjectType.PERSON, ImageSubjectType.SCENE):
+        return prompt, ImageSubjectType.OBJECT
+    return prompt, subject_type
+
+
 def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
     """Convert parsed LLM slides into validated :class:`SlideSpec` objects."""
 
@@ -874,6 +1089,9 @@ def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
                 heading=raw.right_column.heading or "—",
                 points=list(raw.right_column.points),
             )
+        figure_prompt, figure_subject_type = _normalise_figure(
+            raw.figure_prompt, raw.figure_subject_type
+        )
         content = SlideContent(
             title=raw.title,
             subtitle=raw.subtitle,
@@ -893,6 +1111,8 @@ def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
             steps=raw.steps,
             quote_text=raw.quote_text,
             quote_attribution=raw.quote_attribution,
+            figure_prompt=figure_prompt,
+            figure_subject_type=figure_subject_type,
             speaker_notes=raw.speaker_notes,
         )
         out.append(
@@ -1025,65 +1245,62 @@ def _ensure_first_is_title(
     return [title_slide, *slides]
 
 
-def _fix_consecutive_repeats(slides: list[SlideSpec]) -> list[SlideSpec]:
-    """Break a run of identical slide_types by inserting a SECTION_BREAK."""
+def _drop_hollow_dividers(slides: list[SlideSpec]) -> list[SlideSpec]:
+    """Invariant I2: drop SECTION_BREAK slides that carry no thesis.
 
-    out: list[SlideSpec] = []
-    prev_type: SlideType | None = None
-    for slide in slides:
-        if (
-            prev_type is not None
-            and slide.slide_type is prev_type
-            and slide.slide_type is not SlideType.SECTION_BREAK
-        ):
-            out.append(_make_section_break("•"))
-        out.append(slide)
-        prev_type = slide.slide_type
-    return out
+    A SECTION_BREAK earns its place only by stating a one-line argument for
+    the section — its title is the LABEL (the section name), its ``subtitle``
+    (or ``body_text``) is the THESIS. A break that has neither is a bare
+    label; per invariant I2 ("a slide that only names a section is NOT
+    emitted") it does not survive post-process.
+
+    The prompt is steered to put the thesis in ``subtitle``
+    (:data:`SLIDE_TYPE_DESCRIPTIONS`, EDITORIAL_SYSTEM rule 8) so a
+    well-behaved model never emits a hollow break; this filter is the hard
+    backstop that keeps the invariant true regardless of model adherence.
+    """
+
+    return [
+        s
+        for s in slides
+        if s.slide_type is not SlideType.SECTION_BREAK or _section_break_has_thesis(s)
+    ]
 
 
-def _insert_section_breaks(
-    slides: list[SlideSpec],
-    interview: PresentationInterviewAnswers,
-) -> list[SlideSpec]:
-    """Make sure a SECTION_BREAK appears at least every 5 content slides."""
+def _section_break_has_thesis(slide: SlideSpec) -> bool:
+    """True when a SECTION_BREAK carries a one-line thesis in subtitle/body."""
 
-    del interview
-    out: list[SlideSpec] = []
-    since_break = 0
-    for slide in slides:
-        if slide.slide_type is SlideType.SECTION_BREAK:
-            out.append(slide)
-            since_break = 0
-            continue
-        if since_break >= 5:
-            out.append(_make_section_break("•"))
-            since_break = 0
-        out.append(slide)
-        since_break += 1
-    return out
+    content = slide.content
+    subtitle = (content.subtitle or "").strip()
+    body = (content.body_text or "").strip()
+    return bool(subtitle) or bool(body)
 
 
 def _insert_breathing_after_data(
     slides: list[SlideSpec],
     interview: PresentationInterviewAnswers,
+    *,
+    enabled: bool = False,
 ) -> list[SlideSpec]:
-    """R27: insert a breathing slide between two consecutive data-heavy slides.
+    """R27 scaffold: insert a breather between two cross-type data-heavy slides.
 
-    Only ever fires on a *cross-type* data-heavy run (e.g. DATA_EMPHASIS →
-    CHART_DATA): a same-type run was already split by ``_fix_consecutive_repeats``
-    earlier in the pipeline, which interposes a SECTION_BREAK (a breathing type).
+    DEFAULT OFF (invariant I2 + the master prompt: "do not delete the device,
+    default it OFF"). The stat-echo seed below — "Key takeaway: {value} {unit}
+    — {label}" — only echoes the preceding stat, which invariant I2 explicitly
+    bans as filler. The mechanism is retained for the model-authored breathing
+    content that lands in BUILD_STATE plan item 2; flip ``enabled=True`` only
+    when a thesis-bearing seed replaces the stat echo.
 
-    The breather is seeded with a REAL takeaway pulled from the preceding data
-    slide's highlighted (else first) stat, so it never ships as hollow filler.
-    When that slide exposes no usable stat — CHART_DATA and TABLE_COMPACT carry
-    their numbers in prose/rows, not ``stats`` — no breather is injected; absent
-    beats hollow. The trade is deliberate: a chart→table run now gets no auto
-    breather. The model-authored breathing content lands in the paid editorial
-    pass (BUILD_STATE plan item 2) and will replace this stat-derived stub.
+    When enabled: only fires on a *cross-type* data-heavy run (e.g.
+    DATA_EMPHASIS → CHART_DATA). The breather is seeded from the preceding
+    data slide's highlighted (else first) stat; if that slide exposes no
+    usable stat (CHART_DATA / TABLE_COMPACT carry numbers in prose/rows, not
+    ``stats``) no breather is injected — absent beats hollow.
     """
 
     del interview
+    if not enabled:
+        return slides
     out: list[SlideSpec] = []
     prev_slide: SlideSpec | None = None
     for slide in slides:
@@ -1164,16 +1381,6 @@ def _enforce_density_arc(slides: list[SlideSpec]) -> list[SlideSpec]:
 
 def _reindex(slides: list[SlideSpec]) -> list[SlideSpec]:
     return [slide.model_copy(update={"slide_index": i}) for i, slide in enumerate(slides)]
-
-
-def _make_section_break(name: str) -> SlideSpec:
-    return SlideSpec(
-        slide_index=0,
-        slide_type=SlideType.SECTION_BREAK,
-        content=SlideContent(title=name[:300]),
-        section_name=name[:100],
-        narrative_role=NarrativePhase.CONTEXT.value,
-    )
 
 
 def _default_title(interview: PresentationInterviewAnswers) -> str:

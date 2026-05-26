@@ -21,7 +21,7 @@
  * either field.
  */
 
-import { FONT_SIZES, LINE_HEIGHTS } from '../constants.js';
+import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS } from '../constants.js';
 import type {
   DeckSpec,
   ImageBlock,
@@ -36,6 +36,7 @@ import {
   buildTextBlock,
   compose,
   defaultBackground,
+  figureImageBlock,
   hugHeightToMeasured,
   stackBelow,
   stripListPrefix,
@@ -107,8 +108,15 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
     cursorY = stackBelow(bulletBlock, BULLET_GAP);
   });
 
-  const background = buildBackground(slide, deck);
-  return compose(slide, blocks, [], [], background);
+  // A contained object-figure (when resolved) occupies the right column, clear
+  // of the left-hand text. When present it IS the slide's visual, so we skip the
+  // full-bleed topic background to avoid stacking two competing images.
+  const images: ImageBlock[] = [];
+  const figure = figureImageBlock(slide.content.figure_url, SLIDE_REGIONS.concept_definition!.figure!);
+  if (figure) images.push(figure);
+
+  const background = figure ? defaultBackground(deck.design) : buildBackground(slide, deck);
+  return compose(slide, blocks, images, [], background);
 }
 
 function pickDefinition(subtitle?: string | null, body?: string | null): string | null {

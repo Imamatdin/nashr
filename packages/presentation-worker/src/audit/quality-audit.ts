@@ -23,7 +23,7 @@ import type {
   DeckSpec,
   SlideType,
 } from '../types.js';
-import { WORD_LIMITS } from '../constants.js';
+import { WORD_LIMITS, isPlaceholderImageSrc } from '../constants.js';
 
 export class QualityAudit {
   /**
@@ -302,7 +302,15 @@ export class QualityAudit {
   }
 
   // -------------------------------------------------------------------------
-  // Q4: No consecutive layout-type repeats (FAIL, R01)
+  // Q4: No consecutive layout-type repeats (WARN, R01)
+  //
+  // Adjacent same-type slides are a stylistic concern, not a correctness
+  // failure. Per invariant I5 ("a quality gate may vary, degrade, or warn,
+  // but MUST NOT block a deck from exporting over a cosmetic/stylistic
+  // issue"), this check is a warning — the variety problem is handled by
+  // the editorial prompt's layout-variety rules (R01, EDITORIAL_SYSTEM
+  // rule 7). The audit reports it so issues stay observable, but the
+  // deck still exports.
   // -------------------------------------------------------------------------
 
   private checkQ4ConsecutiveRepeats(deck: DeckSpec): AuditCheckResult[] {
@@ -315,7 +323,7 @@ export class QualityAudit {
           check_id: 'Q4',
           check_name: 'Consecutive layout repeat',
           passed: false,
-          severity: 'fail',
+          severity: 'warn',
           slide_index: i,
           rule_reference: 'R01',
           message: `Slides ${i - 1} and ${i} both use "${curr}"`,
@@ -327,7 +335,7 @@ export class QualityAudit {
         check_id: 'Q4',
         check_name: 'Consecutive layout repeat',
         passed: true,
-        severity: 'fail',
+        severity: 'warn',
       });
     }
     return results;
@@ -375,7 +383,7 @@ export class QualityAudit {
     for (const slide of layout.slides) {
       if (slide.background.image) {
         const src = slide.background.image.src;
-        if (!src || src.startsWith('[') || src.length > 500) {
+        if (isPlaceholderImageSrc(src)) {
           results.push({
             check_id: 'Q6',
             check_name: 'Image resolution',

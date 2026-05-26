@@ -23,6 +23,7 @@ from packages.core.enums import (
     ClaimStrength,
     ClaimType,
     ExportFormat,
+    ImageSubjectType,
     Language,
     NarrativeEmphasis,
     NarrativePhase,
@@ -43,8 +44,8 @@ from packages.core.models.presentation import (
     StatItem,
 )
 from packages.core.models.source import SourceClaimCreate
+from packages.core.prompts import EDITORIAL_SYSTEM
 from packages.presentation.editorial import (
-    _DATA_HEAVY_TYPES,
     SONNET_MODEL,
     WORD_LIMITS,
     EditorialPass,
@@ -293,6 +294,446 @@ def test_chart_type_and_grouped_fields_parse_and_materialise() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chart-selection rules (the editorial prompt's DATA-SHAPE → ENCODING block)
+#
+# The model picked zero-based bars by default for ratios and zero-laden series,
+# producing misleading charts on the sCO2 deck. These tests pin the rules that
+# replaced that behaviour:
+#   (a) the EDITORIAL_SYSTEM prompt carries decision criteria for each of the
+#       five recognised data shapes — failing if the rule text drifts;
+#   (b) the materialise path round-trips the model's chart_type intact for
+#       each shape, so a correctly-chosen encoding actually reaches the
+#       renderer.
+# A separate renderer-side guard (chart-guard.ts) is the backstop when the
+# model still mis-picks — these tests assert the SOURCE-side fix.
+# ---------------------------------------------------------------------------
+
+
+def test_editorial_prompt_carries_chart_selection_decision_rules() -> None:
+    # The prompt must instruct the model on encoding for each of the five
+    # recognised data shapes. Assertions pin the actual decision criteria
+    # (max/min ratio, "clustered well above zero", literal zeros, "single
+    # dominant number", "ordered progression", "multi-series per category")
+    # so a future change that deletes a rule is forced to update this test.
+    prompt = EDITORIAL_SYSTEM
+    # The decision block is named, so the contract is greppable.
+    assert "DATA-SHAPE" in prompt and "ENCODING" in prompt
+    # Rule 15 explicitly forbids defaulting to bar.
+    assert "NEVER default to a zero-based bar" in prompt
+    # Shape 1 — large spread (the only correct default for bar).
+    assert "LARGE SPREAD FROM ZERO" in prompt
+    assert "max/min" in prompt
+    # Shape 2 — clustered ratios/indices, the PUE-near-1 case.
+    assert "RATIO" in prompt and "CLUSTERED" in prompt
+    assert "PUE 1.08" in prompt
+    assert "compress these into near-equal columns" in prompt
+    # Shape 3 — literal zeros, the heat-recovery case.
+    assert "SERIES CONTAINING LITERAL ZEROES" in prompt
+    assert "draws as no bar at all" in prompt
+    # Shape 4 — single dominant number.
+    assert "SINGLE DOMINANT NUMBER" in prompt
+    assert "single_value" in prompt
+    # Shape 5 — ordered progression: tightened to require THREE OR MORE
+    # ordered points, with two-point comparisons routed away from line
+    # (the bug that drew a payback "line" between two discrete categories).
+    assert "ORDERED PROGRESSION" in prompt
+    assert "THREE OR MORE points" in prompt
+    assert "NEVER use line for two discrete categories" in prompt
+    # Shape 6 — multi-series-per-category (grouped/stacked) is the ONLY
+    # remaining bar-default case.
+    assert "MULTI-SERIES PER CATEGORY" in prompt
+
+
+def test_editorial_prompt_carries_subject_pick_guidance() -> None:
+    # The renderer's chart-guard picks the slide's subject by matching a
+    # series label inside the title; if the title names no subject the
+    # picker falls back to a metric-polarity lexicon (PUE → min, efficiency
+    # → max). The prompt must instruct the model to put the subject in the
+    # title so (a) wins on the common case — without this, a slide titled
+    # "Cooling efficiency compared" leaves the renderer guessing.
+    prompt = EDITORIAL_SYSTEM
+    assert "TITLE-SUBJECT ALIGNMENT" in prompt
+    assert "the title MUST name that subject" in prompt
+    # The PUE/efficiency lexicon is the deterministic fallback the prompt
+    # explicitly names so the model knows what the renderer will do if the
+    # title is generic.
+    assert "lower-is-better" in prompt and "higher-is-better" in prompt
+    assert "sCO₂ Achieves PUE 1.08" in prompt
+
+
+def _chart_payload(chart_type: str, series: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a minimal chart_data slide payload for the parser."""
+
+    return {
+        "slide_index": 0,
+        "slide_type": "chart_data",
+        "title": "Encoding round-trip",
+        "chart_type": chart_type,
+        "chart_series": series,
+    }
+
+
+@pytest.mark.parametrize(
+    "shape_name, chart_type, series",
+    [
+        # Big spread from zero — bar is correct.
+        (
+            "big_spread_bar",
+            "bar",
+            [
+                {"label": "Air", "value": 8, "unit": "kW/rack"},
+                {"label": "Liquid", "value": 40, "unit": "kW/rack"},
+                {"label": "sCO2", "value": 120, "unit": "kW/rack"},
+            ],
+        ),
+        # Clustered ratios — model should emit single_value (or a non-chart
+        # slide_type). Test pins that, if the model DOES emit single_value,
+        # the type round-trips intact.
+        (
+            "pue_near_1_single_value",
+            "single_value",
+            [{"label": "Best PUE", "value": 1.08, "unit": "PUE"}],
+        ),
+        # Series with literal zeros — the editorial layer routes these away
+        # from chart_data; but if the model picks single_value with one
+        # headline (e.g. "current recovery: 0"), the round-trip must hold.
+        (
+            "zeros_single_value",
+            "single_value",
+            [
+                {"label": "Current recovery", "value": 0, "unit": "%"},
+                {"label": "Target", "value": 20, "unit": "%"},
+            ],
+        ),
+        # Single dominant number.
+        (
+            "single_number",
+            "single_value",
+            [{"label": "Water saved", "value": 94.4, "unit": "%"}],
+        ),
+        # Two-point progression — line is the correct encoding.
+        (
+            "two_point_progression",
+            "line",
+            [
+                {"label": "2020", "value": 12, "unit": "GW"},
+                {"label": "2023", "value": 44, "unit": "GW"},
+            ],
+        ),
+    ],
+)
+def test_materialise_preserves_chart_type_for_each_data_shape(
+    shape_name: str,
+    chart_type: str,
+    series: list[dict[str, Any]],
+) -> None:
+    # When the LLM picks the right chart_type for a data shape, the
+    # materialise path must NOT silently drop or rewrite it. This is the
+    # same contract the existing chart_type_and_grouped_fields test pins,
+    # extended across the five recognised data shapes so the wire is proven
+    # end-to-end. The five shapes mirror the editorial prompt's decision
+    # tree (DATA-SHAPE → ENCODING).
+    del shape_name
+    content = _materialise_one(_chart_payload(chart_type, series))
+    assert content.chart_type is not None
+    assert content.chart_type.value == chart_type
+    assert content.chart_series is not None
+    assert [p.value for p in content.chart_series] == [s["value"] for s in series]
+
+
+# ---------------------------------------------------------------------------
+# Object-figure slot parsing (image engine, PART 1)
+#
+# Same contract guard as the chart/table tests: _LLMSlide must DECLARE
+# figure_prompt/figure_subject_type and _materialise_slides must copy them,
+# or extra="ignore" drops the figure the editorial prompt asks for and the
+# image engine never has a figure to resolve. _normalise_figure additionally
+# clamps a figure away from PERSON/SCENE so it never mis-routes into person
+# sourcing. figure_url is never emitted by editorial — the image stage writes
+# it later — so it must materialise as None here.
+# ---------------------------------------------------------------------------
+
+
+def test_figure_prompt_parses_and_materialises() -> None:
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "concept_definition",
+            "title": "The cold plate is where the heat leaves the chip",
+            "subtitle": "A liquid-cooled heat exchanger bolted to the die.",
+            "figure_prompt": "a liquid cold plate heat exchanger, copper "
+            "microchannels, isolated on a neutral background",
+            "figure_subject_type": "object",
+        }
+    )
+    assert (
+        content.figure_prompt == "a liquid cold plate heat exchanger, copper microchannels, "
+        "isolated on a neutral background"
+    )
+    assert content.figure_subject_type is ImageSubjectType.OBJECT
+    # The image stage fills figure_url later; editorial never emits it.
+    assert content.figure_url is None
+
+
+def test_figure_subject_type_concept_survives() -> None:
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "Entropy always increases in a closed loop",
+            "figure_prompt": "an abstract visualisation of rising entropy",
+            "figure_subject_type": "concept",
+        }
+    )
+    assert content.figure_subject_type is ImageSubjectType.CONCEPT
+
+
+def test_figure_without_subject_type_defaults_to_object() -> None:
+    # The model may emit a figure_prompt and forget the subject type; the
+    # materialiser must default it to OBJECT, never leave a figure unrouted.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "A turbine spins the generator",
+            "figure_prompt": "a steam turbine rotor, isolated on neutral grey",
+        }
+    )
+    assert content.figure_prompt is not None
+    assert content.figure_subject_type is ImageSubjectType.OBJECT
+
+
+def test_figure_tagged_person_is_coerced_to_object() -> None:
+    # A figure is a contained object/concept, never a real person (people go
+    # through the people slot and resolve to gated Commons portraits). A
+    # figure mistakenly tagged "person" must NOT route into person sourcing.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "The reactor core",
+            "figure_prompt": "a nuclear reactor pressure vessel cutaway",
+            "figure_subject_type": "person",
+        }
+    )
+    assert content.figure_subject_type is ImageSubjectType.OBJECT
+
+
+def test_no_figure_prompt_leaves_both_fields_null() -> None:
+    # No prompt means no figure: a stray subject type is dropped too, so the
+    # image stage sees a clean "no figure here" signal.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "content_split",
+            "title": "A slide with no figure",
+            "figure_subject_type": "object",
+        }
+    )
+    assert content.figure_prompt is None
+    assert content.figure_subject_type is None
+
+
+# ---------------------------------------------------------------------------
+# Editorial validation coercion (the resilience net)
+#
+# The editorial schema is intentionally tighter than the model's natural
+# output, so a SINGLE bad field on a SINGLE slide used to fail _LLMSequence
+# validation and collapse the whole deck to the 2-slide "Insufficient source
+# material" fallback. _parse_sequence now salvages the two recurring failure
+# modes — an over-long string and a slide missing its title — and re-validates
+# once, falling back only when the output is genuinely unusable. These tests
+# lock that behaviour: a fixable field must never throw away the deck, and a
+# real defect must still fall back (coercion must not mask it).
+# ---------------------------------------------------------------------------
+
+
+def test_overlong_unit_is_truncated_not_whole_deck_rejected() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {
+                    "slide_index": 0,
+                    "slide_type": "data_emphasis",
+                    "title": "Recovered heat pays for the retrofit",
+                    "stats": [
+                        {
+                            "value": "1.04",
+                            "unit": "M USD of facility energy recovered annually",
+                            "label": "Annual saving",
+                        }
+                    ],
+                }
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 1
+    assert parsed[0].stats is not None
+    # 43-char unit clamped at the nearest word boundary inside the 32 cap.
+    assert parsed[0].stats[0].unit == "M USD of facility energy"
+
+
+def test_null_title_repaired_from_body_keeps_slide() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"},
+                {
+                    "slide_index": 1,
+                    "slide_type": "content_split",
+                    "title": None,
+                    "body_text": "A dry cooler rejects rack heat without evaporating water.",
+                },
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 2
+    assert parsed[1].title == "A dry cooler rejects rack heat without evaporating water."
+
+
+def test_empty_string_title_repaired_from_stat_label() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Real title"},
+                {
+                    "slide_index": 1,
+                    "slide_type": "data_emphasis",
+                    "title": "   ",
+                    "stats": [{"value": "94.4", "unit": "%", "label": "Water saved"}],
+                },
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 2
+    assert parsed[1].title == "Water saved"
+
+
+def test_missing_title_key_repaired_from_body() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Real title"},
+                {
+                    "slide_index": 1,
+                    "slide_type": "content_split",
+                    "body_text": "Liquid cooling moves five times the heat of air.",
+                },
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 2
+    assert parsed[1].title == "Liquid cooling moves five times the heat of air."
+
+
+def test_untitled_slide_with_no_text_is_dropped_not_whole_deck() -> None:
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"},
+                {"slide_index": 1, "slide_type": "content_split", "title": None},
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 1
+    assert parsed[0].title == "Cooling that pays"
+
+
+def test_genuinely_invalid_output_is_not_coerced() -> None:
+    # An unknown slide_type is a real defect, not a fixable field. Coercion must
+    # not mask it: parsing fails so the pipeline can fall back as before.
+    parsed = _parse_sequence(
+        _llm_slides_payload(
+            [{"slide_index": 0, "slide_type": "not_a_real_slide_type", "title": "x"}]
+        )
+    )
+    assert parsed is None
+
+
+def _coercible_payload() -> str:
+    """A realistic editorial response carrying both salvageable violations:
+    one slide with an over-long stat unit and one slide with a null title."""
+
+    slides = [
+        _minimal_slide_payload("title_hero", "Water savings reach 94.4% in mild climates"),
+        _minimal_slide_payload("concept_definition", "Direct evaporative cooling defined"),
+        {
+            "slide_index": 2,
+            "slide_type": "data_emphasis",
+            "title": "Recovered heat pays for the retrofit",
+            "stats": [
+                {
+                    "value": "1.04",
+                    "unit": "M USD of facility energy recovered annually",
+                    "label": "Annual saving",
+                }
+            ],
+            "narrative_role": "evidence",
+        },
+        _minimal_slide_payload("section_break", "Method"),
+        {
+            "slide_index": 4,
+            "slide_type": "content_split",
+            "title": None,
+            "body_text": "A three-stage pipeline moves heat off the rack into a dry cooler.",
+            "narrative_role": "core",
+        },
+        _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot"),
+    ]
+    return _llm_slides_payload(slides)
+
+
+@pytest.mark.asyncio
+async def test_coercible_violations_yield_full_deck_not_fallback() -> None:
+    # The regression that proves the CLASS is fixed, not just the instance: a
+    # response with an over-long unit AND a null title must coerce to a FULL
+    # multi-slide deck, never the 2-slide "insufficient source" fallback.
+    llm = _StubLLM([_coercible_payload()])
+    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    claims = [
+        _claim(
+            f"Empirical finding {i} from the cooling pilot.",
+            claim_type=ClaimType.EMPIRICAL_FINDING,
+            strength=ClaimStrength.STRONG,
+        )
+        for i in range(20)
+    ]
+    deck = await pass_.generate_deck_spec(
+        interview=_interview(include_interactive=False),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=claims,
+        chunks=[],
+        source_metadata=[],
+    )
+    titles = [s.content.title for s in deck.slides]
+    assert "Insufficient source material" not in titles
+    assert len(deck.slides) > 2
+    units = [st.unit for s in deck.slides if s.content.stats for st in s.content.stats]
+    assert "M USD of facility energy" in units
+
+
+@pytest.mark.asyncio
+async def test_uncoercible_output_falls_back_to_minimal_deck() -> None:
+    # Garbage that coercion can't fix (unknown slide_type on every slide) must
+    # still produce the emergency deck — the safety net must not hide real
+    # failure. Two responses: the first call plus its one retry.
+    bad = _llm_slides_payload([{"slide_index": 0, "slide_type": "bogus", "title": "x"}])
+    llm = _StubLLM([bad, bad])
+    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    deck = await pass_.generate_deck_spec(
+        interview=_interview(include_interactive=False),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=[_claim("A finding that matters.")],
+        chunks=[],
+        source_metadata=[],
+    )
+    titles = [s.content.title for s in deck.slides]
+    assert "Insufficient source material" in titles
+
+
+# ---------------------------------------------------------------------------
 # Content analysis (no LLM)
 # ---------------------------------------------------------------------------
 
@@ -510,7 +951,14 @@ def test_build_content_summary_limits_claims() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_post_process_fixes_consecutive_repeats() -> None:
+def test_post_process_does_not_inject_hollow_dividers_between_repeats() -> None:
+    """Invariant I2: the post-process no longer hides R01 (consecutive same-
+    type slides) behind a hollow SECTION_BREAK. The old auto-divider had
+    title='•' and no thesis — pure slop. Consecutive same-types now flow
+    through unchanged (the model is steered by EDITORIAL_SYSTEM rule 7 not
+    to emit them; layout variety is the layout pass's job).
+    """
+
     slides = [
         _slide(SlideType.TITLE_HERO, "Title"),
         _slide(SlideType.CONTENT_SPLIT, "A"),
@@ -518,11 +966,21 @@ def test_post_process_fixes_consecutive_repeats() -> None:
         _slide(SlideType.DATA_EMPHASIS, "Stat"),
     ]
     out = EditorialPass._post_process(slides, _interview())
-    for prev, curr in pairwise(out):
-        assert prev.slide_type is not curr.slide_type or curr.slide_type is SlideType.SECTION_BREAK
+    # The two CONTENT_SPLIT slides remain adjacent — no hollow break wedged in.
+    types = [s.slide_type for s in out]
+    assert types.count(SlideType.CONTENT_SPLIT) == 2
+    # No SECTION_BREAK appears at all because the input had none and post-
+    # process never invents one.
+    assert SlideType.SECTION_BREAK not in types
 
 
-def test_post_process_inserts_section_breaks_in_long_runs() -> None:
+def test_post_process_does_not_auto_insert_section_breaks_in_long_runs() -> None:
+    """Invariant I2: R03 (section cadence) is now a model-prompt concern; the
+    post-process no longer injects hollow section breaks every 5 slides.
+    A long run of content slides survives unchanged — section structure is
+    earned by a thesis-bearing SECTION_BREAK from the LLM, not synthesized.
+    """
+
     slides = [_slide(SlideType.TITLE_HERO, "Title")] + [
         _slide(
             SlideType.CONTENT_SPLIT if i % 2 == 0 else SlideType.DATA_EMPHASIS,
@@ -531,8 +989,50 @@ def test_post_process_inserts_section_breaks_in_long_runs() -> None:
         for i in range(12)
     ]
     out = EditorialPass._post_process(slides, _interview())
-    section_breaks = [s for s in out if s.slide_type is SlideType.SECTION_BREAK]
-    assert len(section_breaks) >= 2
+    # No SECTION_BREAK should be auto-inserted: input had none, output has none.
+    assert all(s.slide_type is not SlideType.SECTION_BREAK for s in out)
+
+
+def test_drop_hollow_dividers_keeps_thesis_breaks_and_drops_bare_ones() -> None:
+    """The hard backstop for invariant I2 — a bare SECTION_BREAK is dropped,
+    a thesis-bearing one (non-empty subtitle) survives. The prompt steers the
+    model away from bare breaks, but this filter is the guarantee.
+    """
+
+    from packages.presentation.editorial import _drop_hollow_dividers
+
+    bare = SlideSpec(
+        slide_index=0,
+        slide_type=SlideType.SECTION_BREAK,
+        content=SlideContent(title="Method"),
+        section_name="Method",
+    )
+    thesis = SlideSpec(
+        slide_index=1,
+        slide_type=SlideType.SECTION_BREAK,
+        content=SlideContent(
+            title="Method",
+            subtitle="Three pilots, one protocol, identical instrumentation.",
+        ),
+        section_name="Method",
+    )
+    body_only = SlideSpec(
+        slide_index=2,
+        slide_type=SlideType.SECTION_BREAK,
+        content=SlideContent(title="Results", body_text="The pilots converged within 6%."),
+        section_name="Results",
+    )
+    content_slide = _slide(SlideType.CONTENT_SPLIT, "Pilot A")
+
+    out = _drop_hollow_dividers([bare, thesis, body_only, content_slide])
+
+    assert [s.slide_type for s in out] == [
+        SlideType.SECTION_BREAK,  # thesis (kept)
+        SlideType.SECTION_BREAK,  # body_only (kept)
+        SlideType.CONTENT_SPLIT,
+    ]
+    assert out[0].content.subtitle is not None  # the thesis-bearing one
+    assert out[1].content.body_text is not None  # the body-only one
 
 
 def test_post_process_enforces_word_limits() -> None:
@@ -580,7 +1080,15 @@ def _only_bullet(slide: SlideSpec) -> str:
     return bullets[0]
 
 
-def test_post_process_inserts_breathing_after_data() -> None:
+def test_post_process_does_not_auto_insert_breather_by_default() -> None:
+    """Invariant I2: the breather device defaults OFF. The stat-echo seed it
+    ships with today ('Key takeaway: 1.58 PUE — Power Usage Effectiveness')
+    is exactly the 'echoes an adjacent stat' filler invariant I2 forbids.
+    The device is retained for plan item 2 (model-authored breathers) but is
+    NOT invoked from _post_process by default — consecutive data slides flow
+    through unchanged.
+    """
+
     slides = [
         _slide(SlideType.TITLE_HERO, "Title"),
         _data_slide_with_stat("Stat", value="1.58", unit="PUE", label="Power Usage Effectiveness"),
@@ -588,18 +1096,16 @@ def test_post_process_inserts_breathing_after_data() -> None:
     ]
     out = EditorialPass._post_process(slides, _interview())
     types = [s.slide_type for s in out]
-    # No two consecutive data-heavy slides should remain.
-    for prev, curr in pairwise(types):
-        assert not (prev in _DATA_HEAVY_TYPES and curr in _DATA_HEAVY_TYPES)
-    # The breather is a SUMMARY_TAKEAWAY carrying real content, never the old filler.
-    breather = next(s for s in out if s.slide_type is SlideType.SUMMARY_TAKEAWAY)
-    assert breather.content.bullets is not None
-    assert "preceding data underscores" not in breather.content.bullets[0]
+    # The two data-heavy slides remain adjacent (no auto breather wedged in).
+    assert SlideType.DATA_EMPHASIS in types
+    assert SlideType.CHART_DATA in types
+    assert all(s.slide_type is not SlideType.SUMMARY_TAKEAWAY for s in out)
 
 
-def test_breathing_slide_carries_real_stat_not_filler() -> None:
-    # FIX B-interim: the injected breather is seeded from the preceding data
-    # slide's stat — a digit plus the stat label — not a hardcoded sentence.
+def test_breathing_device_off_by_default_is_a_no_op() -> None:
+    """The device is OFF by default — calling without enabled=True yields the
+    input unchanged regardless of what data slides precede what."""
+
     slides = [
         _data_slide_with_stat(
             "Energy", value="1.58", unit="PUE", label="Power Usage Effectiveness", highlight=True
@@ -607,20 +1113,33 @@ def test_breathing_slide_carries_real_stat_not_filler() -> None:
         _slide(SlideType.CHART_DATA, "Chart"),
     ]
     out = _insert_breathing_after_data(slides, _interview())
+    assert [s.slide_type for s in out] == [SlideType.DATA_EMPHASIS, SlideType.CHART_DATA]
+
+
+def test_breathing_device_when_enabled_seeds_from_real_stat() -> None:
+    """The scaffold still works when explicitly enabled — the digit + label
+    pair is carried through (kept so plan item 2 can flip enabled=True once a
+    thesis-bearing seed replaces the stat echo)."""
+
+    slides = [
+        _data_slide_with_stat(
+            "Energy", value="1.58", unit="PUE", label="Power Usage Effectiveness", highlight=True
+        ),
+        _slide(SlideType.CHART_DATA, "Chart"),
+    ]
+    out = _insert_breathing_after_data(slides, _interview(), enabled=True)
     assert [s.slide_type for s in out] == [
         SlideType.DATA_EMPHASIS,
         SlideType.SUMMARY_TAKEAWAY,
         SlideType.CHART_DATA,
     ]
     bullet = _only_bullet(out[1])
-    assert "preceding data underscores" not in bullet
     assert any(ch.isdigit() for ch in bullet)
     assert "Power Usage Effectiveness" in bullet
-    # A word unit is spaced off the value; the value+unit is not jammed.
-    assert "1.58 PUE" in bullet
+    assert "1.58 PUE" in bullet  # word unit spaced off the value
 
 
-def test_breathing_slide_prefers_highlighted_stat_and_keeps_symbol_unit() -> None:
+def test_breathing_device_when_enabled_prefers_highlighted_stat_and_keeps_symbol_unit() -> None:
     multi = SlideSpec(
         slide_index=0,
         slide_type=SlideType.DATA_EMPHASIS,
@@ -633,22 +1152,23 @@ def test_breathing_slide_prefers_highlighted_stat_and_keeps_symbol_unit() -> Non
         ),
     )
     out = _insert_breathing_after_data(
-        [multi, _slide(SlideType.TABLE_COMPACT, "Table")], _interview()
+        [multi, _slide(SlideType.TABLE_COMPACT, "Table")], _interview(), enabled=True
     )
     bullet = _only_bullet(out[1])
     assert "highlighted stat" in bullet
-    # Symbol unit stays attached to the value.
-    assert "35%" in bullet
+    assert "35%" in bullet  # symbol unit stays attached
 
 
-def test_no_breathing_slide_when_preceding_data_has_no_stat() -> None:
-    # CHART_DATA / TABLE_COMPACT carry numbers in prose/rows, not stats. With no
-    # usable stat, no breather is injected — absent beats hollow (R27 trade).
+def test_breathing_device_when_enabled_does_not_seed_without_a_stat() -> None:
+    """CHART_DATA / TABLE_COMPACT carry numbers in prose/rows, not stats. The
+    device, even when enabled, still abstains rather than inventing a hollow
+    breather — absent beats hollow."""
+
     slides = [
         _slide(SlideType.CHART_DATA, "Chart with prose numbers"),
         _slide(SlideType.TABLE_COMPACT, "Table"),
     ]
-    out = _insert_breathing_after_data(slides, _interview())
+    out = _insert_breathing_after_data(slides, _interview(), enabled=True)
     assert [s.slide_type for s in out] == [SlideType.CHART_DATA, SlideType.TABLE_COMPACT]
     assert all(s.slide_type is not SlideType.SUMMARY_TAKEAWAY for s in out)
 
@@ -790,13 +1310,18 @@ async def test_generate_interactive_skipped_when_disabled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _minimal_slide_payload(slide_type: str, title: str = "Headline") -> dict[str, Any]:
-    return {
+def _minimal_slide_payload(
+    slide_type: str, title: str = "Headline", *, subtitle: str | None = None
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "slide_index": 0,
         "slide_type": slide_type,
         "title": title,
         "narrative_role": "hook",
     }
+    if subtitle is not None:
+        payload["subtitle"] = subtitle
+    return payload
 
 
 def test_merge_inserts_before_section_breaks() -> None:
@@ -841,7 +1366,14 @@ def _full_pipeline_payload() -> str:
         _minimal_slide_payload("title_hero", "Water savings reach 94.4% in mild climates"),
         _minimal_slide_payload("concept_definition", "Direct evaporative cooling defined"),
         _minimal_slide_payload("data_emphasis", "94.4% water savings demonstrated"),
-        _minimal_slide_payload("section_break", "Method"),
+        # Thesis-bearing section break: under invariant I2 a bare "Method" is
+        # dropped; the subtitle states the section's argument so it earns its
+        # place and survives _drop_hollow_dividers in _post_process.
+        _minimal_slide_payload(
+            "section_break",
+            "Method",
+            subtitle="Three pilots, one protocol, identical instrumentation.",
+        ),
         _minimal_slide_payload("flow_process", "Three-stage cooling pipeline"),
         _minimal_slide_payload("content_split", "Pilot results across climates"),
         _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot"),

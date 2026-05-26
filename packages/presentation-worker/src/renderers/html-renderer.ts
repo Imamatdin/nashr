@@ -14,7 +14,7 @@
  * with semantic roles, and provide navigation + viewport scaling.
  */
 
-import { SLIDE_HEIGHT, SLIDE_WIDTH } from '../constants.js';
+import { SLIDE_HEIGHT, SLIDE_WIDTH, isPlaceholderImageSrc } from '../constants.js';
 import type {
   DeckLayout,
   DeckSpec,
@@ -389,8 +389,7 @@ html, body {
       ? 'image-block bg-image'
       : `image-block${img.objectFit === 'contain' ? ' contain' : ''}`;
 
-    const isPlaceholder =
-      !img.src || img.src.startsWith('[') || img.src.length > 500;
+    const isPlaceholder = isPlaceholderImageSrc(img.src);
 
     if (isPlaceholder) {
       const placeholderStyle = isBackground

@@ -80,10 +80,64 @@ def test_export_expiry_is_seven_days() -> None:
 
 
 def test_image_tier_limits_match_pricing() -> None:
+    from packages.core.enums import GenerationPackage
+
     limits = constants.PRESENTATION_TIER_IMAGE_LIMITS
-    assert limits["presentation_basic"] == 0
-    assert limits["presentation_standard"] >= 1
-    assert limits["presentation_premium"] > limits["presentation_standard"]
+    assert limits[GenerationPackage.PRESENTATION_BASIC] == 0
+    assert limits[GenerationPackage.PRESENTATION_STANDARD] >= 1
+    assert (
+        limits[GenerationPackage.PRESENTATION_PREMIUM]
+        > limits[GenerationPackage.PRESENTATION_STANDARD]
+    )
+
+
+def test_image_tier_limits_cover_every_presentation_tier() -> None:
+    """Invariant I1: every presentation GenerationPackage has a budget.
+
+    Adding a new presentation_* tier without an entry here would silently
+    fall through ``image_budget_for_package``'s fallback — exactly the
+    class of bug the typed re-key was meant to prevent. This assertion
+    fails the build until the new tier is added.
+    """
+
+    from packages.core.enums import GenerationPackage
+
+    presentation_tiers = {p for p in GenerationPackage if p.value.startswith("presentation_")}
+    assert presentation_tiers == set(constants.PRESENTATION_TIER_IMAGE_LIMITS.keys())
+
+
+def test_image_budget_for_package_is_monotone_across_paid_tiers() -> None:
+    """Invariant I1: tier difference must be observable in output.
+
+    The function is the single seam between billing and the image engine; if
+    PREMIUM does not strictly exceed STANDARD which does not exceed BASIC,
+    every paid difference downstream is fictional.
+    """
+
+    from packages.core.enums import GenerationPackage
+
+    basic = constants.image_budget_for_package(GenerationPackage.PRESENTATION_BASIC)
+    standard = constants.image_budget_for_package(GenerationPackage.PRESENTATION_STANDARD)
+    premium = constants.image_budget_for_package(GenerationPackage.PRESENTATION_PREMIUM)
+    assert basic == 0
+    assert standard > basic
+    assert premium > standard
+
+
+def test_image_budget_for_package_falls_back_on_non_presentation_tier() -> None:
+    """Defensive: non-presentation packages (article, bundle) get the standard
+    fallback so a not-yet-wired tier never silently ships a zero-image deck.
+    See INVARIANTS.md authorized deferral for the bundle.
+    """
+
+    from packages.core.enums import GenerationPackage
+
+    standard_budget = constants.image_budget_for_package(GenerationPackage.PRESENTATION_STANDARD)
+    assert (
+        constants.image_budget_for_package(GenerationPackage.BUNDLE_ARTICLE_PRESENTATION)
+        == standard_budget
+    )
+    assert constants.image_budget_for_package(GenerationPackage.ARTICLE_SHORT) == standard_budget
 
 
 def test_ocr_languages_includes_uzbek_russian_english() -> None:

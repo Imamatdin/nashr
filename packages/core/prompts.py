@@ -398,13 +398,25 @@ ABSOLUTE RULES:
 5. Maximum word counts per slide type are HARD limits. If content exceeds the limit, cut it or move it to speaker_notes.
 6. Speaker notes carry depth. The slide is the visual anchor.
 7. Never use the same slide_type on consecutive slides (R01).
-8. Insert a SECTION_BREAK slide every 4-5 content slides (R03).
+8. SECTION_BREAK slides are OPTIONAL and must EARN their place. Emit one ONLY when you can put a real one-line THESIS for the section in `subtitle` (the section's argument, not its name). Put the bare label in `section_name`. A SECTION_BREAK with only a title/section_name and no subtitle WILL BE DROPPED — invariant I2 forbids slides that only name a section. Most decks flow content→content with no dividers at all; reach for SECTION_BREAK sparingly.
 9. The first slide is always TITLE_HERO.
 10. Statistical claims become DATA_EMPHASIS or CHART_DATA. Never bury numbers in body text.
 11. If 3+ people are mentioned with detail, use GALLERY_PEOPLE.
 12. Comparisons become COMPARISON or CHART_DATA. Never describe them in prose when a visual would work.
 13. Density arc (R26): the first three slides MUST be sparse (TITLE_HERO, CONCEPT_DEFINITION, CONTENT_SPLIT, QUOTE_PULLQUOTE, DATA_EMPHASIS with 1-2 stats). Dense types (TABLE_COMPACT, COMPARISON, TIMELINE) only appear in the middle or late deck.
 14. NEVER emit an interactive slide type (interactive_quiz_mcq, interactive_matching, interactive_categorize, interactive_fill_blank, interactive_true_false, interactive_debate). A separate pass generates those.
+15. NEVER default to a zero-based bar chart. Pick the encoding from the SHAPE of the data, not from habit. The decision tree in DATA-SHAPE → ENCODING is mandatory.
+
+DATA-SHAPE → ENCODING (apply BEFORE choosing slide_type / chart_type — most quantitative misreads come from picking bar by reflex):
+- LARGE SPREAD FROM ZERO (max/min ≥ 1.5, no zeros), e.g. 8 / 40 / 120 kW/rack — use chart_data with chart_type "bar". A zero-based bar honestly conveys the magnitudes. This is the only case where a default bar is correct.
+- RATIO / INDEX / EFFICIENCY values CLUSTERED well above zero where the STORY is the small differences (PUE 1.08 vs 1.25 vs 1.58, efficiencies 0.84 vs 0.91, scores 7.2 vs 8.1) — DO NOT use chart_data with chart_type "bar"; zero-based bars compress these into near-equal columns and hide the differences. Use DATA_EMPHASIS with 2-4 stats so each value reads as a discrete number with its label, OR chart_data with chart_type "single_value" if there is only one headline plus a target.
+- SERIES CONTAINING LITERAL ZEROES (0 / 0 / 5 / 20% recovery; 0 / 12 / 30 incidents) — DO NOT use chart_data with chart_type "bar" or "grouped_bar"; a zero draws as no bar at all and reads as missing data, not as an intentional zero. Use DATA_EMPHASIS where each zero stands as the number "0" with its label, OR frame the slide so the zero IS the point (a content_split that names "Today: 0 — Target: 20%").
+- SINGLE DOMINANT NUMBER (94.4%, 1.04 $M ARR, 214 papers) — use chart_data with chart_type "single_value" (give one point; for "value of target" give two, where the second is the target), OR DATA_EMPHASIS with one stat. NEVER a one-bar chart.
+- ORDERED PROGRESSION over time/steps with THREE OR MORE points (2020→2021→2022→2023 capacity, a 4-step pipeline throughput) — use chart_data with chart_type "line"; the line communicates direction. A line REQUIRES a genuine sequence axis and at least three ordered points so the slope is real, not implied. NEVER use line for two discrete categories (Liquid vs sCO2 payback, before vs after intervention): a line between two unrelated points draws a continuous trend that does not exist. Two-point comparisons go to DATA_EMPHASIS (or chart_data with chart_type "bar" when the spread is large) so the values read as discrete numbers.
+- MULTI-SERIES PER CATEGORY (IT load + Cooling + Other across Air/Liquid/sCO2) — use chart_data with chart_type "grouped_bar" (compare per sub-series) or "stacked_bar" (compare totals plus composition). The bar default is correct ONLY here.
+
+TITLE-SUBJECT ALIGNMENT (data slides — DATA_EMPHASIS / CHART_DATA / single_value):
+- When the slide argues for a SPECIFIC value (one row of a comparison, the WINNER of a benchmark), the title MUST name that subject in the same wording that appears in the stat label / chart series label. The renderer headlines the subject the title names; a title that says "sCO₂ Achieves PUE 1.08" with a series of [Air 1.57, Liquid 1.25, sCO2 1.08] will pick the sCO2 point. A title that names no subject ("Cooling efficiency compared") falls back to the metric polarity (lower-is-better for PUE/cost/latency/payback; higher-is-better for efficiency/savings/recovery/throughput), so name the subject explicitly whenever the slide has one.
 
 STRUCTURED FIELDS — populate the field that matches the slide_type, or the slide renders BLANK:
 - table_compact: you MUST fill table_headers (the column labels) AND table_rows (one object per row, each with a "cells" array aligned 1:1 to the headers). Put the data ONLY in these fields — never in body_text, bullets, or speaker_notes. 2-5 columns, 2-7 rows. Example: "table_headers": ["Cooling", "Density", "PUE"], "table_rows": [{{"cells": ["Air", "8 kW/rack", "1.58"]}}, {{"cells": ["Liquid", "40 kW/rack", "1.10"]}}].
@@ -415,6 +427,16 @@ STRUCTURED FIELDS — populate the field that matches the slide_type, or the sli
   - "line": an ORDERED series showing a trend over time/steps, e.g. "chart_type": "line", "chart_series": [{{"label": "2020", "value": 12, "unit": "GW"}}, {{"label": "2023", "value": 44, "unit": "GW"}}].
   - "single_value": ONE headline figure in context. For a percentage give one point ("chart_type": "single_value", "chart_series": [{{"label": "Water saved", "value": 94.4, "unit": "%"}}]); for a value-of-target give two points where the second is the target ([{{"label": "ARR", "value": 1.04, "unit": "$M"}}, {{"label": "target", "value": 5, "unit": "$M"}}]).
   - "grouped_bar" / "stacked_bar": several sub-values per category. Provide chart_group_labels (the sub-series names) and give each chart_series point a "values" array aligned 1:1 to chart_group_labels. Example: "chart_type": "stacked_bar", "chart_group_labels": ["IT load", "Cooling", "Other"], "chart_series": [{{"label": "Air", "value": 8, "values": [6, 1.5, 0.5]}}, {{"label": "sCO2", "value": 120, "values": [90, 25, 5]}}]. Keep "value" set to the point's total for fallback.
+
+FIELD LIMITS (stay inside these — over-long values get truncated, a slide with no title gets dropped):
+- Every slide MUST have a non-empty "title". A slide without one is repaired or discarded.
+- Stat / chart "unit" must be TERSE — max 32 characters (e.g. "kW/rack", "%", "liters/yr", "of facility energy"). Put descriptive words in the "label", NEVER in the unit.
+
+OBJECT FIGURE (figure_prompt) — OPTIONAL, only on concept_definition or content_split slides:
+- When a slide's point is best supported by a single CONTAINED technical subject — a physical device or apparatus (a server rack, a turbine, a gear, a cold plate, a sensor) or a concrete diagram of one mechanism — emit figure_prompt: a short, vivid description of THAT subject alone (the object on a clean background, no scene, no text). Also set figure_subject_type to "object" (a physical thing) or "concept" (an abstract idea visualised). Example: "figure_prompt": "a liquid cold plate heat exchanger, copper microchannels, isolated on a neutral background", "figure_subject_type": "object".
+- figure_prompt is DIFFERENT from a full-bleed scene and from a person. Do NOT use it for a named real person (those go in "people") nor for an atmospheric backdrop. Most slides have NO figure — only emit one when a contained object genuinely strengthens the point. Leave it null otherwise.
+
+TIMELINE PORTRAITS: on a timeline slide, when a node centers on a specific REAL person, set that node's "portrait_prompt" to the person's full name (e.g. "Isaac Newton"). Leave it null for nodes that are events, not people. A portrait is then sourced for that node automatically.
 
 AVAILABLE SLIDE TYPES (pick the right one per slide):
 {slide_type_descriptions}
@@ -454,10 +476,12 @@ Return ONLY a JSON object. No prose, no markdown fences. Schema:
       "chart_series": [{{"label": "Air", "value": 8.0, "unit": "kW/rack", "values": [6, 1.5, 0.5] or null}}] or null,
       "chart_type": "bar" | "line" | "single_value" | "grouped_bar" | "stacked_bar" or null,
       "chart_group_labels": ["IT load", "Cooling", "Other"] or null,
-      "timeline_nodes": [{{"date": "...", "label": "..."}}] or null,
+      "timeline_nodes": [{{"date": "...", "label": "...", "portrait_prompt": "<real person's name>" or null}}] or null,
       "steps": [{{"label": "...", "description": "..."}}] or null,
       "quote_text": "..." or null,
       "quote_attribution": "..." or null,
+      "figure_prompt": "..." or null,
+      "figure_subject_type": "object" | "concept" or null,
       "speaker_notes": "...",
       "narrative_role": "hook" | "context" | "core" | "evidence" | "implications" | "close",
       "section_name": "..." or null,
