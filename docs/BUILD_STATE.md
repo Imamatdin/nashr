@@ -271,6 +271,88 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
     is the gate.
   - "All tests pass" ≠ "verified end-to-end." DONE is gated on Iko's server pass.
 
+## SHIPPED (chart-selection intelligence + Q4 demote — branch feat/image-engine)
+- WHY: the editorial pass had NO data-shape → encoding rules, so the model defaulted to
+  zero-based bars even where bar misleads — sCO2 deck slide 5 plotted PUE 1.08/1.25/1.675
+  as near-equal columns, slide 15 plotted heat-recovery 0/0/5/20 where the zeros drew
+  as absent bars. Same time, Q4 (adjacent-same-layout) was a `fail` severity and was
+  BLOCKING export over a stylistic concern. Both fixed as one batch because they share
+  the cause: the audit + prompt layer trying to enforce the wrong invariants.
+- TWO LAYERS for chart selection (editorial picks right; renderer guard is the backstop):
+  - EDITORIAL (`packages/core/prompts.py`): added a DATA-SHAPE → ENCODING decision block
+    to EDITORIAL_SYSTEM (six concrete rules — LARGE SPREAD FROM ZERO → bar; RATIO/INDEX
+    CLUSTERED → DATA_EMPHASIS / single_value, NOT zero-based bar; LITERAL ZEROES → not
+    bar; SINGLE DOMINANT NUMBER → single_value; ORDERED PROGRESSION → line; MULTI-SERIES
+    PER CATEGORY → grouped/stacked) plus a new ABSOLUTE RULE 15 ("NEVER default to a
+    zero-based bar"). Each rule is named and greppable so a future regression that drops
+    a rule fails its pinning test.
+  - RENDERER GUARD (`packages/presentation-worker/src/charts/chart-guard.ts`, NEW):
+    `validateChartEncoding(content)` is a pure function that runs before drawChart and
+    catches two failure modes deterministically. (1) LOW-SPREAD BAR — `chart_type=bar`
+    with all-nonzero values whose max/min < 1.5 → re-route to `single_value`, headlining
+    series[0] (preserves editorial ordering) and folding the rest into the subtitle so
+    no data is lost. Truncated-axis bars were the alternative and were REJECTED (advisor
+    flag): scope creep for a backstop, and the structurally cleaner fix — moving the
+    slide to DATA_EMPHASIS — lives upstream in editorial. The guard is the floor, not
+    the ceiling. (2) ZEROS IN BAR — some-but-not-all zeros → keep `chart_type=bar` but
+    flag the zero indices so drawBar emits an explicit baseline tick (visible, anchored
+    to plot.bottom) instead of an absent column; the eye reads "0 measured" not "data
+    missing". Every re-route is logged via `process.stderr.write` (matching the worker's
+    existing pipeline at src/index.ts / src/font-metrics.ts), key=value structured so it
+    is greppable: `chart_encoding_rerouted from=bar to=single_value reason=low_spread`.
+    THRESHOLD: max/min < 1.5 (Cleveland 1985 perceptual-flatness floor); documented in
+    the file next to LOW_SPREAD_THRESHOLD so a future maintainer can tune without
+    spelunking. The five existing chart_types are unchanged — this is a SELECTION
+    problem, not a missing-type problem.
+- Q4 DEMOTE (`packages/presentation-worker/src/audit/quality-audit.ts`): consecutive-
+  layout-repeat moved from `severity: 'fail'` to `severity: 'warn'`. A deck with the
+  only-Q4 issue now exports (`is_exportable: true`). Unit-tested by
+  `Q4 — warns on consecutive same type but does NOT block export (invariant I5)` —
+  pins severity 'warn' EXPLICITLY so a future revert is caught. Q4 was the only
+  cosmetic check at `fail` severity; the other `fail`s (Q1 overflow / Q2 contrast /
+  Q5 empty / Q7 unrenderable font / Q9 interactive completeness / Q10 quiz feedback /
+  Q13 wrong-language) all gate genuine user-visible breakage and remain `fail`.
+  Justification recorded in I5 (below).
+- INVARIANTS.md: added I5 "A quality gate may vary, degrade, or warn, but MUST NOT
+  block export over a cosmetic issue." Enumerates which checks are correctness (block)
+  vs cosmetic (warn) and the rationale: a user who paid for a deck gets the deck. New
+  audit checks default to `warn`; upgrades to `fail` must name the specific breakage
+  they prevent and be defended in I5.
+- OUT OF SCOPE (deliberate, noted in the chart-guard.ts module docstring): grouped_bar
+  / stacked_bar with zero sub-values — the editorial DATA-SHAPE → ENCODING rule
+  routes those away from grouped/stacked. If the model still mis-routes a grouped
+  chart with zeros, extend the guard in a follow-up; the seam is in place. ALSO out of
+  scope per the master prompt: body_text → speaker_notes truncation (slides 2/5/14);
+  the four near-identical air/liquid/sCO2 redundancy (editorial-variety concern, the
+  Step 1 prompt rule is the lever, batches with the variety patch); per-slide
+  atmosphere router; animated/interactive WEB-surface charts (deferred — LEAN/WEB
+  split intact).
+- VERIFIED locally (gates green on changed files):
+  - pytest tests/: 1210 passed / 32 skipped (+6 new — the EDITORIAL_SYSTEM rule pin
+    + five parametrized data-shape round-trip tests covering PUE-near-1, zeros,
+    big-spread, single-number, two-point progression).
+  - vitest packages/presentation-worker: 317 passed / 3 skipped (+16 new — 13 for
+    chart-guard.test.ts pinning the pass-through, re-route, and annotation decisions;
+    3 for draw-chart.test.ts proving the end-to-end behavior). ONE failure is the
+    pre-existing text-measure F red (plan item 11 — vendored Plex font unmatched by
+    fontkit on this Windows box; documented across multiple prior SHIPPED entries,
+    unrelated to this work).
+  - tsc --noEmit: clean on src + tests.
+  - pyright packages/: 0 errors / 0 warnings.
+  - ruff check + format --check on changed Python files: clean.
+- NOT verified locally (server eyeball gates DONE — per master prompt):
+  - Live regen of the sCO2 deck on server. Must confirm: slide 5 (PUE) is NO LONGER
+    a flat near-equal-bar chart (either editorial routes it to DATA_EMPHASIS / chart_
+    type=single_value at source, OR the renderer guard re-routes it and emits a
+    `chart_encoding_rerouted` log line); slide 15 (heat recovery) does not show empty
+    bars (renderer guard annotates zeros with explicit baseline ticks); charts across
+    the deck show VARIETY (line / single_value / grouped / bar where it earns its
+    place), not bar four times. Screenshot the chart slides into docs/screens/ and
+    eyeball.
+  - Q4 export: confirm the deck exports through the worker without the audit blocking
+    on adjacent duplicates.
+  - "All tests pass" ≠ "verified end-to-end." DONE is gated on Iko's server pass.
+
 ## SHIPPED (editorial resilience — branch feat/image-engine)
 - WHY HERE, not a hardening branch: the editorial pass was collapsing every run to the 2-slide
   "Insufficient source material" fallback, which BLOCKED testing the image engine on this branch

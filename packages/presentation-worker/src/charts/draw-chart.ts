@@ -21,7 +21,6 @@ import { FONT_SIZES, LINE_HEIGHTS, type Region } from '../constants.js';
 import { buildTextBlock, type FontTier, hugHeightToMeasured } from '../layouts/shared.js';
 import type {
   ChartSeriesPoint,
-  ChartType,
   DesignDirectionSpec,
   ShapeBlock,
   SlideContent,
@@ -33,6 +32,7 @@ import {
   horizontalRule,
   resolveChartRamp,
 } from './chart-style.js';
+import { validateChartEncoding } from './chart-guard.js';
 
 export interface ChartDrawing {
   shapes: ShapeBlock[];
@@ -56,6 +56,8 @@ const POINT_DIAMETER = 14;
 const AXIS_OPACITY = 0.45;
 /** Beyond this many sub-bars a grouped chart drops per-bar value labels. */
 const GROUPED_LABEL_BUDGET = 8;
+/** Height (slide %) of the visible tick that marks an explicit-zero bar. */
+const ZERO_TICK_HEIGHT = 0.45;
 
 interface PlotArea {
   x: number;
@@ -77,16 +79,32 @@ function computePlotArea(region: Region, legendBand: number): PlotArea {
 /**
  * Draw the chart for a CHART_DATA slide into `region`. Returns `null` when
  * there is no series to plot, so the caller falls back to its placeholder.
+ *
+ * The encoding goes through {@link validateChartEncoding} first — a
+ * deterministic guard that re-routes a chart whose `chart_type` would
+ * misrepresent the data's shape (low-spread bars, zero-laden bars). Every
+ * re-route is logged via the worker's existing stderr pipeline so the
+ * behavior is observable in production.
  */
 export function drawChart(
   region: Region,
   content: SlideContent,
   design: DesignDirectionSpec,
 ): ChartDrawing | null {
-  const series = content.chart_series ?? [];
-  if (series.length === 0) return null;
+  if ((content.chart_series ?? []).length === 0) return null;
 
-  const chartType: ChartType = content.chart_type ?? 'bar';
+  const decision = validateChartEncoding(content);
+  for (const reroute of decision.reroutes) {
+    // Match the worker's existing logging pipeline (process.stderr is what
+    // src/index.ts and src/font-metrics.ts already use). One line per
+    // re-route, structured key=value so logs are greppable in production.
+    process.stderr.write(
+      `chart_encoding_rerouted from=${reroute.from} to=${reroute.to} ` +
+        `reason=${reroute.reason} :: ${reroute.detail}\n`,
+    );
+  }
+
+  const { chartType, series, groupLabels, zeroAnnotations } = decision;
 
   switch (chartType) {
     case 'single_value':
@@ -94,11 +112,11 @@ export function drawChart(
     case 'line':
       return drawLine(region, series, design);
     case 'grouped_bar':
-      return drawGrouped(region, content, series, design, false);
+      return drawGrouped(region, groupLabels, series, design, false);
     case 'stacked_bar':
-      return drawGrouped(region, content, series, design, true);
+      return drawGrouped(region, groupLabels, series, design, true);
     case 'bar':
-      return drawBar(region, series, design);
+      return drawBar(region, series, design, zeroAnnotations);
   }
 }
 
@@ -166,11 +184,13 @@ function drawBar(
   region: Region,
   series: ChartSeriesPoint[],
   design: DesignDirectionSpec,
+  zeroAnnotations: number[] = [],
 ): ChartDrawing {
   const ramp = resolveChartRamp(design.palette);
   const plot = computePlotArea(region, 0);
   const shapes: ShapeBlock[] = [];
   const blocks: TextBlock[] = [];
+  const zeroSet = new Set(zeroAnnotations);
 
   const maxValue = Math.max(...series.map((p) => Math.max(0, p.value)), 0) || 1;
   const slotW = plot.w / series.length;
@@ -184,7 +204,20 @@ function drawBar(
     const barX = slotX + (slotW - barW) / 2;
     const barY = plot.bottom - barH;
 
-    shapes.push({ type: 'rect', x: barX, y: barY, w: barW, h: barH, fill: ramp[0] });
+    if (zeroSet.has(i)) {
+      // Explicit zero: draw a visible baseline tick instead of an absent
+      // bar so the eye reads "0 measured" rather than "data missing".
+      shapes.push({
+        type: 'rect',
+        x: barX,
+        y: plot.bottom - ZERO_TICK_HEIGHT,
+        w: barW,
+        h: ZERO_TICK_HEIGHT,
+        fill: ramp[0],
+      });
+    } else {
+      shapes.push({ type: 'rect', x: barX, y: barY, w: barW, h: barH, fill: ramp[0] });
+    }
     blocks.push(
       valueLabel(formatChartValue(point.value, point.unit), slotX, slotW, barY, region.y, design),
     );
@@ -347,12 +380,11 @@ function pointValues(point: ChartSeriesPoint, groupCount: number): number[] {
 
 function drawGrouped(
   region: Region,
-  content: SlideContent,
+  groupLabels: string[],
   series: ChartSeriesPoint[],
   design: DesignDirectionSpec,
   stacked: boolean,
 ): ChartDrawing {
-  const groupLabels = content.chart_group_labels ?? [];
   const groupCount = Math.max(
     1,
     groupLabels.length || Math.max(...series.map((p) => p.values?.length ?? 1)),

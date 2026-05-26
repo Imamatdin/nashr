@@ -44,6 +44,7 @@ from packages.core.models.presentation import (
     StatItem,
 )
 from packages.core.models.source import SourceClaimCreate
+from packages.core.prompts import EDITORIAL_SYSTEM
 from packages.presentation.editorial import (
     SONNET_MODEL,
     WORD_LIMITS,
@@ -290,6 +291,133 @@ def test_chart_type_and_grouped_fields_parse_and_materialise() -> None:
     assert content.chart_group_labels == ["IT load", "Cooling", "Other"]
     assert content.chart_series is not None
     assert content.chart_series[1].values == [90.0, 25.0, 5.0]
+
+
+# ---------------------------------------------------------------------------
+# Chart-selection rules (the editorial prompt's DATA-SHAPE → ENCODING block)
+#
+# The model picked zero-based bars by default for ratios and zero-laden series,
+# producing misleading charts on the sCO2 deck. These tests pin the rules that
+# replaced that behaviour:
+#   (a) the EDITORIAL_SYSTEM prompt carries decision criteria for each of the
+#       five recognised data shapes — failing if the rule text drifts;
+#   (b) the materialise path round-trips the model's chart_type intact for
+#       each shape, so a correctly-chosen encoding actually reaches the
+#       renderer.
+# A separate renderer-side guard (chart-guard.ts) is the backstop when the
+# model still mis-picks — these tests assert the SOURCE-side fix.
+# ---------------------------------------------------------------------------
+
+
+def test_editorial_prompt_carries_chart_selection_decision_rules() -> None:
+    # The prompt must instruct the model on encoding for each of the five
+    # recognised data shapes. Assertions pin the actual decision criteria
+    # (max/min ratio, "clustered well above zero", literal zeros, "single
+    # dominant number", "ordered progression", "multi-series per category")
+    # so a future change that deletes a rule is forced to update this test.
+    prompt = EDITORIAL_SYSTEM
+    # The decision block is named, so the contract is greppable.
+    assert "DATA-SHAPE" in prompt and "ENCODING" in prompt
+    # Rule 15 explicitly forbids defaulting to bar.
+    assert "NEVER default to a zero-based bar" in prompt
+    # Shape 1 — large spread (the only correct default for bar).
+    assert "LARGE SPREAD FROM ZERO" in prompt
+    assert "max/min" in prompt
+    # Shape 2 — clustered ratios/indices, the PUE-near-1 case.
+    assert "RATIO" in prompt and "CLUSTERED" in prompt
+    assert "PUE 1.08" in prompt
+    assert "compress these into near-equal columns" in prompt
+    # Shape 3 — literal zeros, the heat-recovery case.
+    assert "SERIES CONTAINING LITERAL ZEROES" in prompt
+    assert "draws as no bar at all" in prompt
+    # Shape 4 — single dominant number.
+    assert "SINGLE DOMINANT NUMBER" in prompt
+    assert "single_value" in prompt
+    # Shape 5 — two-point progression / before-after.
+    assert "ORDERED PROGRESSION" in prompt
+    # Shape 6 — multi-series-per-category (grouped/stacked) is the ONLY
+    # remaining bar-default case.
+    assert "MULTI-SERIES PER CATEGORY" in prompt
+
+
+def _chart_payload(chart_type: str, series: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a minimal chart_data slide payload for the parser."""
+
+    return {
+        "slide_index": 0,
+        "slide_type": "chart_data",
+        "title": "Encoding round-trip",
+        "chart_type": chart_type,
+        "chart_series": series,
+    }
+
+
+@pytest.mark.parametrize(
+    "shape_name, chart_type, series",
+    [
+        # Big spread from zero — bar is correct.
+        (
+            "big_spread_bar",
+            "bar",
+            [
+                {"label": "Air", "value": 8, "unit": "kW/rack"},
+                {"label": "Liquid", "value": 40, "unit": "kW/rack"},
+                {"label": "sCO2", "value": 120, "unit": "kW/rack"},
+            ],
+        ),
+        # Clustered ratios — model should emit single_value (or a non-chart
+        # slide_type). Test pins that, if the model DOES emit single_value,
+        # the type round-trips intact.
+        (
+            "pue_near_1_single_value",
+            "single_value",
+            [{"label": "Best PUE", "value": 1.08, "unit": "PUE"}],
+        ),
+        # Series with literal zeros — the editorial layer routes these away
+        # from chart_data; but if the model picks single_value with one
+        # headline (e.g. "current recovery: 0"), the round-trip must hold.
+        (
+            "zeros_single_value",
+            "single_value",
+            [
+                {"label": "Current recovery", "value": 0, "unit": "%"},
+                {"label": "Target", "value": 20, "unit": "%"},
+            ],
+        ),
+        # Single dominant number.
+        (
+            "single_number",
+            "single_value",
+            [{"label": "Water saved", "value": 94.4, "unit": "%"}],
+        ),
+        # Two-point progression — line is the correct encoding.
+        (
+            "two_point_progression",
+            "line",
+            [
+                {"label": "2020", "value": 12, "unit": "GW"},
+                {"label": "2023", "value": 44, "unit": "GW"},
+            ],
+        ),
+    ],
+)
+def test_materialise_preserves_chart_type_for_each_data_shape(
+    shape_name: str,
+    chart_type: str,
+    series: list[dict[str, Any]],
+) -> None:
+    # When the LLM picks the right chart_type for a data shape, the
+    # materialise path must NOT silently drop or rewrite it. This is the
+    # same contract the existing chart_type_and_grouped_fields test pins,
+    # extended across the five recognised data shapes so the wire is proven
+    # end-to-end. The five shapes mirror the editorial prompt's decision
+    # tree (DATA-SHAPE → ENCODING).
+    del shape_name
+    content = _materialise_one(_chart_payload(chart_type, series))
+    assert content.chart_type is not None
+    assert content.chart_type.value == chart_type
+    assert content.chart_series is not None
+    assert [p.value for p in content.chart_series] == [s["value"] for s in series]
 
 
 # ---------------------------------------------------------------------------

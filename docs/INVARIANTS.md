@@ -97,3 +97,31 @@ deferral, by name, IN THIS FILE.
   tracked telemetry; today it stays at 0. The fix is a small surface change to
   `resolve_images` — return the count so the caller can persist it. Out of scope
   here; flagged so it is not silently forgotten. **Sign-off requested.**
+
+## I5 — A quality gate may vary, degrade, or warn, but MUST NOT block export over a cosmetic issue
+
+A user who paid for a deck gets the deck. The audit's job is to keep correctness
+failures off the user's screen (text that doesn't render, contrast that can't be
+read, an interactive without a correct answer) — not to gatekeep on style. A
+stylistic concern means: a real human designer might argue with the choice but the
+deck is still legible, accurate, and complete.
+
+- **Correctness failures (severity: `fail`, blocks export):** Q1 text overflow,
+  Q2 WCAG contrast, Q5 empty slide, Q7 unrenderable font, Q9 interactive without a
+  correct answer, Q10 quiz without feedback, Q13 deck in the wrong language.
+- **Stylistic / cosmetic concerns (severity: `warn`, never blocks):** Q4 adjacent
+  same-layout, Q3 word count over, Q6 unresolved background image, Q8 mixed
+  script, Q11 visible cards, Q12 generic title, Q14 consecutive data slides,
+  Q15 unvaried stats.
+
+Adding a new check defaults to `warn` unless it traps a correctness failure
+defined above. If a check upgrades from `warn` to `fail`, the upgrade must name
+the specific user-visible breakage it prevents and be defended here. The
+`is_exportable` flag is computed from `failed === 0`, so the line lives in the
+severity field — keep it honest.
+
+Q4 specifically: adjacent same-layout was a `fail` historically and blocked the
+sCO2 deck from exporting. It is now `warn` (see `quality-audit.ts` and the test
+`warns on consecutive same type but does NOT block export`). The variety problem
+is addressed upstream by `EDITORIAL_SYSTEM` rule 7; the audit reports the
+violation so it remains observable.
