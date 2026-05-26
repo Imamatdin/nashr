@@ -14,10 +14,13 @@ Pipeline:
 3. Select a narrative arc from the user's emphasis choice.
 4. LLM call (Sonnet) — generate the slide sequence with takeaway titles,
    typed content, and narrative roles.
-5. Post-process — enforce R01 (no consecutive layout repeats), R03
-   (section breaks every 4-5 slides), R17 (word-count limits), R27
-   (breathing after data-heavy), R26 (density arc), first-slide is
-   TITLE_HERO, and re-index.
+5. Post-process — drop hollow SECTION_BREAK dividers that carry no thesis
+   (invariant I2, ``docs/INVARIANTS.md``); ensure first-slide is TITLE_HERO;
+   enforce R17 (word-count limits) and R26 (density arc); re-index. The
+   breather device (R27) is retained but defaults OFF — see
+   :func:`_insert_breathing_after_data`. R01/R03 are now model-prompt
+   concerns (EDITORIAL_SYSTEM rules 7-8), not post-process invariants:
+   the old auto-injected hollow dividers that satisfied them are slop.
 6. Optional LLM call (Gemini Flash) — generate quiz / matching /
    fill-blank / true-false / debate / categorise content for interactive
    slides.
@@ -160,7 +163,14 @@ SLIDE_TYPE_DESCRIPTIONS: Final[dict[SlideType, str]] = {
     SlideType.QUOTE_PULLQUOTE: "One powerful quote or finding. The quote IS the slide. Max 35 words.",
     SlideType.CHART_DATA: "One chart/graph. Title states the insight. Max 20 words of text.",
     SlideType.TABLE_COMPACT: "Structured data. Max 5 columns x 6 rows.",
-    SlideType.SECTION_BREAK: "Section transition. Just the section name. Max 6 words.",
+    SlideType.SECTION_BREAK: (
+        "Section transition. Put the section LABEL in section_name, and put a"
+        " ONE-LINE THESIS for the section in subtitle (the section's argument,"
+        " not its name). A SECTION_BREAK with no subtitle is dropped — invariant"
+        " I2: a slide that only names a section carries no weight. Most decks"
+        " flow content→content; emit a SECTION_BREAK only when a thesis earns it."
+        " Title max 6 words; subtitle max 130 chars."
+    ),
     SlideType.SUMMARY_TAKEAWAY: "3-5 numbered takeaways from preceding section. Max 60 words.",
     SlideType.RESOURCES_LINKS: "3-6 resource links with descriptions. Max 60 words.",
     SlideType.TEAM_CREDITS: "Team members with names + roles. Max 40 words.",
@@ -678,16 +688,22 @@ class EditorialPass:
         slides: list[SlideSpec],
         interview: PresentationInterviewAnswers,
     ) -> list[SlideSpec]:
-        """Enforce R01, R03, R17, R27, R26 on the LLM-emitted sequence."""
+        """De-slop the LLM-emitted sequence and enforce content invariants.
+
+        Order matters: hollow dividers are dropped FIRST so a stray bare
+        ``slides[0]`` SECTION_BREAK never gets promoted to a title-hero by
+        :func:`_ensure_first_is_title`. The breather call is retained for the
+        scaffold of plan item 2 (model-authored breathers) but defaults OFF —
+        an invariant-I2 violation if enabled with the current stat-echo seed.
+        """
 
         if not slides:
             return _emergency_minimal_deck(interview)
+        slides = _drop_hollow_dividers(slides)
         slides = _ensure_first_is_title(slides, interview)
         slides = _enforce_word_limits(slides)
         slides = _enforce_density_arc(slides)
-        slides = _fix_consecutive_repeats(slides)
-        slides = _insert_section_breaks(slides, interview)
-        slides = _insert_breathing_after_data(slides, interview)
+        slides = _insert_breathing_after_data(slides, interview)  # no-op by default
         slides = _reindex(slides)
         return slides
 
@@ -1229,65 +1245,62 @@ def _ensure_first_is_title(
     return [title_slide, *slides]
 
 
-def _fix_consecutive_repeats(slides: list[SlideSpec]) -> list[SlideSpec]:
-    """Break a run of identical slide_types by inserting a SECTION_BREAK."""
+def _drop_hollow_dividers(slides: list[SlideSpec]) -> list[SlideSpec]:
+    """Invariant I2: drop SECTION_BREAK slides that carry no thesis.
 
-    out: list[SlideSpec] = []
-    prev_type: SlideType | None = None
-    for slide in slides:
-        if (
-            prev_type is not None
-            and slide.slide_type is prev_type
-            and slide.slide_type is not SlideType.SECTION_BREAK
-        ):
-            out.append(_make_section_break("•"))
-        out.append(slide)
-        prev_type = slide.slide_type
-    return out
+    A SECTION_BREAK earns its place only by stating a one-line argument for
+    the section — its title is the LABEL (the section name), its ``subtitle``
+    (or ``body_text``) is the THESIS. A break that has neither is a bare
+    label; per invariant I2 ("a slide that only names a section is NOT
+    emitted") it does not survive post-process.
+
+    The prompt is steered to put the thesis in ``subtitle``
+    (:data:`SLIDE_TYPE_DESCRIPTIONS`, EDITORIAL_SYSTEM rule 8) so a
+    well-behaved model never emits a hollow break; this filter is the hard
+    backstop that keeps the invariant true regardless of model adherence.
+    """
+
+    return [
+        s
+        for s in slides
+        if s.slide_type is not SlideType.SECTION_BREAK or _section_break_has_thesis(s)
+    ]
 
 
-def _insert_section_breaks(
-    slides: list[SlideSpec],
-    interview: PresentationInterviewAnswers,
-) -> list[SlideSpec]:
-    """Make sure a SECTION_BREAK appears at least every 5 content slides."""
+def _section_break_has_thesis(slide: SlideSpec) -> bool:
+    """True when a SECTION_BREAK carries a one-line thesis in subtitle/body."""
 
-    del interview
-    out: list[SlideSpec] = []
-    since_break = 0
-    for slide in slides:
-        if slide.slide_type is SlideType.SECTION_BREAK:
-            out.append(slide)
-            since_break = 0
-            continue
-        if since_break >= 5:
-            out.append(_make_section_break("•"))
-            since_break = 0
-        out.append(slide)
-        since_break += 1
-    return out
+    content = slide.content
+    subtitle = (content.subtitle or "").strip()
+    body = (content.body_text or "").strip()
+    return bool(subtitle) or bool(body)
 
 
 def _insert_breathing_after_data(
     slides: list[SlideSpec],
     interview: PresentationInterviewAnswers,
+    *,
+    enabled: bool = False,
 ) -> list[SlideSpec]:
-    """R27: insert a breathing slide between two consecutive data-heavy slides.
+    """R27 scaffold: insert a breather between two cross-type data-heavy slides.
 
-    Only ever fires on a *cross-type* data-heavy run (e.g. DATA_EMPHASIS →
-    CHART_DATA): a same-type run was already split by ``_fix_consecutive_repeats``
-    earlier in the pipeline, which interposes a SECTION_BREAK (a breathing type).
+    DEFAULT OFF (invariant I2 + the master prompt: "do not delete the device,
+    default it OFF"). The stat-echo seed below — "Key takeaway: {value} {unit}
+    — {label}" — only echoes the preceding stat, which invariant I2 explicitly
+    bans as filler. The mechanism is retained for the model-authored breathing
+    content that lands in BUILD_STATE plan item 2; flip ``enabled=True`` only
+    when a thesis-bearing seed replaces the stat echo.
 
-    The breather is seeded with a REAL takeaway pulled from the preceding data
-    slide's highlighted (else first) stat, so it never ships as hollow filler.
-    When that slide exposes no usable stat — CHART_DATA and TABLE_COMPACT carry
-    their numbers in prose/rows, not ``stats`` — no breather is injected; absent
-    beats hollow. The trade is deliberate: a chart→table run now gets no auto
-    breather. The model-authored breathing content lands in the paid editorial
-    pass (BUILD_STATE plan item 2) and will replace this stat-derived stub.
+    When enabled: only fires on a *cross-type* data-heavy run (e.g.
+    DATA_EMPHASIS → CHART_DATA). The breather is seeded from the preceding
+    data slide's highlighted (else first) stat; if that slide exposes no
+    usable stat (CHART_DATA / TABLE_COMPACT carry numbers in prose/rows, not
+    ``stats``) no breather is injected — absent beats hollow.
     """
 
     del interview
+    if not enabled:
+        return slides
     out: list[SlideSpec] = []
     prev_slide: SlideSpec | None = None
     for slide in slides:
@@ -1368,16 +1381,6 @@ def _enforce_density_arc(slides: list[SlideSpec]) -> list[SlideSpec]:
 
 def _reindex(slides: list[SlideSpec]) -> list[SlideSpec]:
     return [slide.model_copy(update={"slide_index": i}) for i, slide in enumerate(slides)]
-
-
-def _make_section_break(name: str) -> SlideSpec:
-    return SlideSpec(
-        slide_index=0,
-        slide_type=SlideType.SECTION_BREAK,
-        content=SlideContent(title=name[:300]),
-        section_name=name[:100],
-        narrative_role=NarrativePhase.CONTEXT.value,
-    )
 
 
 def _default_title(interview: PresentationInterviewAnswers) -> str:

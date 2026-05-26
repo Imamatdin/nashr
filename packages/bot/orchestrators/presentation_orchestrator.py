@@ -37,8 +37,10 @@ from packages.bot.orchestrators.article_orchestrator import (
     SourceProcessingResult,
     _OrchestratorError,
 )
+from packages.core.constants import image_budget_for_package
 from packages.core.enums import (
     ExportFormat,
+    GenerationPackage,
     SourceQuality,
 )
 from packages.core.models.evidence import EvidenceMatrix
@@ -418,6 +420,8 @@ class PresentationOrchestrator:
         sources: SourceProcessingResult,
         project_id: str,
         progress: ProgressCallback,
+        *,
+        package: GenerationPackage,
     ) -> DeckSpec:
         """Fill the deck's image slots (parallel); abstain rather than fail.
 
@@ -426,18 +430,23 @@ class PresentationOrchestrator:
         retrievable url against) but still advance the progress step so the step
         count stays stable. Any unexpected error is swallowed — a deck with no
         images still renders.
+
+        ``package`` derives the per-deck generated-image budget (invariant I1).
+        Required keyword-only so a caller cannot silently default a paid tier.
         """
 
         await progress("Resolving images", 6, TOTAL_STEPS)
         storage = self._storage
         if storage is None:
             return deck_spec
+        budget = image_budget_for_package(package)
         try:
             return await self._image_pass.resolve_deck(
                 deck_spec,
                 storage=storage,
                 project_id=project_id,
                 figures=sources.figures,
+                max_generated_images=budget,
             )
         except Exception as exc:
             logger.warning(
@@ -583,6 +592,8 @@ class PresentationOrchestrator:
         raw_answers: Mapping[str, object] | None,
         requested_formats: list[ExportFormat] | None,
         progress: ProgressCallback,
+        *,
+        package: GenerationPackage,
     ) -> PresentationRenderResult:
         """Drive the full presentation pipeline end-to-end.
 
@@ -590,6 +601,10 @@ class PresentationOrchestrator:
         raises on unrecoverable errors (no usable sources, editorial
         pass failure); the caller (the bot handler) is responsible for
         refunding credits when this raises.
+
+        ``package`` is the paid tier; it threads through to the image stage to
+        set the per-deck generated-image budget. Required keyword-only so a
+        caller cannot silently default a paid path (invariant I1).
         """
 
         formats = requested_formats or [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
@@ -616,7 +631,9 @@ class PresentationOrchestrator:
             project_id=project_id,
             progress=progress,
         )
-        deck_spec = await self.resolve_images(deck_spec, sources, project_id, progress)
+        deck_spec = await self.resolve_images(
+            deck_spec, sources, project_id, progress, package=package
+        )
         return await self.render(deck_spec, formats, progress, project_id=project_id)
 
 

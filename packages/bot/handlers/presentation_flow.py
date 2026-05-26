@@ -55,7 +55,7 @@ from packages.bot.orchestrators import (
 )
 from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
 from packages.bot.states import PresentationStates
-from packages.core.enums import ExportFormat
+from packages.core.enums import ExportFormat, GenerationPackage
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
@@ -409,6 +409,7 @@ async def start_generation(
     progress_msg: Message = await target.answer(labels.generating.format(progress="…"))
     progress = _progress_editor(progress_msg, labels)
     orchestrator = _orchestrator(bot, db, credits, storage=storage)
+    package = _package_for_generation(data)
     await state.set_state(PresentationStates.generating)
 
     try:
@@ -420,6 +421,7 @@ async def start_generation(
             raw_answers=raw_answers,
             requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
             progress=progress,
+            package=package,
         )
     except _OrchestratorError as exc:
         logger.exception(
@@ -520,6 +522,34 @@ async def _refund_on_failure(credits: CreditLedger, data: dict[str, Any], projec
             "presentation_refund_failed",
             extra={"error_type": type(exc).__name__},
         )
+
+
+def _package_for_generation(data: dict[str, Any]) -> GenerationPackage:
+    """Resolve the FSM-recorded tier string to a :class:`GenerationPackage`.
+
+    The ``choose_tier`` callback writes ``presentation_{basic,standard,premium}``
+    into FSM data — exactly the :class:`GenerationPackage` enum values for the
+    three presentation tiers. Missing/malformed values fall back to
+    ``PRESENTATION_STANDARD`` with a logged warning so a flow bug never starves
+    a paying user to zero images; tier is required at the orchestrator (no
+    silent default there — invariant I1), so the handler is the one place that
+    owns the str→enum boundary.
+    """
+
+    raw = str(data.get("tier") or "")
+    try:
+        package = GenerationPackage(raw)
+    except ValueError:
+        logger.warning("presentation_unknown_tier_in_fsm", extra={"tier": raw})
+        return GenerationPackage.PRESENTATION_STANDARD
+    if not raw.startswith("presentation_"):
+        # The presentation flow should never land here with an article/bundle
+        # tier (the choose_tier callback prefixes presentation_); if it does,
+        # something upstream is wrong — fall back rather than ship a deck
+        # without images, and log so the upstream bug is visible.
+        logger.warning("presentation_non_presentation_tier_in_fsm", extra={"tier": package.value})
+        return GenerationPackage.PRESENTATION_STANDARD
+    return package
 
 
 # ---------------------------------------------------------------------------

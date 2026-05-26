@@ -34,6 +34,7 @@ from packages.core.enums import (
     ClaimType,
     DiagramStrategy,
     ExportFormat,
+    GenerationPackage,
     Language,
     NarrativeEmphasis,
     NarrativePhase,
@@ -342,6 +343,7 @@ def _build_orch(
     editorial: _StubEditorialPass | None = None,
     worker: _StubWorkerRunner | None = None,
     storage: Any = None,
+    image_pass: Any = None,
 ) -> tuple[PresentationOrchestrator, DatabaseClient, CreditLedger, FakeSupabaseClient]:
     db, fake, credits = _make_db()
     orch = PresentationOrchestrator(
@@ -357,6 +359,7 @@ def _build_orch(
         design_pass=cast(Any, design if design is not None else _StubDesignPass()),
         editorial_pass=cast(Any, editorial if editorial is not None else _StubEditorialPass()),
         worker_runner=cast(Any, worker if worker is not None else _StubWorkerRunner()),
+        image_pass=image_pass,
     )
     return orch, db, credits, fake
 
@@ -708,6 +711,7 @@ async def test_full_pipeline_emits_seven_progress_steps() -> None:
         raw_answers=None,
         requested_formats=None,
         progress=progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
     )
 
     assert isinstance(result, PresentationRenderResult)
@@ -730,6 +734,7 @@ async def test_full_pipeline_uses_defaults_when_no_answers() -> None:
         raw_answers=None,
         requested_formats=[ExportFormat.HTML],
         progress=_noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
     )
 
     assert interview.apply_defaults_calls and not interview.apply_answers_calls
@@ -751,8 +756,113 @@ async def test_full_pipeline_propagates_editorial_failure() -> None:
             raw_answers=None,
             requested_formats=[ExportFormat.HTML],
             progress=_noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
         )
     assert info.value.step == "editorial"
+
+
+# ---------------------------------------------------------------------------
+# Tier → image budget wire (invariant I1)
+# ---------------------------------------------------------------------------
+
+
+class _SpyImagePass:
+    """Records the per-call ``max_generated_images`` the orchestrator passes."""
+
+    def __init__(self) -> None:
+        self.resolve_calls: list[int | None] = []
+
+    async def resolve_deck(
+        self,
+        deck: DeckSpec,
+        *,
+        storage: Any,
+        project_id: str,
+        figures: list[Any],
+        max_generated_images: int | None = None,
+    ) -> DeckSpec:
+        del storage, project_id, figures
+        self.resolve_calls.append(max_generated_images)
+        return deck
+
+
+@pytest.mark.parametrize(
+    ("package", "expected_budget"),
+    [
+        (GenerationPackage.PRESENTATION_BASIC, 0),
+        (GenerationPackage.PRESENTATION_STANDARD, 2),
+        (GenerationPackage.PRESENTATION_PREMIUM, 5),
+    ],
+)
+async def test_full_pipeline_threads_package_to_image_budget(
+    package: GenerationPackage, expected_budget: int
+) -> None:
+    """Invariant I1: the paid tier MUST set the per-deck image budget.
+
+    This test fails on any code that lets the budget default in the
+    orchestrator (the bug the image-engine fix corrects). The spy records
+    exactly what the orchestrator passed to ``ImagePass.resolve_deck`` and
+    the SPEC budgets (0/2/5) must round-trip.
+    """
+
+    from unittest.mock import MagicMock
+
+    bot = _StubBot(payloads={"f1": b"pdf"})
+    worker = _StubWorkerRunner(formats_to_succeed=("html",))
+    storage_stub = MagicMock()
+    storage_stub.available = False  # disables _upload_rendered, keeps render local
+    spy = _SpyImagePass()
+    orch, _, _, _ = _build_orch(bot, worker=worker, storage=storage_stub, image_pass=spy)
+
+    await orch.run_full_pipeline(
+        file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
+        project_id=PROJECT_ID,
+        user_id=USER_ID,
+        language="uz",
+        raw_answers=None,
+        requested_formats=[ExportFormat.HTML],
+        progress=_noop_progress,
+        package=package,
+    )
+
+    assert spy.resolve_calls == [expected_budget]
+
+
+async def test_full_pipeline_premium_image_budget_strictly_exceeds_standard() -> None:
+    """The headline regression: premium > standard observable in the wire.
+
+    Captures the budget for both tiers from the same orchestrator harness and
+    asserts strict inequality. The whole point of charging more for premium
+    is more images; if this passes on a build where premium == standard, the
+    test is wrong, not the code.
+    """
+
+    from unittest.mock import MagicMock
+
+    async def _run(package: GenerationPackage) -> int | None:
+        bot = _StubBot(payloads={"f1": b"pdf"})
+        worker = _StubWorkerRunner(formats_to_succeed=("html",))
+        storage_stub = MagicMock()
+        storage_stub.available = False
+        spy = _SpyImagePass()
+        orch, _, _, _ = _build_orch(bot, worker=worker, storage=storage_stub, image_pass=spy)
+        await orch.run_full_pipeline(
+            file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
+            project_id=PROJECT_ID,
+            user_id=USER_ID,
+            language="uz",
+            raw_answers=None,
+            requested_formats=[ExportFormat.HTML],
+            progress=_noop_progress,
+            package=package,
+        )
+        assert len(spy.resolve_calls) == 1
+        return spy.resolve_calls[0]
+
+    standard = await _run(GenerationPackage.PRESENTATION_STANDARD)
+    premium = await _run(GenerationPackage.PRESENTATION_PREMIUM)
+    assert standard is not None and premium is not None
+    assert premium > standard
 
 
 # ---------------------------------------------------------------------------

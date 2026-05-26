@@ -6,9 +6,12 @@ Changing one here must be matched everywhere.
 
 from __future__ import annotations
 
+import logging
 from typing import Final
 
-from packages.core.enums import FileType, JobType
+from packages.core.enums import FileType, GenerationPackage, JobType
+
+logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE_BYTES: Final[int] = 20_971_520
 
@@ -102,11 +105,36 @@ MODEL_ROUTING: Final[dict[str, str]] = {
 
 EXPORT_URL_EXPIRY_SECONDS: Final[int] = 60 * 60 * 24 * 7
 
-PRESENTATION_TIER_IMAGE_LIMITS: Final[dict[str, int]] = {
-    "presentation_basic": 0,
-    "presentation_standard": 2,
-    "presentation_premium": 5,
+# SPEC §8: the per-deck generated-image budget by presentation tier (basic = 0
+# AI images, standard = 2, premium = 5). Keyed by GenerationPackage (not raw
+# str) so pyright catches drift when a new tier is added — invariant I1 in
+# docs/INVARIANTS.md forbids a literal standing in for tier logic on a paid
+# path. Access through image_budget_for_package() so the fallback for unknown
+# packages is defined once and logged.
+PRESENTATION_TIER_IMAGE_LIMITS: Final[dict[GenerationPackage, int]] = {
+    GenerationPackage.PRESENTATION_BASIC: 0,
+    GenerationPackage.PRESENTATION_STANDARD: 2,
+    GenerationPackage.PRESENTATION_PREMIUM: 5,
 }
+
+
+def image_budget_for_package(package: GenerationPackage) -> int:
+    """Return the per-deck generated-image budget for ``package`` (SPEC §8).
+
+    Maps the three presentation tiers to their SPEC budgets. For any other
+    package (article tiers, the bundle — see INVARIANTS.md deferral), falls
+    back to the standard tier budget rather than zero so a not-yet-wired tier
+    does not silently ship a zero-image deck; the fallback is logged so the
+    omission is visible.
+    """
+
+    budget = PRESENTATION_TIER_IMAGE_LIMITS.get(package)
+    if budget is not None:
+        return budget
+    fallback = PRESENTATION_TIER_IMAGE_LIMITS[GenerationPackage.PRESENTATION_STANDARD]
+    logger.warning("image_budget_unknown_package package=%s fallback=%d", package.value, fallback)
+    return fallback
+
 
 PRICING_UZS: Final[dict[str, int]] = {
     "presentation_basic": 5_000,

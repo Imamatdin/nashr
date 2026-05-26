@@ -15,10 +15,20 @@ URL written back to the slot. Any failure or low-confidence result abstains —
 the ``_url`` stays ``None`` and the deck renders that slide exactly as before. The
 stage never raises into the pipeline and never writes a junk url.
 
-Generated images (figures + the hero background) consume a per-deck budget
-(``max_generated_images``); Commons portraits are free of that budget. The
-budget defaults to the SPEC's *standard* tier (2); the caller raises it for
-premium. Wiring it from the user's :class:`GenerationPackage` is a follow-up.
+Generated images (figures + the hero background) consume a per-deck budget;
+Commons portraits are free of that budget. The budget arrives PER CALL on
+:meth:`ImagePass.resolve_deck` (``max_generated_images=…``) so it can be
+derived from the user's :class:`GenerationPackage` for that job — see
+``image_budget_for_package`` in :mod:`packages.core.constants` and the
+orchestrator's ``resolve_images``. The constructor still accepts a default
+budget so unit tests and ad-hoc callers can construct an ``ImagePass``
+without specifying it, but production always passes it per-call (invariant
+I1, ``docs/INVARIANTS.md``: no constant standing in for tier logic).
+
+Within the budget, the title-hero scene background takes the FIRST claim
+(invariant I3) — it is the highest-leverage image in any deck, and starving
+it for a contained figure leaves the opening slide naked. Figures consume
+the remainder. A zero budget (basic tier) generates nothing, hero included.
 
 CC-BY portraits carry attribution, which is folded into the affected slide's
 ``speaker_notes`` — there is no separate credits slide (PD/CC0 need no credit).
@@ -53,16 +63,22 @@ from packages.presentation.image_types import ImageAttribution, ResolvedImage
 
 logger = logging.getLogger(__name__)
 
-# SPEC tiers: basic=0, standard=2, premium=5 generated images per deck. We
-# default to standard; the caller raises it for premium. Commons portraits are
-# real-likeness sourcing, not generation, and do NOT count against this budget.
+# SPEC §8 tiers: basic=0, standard=2, premium=5 generated images per deck. This
+# constructor-time default is the floor that lets a bare ``ImagePass()`` work in
+# tests; production callers always pass a per-call budget derived from the
+# user's GenerationPackage (invariant I1, docs/INVARIANTS.md). Commons portraits
+# are real-likeness sourcing, not generation, and do NOT count against the budget.
 DEFAULT_MAX_GENERATED_IMAGES: Final[int] = 2
 _HTTP_TIMEOUT_SECONDS: Final[int] = 15
 _SIGNED_URL_TTL_SECONDS: Final[int] = 7 * 24 * 3600  # 7 days; render happens at once
 _MAX_SPEAKER_NOTES: Final[int] = 2000
 
-_FIGURE_PRIORITY: Final[int] = 0  # content-bearing → first claim on the budget
-_BACKGROUND_PRIORITY: Final[int] = 1  # atmospheric → only if budget remains
+# Within the generated-image budget, the title-hero scene takes the FIRST
+# claim — the single highest-leverage image in a deck; starving it for a
+# contained figure leaves the opening naked (invariant I3). Lower priority
+# sorts earlier in the budgeted slice, so background (0) outranks figure (1).
+_BACKGROUND_PRIORITY: Final[int] = 0  # title-hero scene → guaranteed first slot
+_FIGURE_PRIORITY: Final[int] = 1  # contained object/concept → claims the remainder
 
 
 @dataclass
@@ -73,7 +89,6 @@ class _ImageTask:
     priority: int  # generated-image budget order; portraits use _PORTRAIT_PRIORITY
     run: Callable[[httpx.AsyncClient], Awaitable[ResolvedImage | None]]
     apply: Callable[[str], None]
-    is_generated: bool
 
 
 _PORTRAIT_PRIORITY: Final[int] = -1  # not budgeted
@@ -114,15 +129,28 @@ class ImagePass:
         storage: FileStorage,
         project_id: str,
         figures: list[SourceFigure],
+        max_generated_images: int | None = None,
     ) -> DeckSpec:
         """Resolve every unfilled image slot in ``deck`` and write its ``_url``.
 
-        Returns the same (mutated) deck. Slots that abstain are left untouched.
+        ``max_generated_images`` overrides the constructor default for this one
+        call — the orchestrator passes the tier-derived budget so the budget is
+        a property of the job, not of the engine instance (invariant I1). A
+        ``None`` value falls back to the instance default, preserving the
+        single-construction-then-many-calls pattern used by callers that have
+        no tier (tests, ad-hoc tools). Returns the same (mutated) deck.
         """
 
+        budget = (
+            self._max_generated if max_generated_images is None else max(0, max_generated_images)
+        )
         portrait_tasks, generate_tasks = self._collect(deck, figures)
-        generate_tasks.sort(key=lambda t: t.priority)  # figures before backgrounds
-        budgeted_generates = generate_tasks[: self._max_generated]
+        # Sort ascending by priority so the title-hero background (0) wins the
+        # first slot, then figures (1) consume the remainder up to the budget
+        # — invariant I3: highest-leverage image is never starved by lower-
+        # priority images within a non-zero budget.
+        generate_tasks.sort(key=lambda t: t.priority)
+        budgeted_generates = generate_tasks[:budget]
         tasks = portrait_tasks + budgeted_generates
         if not tasks:
             return deck
@@ -204,9 +232,7 @@ class ImagePass:
         def apply(url: str) -> None:
             person.portrait_url = url
 
-        return _ImageTask(
-            slide=slide, priority=_PORTRAIT_PRIORITY, run=run, apply=apply, is_generated=False
-        )
+        return _ImageTask(slide=slide, priority=_PORTRAIT_PRIORITY, run=run, apply=apply)
 
     def _timeline_task(self, slide: SlideSpec, node: TimelineNode) -> _ImageTask:
         name = node.portrait_prompt or ""
@@ -217,9 +243,7 @@ class ImagePass:
         def apply(url: str) -> None:
             node.portrait_url = url
 
-        return _ImageTask(
-            slide=slide, priority=_PORTRAIT_PRIORITY, run=run, apply=apply, is_generated=False
-        )
+        return _ImageTask(slide=slide, priority=_PORTRAIT_PRIORITY, run=run, apply=apply)
 
     def _figure_task(
         self, slide: SlideSpec, design: DesignDirectionSpec, figures: list[SourceFigure]
@@ -233,9 +257,7 @@ class ImagePass:
         def apply(url: str) -> None:
             slide.content.figure_url = url
 
-        return _ImageTask(
-            slide=slide, priority=_FIGURE_PRIORITY, run=run, apply=apply, is_generated=True
-        )
+        return _ImageTask(slide=slide, priority=_FIGURE_PRIORITY, run=run, apply=apply)
 
     def _background_task(
         self, slide: SlideSpec, deck: DeckSpec, figures: list[SourceFigure]
@@ -250,9 +272,7 @@ class ImagePass:
         def apply(url: str) -> None:
             slide.content.background_url = url
 
-        return _ImageTask(
-            slide=slide, priority=_BACKGROUND_PRIORITY, run=run, apply=apply, is_generated=True
-        )
+        return _ImageTask(slide=slide, priority=_BACKGROUND_PRIORITY, run=run, apply=apply)
 
     # ----------------------------------------------------------------- storage
 

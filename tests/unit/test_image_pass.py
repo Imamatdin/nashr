@@ -250,9 +250,14 @@ async def test_resolution_runs_in_parallel() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generated_budget_caps_figures_and_prefers_them_over_background() -> None:
-    # Budget of 1: one figure should win the budget; the title-hero background
-    # (lower priority) abstains.
+async def test_generated_budget_reserves_title_hero_background_first() -> None:
+    """Invariant I3: the title-hero background is the highest-leverage image
+    in a deck and takes the first claim on the generated-image budget. With
+    a budget of 1 and one competing figure, the BACKGROUND wins and the
+    figure abstains — the inverse of the old (buggy) priority where figures
+    starved the hero.
+    """
+
     deck = _deck(
         [
             _slide(0, SlideType.TITLE_HERO, SlideContent(title="Deck")),
@@ -275,10 +280,92 @@ async def test_generated_budget_caps_figures_and_prefers_them_over_background() 
         deck, storage=_FakeStorage(), project_id="p1", figures=[]
     )
 
-    assert result.slides[1].content.figure_url is not None  # figure won the budget
-    assert result.slides[0].content.background_url is None  # background dropped
+    assert result.slides[0].content.background_url is not None  # hero won the budget
+    assert result.slides[1].content.figure_url is None  # figure abstained
     assert len(generated.calls) == 1
-    assert generated.calls[0][1] is ImageSubjectType.OBJECT  # the figure, not the scene
+    assert generated.calls[0][1] is ImageSubjectType.SCENE  # the hero scene, not a figure
+
+
+@pytest.mark.asyncio
+async def test_zero_budget_generates_nothing_including_hero() -> None:
+    """Invariant I1 + I3: a zero-budget tier (basic) generates NO images,
+    title-hero included. The 'guaranteed first claim' guarantee is *within*
+    the budget — not exempt from it. Without this, basic tier (priced for
+    0 AI images per SPEC) would still ship a hero image and the tier
+    difference would be unobservable.
+    """
+
+    deck = _deck(
+        [
+            _slide(0, SlideType.TITLE_HERO, SlideContent(title="Basic deck")),
+            _slide(
+                1,
+                SlideType.CONTENT_SPLIT,
+                SlideContent(title="Fig A", figure_prompt="widget A"),
+            ),
+        ]
+    )
+    generated = _FakeGenerated(result=_img(b"GEN"))
+    image_pass = ImagePass(
+        portrait_resolver=_FakePortraits(result=None),
+        generated_resolver=generated,
+        max_generated_images=0,
+        http_client_factory=_no_http,
+    )
+
+    result = await image_pass.resolve_deck(
+        deck, storage=_FakeStorage(), project_id="p1", figures=[]
+    )
+
+    assert result.slides[0].content.background_url is None
+    assert result.slides[1].content.figure_url is None
+    assert generated.calls == []  # generator never invoked
+
+
+@pytest.mark.asyncio
+async def test_premium_budget_yields_strictly_more_generated_images_than_standard() -> None:
+    """Invariant I1 acceptance test (engine-level): on the same source deck,
+    a premium-tier budget (5) MUST resolve strictly more generated images
+    than a standard-tier budget (2). This is the regression that proves the
+    image engine respects its per-call budget — wire it any lower in the
+    stack and this still asserts the right contract.
+    """
+
+    def _premium_test_deck() -> DeckSpec:
+        return _deck(
+            [
+                _slide(0, SlideType.TITLE_HERO, SlideContent(title="Hero")),
+                *[
+                    _slide(
+                        i,
+                        SlideType.CONTENT_SPLIT,
+                        SlideContent(title=f"Fig {i}", figure_prompt=f"widget {i}"),
+                    )
+                    for i in range(1, 7)
+                ],
+            ]
+        )
+
+    async def _count_generated(budget: int) -> int:
+        deck = _premium_test_deck()
+        image_pass = ImagePass(
+            portrait_resolver=_FakePortraits(result=None),
+            generated_resolver=_FakeGenerated(result=_img(b"GEN")),
+            max_generated_images=budget,
+            http_client_factory=_no_http,
+        )
+        result = await image_pass.resolve_deck(
+            deck, storage=_FakeStorage(), project_id=f"p-{budget}", figures=[]
+        )
+        bg = 1 if result.slides[0].content.background_url is not None else 0
+        figs = sum(1 for s in result.slides[1:] if s.content.figure_url is not None)
+        return bg + figs
+
+    standard = await _count_generated(2)
+    premium = await _count_generated(5)
+    assert standard == 2  # the SPEC standard budget
+    assert premium == 5  # the SPEC premium budget — full slate filled
+    assert premium > standard
 
 
 @pytest.mark.asyncio

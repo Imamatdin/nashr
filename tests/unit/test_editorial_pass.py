@@ -45,7 +45,6 @@ from packages.core.models.presentation import (
 )
 from packages.core.models.source import SourceClaimCreate
 from packages.presentation.editorial import (
-    _DATA_HEAVY_TYPES,
     SONNET_MODEL,
     WORD_LIMITS,
     EditorialPass,
@@ -803,7 +802,14 @@ def test_build_content_summary_limits_claims() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_post_process_fixes_consecutive_repeats() -> None:
+def test_post_process_does_not_inject_hollow_dividers_between_repeats() -> None:
+    """Invariant I2: the post-process no longer hides R01 (consecutive same-
+    type slides) behind a hollow SECTION_BREAK. The old auto-divider had
+    title='•' and no thesis — pure slop. Consecutive same-types now flow
+    through unchanged (the model is steered by EDITORIAL_SYSTEM rule 7 not
+    to emit them; layout variety is the layout pass's job).
+    """
+
     slides = [
         _slide(SlideType.TITLE_HERO, "Title"),
         _slide(SlideType.CONTENT_SPLIT, "A"),
@@ -811,11 +817,21 @@ def test_post_process_fixes_consecutive_repeats() -> None:
         _slide(SlideType.DATA_EMPHASIS, "Stat"),
     ]
     out = EditorialPass._post_process(slides, _interview())
-    for prev, curr in pairwise(out):
-        assert prev.slide_type is not curr.slide_type or curr.slide_type is SlideType.SECTION_BREAK
+    # The two CONTENT_SPLIT slides remain adjacent — no hollow break wedged in.
+    types = [s.slide_type for s in out]
+    assert types.count(SlideType.CONTENT_SPLIT) == 2
+    # No SECTION_BREAK appears at all because the input had none and post-
+    # process never invents one.
+    assert SlideType.SECTION_BREAK not in types
 
 
-def test_post_process_inserts_section_breaks_in_long_runs() -> None:
+def test_post_process_does_not_auto_insert_section_breaks_in_long_runs() -> None:
+    """Invariant I2: R03 (section cadence) is now a model-prompt concern; the
+    post-process no longer injects hollow section breaks every 5 slides.
+    A long run of content slides survives unchanged — section structure is
+    earned by a thesis-bearing SECTION_BREAK from the LLM, not synthesized.
+    """
+
     slides = [_slide(SlideType.TITLE_HERO, "Title")] + [
         _slide(
             SlideType.CONTENT_SPLIT if i % 2 == 0 else SlideType.DATA_EMPHASIS,
@@ -824,8 +840,50 @@ def test_post_process_inserts_section_breaks_in_long_runs() -> None:
         for i in range(12)
     ]
     out = EditorialPass._post_process(slides, _interview())
-    section_breaks = [s for s in out if s.slide_type is SlideType.SECTION_BREAK]
-    assert len(section_breaks) >= 2
+    # No SECTION_BREAK should be auto-inserted: input had none, output has none.
+    assert all(s.slide_type is not SlideType.SECTION_BREAK for s in out)
+
+
+def test_drop_hollow_dividers_keeps_thesis_breaks_and_drops_bare_ones() -> None:
+    """The hard backstop for invariant I2 — a bare SECTION_BREAK is dropped,
+    a thesis-bearing one (non-empty subtitle) survives. The prompt steers the
+    model away from bare breaks, but this filter is the guarantee.
+    """
+
+    from packages.presentation.editorial import _drop_hollow_dividers
+
+    bare = SlideSpec(
+        slide_index=0,
+        slide_type=SlideType.SECTION_BREAK,
+        content=SlideContent(title="Method"),
+        section_name="Method",
+    )
+    thesis = SlideSpec(
+        slide_index=1,
+        slide_type=SlideType.SECTION_BREAK,
+        content=SlideContent(
+            title="Method",
+            subtitle="Three pilots, one protocol, identical instrumentation.",
+        ),
+        section_name="Method",
+    )
+    body_only = SlideSpec(
+        slide_index=2,
+        slide_type=SlideType.SECTION_BREAK,
+        content=SlideContent(title="Results", body_text="The pilots converged within 6%."),
+        section_name="Results",
+    )
+    content_slide = _slide(SlideType.CONTENT_SPLIT, "Pilot A")
+
+    out = _drop_hollow_dividers([bare, thesis, body_only, content_slide])
+
+    assert [s.slide_type for s in out] == [
+        SlideType.SECTION_BREAK,  # thesis (kept)
+        SlideType.SECTION_BREAK,  # body_only (kept)
+        SlideType.CONTENT_SPLIT,
+    ]
+    assert out[0].content.subtitle is not None  # the thesis-bearing one
+    assert out[1].content.body_text is not None  # the body-only one
 
 
 def test_post_process_enforces_word_limits() -> None:
@@ -873,7 +931,15 @@ def _only_bullet(slide: SlideSpec) -> str:
     return bullets[0]
 
 
-def test_post_process_inserts_breathing_after_data() -> None:
+def test_post_process_does_not_auto_insert_breather_by_default() -> None:
+    """Invariant I2: the breather device defaults OFF. The stat-echo seed it
+    ships with today ('Key takeaway: 1.58 PUE — Power Usage Effectiveness')
+    is exactly the 'echoes an adjacent stat' filler invariant I2 forbids.
+    The device is retained for plan item 2 (model-authored breathers) but is
+    NOT invoked from _post_process by default — consecutive data slides flow
+    through unchanged.
+    """
+
     slides = [
         _slide(SlideType.TITLE_HERO, "Title"),
         _data_slide_with_stat("Stat", value="1.58", unit="PUE", label="Power Usage Effectiveness"),
@@ -881,18 +947,16 @@ def test_post_process_inserts_breathing_after_data() -> None:
     ]
     out = EditorialPass._post_process(slides, _interview())
     types = [s.slide_type for s in out]
-    # No two consecutive data-heavy slides should remain.
-    for prev, curr in pairwise(types):
-        assert not (prev in _DATA_HEAVY_TYPES and curr in _DATA_HEAVY_TYPES)
-    # The breather is a SUMMARY_TAKEAWAY carrying real content, never the old filler.
-    breather = next(s for s in out if s.slide_type is SlideType.SUMMARY_TAKEAWAY)
-    assert breather.content.bullets is not None
-    assert "preceding data underscores" not in breather.content.bullets[0]
+    # The two data-heavy slides remain adjacent (no auto breather wedged in).
+    assert SlideType.DATA_EMPHASIS in types
+    assert SlideType.CHART_DATA in types
+    assert all(s.slide_type is not SlideType.SUMMARY_TAKEAWAY for s in out)
 
 
-def test_breathing_slide_carries_real_stat_not_filler() -> None:
-    # FIX B-interim: the injected breather is seeded from the preceding data
-    # slide's stat — a digit plus the stat label — not a hardcoded sentence.
+def test_breathing_device_off_by_default_is_a_no_op() -> None:
+    """The device is OFF by default — calling without enabled=True yields the
+    input unchanged regardless of what data slides precede what."""
+
     slides = [
         _data_slide_with_stat(
             "Energy", value="1.58", unit="PUE", label="Power Usage Effectiveness", highlight=True
@@ -900,20 +964,33 @@ def test_breathing_slide_carries_real_stat_not_filler() -> None:
         _slide(SlideType.CHART_DATA, "Chart"),
     ]
     out = _insert_breathing_after_data(slides, _interview())
+    assert [s.slide_type for s in out] == [SlideType.DATA_EMPHASIS, SlideType.CHART_DATA]
+
+
+def test_breathing_device_when_enabled_seeds_from_real_stat() -> None:
+    """The scaffold still works when explicitly enabled — the digit + label
+    pair is carried through (kept so plan item 2 can flip enabled=True once a
+    thesis-bearing seed replaces the stat echo)."""
+
+    slides = [
+        _data_slide_with_stat(
+            "Energy", value="1.58", unit="PUE", label="Power Usage Effectiveness", highlight=True
+        ),
+        _slide(SlideType.CHART_DATA, "Chart"),
+    ]
+    out = _insert_breathing_after_data(slides, _interview(), enabled=True)
     assert [s.slide_type for s in out] == [
         SlideType.DATA_EMPHASIS,
         SlideType.SUMMARY_TAKEAWAY,
         SlideType.CHART_DATA,
     ]
     bullet = _only_bullet(out[1])
-    assert "preceding data underscores" not in bullet
     assert any(ch.isdigit() for ch in bullet)
     assert "Power Usage Effectiveness" in bullet
-    # A word unit is spaced off the value; the value+unit is not jammed.
-    assert "1.58 PUE" in bullet
+    assert "1.58 PUE" in bullet  # word unit spaced off the value
 
 
-def test_breathing_slide_prefers_highlighted_stat_and_keeps_symbol_unit() -> None:
+def test_breathing_device_when_enabled_prefers_highlighted_stat_and_keeps_symbol_unit() -> None:
     multi = SlideSpec(
         slide_index=0,
         slide_type=SlideType.DATA_EMPHASIS,
@@ -926,22 +1003,23 @@ def test_breathing_slide_prefers_highlighted_stat_and_keeps_symbol_unit() -> Non
         ),
     )
     out = _insert_breathing_after_data(
-        [multi, _slide(SlideType.TABLE_COMPACT, "Table")], _interview()
+        [multi, _slide(SlideType.TABLE_COMPACT, "Table")], _interview(), enabled=True
     )
     bullet = _only_bullet(out[1])
     assert "highlighted stat" in bullet
-    # Symbol unit stays attached to the value.
-    assert "35%" in bullet
+    assert "35%" in bullet  # symbol unit stays attached
 
 
-def test_no_breathing_slide_when_preceding_data_has_no_stat() -> None:
-    # CHART_DATA / TABLE_COMPACT carry numbers in prose/rows, not stats. With no
-    # usable stat, no breather is injected — absent beats hollow (R27 trade).
+def test_breathing_device_when_enabled_does_not_seed_without_a_stat() -> None:
+    """CHART_DATA / TABLE_COMPACT carry numbers in prose/rows, not stats. The
+    device, even when enabled, still abstains rather than inventing a hollow
+    breather — absent beats hollow."""
+
     slides = [
         _slide(SlideType.CHART_DATA, "Chart with prose numbers"),
         _slide(SlideType.TABLE_COMPACT, "Table"),
     ]
-    out = _insert_breathing_after_data(slides, _interview())
+    out = _insert_breathing_after_data(slides, _interview(), enabled=True)
     assert [s.slide_type for s in out] == [SlideType.CHART_DATA, SlideType.TABLE_COMPACT]
     assert all(s.slide_type is not SlideType.SUMMARY_TAKEAWAY for s in out)
 
@@ -1083,13 +1161,18 @@ async def test_generate_interactive_skipped_when_disabled() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _minimal_slide_payload(slide_type: str, title: str = "Headline") -> dict[str, Any]:
-    return {
+def _minimal_slide_payload(
+    slide_type: str, title: str = "Headline", *, subtitle: str | None = None
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "slide_index": 0,
         "slide_type": slide_type,
         "title": title,
         "narrative_role": "hook",
     }
+    if subtitle is not None:
+        payload["subtitle"] = subtitle
+    return payload
 
 
 def test_merge_inserts_before_section_breaks() -> None:
@@ -1134,7 +1217,14 @@ def _full_pipeline_payload() -> str:
         _minimal_slide_payload("title_hero", "Water savings reach 94.4% in mild climates"),
         _minimal_slide_payload("concept_definition", "Direct evaporative cooling defined"),
         _minimal_slide_payload("data_emphasis", "94.4% water savings demonstrated"),
-        _minimal_slide_payload("section_break", "Method"),
+        # Thesis-bearing section break: under invariant I2 a bare "Method" is
+        # dropped; the subtitle states the section's argument so it earns its
+        # place and survives _drop_hollow_dividers in _post_process.
+        _minimal_slide_payload(
+            "section_break",
+            "Method",
+            subtitle="Three pilots, one protocol, identical instrumentation.",
+        ),
         _minimal_slide_payload("flow_process", "Three-stage cooling pipeline"),
         _minimal_slide_payload("content_split", "Pilot results across climates"),
         _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot"),

@@ -4,6 +4,9 @@ STATUS: PRODUCTION. Past MVP. No MVP scope, no "works for now." Fix at the corre
 verified. Iko runs Claude Code locally against the real repo; master prompts carry acceptance
 tests; a step is DONE only when a commit changes this file.
 
+INVARIANTS: See [INVARIANTS.md](INVARIANTS.md) — load-bearing contracts that outrank test
+status. A violation is a bug regardless of whether tests pass. Read after this file.
+
 ## VERIFIED DONE (evidence, not memory)
 - Decimal truncation "73.8 bar" — fixed 8f5b587, renders intact slide 2.
 - Collision/clip/overflow stacking — committed, margins documented.
@@ -167,6 +170,106 @@ tests; a step is DONE only when a commit changes this file.
     portraits/figures/backgrounds. Unit tests mock those boundaries; live behaviour + visual quality
     must be confirmed by regenerating the sCO2 deck on the server. "All tests pass" ≠ "verified
     end-to-end." Live tests are gated behind NASHR_LIVE_NET=1 (Commons) and the server's Vertex creds.
+
+## SHIPPED (integrity + de-slop pass — branch feat/image-engine)
+- WHY HERE: three load-bearing "interim" decisions on the image + editorial paths were
+  silently nullifying a paid feature (premium == standard == 2 images) and littering
+  decks with hollow filler. They share a class (a constant standing in for logic on a
+  paid or visible path = bug, not interim), so fixed as a CLASS and wrote the discipline
+  into [INVARIANTS.md](INVARIANTS.md) before changing anything. Referenced from this file's top.
+- INVARIANTS.md (NEW): I1 (no constant for tier logic on paid path; tier difference must
+  be observable in output), I2 (every slide carries content weight — no bare-section
+  dividers, no echo breathers), I3 (text wins; title-hero scene guaranteed AHEAD of
+  lower-priority images within the deck budget; basic-tier 0-budget generates NOTHING,
+  hero included — this resolves the latent #1↔#3 tension where naive "reserve outside
+  the budget" would nullify basic tier), I4 (no TODO/stub/interim on a load-bearing path
+  without Iko sign-off; two deferrals recorded by name: bundle_article_presentation tier
+  + GenerationJob.image_count telemetry).
+- BUG #1 — TIER → IMAGE BUDGET (wire, not invention): PRESENTATION_TIER_IMAGE_LIMITS
+  already existed in constants.py with the SPEC values (0/2/5). The bug was that nobody
+  read it — orchestrator constructed ImagePass() once with the constructor default 2,
+  so every tier got 2. The web-Claude prompt said "if numbers aren't defined, STOP and
+  ask Iko" — they ARE defined; no ask needed, just wire. Fix:
+  - constants.py: re-keyed PRESENTATION_TIER_IMAGE_LIMITS from dict[str,int] to
+    dict[GenerationPackage,int] so pyright catches drift when a new tier is added
+    (the type system enforces the invariant). Added image_budget_for_package(package)
+    helper with a documented standard-tier fallback for not-yet-wired tiers (bundle).
+  - image_pass.py: ImagePass.resolve_deck gained a per-call max_generated_images
+    override; the budget is a property of the JOB, not the engine instance. Constructor
+    default kept as the floor for tests/ad-hoc callers.
+  - presentation_orchestrator.py: run_full_pipeline + resolve_images take
+    package: GenerationPackage as REQUIRED keyword-only — explicit choice on a paid
+    path is the invariant; no silent default at the orchestrator.
+  - presentation_flow.py: new _package_for_generation helper at the str→enum boundary
+    (handler is the one place that owns the parse; falls back to STANDARD with a logged
+    warning on malformed FSM data, never to BASIC, so a flow bug never accidentally
+    starves a paying user to zero images).
+- BUG #2 — BACKGROUND PRIORITY (invert, but WITHIN budget): swapped
+  _BACKGROUND_PRIORITY (0) and _FIGURE_PRIORITY (1) so the title-hero scene takes the
+  first claim in the budgeted slice. The SUBTLETY the web-Claude prompt missed: "reserve
+  the background outside the figure allocation" must NOT mean "exempt from budget" or
+  basic tier (budget 0) would still ship a hero image, nullifying I1 + violating SPEC
+  free-tier pricing. So the hero is guaranteed AHEAD OF, not EXEMPT FROM, the budget;
+  zero budget generates nothing. The existing test
+  test_generated_budget_caps_figures_and_prefers_them_over_background pinned the OLD
+  buggy priority — flipped to test_generated_budget_reserves_title_hero_background_first
+  asserting the new (correct) order, and added test_zero_budget_generates_nothing_including_hero
+  for the basic-tier corner.
+- BUG #3 — CUT FILLER (drop the slop, keep the device): the two auto-injectors of
+  hollow "•" SECTION_BREAK dividers (_fix_consecutive_repeats for R01,
+  _insert_section_breaks for R03) are REMOVED — they only ever produced bare-label
+  dividers that violate I2. The breather _insert_breathing_after_data is RETAINED
+  (master prompt: "do not delete the device, default it OFF") via an enabled=False
+  kwarg; the stat-echo seed it ships with today is an I2 violation if emitted, so
+  default off until model-authored breathers replace it (BUILD_STATE plan item 2).
+  Added _drop_hollow_dividers filter in _post_process (runs BEFORE _ensure_first_is_title
+  so a stray bare SECTION_BREAK at slides[0] never gets promoted to title-hero) that
+  drops any SECTION_BREAK whose subtitle AND body_text are both empty — the hard
+  backstop for I2 on LLM output. Updated SLIDE_TYPE_DESCRIPTIONS[SECTION_BREAK] and
+  EDITORIAL_SYSTEM rule 8 so the model puts the section label in section_name and the
+  one-line THESIS in subtitle; a well-behaved model produces no hollow dividers and the
+  filter is just the guarantee. R01/R03 are now MODEL-prompt concerns only — documented
+  in the editorial module docstring; previously they were enforced by hollow dividers
+  in post-process, which is exactly the slop I2 forbids. Side effect on _merge_slides:
+  with fewer thesis-bearing breaks, interactive slides fall back to end-append (the
+  existing fallback) — a normal "quiz finale" pattern, not a regression.
+- ALSO removed dead _ImageTask.is_generated field (set in 4 places, read nowhere) —
+  de-slop discipline applied to this file too, per advisor flag.
+- PHASE 3 ACCEPTANCE (engine + orchestrator levels, both required):
+  - ENGINE: test_premium_budget_yields_strictly_more_generated_images_than_standard
+    builds a deck with hero + 6 figure slots, runs ImagePass at budgets 2 and 5,
+    asserts the budget caps the generated count and PREMIUM (5) > STANDARD (2).
+  - WIRE: test_full_pipeline_threads_package_to_image_budget (parametrized basic/
+    standard/premium) and test_full_pipeline_premium_image_budget_strictly_exceeds_standard
+    inject a spy ImagePass into the orchestrator and assert the EXACT budget the
+    orchestrator passed per tier. This is the regression that proves the wire — it fails
+    on any code that lets the budget default at the orchestrator (the bug today).
+  - I3: test_drop_hollow_dividers_keeps_thesis_breaks_and_drops_bare_ones, plus the
+    rewritten post-process tests that pin the new (correct) behavior: no auto-injected
+    hollow dividers, no auto breather by default, the breather device still works when
+    enabled (kept for plan item 2).
+  - constants.py: coverage assertion test_image_tier_limits_cover_every_presentation_tier
+    fails the build if a new presentation_* tier is added without a budget entry.
+- VERIFIED locally (gates green on changed files):
+  - pytest tests/ -q: 1204 passed / 32 skipped (the same skip set as the prior commit;
+    LibreOffice + RUN_E2E_TESTS + RUN_LIVE_API_TESTS unset locally).
+  - ruff check + format --check: clean on all 10 changed files.
+  - pyright packages/: 0 errors / 0 warnings.
+  - vitest: 1 failure / 301 passed / 3 skipped — the failure is the documented
+    text-measure.test.ts sCO2 title line-count baseline (plan item 11 / F).
+    Identical to pre-edit state; I touched zero TypeScript.
+- NOT verified locally (server eyeball gates DONE — per master prompt):
+  - Live regen of the sCO2 deck on PREMIUM tier: needs Iko to confirm the log shows
+    `gemini_image_generated` > 2 (the wire actually fires more generations) and the
+    title-hero background is rendered.
+  - Live regen on STANDARD vs PREMIUM same source: confirm the rendered deck count of
+    images differs and that PREMIUM > STANDARD in the wild.
+  - Slide-count drops on regen (no hollow "•" section breaks, no "Key takeaway"
+    echo breather), every remaining slide carries content.
+  - Eyeball any atmospheric background behind text — scrim contrast is already enforced
+    by heroBackground + quality-audit.ts (no code change needed), but visual confirmation
+    is the gate.
+  - "All tests pass" ≠ "verified end-to-end." DONE is gated on Iko's server pass.
 
 ## SHIPPED (editorial resilience — branch feat/image-engine)
 - WHY HERE, not a hardening branch: the editorial pass was collapsing every run to the 2-slide

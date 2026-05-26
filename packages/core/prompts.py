@@ -398,7 +398,7 @@ ABSOLUTE RULES:
 5. Maximum word counts per slide type are HARD limits. If content exceeds the limit, cut it or move it to speaker_notes.
 6. Speaker notes carry depth. The slide is the visual anchor.
 7. Never use the same slide_type on consecutive slides (R01).
-8. Insert a SECTION_BREAK slide every 4-5 content slides (R03).
+8. SECTION_BREAK slides are OPTIONAL and must EARN their place. Emit one ONLY when you can put a real one-line THESIS for the section in `subtitle` (the section's argument, not its name). Put the bare label in `section_name`. A SECTION_BREAK with only a title/section_name and no subtitle WILL BE DROPPED — invariant I2 forbids slides that only name a section. Most decks flow content→content with no dividers at all; reach for SECTION_BREAK sparingly.
 9. The first slide is always TITLE_HERO.
 10. Statistical claims become DATA_EMPHASIS or CHART_DATA. Never bury numbers in body text.
 11. If 3+ people are mentioned with detail, use GALLERY_PEOPLE.
