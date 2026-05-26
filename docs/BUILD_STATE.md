@@ -517,6 +517,77 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
     real-content (not fixture) data_emphasis + flow_process slides fill cleanly with
     actual editorial output.
 
+## SHIPPED (Q1 chart-label overflow — branch feat/layout-fill)
+- Live sCO2 regen of the heat-recovery slide failed Q1: 4 text blocks overflowing
+  at 20px on a `chart_type: bar` with verbose unit "% waste heat recovered" (23 chars).
+  Reproduced locally with the exact failing content (saved as
+  `__tests__/layout-chart-data.test.ts > value labels with a verbose unit do not
+  overflow Q1`) — `formatChartValue(0, "% waste heat recovered")` yields a 23-char
+  value label that wraps to 2 lines in a 4-bar chart's 15.5pp-wide slot at
+  subheading.min=20px, exceeding the fixed VALUE_LABEL_BAND=6pp by 0.26pp.
+  - ROOT CAUSE was TWO compounding bugs, neither caused by layout-fill's tier
+    promotions (those went elsewhere and didn't fire here):
+    1. `valueLabel` measured against a fixed 6pp band even though every bar has
+       much more real space above it (the available space up to `regionTop`).
+       Short bars (value=0): ~60pp of room. Tall bar (value=20): ~8pp. Verbose
+       labels wrap at 2 lines = 6.3pp which clears the dynamic h but blew the
+       fixed 6pp.
+    2. The shrink loop's floor was `tier.min`, so subheading-tier labels could
+       not shrink past 20px even when geometry demanded it. The audit then
+       caught the overflow and blocked export.
+  - FIX (in `packages/presentation-worker/src`):
+    - `layouts/shared.ts`: `BuildTextBlockOptions` now accepts `minFontSize?: number`.
+      When set (typically `FONT_SIZES.minimum`), the shrink loop floor drops to
+      that value. Default is `tier.min` so titles, headline numbers, and every
+      existing caller behave unchanged. This is NOT Q1 demotion: a block that
+      still overflows at `FONT_SIZES.minimum` is genuinely broken text and Q1
+      still fires.
+    - `charts/draw-chart.ts`: `valueLabel` now measures against
+      `max(VALUE_LABEL_BAND, barTopY - regionTop - VALUE_LABEL_GAP)` — the
+      dynamic available space above each bar — and opts into `minFontSize:
+      FONT_SIZES.minimum`. `categoryLabel`, `multi_stat` label, `single_value`
+      metric label, and the legend label all opt into the permissive floor as
+      defence-in-depth (their tiers were already at the floor for most cases).
+    - `layouts/flow-process.ts`: the user's flagged "cousin" — step label and
+      step description opt into `minFontSize: FONT_SIZES.minimum`. The
+      flow-process measure regions are already generous (full content region
+      height), so this is defence-in-depth.
+    - Headline NUMBERS in data_emphasis and flow_process do NOT receive the
+      permissive floor: they hold their adaptive tier so the canvas-fill from
+      the previous commit (`addc4f9`) stays headline-sized.
+  - VERIFIED:
+    - Regression test `value labels with a verbose unit do not overflow Q1
+      (slide-11 regression)` in `layout-chart-data.test.ts` reproduces the
+      failing content and asserts `overflow === false` on all four value labels.
+    - Probe `scripts/probe-slide11.mjs` against the user's exact content:
+      BEFORE = `[Q1] 4 text block(s) overflow on slide 11 at 20px` and
+      `is_exportable=false failed=1`. AFTER = `overflowing=0` and
+      `is_exportable=true failed=0`. The value labels in the AFTER probe land
+      at fs=24 (subheading.max) — the dynamic measure region alone was enough;
+      the permissive floor never had to kick in for this case.
+    - Screenshot proof at `packages/presentation-worker/debug/out/slide_3_
+      chart_data_q1fix.png`: "20% waste heat recovered" wraps to 2 lines
+      cleanly above the tall bar; the three shorter bars carry one-line labels.
+    - data_emphasis numbers still at 202px (unchanged from `addc4f9`);
+      flow_process unchanged. No canvas-fill regression.
+    - tsc clean (src + tests); vitest 347/351 + 3 skipped (+1 new); the only
+      red is the pre-existing `text-measure` sCO2 title 1-vs-2 (plan item 11).
+  - On the user's observation about saved-`layout.json` overflow:false vs the
+    live audit reporting overflow:true: Q1 reads `block.overflow` directly from
+    the layout (no re-measurement in the audit). Same code path. The saved
+    layout was from earlier content with short units; the live regen with
+    verbose units produces a different layout where the same block now has
+    overflow:true. Not a measurement consistency bug — different inputs.
+  - On the user's bar-width hypothesis: bars use `BAR_FILL_RATIO=0.62` of slot
+    width, and labels always get the FULL slot width regardless. Bars do not
+    compete with labels for horizontal room. The user's intuition pointed at
+    "labels in narrow columns" which IS the right plane; the implicated
+    geometry was the fixed label MEASUREMENT band, not the bar width itself.
+  - NEEDS SERVER EYEBALL: same as `addc4f9` — live sCO2 regen on the server.
+    Slide 11 (the heat-recovery chart) must now export with no Q1, and the
+    verbose-unit value labels must read cleanly. After eyeball, the branch
+    merges to main.
+
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [~] Editorial structured fields: H tables + G comparison + D-data chart_series — DONE this branch.

@@ -126,7 +126,16 @@ export function drawChart(
 // Shared label builders
 // ---------------------------------------------------------------------------
 
-/** A value label hugged to its text and placed just above `barTopY`. */
+/** A value label hugged to its text and placed just above `barTopY`.
+ *
+ * The measure region's height is the REAL space available above the bar
+ * (capped at VALUE_LABEL_BAND when there's plenty of room — we don't want
+ * a single-line value label to stretch over the whole plot), not a fixed
+ * 6pp slot. Verbose units like "% waste heat recovered" wrap to 2 lines
+ * at subheading.min; that wrap was the slide-11 Q1 overflow. The dynamic
+ * height accommodates the wrap; `minFontSize: FONT_SIZES.minimum` is the
+ * belt-and-suspenders safety so a tall-bar + verbose-unit combination
+ * shrinks past the tier floor instead of pin-overflowing. */
 function valueLabel(
   text: string,
   slotX: number,
@@ -136,23 +145,28 @@ function valueLabel(
   design: DesignDirectionSpec,
   tier: FontTier = FONT_SIZES.subheading,
 ): TextBlock {
+  const availableAbovePct = Math.max(VALUE_LABEL_BAND, barTopY - regionTop - VALUE_LABEL_GAP);
   const block = hugHeightToMeasured(
     buildTextBlock({
       text,
-      region: { x: slotX, y: regionTop, w: slotW, h: VALUE_LABEL_BAND },
+      region: { x: slotX, y: regionTop, w: slotW, h: availableAbovePct },
       fontFamily: design.body_font,
       fontWeight: 'bold',
       color: design.palette.text,
       align: 'center',
       tier,
       lineHeight: LINE_HEIGHTS.caption,
+      minFontSize: FONT_SIZES.minimum,
     }),
   );
   block.y = Math.max(regionTop, barTopY - block.h - VALUE_LABEL_GAP);
   return block;
 }
 
-/** A category label in the bottom band under a slot. */
+/** A category label in the bottom band under a slot. The bottom band can
+ *  be squeezed (squeezed chart → small bottomPad) and the label can be
+ *  verbose; permissive floor (FONT_SIZES.minimum) is the safety net so a
+ *  long label doesn't pin-overflow Q1. */
 function categoryLabel(
   text: string,
   slotX: number,
@@ -175,6 +189,7 @@ function categoryLabel(
     align: 'center',
     tier: FONT_SIZES.small,
     lineHeight: LINE_HEIGHTS.caption,
+    minFontSize: FONT_SIZES.minimum,
   });
 }
 
@@ -375,6 +390,7 @@ function drawMultiStat(
           align: 'center',
           tier: labelTier,
           lineHeight: LINE_HEIGHTS.body,
+          minFontSize: FONT_SIZES.minimum,
         }),
       ),
     );
@@ -443,6 +459,7 @@ function drawSingleValue(
       align: 'center',
       tier: FONT_SIZES.subheading,
       lineHeight: LINE_HEIGHTS.body,
+      minFontSize: FONT_SIZES.minimum,
     }),
   );
   blocks.push(metric);
@@ -585,6 +602,7 @@ function drawLegend(
         align: 'left',
         tier: FONT_SIZES.small,
         lineHeight: LINE_HEIGHTS.caption,
+        minFontSize: FONT_SIZES.minimum,
       }),
     );
   });

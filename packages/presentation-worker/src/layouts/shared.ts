@@ -135,6 +135,21 @@ export interface BuildTextBlockOptions {
   role?: InteractiveRole;
   groupId?: string;
   dataIndex?: number;
+  /**
+   * Absolute floor the shrink loop is allowed to reach in PX when even
+   * `tier.min` overflows the box. Defaults to `tier.min` — the existing
+   * behaviour, where the loop stops at the tier and reports `overflow=true`.
+   *
+   * Set to `FONT_SIZES.minimum` (or any value < tier.min) on LABEL and
+   * UNIT text living in width-constrained boxes — chart bar labels, narrow
+   * flow-step labels, the like — where overflowing the box is a worse
+   * outcome than a slightly undersized label. The tier still wins on the
+   * common case; this only kicks in when text genuinely cannot fit at the
+   * tier floor. Do NOT set this on titles or headline numbers: those carry
+   * design integrity and must stay above their tier floor — better the
+   * audit catches them than they read as body text.
+   */
+  minFontSize?: number;
 }
 
 /**
@@ -145,11 +160,18 @@ export interface BuildTextBlockOptions {
  * overflows, the block is returned with overflow=true and the floor
  * font size — the renderer is expected to truncate visually and the
  * audit will surface the violation.
+ *
+ * The floor defaults to `tier.min`, but a caller may pass `minFontSize`
+ * (typically `FONT_SIZES.minimum`) to let the loop go below the tier
+ * when a width-constrained label would otherwise pin-overflow Q1. See
+ * the option docstring for when that's appropriate.
  */
 export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
   const maxWidthPx = regionWidthPx(opts.region);
   const maxHeightPx = regionHeightPx(opts.region);
-  const floor = Math.max(FONT_SIZES.minimum, Math.min(opts.tier.min, opts.tier.max));
+  const tierFloor = Math.min(opts.tier.min, opts.tier.max);
+  const requestedFloor = opts.minFontSize ?? tierFloor;
+  const floor = Math.max(FONT_SIZES.minimum, requestedFloor);
 
   const measure = (size: number) =>
     measureText({

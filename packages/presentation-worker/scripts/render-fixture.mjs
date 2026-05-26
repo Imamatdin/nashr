@@ -92,6 +92,21 @@ const deck = {
     },
     {
       slide_index: 2,
+      slide_type: 'chart_data',
+      source_claim_ids: [],
+      content: {
+        title: 'Most cooling stacks throw their waste heat away',
+        chart_type: 'bar',
+        chart_series: [
+          { label: 'Air cooling (min)', value: 0, unit: '% waste heat recovered' },
+          { label: 'Liquid cooling (min)', value: 0, unit: '% waste heat recovered' },
+          { label: 'sCO2 (min)', value: 5, unit: '% waste heat recovered' },
+          { label: 'sCO2 (max)', value: 20, unit: '% waste heat recovered' },
+        ],
+      },
+    },
+    {
+      slide_index: 3,
       slide_type: 'flow_process',
       source_claim_ids: [],
       content: {

@@ -155,6 +155,12 @@ export function layoutFlowProcess(slide: SlideSpec, deck: DeckSpec): SlideLayout
         align: 'center',
         tier: labelTier,
         lineHeight: LINE_HEIGHTS.body,
+        // Step columns get narrow at 5 steps (16% slot ≈ 240px usable).
+        // A verbose label at heading.min=28 can still pin-overflow; the
+        // permissive floor is the Q1 safety the chart bar label path
+        // also uses. Numbers are not given this escape — they hold their
+        // adaptive tier so the canvas-fill stays headline-sized.
+        minFontSize: FONT_SIZES.minimum,
       }),
     );
 
@@ -168,6 +174,7 @@ export function layoutFlowProcess(slide: SlideSpec, deck: DeckSpec): SlideLayout
         align: 'center',
         tier: descriptionTier,
         lineHeight: LINE_HEIGHTS.body,
+        minFontSize: FONT_SIZES.minimum,
       }),
     );
 
