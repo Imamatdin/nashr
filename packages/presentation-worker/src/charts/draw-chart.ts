@@ -104,7 +104,7 @@ export function drawChart(
     );
   }
 
-  const { chartType, series, groupLabels, zeroAnnotations } = decision;
+  const { chartType, series, groupLabels, zeroAnnotations, subjectIndex } = decision;
 
   switch (chartType) {
     case 'single_value':
@@ -117,6 +117,8 @@ export function drawChart(
       return drawGrouped(region, groupLabels, series, design, true);
     case 'bar':
       return drawBar(region, series, design, zeroAnnotations);
+    case 'multi_stat':
+      return drawMultiStat(region, series, design, subjectIndex ?? 0);
   }
 }
 
@@ -287,6 +289,109 @@ function drawLine(
 
 function clampX(x: number, w: number, region: Region): number {
   return Math.max(region.x, Math.min(x, region.x + region.w - w));
+}
+
+// ---------------------------------------------------------------------------
+// Multi-stat (low-spread re-route target)
+//
+// Rendered inside the chart_data slide region when a clustered comparison
+// (max/min < 1.5) would otherwise read as a flat zero-based bar. Each
+// series point becomes a stat card — number / unit / label, stacked and
+// hugged to its measured height the same way DATA_EMPHASIS columns are —
+// so the slide reads as a comparison of discrete numbers, not a row of
+// near-equal bars. The subject card carries the deck accent so the slide's
+// argument stays visible at a glance; the others render in body text.
+// ---------------------------------------------------------------------------
+
+const MULTI_STAT_BLOCK_GAP = 1;
+
+function drawMultiStat(
+  region: Region,
+  series: ChartSeriesPoint[],
+  design: DesignDirectionSpec,
+  subjectIndex: number,
+): ChartDrawing {
+  const shapes: ShapeBlock[] = [];
+  const blocks: TextBlock[] = [];
+
+  const n = series.length;
+  if (n === 0) return { shapes, blocks };
+
+  // Number tier shrinks as the count grows so 4 stats still breathe inside
+  // the chart region width (the slide title sits above, not beside).
+  const numberTier =
+    n === 1 ? FONT_SIZES.displayLarge : n <= 3 ? FONT_SIZES.heading : FONT_SIZES.subheading;
+  const labelTier = n <= 3 ? FONT_SIZES.caption : FONT_SIZES.small;
+  const subjectColor = design.palette.accent;
+  const otherColor = design.palette.text;
+  const safeSubject = Math.max(0, Math.min(n - 1, subjectIndex));
+
+  const slotW = region.w / n;
+  series.forEach((point, i) => {
+    const slotX = region.x + i * slotW;
+    const isSubject = i === safeSubject;
+    const numberColor = isSubject ? subjectColor : otherColor;
+    const numberWeight = isSubject ? 'bold' : 'semibold';
+
+    const stack: TextBlock[] = [];
+    stack.push(
+      hugHeightToMeasured(
+        buildTextBlock({
+          text: formatChartValue(point.value, null),
+          region: { x: slotX, y: region.y, w: slotW, h: region.h },
+          fontFamily: design.heading_font,
+          fontWeight: numberWeight,
+          color: numberColor,
+          align: 'center',
+          tier: numberTier,
+          lineHeight: LINE_HEIGHTS.heading,
+        }),
+      ),
+    );
+    if (point.unit) {
+      stack.push(
+        hugHeightToMeasured(
+          buildTextBlock({
+            text: point.unit,
+            region: { x: slotX, y: region.y, w: slotW, h: region.h },
+            fontFamily: design.body_font,
+            fontWeight: 'normal',
+            color: design.palette.text_secondary,
+            align: 'center',
+            tier: FONT_SIZES.caption,
+            lineHeight: LINE_HEIGHTS.body,
+          }),
+        ),
+      );
+    }
+    stack.push(
+      hugHeightToMeasured(
+        buildTextBlock({
+          text: point.label,
+          region: { x: slotX, y: region.y, w: slotW, h: region.h },
+          fontFamily: design.body_font,
+          fontWeight: isSubject ? 'semibold' : 'normal',
+          color: isSubject ? subjectColor : design.palette.text,
+          align: 'center',
+          tier: labelTier,
+          lineHeight: LINE_HEIGHTS.body,
+        }),
+      ),
+    );
+
+    // Centre the measured stack vertically within the chart region; never
+    // start above the region top (the never-stack-upward floor).
+    const stackHeight =
+      stack.reduce((sum, b) => sum + b.h, 0) + MULTI_STAT_BLOCK_GAP * (stack.length - 1);
+    let cursorY = region.y + Math.max(0, (region.h - stackHeight) / 2);
+    for (const block of stack) {
+      block.y = cursorY;
+      cursorY = block.y + block.h + MULTI_STAT_BLOCK_GAP;
+    }
+    blocks.push(...stack);
+  });
+
+  return { shapes, blocks };
 }
 
 // ---------------------------------------------------------------------------

@@ -393,6 +393,79 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   that editorial_invalid_schema is gone/coerced-and-recovered in the logs — must be run on the
   server BEFORE merging anywhere.
 
+## SHIPPED (chart-encoding correctness — branch feat/image-engine)
+- WHY: the chart-selection pass (f185779) re-routed low-spread bars to single_value by
+  headlining `series[0]` and folding the rest into a subtitle. On the live sCO2 deck slide
+  10 "sCO₂ Achieves PUE 1.08" with series [Air 1.57, Liquid 1.25, sCO2 1.08], series[0] is
+  Air — so the slide titled for sCO2 printed a giant "1.57 PUE", the value the slide
+  BEATS. Slide 14 (payback Liquid 5yr / sCO2 3.2yr) drew TWO discrete categories as a LINE,
+  implying a continuous trend that does not exist. Two bugs, one root cause: the encoding
+  layer was inferring the wrong shape from the wrong signal (position-in-array, presence-of-
+  line). Fixed at the same two layers as f185779 — editorial prompt + renderer guard.
+- RENDERER (`packages/presentation-worker/src/charts/chart-guard.ts`):
+  - LOW-SPREAD COMPARISON now re-routes to a chart-internal `multi_stat` mode instead of
+    single_value. All N points reach the renderer (the gap IS the story; throwing it away
+    was the source of the wrong-headline bug). The SUBJECT card carries `palette.accent`;
+    the others render in body text. `single_value` is reserved for the genuinely one-number
+    case (one-point series, an editorial intent).
+  - SUBJECT PICKER (`pickSubjectIndex`, exported for testing): three rules in priority
+    order. (a) Title-token match — the series label that appears in the title wins; when
+    several match, the LAST occurrence wins (handles "Air vs sCO2 …" → sCO2). Normalisation
+    is NFKD-aware so "sCO₂" in the title matches the ASCII "sCO2" series label (NFKD
+    decomposes U+2082 → "2", combining marks stripped, lower-cased, non-alphanumerics
+    dropped). (b) Metric-polarity lexicon — `pue / cost / latency / payback / downtime /
+    footprint / emission / error / loss / risk / overhead` → argmin; `efficiency / saving /
+    recovery / throughput / capacity / density / performance / yield` → argmax. (c)
+    Fallback — argmax (biggest number is the natural hero). English-biased by design
+    (false positives are worse than misses); the model is steered by the prompt to put
+    the subject in the title so (a) wins on the common case.
+  - LINE < 3 POINTS now re-routes to `bar` and re-evaluates the bar guards — so a
+    low-spread 2-point line (e.g. 1.0/1.2) cascades all the way to `multi_stat`, not a
+    flat two-bar chart. Both re-routes log one stderr line each:
+    `chart_encoding_rerouted from=line to=bar reason=line_too_few_points` then
+    `from=bar to=multi_stat reason=low_spread`.
+  - `applyBarGuards` extracted so the cascade is one helper call from two paths
+    (initial-bar + line→bar), not duplicated logic. `LINE_MIN_POINTS = 3` exported next
+    to `LOW_SPREAD_THRESHOLD` so a future tuner sees both knobs together.
+- RENDERER (`packages/presentation-worker/src/charts/draw-chart.ts`):
+  - New `drawMultiStat` — renders N stat cards inside the chart region. Per stat: number
+    (heading tier, hugged), unit (caption tier, secondary color, hugged), label (caption,
+    text color). Stacked and centered the same way DATA_EMPHASIS columns are. Subject
+    card uses `palette.accent` for both number AND label, bold weight, so the slide's
+    argument is unmistakable; others use body text. Number tier shrinks with count
+    (displayLarge for 1, heading for 2-3, subheading for 4+) so cards breathe.
+  - drawChart switches on the new `'multi_stat'` value in the render-internal
+    `ChartRenderType = ChartType | 'multi_stat'`. The PUBLIC `ChartType` is unchanged.
+- EDITORIAL (`packages/core/prompts.py`):
+  - ORDERED PROGRESSION rule tightened: line REQUIRES `THREE OR MORE points` over a
+    genuine sequence axis. Explicitly forbids two-discrete-category lines ("NEVER use
+    line for two discrete categories") and names the failure case ("payback Liquid vs
+    sCO2"). Two-point comparisons go to DATA_EMPHASIS or bar.
+  - New TITLE-SUBJECT ALIGNMENT block: when a slide argues for a specific value, the
+    title MUST name it in the same wording as the stat/series label. The block names
+    the polarity lexicon so the model knows the deterministic fallback the renderer
+    will use if the title is generic.
+- VERIFIED locally:
+  - vitest packages/presentation-worker: 47 passed in chart-guard + draw-chart suites
+    (`__tests__/chart-guard.test.ts` + `__tests__/draw-chart.test.ts`). Full vitest:
+    332 passed / 3 skipped / 1 PRE-EXISTING failure (text-measure F-red — plan item 11,
+    documented above; verified pre-existing by stash-and-rerun).
+  - pytest tests/: 1211 passed / 32 skipped (+2 new — the line-rule pin and the
+    title-subject-alignment pin).
+  - tsc --noEmit: clean.
+  - ruff check + format --check: clean on changed Python files.
+  - pyright packages/core/prompts.py: 0 errors / 0 warnings.
+  - SCO2 FIXTURE eyeball (`debug/sco2_chart_fix_fixture.json` → `debug/chart-fix-out/`):
+    layout.json shows slide 1 (PUE) text blocks "1.57"/"1.25"/"1.08" with "1.08" colored
+    `#E8553A` (the deck accent) and the others in body color — sCO2 IS the headlined
+    subject. Slide 2 (payback) has 2 rects (bars) + 1 axis-aligned line (the baseline
+    rule) and ZERO diagonal `line` segments — bar, not line. Screenshots at
+    `debug/chart-fix-out/slide_1_pue_multi_stat.png` and `slide_2_payback_bar.png`
+    confirm visually: PUE shows three cards with sCO2's 1.08 in accent orange, payback
+    shows two clean orange bars labeled Liquid (5 yr) and sCO2 (3.2 yr).
+- DONE = this commit + this BUILD_STATE entry + live regen on server (slide 10
+  headlines 1.08, slide 14 is bars) gate the merge to main.
+
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [~] Editorial structured fields: H tables + G comparison + D-data chart_series — DONE this branch.

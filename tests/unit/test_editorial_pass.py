@@ -333,11 +333,32 @@ def test_editorial_prompt_carries_chart_selection_decision_rules() -> None:
     # Shape 4 — single dominant number.
     assert "SINGLE DOMINANT NUMBER" in prompt
     assert "single_value" in prompt
-    # Shape 5 — two-point progression / before-after.
+    # Shape 5 — ordered progression: tightened to require THREE OR MORE
+    # ordered points, with two-point comparisons routed away from line
+    # (the bug that drew a payback "line" between two discrete categories).
     assert "ORDERED PROGRESSION" in prompt
+    assert "THREE OR MORE points" in prompt
+    assert "NEVER use line for two discrete categories" in prompt
     # Shape 6 — multi-series-per-category (grouped/stacked) is the ONLY
     # remaining bar-default case.
     assert "MULTI-SERIES PER CATEGORY" in prompt
+
+
+def test_editorial_prompt_carries_subject_pick_guidance() -> None:
+    # The renderer's chart-guard picks the slide's subject by matching a
+    # series label inside the title; if the title names no subject the
+    # picker falls back to a metric-polarity lexicon (PUE → min, efficiency
+    # → max). The prompt must instruct the model to put the subject in the
+    # title so (a) wins on the common case — without this, a slide titled
+    # "Cooling efficiency compared" leaves the renderer guessing.
+    prompt = EDITORIAL_SYSTEM
+    assert "TITLE-SUBJECT ALIGNMENT" in prompt
+    assert "the title MUST name that subject" in prompt
+    # The PUE/efficiency lexicon is the deterministic fallback the prompt
+    # explicitly names so the model knows what the renderer will do if the
+    # title is generic.
+    assert "lower-is-better" in prompt and "higher-is-better" in prompt
+    assert "sCO₂ Achieves PUE 1.08" in prompt
 
 
 def _chart_payload(chart_type: str, series: list[dict[str, Any]]) -> dict[str, Any]:

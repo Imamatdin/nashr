@@ -207,23 +207,68 @@ describe('drawChart — empty series', () => {
 });
 
 describe('drawChart — encoding guard', () => {
-  it('renders a low-spread bar through the single_value path (one number, no bars)', () => {
+  it('renders a low-spread bar as multi_stat with the subject highlighted', () => {
+    // The sCO2 deck slide 10 case: title argues for sCO2 PUE 1.08, series
+    // is Air/Liquid/sCO2. The OLD path headlined series[0] (Air, 1.57) —
+    // the value the slide BEATS. The new path keeps every point as a stat
+    // card and accents sCO2.
     const pue = [
-      { label: 'Air', value: 1.58, unit: 'PUE' },
+      { label: 'Air', value: 1.57, unit: 'PUE' },
       { label: 'Liquid', value: 1.25, unit: 'PUE' },
       { label: 'sCO2', value: 1.08, unit: 'PUE' },
     ];
     const result = drawChart(
       REGION,
-      content({ chart_type: 'bar', chart_series: pue }),
+      content({ title: 'sCO₂ Achieves PUE 1.08', chart_type: 'bar', chart_series: pue }),
       DESIGN,
     )!;
-    // single_value with a single point and no progress-bar denominator
-    // renders the headline number + label only (no rect shapes).
+    // No bars are drawn — the stat-card layout has no rect shapes.
     expect(result.shapes.filter((s) => s.type === 'rect')).toHaveLength(0);
-    expect(result.blocks.some((b) => b.text === '1.58 PUE')).toBe(true);
-    // The other values still appear in the composite label so no data is lost.
-    expect(result.blocks.some((b) => b.text.includes('Liquid') && b.text.includes('1.25'))).toBe(true);
+    // Every value appears as its own number block (each card carries the
+    // raw number without unit; unit lives on its own row).
+    expect(result.blocks.some((b) => b.text === '1.08')).toBe(true);
+    expect(result.blocks.some((b) => b.text === '1.25')).toBe(true);
+    expect(result.blocks.some((b) => b.text === '1.57')).toBe(true);
+    // The subject card (sCO2) is the only one rendered in the deck accent.
+    const sco2Number = result.blocks.find((b) => b.text === '1.08')!;
+    const airNumber = result.blocks.find((b) => b.text === '1.57')!;
+    expect(sco2Number.color).toBe(DESIGN.palette.accent);
+    expect(airNumber.color).not.toBe(DESIGN.palette.accent);
+    // Labels appear so the comparison is intact.
+    expect(result.blocks.some((b) => b.text === 'sCO2')).toBe(true);
+    expect(result.blocks.some((b) => b.text === 'Air')).toBe(true);
+    expect(result.blocks.some((b) => b.text === 'Liquid')).toBe(true);
+  });
+
+  it('re-routes a 2-point payback line off line into a clean two-bar chart', () => {
+    // The sCO2 deck slide 14 case: payback Liquid 5yr vs sCO2 3.2yr was
+    // emitted as `line` (which implies a continuous trend across discrete
+    // categories). After the line<3 → bar re-route, the ratio 5/3.2 = 1.56
+    // is above the spread threshold, so the bar guards leave the chart at
+    // a clean two-bar comparison.
+    const payback = [
+      { label: 'Liquid', value: 5, unit: 'yr' },
+      { label: 'sCO2', value: 3.2, unit: 'yr' },
+    ];
+    const result = drawChart(
+      REGION,
+      content({
+        title: 'sCO2 cuts payback to 3.2 years',
+        chart_type: 'line',
+        chart_series: payback,
+      }),
+      DESIGN,
+    )!;
+    // Two accent bars drawn (rects), with a baseline rule below.
+    const bars = result.shapes.filter((s) => s.type === 'rect');
+    expect(bars).toHaveLength(2);
+    // No diagonal line segments (the visual that misled the reader).
+    expect(
+      result.shapes.filter((s) => s.type === 'line' && s.x2 !== undefined),
+    ).toHaveLength(0);
+    // Both values appear as labels.
+    expect(result.blocks.some((b) => b.text === '5 yr')).toBe(true);
+    expect(result.blocks.some((b) => b.text === '3.2 yr')).toBe(true);
   });
 
   it('renders a big-spread bar untouched (3 accent bars, baseline, value + category labels)', () => {
