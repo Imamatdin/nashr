@@ -69,6 +69,37 @@ describe('layout — CHART_DATA', () => {
     expect(layout.textBlocks.some((b) => b.text === 'sCO2')).toBe(true);
   });
 
+  it('value labels with a verbose unit do not overflow Q1 (slide-11 regression)', () => {
+    // The live sCO2 regen failed [Q1] on a chart whose unit was
+    // "% waste heat recovered" — a 23-char unit that yields a value label
+    // like "20% waste heat recovered". With the old fixed 6pp VALUE_LABEL_BAND,
+    // the wrap at subheading.min=20px overflowed the band. The fix measures
+    // against the real space above each bar AND opts the chart labels into
+    // FONT_SIZES.minimum as the absolute floor.
+    const series: ChartSeriesPoint[] = [
+      { label: 'Air cooling (min)', value: 0, unit: '% waste heat recovered' },
+      { label: 'Liquid cooling (min)', value: 0, unit: '% waste heat recovered' },
+      { label: 'sCO2 (min)', value: 5, unit: '% waste heat recovered' },
+      { label: 'sCO2 (max)', value: 20, unit: '% waste heat recovered' },
+    ];
+    const deck = buildTestDeck([
+      makeSlide('chart_data', {
+        title: 'Most cooling stacks throw their waste heat away',
+        chart_type: 'bar',
+        chart_series: series,
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const valueLabels = layout.textBlocks.filter((b) => b.text.includes('% waste heat recovered'));
+    expect(valueLabels).toHaveLength(4);
+    for (const b of valueLabels) {
+      expect(b.overflow).toBe(false);
+      // Common case: the dynamic measure region is generous enough that the
+      // label stays at subheading.max=24 — no shrink needed.
+      expect(b.fontSize).toBeGreaterThanOrEqual(20);
+    }
+  });
+
   it('places the source citation small and bottom-right', () => {
     const deck = buildTestDeck([
       makeSlide('chart_data', {

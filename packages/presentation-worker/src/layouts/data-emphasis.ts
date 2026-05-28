@@ -3,34 +3,188 @@
  *
  * Highlights 1-4 key statistics. Each stat is decomposed into a
  * number block (largest), an optional unit block, a label block,
- * and an optional comparison line. The hero single-stat version
- * promotes the number to displayJumbo; multi-stat versions step
- * down to displayLarge so they fit side-by-side without crowding.
+ * and an optional comparison line. The number is the headline content
+ * and reads big — sized adaptively against the band's REMAINING height
+ * after the unit/label/comparison stack is measured, so on a tall
+ * band with short labels the number grows toward the ceiling; on a
+ * narrow 4-stat band or with verbose labels the number compresses
+ * gracefully. The displayLarge/displayJumbo tiers are floors here, not
+ * ceilings: keeping a 64px cap on a 800px-tall band is the under-fill
+ * bug this exists to kill.
+ *
+ * Within each row of stats the number blocks share a COMMON BASELINE
+ * (their measured bottoms align) and render at a UNIFORM FONT SIZE
+ * (the smallest size at which every value in the row still fits its
+ * column). Pure baseline alignment with mismatched font sizes still
+ * reads as staggered, so this layout pays one extra build pass per
+ * stat to harmonise the row. Do NOT collapse this back to per-column
+ * independence — that re-introduces the staggered headline bug.
  *
  * The four blocks of a stat are measured and stacked vertically
- * (number → unit → label → comparison) rather than dropped at fixed
- * fractions of the column height: a number that wraps to two lines
- * pushes the unit/label/comparison down instead of stranding them in a
- * pre-cut slot. The measured stack is centred within the column band,
- * clamped so it never starts above the column top (the never-stack-
- * upward floor; a stack taller than the band top-aligns and the audit
- * surfaces the overflow). The number block carries the value ONLY — the
- * unit has exactly one home, its own block — so a value+unit pair never
- * renders jammed together ("1.58PUE") or doubled.
+ * (number → unit → label → comparison) — a number that wraps to two
+ * lines pushes the unit/label/comparison down instead of stranding
+ * them in a pre-cut slot. The stack hangs FROM the shared baseline:
+ * unit/label/comparison cascade below it, the number rises to align
+ * its bottom there. A stack that overflows the band top-aligns
+ * (never-stack-upward floor) and the audit surfaces it. The number
+ * block carries the value ONLY — the unit has exactly one home, its
+ * own block — so a value+unit pair never renders jammed together
+ * ("1.58PUE") or doubled.
  */
 
-import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, STAT_POSITIONS, type Region } from '../constants.js';
-import type { DeckSpec, SlideLayout, SlideSpec, StatItem, TextBlock } from '../types.js';
+import {
+  FONT_SIZES,
+  LINE_HEIGHTS,
+  SLIDE_HEIGHT,
+  SLIDE_WIDTH,
+  SLIDE_REGIONS,
+  STAT_POSITIONS,
+  type Region,
+} from '../constants.js';
+import { measureText } from '../text-measure.js';
+import type {
+  DeckSpec,
+  DesignDirectionSpec,
+  SlideLayout,
+  SlideSpec,
+  StatItem,
+  TextBlock,
+} from '../types.js';
 import {
   availableHeightBelow,
   buildTextBlock,
   compose,
   defaultBackground,
   hugHeightToMeasured,
+  type FontTier,
 } from './shared.js';
 
 /** Vertical gap (slide %) between a stat's number/unit/label/comparison blocks. */
 const STAT_BLOCK_GAP = 1;
+
+/** Probe floor for uniform number sizing — never let a pathological long
+ *  value drag the row's font size below the displayLarge minimum. The existing
+ *  test `keeps multi-stat number blocks in the large display tier` is the
+ *  tripwire on this floor: if it fails, this floor is the lever. */
+const NUMBER_PROBE_FLOOR_PX = FONT_SIZES.displayLarge.min;
+
+/** Adaptive ceiling for the headline number, in px. Big enough to read
+ *  like a Canva stat headline on a full-height band, capped so a single
+ *  hero stat doesn't grow absurdly. */
+const NUMBER_CEILING_PX = 240;
+
+/** Fraction of the *number-available* height (band minus below-stack) the
+ *  number should occupy. 80% leaves a small breather between the wrapped
+ *  number's bottom and the unit row above the baseline; lifting this above
+ *  ~85% lets the number kiss the unit, below ~70% strands the number high
+ *  on a tall band. */
+const NUMBER_FILL_FRACTION = 0.8;
+
+/** Render-cost multiplier mirrored from text-measure.HEIGHT_SAFETY (1.3)
+ *  × LINE_HEIGHTS.heading (1.1). The Layout Pass knows the renderer
+ *  inflates line height, so it sizes against the same factor. */
+const RENDER_LINE_FACTOR = LINE_HEIGHTS.heading * 1.3;
+
+interface StatStack {
+  number: TextBlock;
+  below: TextBlock[];
+}
+
+/** Group positions into rows that share a y/h band — 4-stat splits into 2 rows. */
+function groupRows(positions: readonly Region[]): readonly (readonly number[])[] {
+  const rows = new Map<string, number[]>();
+  positions.forEach((p, i) => {
+    const key = `${p.y}:${p.h}`;
+    const arr = rows.get(key) ?? [];
+    arr.push(i);
+    rows.set(key, arr);
+  });
+  return [...rows.values()];
+}
+
+interface NumberBuildOptions {
+  text: string;
+  position: Region;
+  tier: FontTier;
+  design: DesignDirectionSpec;
+  highlight: boolean | undefined;
+}
+
+/**
+ * Build a number block without hugging — measureRegion stretches to the
+ * bottom margin so the shrink loop only contracts on width or on a genuine
+ * height overflow, not on the pre-cut nominal band height. Hugging is
+ * deferred to the emit pass so we can reposition the block to the shared
+ * baseline first.
+ */
+function buildNumberBlock(opts: NumberBuildOptions): TextBlock {
+  const accentColor = opts.highlight ? opts.design.palette.accent : opts.design.palette.text;
+  const measureRegion: Region = {
+    x: opts.position.x,
+    y: opts.position.y,
+    w: opts.position.w,
+    h: availableHeightBelow(opts.position.y),
+  };
+  return buildTextBlock({
+    text: opts.text,
+    region: measureRegion,
+    fontFamily: opts.design.heading_font,
+    fontWeight: 'bold',
+    color: accentColor,
+    align: 'center',
+    tier: opts.tier,
+    lineHeight: LINE_HEIGHTS.heading,
+  });
+}
+
+/**
+ * Adaptive number font ceiling: derive from the height available to the
+ * number specifically — band height minus the tallest below-stack and the
+ * intra-stat gaps. Numbers grow to fill what's left; verbose labels push
+ * the number ceiling down, terse labels let it grow toward NUMBER_CEILING_PX.
+ */
+function adaptiveNumberMaxPx(numberAvailablePct: number): number {
+  const availablePx = (numberAvailablePct / 100) * SLIDE_HEIGHT;
+  const targetHeightPx = availablePx * NUMBER_FILL_FRACTION;
+  const fontSize = Math.round(targetHeightPx / RENDER_LINE_FACTOR);
+  return Math.min(NUMBER_CEILING_PX, Math.max(NUMBER_PROBE_FLOOR_PX, fontSize));
+}
+
+/**
+ * Largest font size at which `value` fits on a SINGLE line inside the
+ * column. The default buildTextBlock loop accepts a value wrapping across
+ * "94" / "4" because it caps maxLineWidth at the column width — that's
+ * fine for prose, lethal for a headline number where a wrap reads as a
+ * typo. We probe explicitly for the one-line fit; if no size in the range
+ * does it (a pathological value longer than the column at the floor), we
+ * fall back to the floor so the buildTextBlock loop downstream still
+ * keeps the row uniform — the value will wrap, but the floor protects the
+ * other stats in the row from being dragged with it.
+ */
+function maxSingleLineFontSize(
+  value: string,
+  column: Region,
+  design: DesignDirectionSpec,
+  ceilingPx: number,
+  floorPx: number,
+): number {
+  const columnWidthPx = (column.w / 100) * SLIDE_WIDTH;
+  for (let size = ceilingPx; size >= floorPx; size -= 2) {
+    const m = measureText({
+      text: value,
+      fontSize: size,
+      fontFamily: design.heading_font,
+      fontWeight: 'bold',
+      maxWidth: columnWidthPx,
+      // Generous height — the predicate we want is just "lineCount === 1",
+      // height-overflow would never trigger on a single-line measurement.
+      maxHeight: SLIDE_HEIGHT,
+      lineHeight: LINE_HEIGHTS.heading,
+    });
+    if (m.lineCount === 1) return size;
+  }
+  return floorPx;
+}
 
 export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const regions = SLIDE_REGIONS.data_emphasis!;
@@ -54,99 +208,159 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
   const count = Math.max(1, stats.length) as 1 | 2 | 3 | 4;
   const positions = STAT_POSITIONS[count];
   const isHero = count === 1;
-  const numberTier = isHero ? FONT_SIZES.displayJumbo : FONT_SIZES.displayLarge;
-  const unitTier = isHero ? FONT_SIZES.heading : FONT_SIZES.subheading;
-  const labelTier = isHero ? FONT_SIZES.subheading : FONT_SIZES.caption;
+  // Below-stack tiers are bumped from the original caption/subheading floor —
+  // those sizes were calibrated against the old 50% mid-slide band where tall
+  // ancillary text would have crowded the number. With the band expanded to
+  // the full content region the unit/label/comparison carry the next tier up
+  // and still leave headline-sized room for the number. Hero stats get an
+  // additional tier of promotion: the single 50%-wide column carries more
+  // ancillary text without crowding the number, and a hero deserves a hero
+  // unit.
+  const unitTier = isHero ? FONT_SIZES.displayJumbo : FONT_SIZES.heading;
+  const labelTier = isHero ? FONT_SIZES.heading : FONT_SIZES.subheading;
+  const comparisonTier = isHero ? FONT_SIZES.subheading : FONT_SIZES.body;
 
-  stats.forEach((stat, idx) => {
-    const position = positions[idx];
-    if (!position) return;
-    const accentColor = stat.highlight ? design.palette.accent : design.palette.text;
-    // Measure every block against the space down to the bottom margin so the
-    // font tier shrinks only on a genuine width constraint (a long value, a
-    // narrow column), never because a pre-cut nominal slot was too short.
-    const measureRegion = (y: number): Region => ({
-      x: position.x,
-      y,
-      w: position.w,
-      h: availableHeightBelow(y),
-    });
+  const rows = groupRows(positions);
 
-    // number → unit → label → comparison, each hugged to its measured height.
-    const statBlocks: TextBlock[] = [];
-    statBlocks.push(
-      hugHeightToMeasured(
-        buildTextBlock({
-          text: stat.value,
-          region: measureRegion(position.y),
-          fontFamily: design.heading_font,
-          fontWeight: 'bold',
-          color: accentColor,
-          align: 'center',
-          tier: numberTier,
-          lineHeight: LINE_HEIGHTS.heading,
-        }),
-      ),
-    );
-    if (stat.unit) {
-      statBlocks.push(
+  for (const rowIndices of rows) {
+    if (rowIndices.length === 0) continue;
+    const rowPositions = rowIndices.map((i) => positions[i]!);
+    const rowStats = rowIndices.map((i) => stats[i]).filter((s): s is StatItem => Boolean(s));
+    if (rowStats.length === 0) continue;
+
+    const bandTop = rowPositions[0]!.y;
+    const bandHeight = rowPositions[0]!.h;
+
+    // BELOW PASS: build each stat's unit/label/comparison stack at its tier.
+    // These probe against the available height down to the bottom margin so
+    // the measured heights are real wrap heights, not pre-cut slots.
+    const belowStacks: TextBlock[][] = rowStats.map((stat) => {
+      const position = rowPositions[rowStats.indexOf(stat)]!;
+      const measureRegion = (y: number): Region => ({
+        x: position.x,
+        y,
+        w: position.w,
+        h: availableHeightBelow(y),
+      });
+      const below: TextBlock[] = [];
+      if (stat.unit) {
+        below.push(
+          hugHeightToMeasured(
+            buildTextBlock({
+              text: stat.unit,
+              region: measureRegion(position.y),
+              fontFamily: design.body_font,
+              fontWeight: 'normal',
+              color: design.palette.text_secondary,
+              align: 'center',
+              tier: unitTier,
+              lineHeight: LINE_HEIGHTS.body,
+            }),
+          ),
+        );
+      }
+      below.push(
         hugHeightToMeasured(
           buildTextBlock({
-            text: stat.unit,
+            text: stat.label,
             region: measureRegion(position.y),
             fontFamily: design.body_font,
             fontWeight: 'normal',
-            color: design.palette.text_secondary,
+            color: design.palette.text,
             align: 'center',
-            tier: unitTier,
+            tier: labelTier,
             lineHeight: LINE_HEIGHTS.body,
           }),
         ),
       );
-    }
-    statBlocks.push(
-      hugHeightToMeasured(
-        buildTextBlock({
-          text: stat.label,
-          region: measureRegion(position.y),
-          fontFamily: design.body_font,
-          fontWeight: 'normal',
-          color: design.palette.text,
-          align: 'center',
-          tier: labelTier,
-          lineHeight: LINE_HEIGHTS.body,
-        }),
-      ),
-    );
-    if (stat.comparison) {
-      statBlocks.push(
-        hugHeightToMeasured(
-          buildTextBlock({
-            text: stat.comparison,
-            region: measureRegion(position.y),
-            fontFamily: design.body_font,
-            fontWeight: 'normal',
-            color: design.palette.text_secondary,
-            align: 'center',
-            tier: FONT_SIZES.caption,
-            lineHeight: LINE_HEIGHTS.caption,
-          }),
-        ),
-      );
-    }
+      if (stat.comparison) {
+        below.push(
+          hugHeightToMeasured(
+            buildTextBlock({
+              text: stat.comparison,
+              region: measureRegion(position.y),
+              fontFamily: design.body_font,
+              fontWeight: 'normal',
+              color: design.palette.text_secondary,
+              align: 'center',
+              tier: comparisonTier,
+              lineHeight: LINE_HEIGHTS.caption,
+            }),
+          ),
+        );
+      }
+      return below;
+    });
 
-    // Centre the measured stack within the column band, but never let it begin
-    // above the column top: a stack that overflows the band top-aligns instead
-    // of climbing into the title above.
-    const stackHeight =
-      statBlocks.reduce((sum, b) => sum + b.h, 0) + STAT_BLOCK_GAP * (statBlocks.length - 1);
-    let cursorY = position.y + Math.max(0, (position.h - stackHeight) / 2);
-    for (const block of statBlocks) {
-      block.y = cursorY;
-      cursorY = block.y + block.h + STAT_BLOCK_GAP;
+    // Tallest below-stack drives the number's ceiling: the number gets
+    // (band - below - gaps) to render in. Each stat keeps its own below
+    // measurement, but the SHARED row layout uses the maximum so all
+    // columns reserve the same number-region height.
+    const belowHeights = belowStacks.map(
+      (stack) => stack.reduce((sum, b) => sum + b.h, 0) + STAT_BLOCK_GAP * stack.length,
+    );
+    const maxBelowHeight = Math.max(...belowHeights);
+    const numberRegionHeight = Math.max(
+      NUMBER_PROBE_FLOOR_PX / SLIDE_HEIGHT * 100,
+      bandHeight - maxBelowHeight - STAT_BLOCK_GAP,
+    );
+    const numberCeiling = adaptiveNumberMaxPx(numberRegionHeight);
+
+    // PROBE PASS: find the largest font size at which EACH value fits on
+    // ONE line in its column. The uniform size is the MIN across the row,
+    // floored at NUMBER_PROBE_FLOOR_PX so a single pathological value can't
+    // drag the row below displayLarge.min. Forcing single-line avoids the
+    // ugly digit-wrap a generic shrink-on-overflow loop would happily
+    // accept (a column wide enough for "9" wraps "94.4" to "94" / "4").
+    const perStatSingleLine = rowStats.map((stat, idx) =>
+      maxSingleLineFontSize(stat.value, rowPositions[idx]!, design, numberCeiling, NUMBER_PROBE_FLOOR_PX),
+    );
+    const uniformSize = Math.min(...perStatSingleLine);
+    const uniformTier: FontTier = { min: uniformSize, max: uniformSize };
+
+    // EMIT PASS: rebuild every number at the uniform size; hug to measured
+    // height here (not in the probe pass) so the renderer's overflow:hidden
+    // box hugs the text after the shared-baseline reposition.
+    const numberBlocks: TextBlock[] = rowStats.map((stat, idx) => {
+      const position = rowPositions[idx]!;
+      return hugHeightToMeasured(
+        buildNumberBlock({
+          text: stat.value,
+          position,
+          tier: uniformTier,
+          design,
+          highlight: stat.highlight,
+        }),
+      );
+    });
+    const stacks: StatStack[] = numberBlocks.map((number, i) => ({
+      number,
+      below: belowStacks[i]!,
+    }));
+
+    // Shared baseline = deepest number bottom in this row. Centre the
+    // (number-row + below-stack) within the band: rowTop pins where the
+    // tallest number begins; baselineY is its measured bottom.
+    const maxNumberHeight = Math.max(...stacks.map((s) => s.number.measuredHeightPct));
+    const rowContentHeight = maxNumberHeight + STAT_BLOCK_GAP + maxBelowHeight;
+    const rowTop = bandTop + Math.max(0, (bandHeight - rowContentHeight) / 2);
+    const baselineY = rowTop + maxNumberHeight;
+
+    for (const stack of stacks) {
+      // Position the number so its measured bottom sits at baselineY. The
+      // never-stack-upward floor pins it at bandTop if its stack would
+      // overflow the band — top-align instead of climbing into the title.
+      stack.number.y = Math.max(bandTop, baselineY - stack.number.measuredHeightPct);
+      blocks.push(stack.number);
+
+      let cursorY = baselineY + STAT_BLOCK_GAP;
+      for (const block of stack.below) {
+        block.y = cursorY;
+        cursorY = block.y + block.h + STAT_BLOCK_GAP;
+        blocks.push(block);
+      }
     }
-    blocks.push(...statBlocks);
-  });
+  }
 
   const background = defaultBackground(design);
   return compose(slide, blocks, [], [], background);

@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { LayoutPass } from '../src/layout-pass.js';
-import { FONT_SIZES } from '../src/constants.js';
+import { FONT_SIZES, MARGIN, STAT_POSITIONS } from '../src/constants.js';
 import type { DeckSpec, SlideContent, SlideSpec, SlideType, StatItem, TextBlock } from '../src/types.js';
 
 function buildDeck(slides: SlideSpec[]): DeckSpec {
@@ -161,5 +161,130 @@ describe('DATA_EMPHASIS — over-long stat value does not collide with its unit'
     // Unit top must clear the number's measured bottom (1px epsilon in % units).
     const epsilon = (1 / 1080) * 100;
     expect(overLongUnit.y).toBeGreaterThanOrEqual(overLongNumber.y + overLongNumber.h - epsilon);
+  });
+});
+
+/**
+ * Band fill + shared baseline regression suite (feat/layout-fill).
+ *
+ * Locks the under-fill bug fix: with the band expanded to the full content
+ * region and the number tier sized adaptively, the stat row spans the
+ * majority of the available height instead of squatting in a mid-slide
+ * strip — and the number blocks share a common baseline so the headline
+ * row reads as a unified ribbon.
+ */
+describe('DATA_EMPHASIS — band fill and shared baseline', () => {
+  const REGION_BOTTOM = 100 - MARGIN.bottom; // 94
+
+  function statBlocks(stats: StatItem[]): TextBlock[] {
+    const deck = buildDeck([makeSlide(0, 'data_emphasis', { title: 'In numbers', stats })]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    return layout.textBlocks.filter((b) => b.text !== 'In numbers');
+  }
+
+  it('aligns number-block bottoms on a shared baseline across columns (3 stats)', () => {
+    const stats: StatItem[] = [
+      { value: '94.4', unit: '%', label: 'Water savings', highlight: true },
+      { value: '35', unit: '%', label: 'Overhead' },
+      { value: '12', unit: 'MW', label: 'Capacity' },
+    ];
+    const blocks = statBlocks(stats);
+    const numbers = stats.map((s) => blocks.find((b) => b.text === s.value)!);
+    expect(numbers).toHaveLength(3);
+    const baselines = numbers.map((n) => n.y + n.measuredHeightPct);
+    const spread = Math.max(...baselines) - Math.min(...baselines);
+    // Tolerance: half a slide-percent. The font-metrics fallback can introduce
+    // sub-pixel measurement drift but a shared baseline should pin within ~5px.
+    expect(spread).toBeLessThan(0.5);
+  });
+
+  it('uses a uniform font size across number blocks in a row', () => {
+    // Three same-format values — uniform sizing must yield identical fontSize
+    // (uniformFontSize is the min over per-stat natural fits; with similar
+    // values the natural fits are equal).
+    const stats: StatItem[] = [
+      { value: '94', unit: '%', label: 'a' },
+      { value: '35', unit: '%', label: 'b' },
+      { value: '12', unit: 'MW', label: 'c' },
+    ];
+    const blocks = statBlocks(stats);
+    const sizes = stats.map((s) => blocks.find((b) => b.text === s.value)!.fontSize);
+    const allEqual = sizes.every((s) => s === sizes[0]);
+    expect(allEqual).toBe(true);
+  });
+
+  it('floors uniform font size at displayLarge.min when a pathological value would otherwise drag it lower', () => {
+    // One very long value alongside two short ones. The uniform sizing must
+    // not crater the row below displayLarge.min — the probe floor protects
+    // the short stats from being dragged to caption-size.
+    const stats: StatItem[] = [
+      { value: '1.560–1.580–1.600–1.620', unit: 'PUE', label: 'a' },
+      { value: '1.08', unit: 'PUE', label: 'b' },
+      { value: '35', unit: '%', label: 'c' },
+    ];
+    const blocks = statBlocks(stats);
+    const sizes = stats.map((s) => blocks.find((b) => b.text === s.value)!.fontSize);
+    for (const s of sizes) expect(s).toBeGreaterThanOrEqual(FONT_SIZES.displayLarge.min);
+  });
+
+  it('spans the majority of the available content region (3 stats)', () => {
+    const stats: StatItem[] = [
+      { value: '94.4', unit: '%', label: 'Water savings', comparison: 'vs 30% baseline' },
+      { value: '35', unit: '%', label: 'Overhead reduction', comparison: 'down from 60%' },
+      { value: '12', unit: 'MW', label: 'Cooling capacity', comparison: 'rack-scale' },
+    ];
+    const blocks = statBlocks(stats);
+    const band = STAT_POSITIONS[3][0]!;
+    const bandHeight = band.h;
+    const tops = blocks.map((b) => b.y);
+    const bottoms = blocks.map((b) => b.y + b.h);
+    const contentTop = Math.min(...tops);
+    const contentBottom = Math.max(...bottoms);
+    const contentSpan = contentBottom - contentTop;
+    // Content must occupy the majority of the band height (>50%). The
+    // under-fill bug squatted at ~30% of an 81pp content envelope while
+    // confined to a 50pp band — both halves of the regression. The single-
+    // line number constraint caps how big the number can grow in a narrow
+    // 3-stat column, so we don't push the ratio above the majority
+    // threshold the prompt requires.
+    expect(contentSpan / bandHeight).toBeGreaterThan(0.5);
+  });
+
+  it('never overflows the bottom margin', () => {
+    const stats: StatItem[] = [
+      { value: '94.4', unit: '%', label: 'Water savings', comparison: 'vs 30% baseline' },
+      { value: '35', unit: '%', label: 'Overhead reduction', comparison: 'down from 60%' },
+      { value: '12', unit: 'MW', label: 'Cooling capacity', comparison: 'rack-scale' },
+    ];
+    const blocks = statBlocks(stats);
+    const epsilon = 0.1; // half a slide-pixel
+    for (const b of blocks) {
+      expect(b.y + b.h).toBeLessThanOrEqual(REGION_BOTTOM + epsilon);
+    }
+  });
+
+  it('places per-row baselines for the 4-stat 2×2 grid (top row baseline ≠ bottom row baseline)', () => {
+    const stats: StatItem[] = [
+      { value: '94', unit: '%', label: 'a' },
+      { value: '35', unit: '%', label: 'b' },
+      { value: '12', unit: 'MW', label: 'c' },
+      { value: '7', unit: 'kW', label: 'd' },
+    ];
+    const blocks = statBlocks(stats);
+    const numbers = stats.map((s) => blocks.find((b) => b.text === s.value)!);
+    const topRowBaseline = numbers[0]!.y + numbers[0]!.measuredHeightPct;
+    const bottomRowBaseline = numbers[2]!.y + numbers[2]!.measuredHeightPct;
+    expect(bottomRowBaseline - topRowBaseline).toBeGreaterThan(20);
+    // Within each row, the two numbers' bottoms align.
+    const topPairSpread =
+      Math.abs(
+        numbers[1]!.y + numbers[1]!.measuredHeightPct - (numbers[0]!.y + numbers[0]!.measuredHeightPct),
+      );
+    const bottomPairSpread =
+      Math.abs(
+        numbers[3]!.y + numbers[3]!.measuredHeightPct - (numbers[2]!.y + numbers[2]!.measuredHeightPct),
+      );
+    expect(topPairSpread).toBeLessThan(0.5);
+    expect(bottomPairSpread).toBeLessThan(0.5);
   });
 });
