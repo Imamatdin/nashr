@@ -38,9 +38,18 @@ logger = logging.getLogger(__name__)
 
 GEMINI_FLASH_MODEL: Final[str] = "gemini-2.5-flash"
 
+# Current-generation Flash. Opt-in: not the GeminiClient default — pass
+# explicitly as the ``model=`` arg on ``complete()``. Routed through the
+# ThesisClassifier so the planner-validator pass benefits from the
+# stronger multilingual judgment without changing editorial's existing
+# interactive-pass calls (which stay on 2.5 Flash).
+GEMINI_FLASH_3_5_MODEL: Final[str] = "gemini-3.5-flash"
+
 # Per million tokens (input, output)
 GEMINI_COSTS: Final[dict[str, tuple[float, float]]] = {
     "gemini-2.5-flash": (0.50, 3.00),
+    # https://cloud.google.com/vertex-ai/generative-ai/pricing
+    "gemini-3.5-flash": (1.50, 9.00),
     "gemini-3.1-flash-lite-preview": (0.25, 1.00),
     "gemini-3.1-pro-preview": (2.50, 15.00),
 }
@@ -120,21 +129,45 @@ def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
 def build_default_genai_client() -> genai.Client:
     """Construct a ``google-genai`` client, preferring Vertex AI over AI Studio.
 
-    Vertex is used when ``VERTEX_PROJECT`` and ``GOOGLE_APPLICATION_CREDENTIALS``
-    are both set; otherwise an AI Studio ``GOOGLE_API_KEY`` is required. Shared
-    by :class:`GeminiClient` and the image/vision client so both providers route
-    through the same credentials with one definition.
+    Auth resolution, in order of preference:
+
+    * **Vertex AI** — used whenever ``VERTEX_PROJECT`` is set. Credentials
+      resolve through the SDK's standard chain: an explicit
+      ``GOOGLE_APPLICATION_CREDENTIALS`` service-account JSON if present,
+      otherwise Application Default Credentials from
+      ``gcloud auth application-default login``. ``VERTEX_LOCATION``
+      overrides the regional endpoint (default ``global`` — the only
+      location that publishes the current Gemini 3.x family; regional
+      endpoints like ``us-central1`` return 404 NOT_FOUND for them).
+      Vertex bills against the GCP project and bypasses the AI Studio
+      prepayment-credit pool entirely, which is the path you want for
+      any non-trivial workload.
+    * **AI Studio** — falls back to a personal API key under either
+      ``GOOGLE_API_KEY`` (the SDK's documented name) or ``GEMINI_API_KEY``
+      (the alias the AI Studio UI exposes and that several Google
+      examples ship with). This is the casual / single-developer path;
+      it does NOT survive depleted prepaid credits.
+
+    Shared by :class:`GeminiClient` and the image/vision client so both
+    providers route through the same credentials with one definition.
     """
 
     vertex_project = os.environ.get("VERTEX_PROJECT")
-    if vertex_project and os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-        logger.info("genai client using Vertex AI (project=%s)", vertex_project)
-        return genai.Client(vertexai=True, project=vertex_project, location="us-central1")
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    if vertex_project:
+        location = os.environ.get("VERTEX_LOCATION", "global")
+        logger.info(
+            "genai client using Vertex AI (project=%s, location=%s)",
+            vertex_project,
+            location,
+        )
+        return genai.Client(vertexai=True, project=vertex_project, location=location)
+    api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "GOOGLE_API_KEY environment variable is not set; "
-            "the Gemini client cannot be initialized without it."
+            "No Gemini credentials found. Set VERTEX_PROJECT (with "
+            "`gcloud auth application-default login` or "
+            "GOOGLE_APPLICATION_CREDENTIALS) for Vertex AI, or set "
+            "GOOGLE_API_KEY / GEMINI_API_KEY for AI Studio."
         )
     logger.info("genai client using AI Studio API key")
     return genai.Client(api_key=api_key)

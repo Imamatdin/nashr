@@ -581,3 +581,162 @@ class NarrativeArc(BaseModel):
 
     phases: list[NarrativePhase] = Field(min_length=1, max_length=10)
     emphasis_phase: NarrativePhase
+
+
+# ---------------------------------------------------------------------------
+# Planner Pass models (Phase 1 of the editorial re-architecture)
+# ---------------------------------------------------------------------------
+#
+# The Planner Pass runs BEFORE the Editorial Pass and produces a binding
+# authorship plan: a thesis, a sequence of section theses, and a roster of
+# real figures named by the source. Phase 1 (these models + the planner +
+# the plan validator) is additive — editorial's control flow is not yet
+# rewired. Phase 2 binds editorial to the plan and removes the curated
+# claim-string author path that lets the model substitute facts the source
+# never contained (the Bach/Mozart → Beethoven failure).
+
+
+class PlannedFigure(BaseModel):
+    """A real person the source names, eligible to appear as a portrait.
+
+    Extracted by the Planner Pass directly from source TEXT (chunks), never
+    from a hardcoded keyword roster — that is the editorial bug the planner
+    exists to remove. ``name`` and ``years`` are the disambiguation signal
+    :class:`packages.presentation.commons_portraits.CommonsPortraitResolver`
+    matches against Wikidata P569/P570; both should be populated when the
+    source gives them, but ``years`` stays optional because some sources
+    legitimately omit dates. ``why_in_source`` is the grounding anchor — a
+    one-line paraphrase of what the source actually says about this figure;
+    the plan validator's source-fidelity gate requires it to be non-empty,
+    and Phase 2's deck-vs-plan validator will use it to verify that any
+    slide claim about the figure is consistent with the source.
+
+    ``source_claim_ids`` is the optional join key from the figure back into
+    the project's extracted :class:`SourceClaimCreate` list. Phase 1 leaves
+    it as a forward-looking field; Phase 2's deck-vs-plan validator can
+    enforce that a figure-bearing slide cites a claim from this list.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    years: str | None = Field(default=None, max_length=30)
+    why_in_source: str = Field(min_length=1, max_length=300)
+    source_claim_ids: list[str] = Field(default_factory=list[str], max_length=50)
+
+
+class PlannedSection(BaseModel):
+    """One movement of the deck's argument.
+
+    ``thesis`` is a CLAIM the section argues, not a label. "Introduction" is
+    not a thesis; "Science breaks the authority of inherited dogma" is. The
+    plan validator's arc non-genericness gate enforces this STRUCTURALLY (no
+    banned-word lists, no per-language stopword tables): it requires the
+    thesis to differ from the section name, to be a multi-token predication
+    rather than a noun phrase, and to introduce real content beyond the
+    label. See :mod:`packages.presentation.plan_validator` for the exact
+    heuristic and the rationale.
+
+    ``figure_names`` is the subset of the deck-level :attr:`DeckPlan.figures`
+    roster that this section portrays. The validator enforces it is a
+    subset; any name a section claims to portray that is not in the roster
+    means the planner LLM either hallucinated a figure or named one the
+    source did not contain — that is the gate that would have caught the
+    Beethoven substitution.
+
+    ``planned_slide_types`` is advisory in Phase 1: the section's hint to
+    Phase 2's executor for how to render this movement. Each entry is a
+    real :class:`SlideType` enum value.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    section_name: str = Field(min_length=1, max_length=100)
+    thesis: str = Field(min_length=12, max_length=300)
+    phase: NarrativePhase
+    figure_names: list[str] = Field(default_factory=list[str], max_length=12)
+    planned_slide_types: list[SlideType] = Field(default_factory=list[SlideType], max_length=10)
+
+
+class DeckPlan(BaseModel):
+    """Binding authorship plan produced before slide generation.
+
+    The thesis and sections are the deck's spine; in Phase 2 the executor
+    fills this plan section by section instead of inventing the deck, and
+    the validator rejects slides that contradict it. In Phase 1 the plan is
+    produced and validated in isolation by the proof harness.
+
+    ``figures`` is the complete roster of real people the source names that
+    the deck may portray. The 30-entry ceiling mirrors the deck-level scale
+    of :attr:`DeckSpec.slides` (max 50) so a roster cannot dwarf the deck
+    it provisions: a source naming more than 30 distinct figures is
+    vanishingly rare in practice, and the planner is asked to pick the
+    load-bearing ones rather than list everyone.
+
+    ``image_cohesion_note`` is the one-line aesthetic anchor every
+    generated image in the deck shares so the deck reads as authored
+    (a single voice, not a magazine). Phase 2 will feed this toward
+    :attr:`DesignDirectionSpec.image_style_prefix`.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    thesis: str = Field(min_length=20, max_length=400)
+    audience_takeaway: str = Field(min_length=12, max_length=300)
+    sections: list[PlannedSection] = Field(min_length=2, max_length=8)
+    figures: list[PlannedFigure] = Field(default_factory=list[PlannedFigure], max_length=30)
+    image_cohesion_note: str = Field(min_length=12, max_length=500)
+
+
+class PlanValidationResult(BaseModel):
+    """Result of running :func:`plan_validator.validate_plan` over a DeckPlan.
+
+    Thin wrapper around the existing :class:`AuditCheckResult` /
+    :class:`AuditSeverity` vocabulary so plan-time and deck-time audit
+    findings are presented and rendered identically. We do NOT reuse
+    :class:`AuditReport` because that type carries a deck_id, which a plan
+    does not have until the executor runs.
+
+    ``passed`` is a derived flag: True iff there are zero ``FAIL`` findings.
+    Warnings never block — they are informational signals the planner gave
+    a structurally weak plan (e.g. a roster of named figures but no section
+    portrays any of them — the original Beethoven bug's signature).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    findings: list[AuditCheckResult] = Field(default_factory=list[AuditCheckResult], max_length=200)
+
+    @property
+    def passed(self) -> bool:
+        return not any(f.severity is AuditSeverity.FAIL for f in self.findings)
+
+    @property
+    def failures(self) -> list[AuditCheckResult]:
+        return [f for f in self.findings if f.severity is AuditSeverity.FAIL]
+
+    @property
+    def warnings(self) -> list[AuditCheckResult]:
+        return [f for f in self.findings if f.severity is AuditSeverity.WARN]
+
+
+class ThesisVerdict(BaseModel):
+    """One classifier verdict on whether a section's thesis is a real predication.
+
+    Phase 1.5 of the planner re-architecture replaces the token-count
+    structural checks (which were biased against agglutinative languages
+    like Karakalpak / Uzbek / Turkish, where a 3-token clause is a real
+    predication) with a multilingual LLM judgement. The classifier
+    returns one of these verdicts per section in the plan; the validator's
+    async path appends a ``P-A3`` failing finding for every verdict where
+    :attr:`is_thesis` is ``False``.
+
+    ``reason`` is written in English regardless of the input language so
+    debug logs and validator messages stay readable when the source is in
+    Karakalpak / Uzbek / Russian. The classifier prompt enforces this.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    is_thesis: bool
+    reason: str = Field(min_length=1, max_length=200)

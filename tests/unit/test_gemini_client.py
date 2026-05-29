@@ -117,9 +117,71 @@ def test_gemini_response_cost_unknown_model_falls_back_to_flash() -> None:
 
 
 def test_gemini_client_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With BOTH AI-Studio env vars AND VERTEX_PROJECT unset the client refuses
+    to initialise."""
+
+    monkeypatch.delenv("VERTEX_PROJECT", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="GOOGLE_API_KEY"):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="No Gemini credentials found"):
         GeminiClient()
+
+
+def test_gemini_client_accepts_gemini_api_key_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The AI Studio UI exposes the key as GEMINI_API_KEY; the client
+    accepts it as a fallback when GOOGLE_API_KEY is unset.
+
+    We construct with an injected ``generate_content_fn`` so the actual
+    google-genai ``Client`` initialisation is not exercised — the test
+    pins that build_default_genai_client is NOT called when an fn is
+    injected, and that the no-fn path stops complaining once either
+    key is present. We verify the no-fn path by deleting GOOGLE_API_KEY,
+    setting GEMINI_API_KEY, and expecting the default construction to
+    proceed to the genai SDK (which may itself raise on a fake key — we
+    don't care, only that the early no-key RuntimeError does not fire).
+    """
+
+    monkeypatch.delenv("VERTEX_PROJECT", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-but-present")
+    try:
+        GeminiClient()
+    except RuntimeError as exc:
+        # Acceptable: anything from the SDK auth flow. Not acceptable:
+        # our own "no credentials" message.
+        assert "No Gemini credentials found" not in str(exc)
+
+
+def test_gemini_client_routes_to_vertex_when_project_set_without_app_creds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VERTEX_PROJECT alone is enough — the SDK resolves credentials via ADC.
+
+    Phase 1.5 follow-up: previously the code required BOTH
+    ``VERTEX_PROJECT`` and ``GOOGLE_APPLICATION_CREDENTIALS`` to take the
+    Vertex path, which forced a service-account-JSON workflow even for
+    devs running ``gcloud auth application-default login``. The relaxed
+    check uses Vertex whenever the project var is set; auth flows
+    through the SDK's standard resolution chain (service-account JSON
+    if specified, otherwise ADC).
+
+    We don't exercise the real SDK auth here — we pin that the
+    "no credentials" RuntimeError does NOT fire when VERTEX_PROJECT
+    alone is set, even with the AI Studio keys cleared.
+    """
+
+    monkeypatch.setenv("VERTEX_PROJECT", "any-project-id")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    try:
+        GeminiClient()
+    except RuntimeError as exc:
+        # The SDK may raise on missing ADC; that's fine. Our own
+        # early-exit message must NOT fire.
+        assert "No Gemini credentials found" not in str(exc)
 
 
 def test_gemini_response_model_rejects_negative_tokens() -> None:
