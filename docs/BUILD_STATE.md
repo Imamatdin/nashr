@@ -688,6 +688,91 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
 - Renderer / image pass / interactive pass: ZERO changes (DeckSpec contract frozen; no orchestrator
   signature change — editorial already received the planner's inputs).
 - DONE = this commit + this BUILD_STATE entry + the server Vertex gate green before merge to main.
+  STATUS: gate run 2 recorded below — Enlightenment PASSES clean; sCO2 has ONE remaining
+  executor people-leak to fix before the gate is fully green and the branch merges.
+
+## PHASE 2 — SERVER GATE (run 2): Enlightenment PASS, sCO2 one FAIL (executor people-leak)
+Run on Vertex via `python scripts/proof_planner_phase2.py` AFTER the run-1 timeout fix
+(EDITORIAL_LLM_TIMEOUT_SECONDS=300). The timeout is gone — both decks generated fully, end to end.
+This is the authoritative status; a fresh session should treat it as the source of truth.
+
+BRANCH / COMMIT STATE:
+- Work is on `feat/planner-bound-editorial`, latest commit `4154e8f` (the
+  EDITORIAL_LLM_TIMEOUT_SECONDS=300 per-call timeout fix), pushed to origin.
+- NOT merged to main. main is clean.
+- Phase 1 + 1.5 are already committed and live on main: `890a67f` (DeckPlan contract + planner
+  pass + plan-adherence validator) plus the Vertex-routing / Gemini-3.5-Flash classifier fix.
+- (This BUILD_STATE run-2 entry is committed on the branch locally; per standing instruction it is
+  NOT pushed by Claude — Iko pushes the branch to run the server gate.)
+
+ENLIGHTENMENT (Karakalpak) — full generate_deck_spec on Vertex — PASSED EVERY BAR:
+- 19 slides, a real narrative arc across the planned sections.
+- Gallery slides carry REAL people (`people` is NOT null): slide 2 = Voltaire / Montesquieu /
+  Rousseau / Diderot / D'Alembert; slide 8 = Newton / Leibniz / Euler; slide 11 = Bach + Mozart.
+- Beethoven is ABSENT — the music slide is Bach + Mozart exactly as the source names them. The
+  ORIGINAL FABRICATION BUG (Beethoven substituted for the source's Bach/Mozart; people=null on
+  every slide) is DEAD in production, not just in unit tests.
+- INTERACTIVE_MATCHING slide present — the B1 regression guard holds: people_mentioned regrounded
+  from plan.figures works, the second consumer survives.
+- DeckSpec round-trips (renderer contract intact).
+- The scoped-section repair (DECISION 2 / path a) FIRED ONCE on this deck
+  (`editorial_deck_plan_mismatch_repairing` in the logs) and then passed — the repair primitive
+  works in PRODUCTION, not just in the unit test.
+
+sCO2 (English, real paper) — full generate_deck_spec on Vertex — ONE FAIL, narrow and understood:
+- 22 slides; charts / tables / the DATA-SHAPE tree all intact (PUE 1.08 handled correctly,
+  comparison tables present, no degradation from the chart-selection work).
+- Planner roster came back EMPTY — CORRECT; the paper names no biographical subjects. The
+  "roster EXCLUDES cited author 'Ahn'" bar PASSED: the planner distinguished a citation
+  ("Ahn, Y. et al." in the references) from a portrayed subject.
+- THE FAIL: the EXECUTOR attached `people=[Ahn, Y. et al.]` to slide 8, a `typographic_keywords`
+  slide. The harness's all-slides person scan caught it. D-X1 did NOT catch it because D-X1 is
+  scoped to GALLERY_PEOPLE / TIMELINE only — the exact limitation the advisor flagged in review
+  ("a person on a non-gallery slide escapes the invented-figure gate") materialized on a real
+  deck. A non-rostered person leaked onto a non-gallery slide type and slipped the deck-vs-plan
+  validator.
+- ROOT CAUSE is EXECUTOR-SIDE, not planner-side: the planner correctly excluded Ahn (empty
+  roster); the executor independently attached the citation as `people` on a keywords slide.
+- DeckSpec round-trips.
+- OVERALL gate verdict: FAIL — solely because of this one leak; Enlightenment passed clean.
+
+REMAINING FIX (next session — NOT done this run):
+1. WIDEN D-X1 (plan_validator.py `_check_deck_invented_figures`): scan `content.people` against the
+   roster on EVERY slide type EXCEPT TEAM_CREDITS (keep that carve-out — its people are the deck's
+   own authors, not source figures; `test_team_credits_authors_not_flagged_d_x1` pins it). Per the
+   schema, people belong only on gallery / team / timeline slides, so a person on a
+   typographic_keywords slide is malformed regardless of roster membership — D-X1 is the
+   production safety net that must catch it. (Currently `_PEOPLE_BEARING_TYPES` =
+   {GALLERY_PEOPLE, TIMELINE}; the fix is to scan content.people on all non-TEAM_CREDITS slides,
+   plus TIMELINE portrait_prompts, against the roster.)
+2. STRIP in _post_process (editorial.py): drop `content.people` from any slide type that is NOT
+   GALLERY_PEOPLE / TEAM_CREDITS / TIMELINE, so a stray attachment is cleaned GRACEFULLY instead of
+   failing the whole deck. The strip is the graceful cleanup; the D-X1 widening is the safety net
+   that still surfaces the leak as a validation failure in production, not only in the harness.
+3. PROMPT note (prompts.py / EDITORIAL_SYSTEM): instruct the executor not to introduce people the
+   plan's roster omits, on ANY slide type (the fill-the-plan block already forbids inventing
+   people; make explicit it applies to every slide type, not just gallery slides).
+- After the fix: re-run the Vertex gate on sCO2; it should pass (no person on the keywords slide,
+  or D-X1 catches any residual). Enlightenment already passes — re-confirm it still does.
+
+WATCH-ITEM (log only, NOT blocking):
+- On the sCO2 source the planner needed its internal retry-once (`planner_schema_validation_failed`
+  → `planner_first_attempt_unparseable` → retry succeeded). The resilience worked as designed.
+  First-pass unparseable output on a real source is a latency/cost signal; revisit only if it
+  becomes frequent.
+
+LOCKED DECISIONS (do not reopen):
+- DECISION 1: section identity = the section_index integer join on the _LLMSlide DTO, resolved to
+  the canonical plan section name at materialize. Working — slides resolved cleanly on both decks.
+- DECISION 2: deck-vs-plan repair = scoped-section repair (path a), skipping _enforce_density_arc
+  to avoid the reorder-rebreak hazard. Working — fired and passed on Enlightenment.
+- interview.py `_PERSON_KEYWORDS` stays IN PLACE as logged debt (different risk class — a UI
+  available_people_count, not a fabricated slide; unfixable the Phase-2 way since the interview
+  runs before the plan exists; fix later via NER or by moving planning earlier). Do NOT delete it.
+
+DEFINITION OF DONE (Phase 2): both decks pass the Vertex gate (Enlightenment already does; sCO2
+passes once the executor people-leak is fixed per REMAINING FIX), THEN merge
+`feat/planner-bound-editorial` to main.
 
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
