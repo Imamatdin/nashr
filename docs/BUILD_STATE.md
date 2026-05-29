@@ -650,7 +650,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   earlier in the pipeline. Distinct symbol from the editorial one; deleting it now would break a
   live feature with no replacement.
 - VERIFIED locally (gates green):
-  - pytest tests/: 1273 passed / 32 skipped (same env-gated skip set: e2e/live-API/LibreOffice/
+  - pytest tests/: 1274 passed / 32 skipped (same env-gated skip set: e2e/live-API/LibreOffice/
     Tesseract). New coverage: 8 deck-vs-plan validator tests (D-S1/F1/X1/A1 + TEAM_CREDITS scoping
     + empty-roster fabrication guard + year-suffix name match); editorial retry-policy (one re-plan
     with feedback / reject-twice raises / one section repair); the keyword-path-dead test;
@@ -669,6 +669,22 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   pass 1 clear the gate or lean on the repair (extra Sonnet call); raise-on-mismatch is a NEW
   delivery-rate behavior (pre-Phase-2 a slightly-off deck still shipped). "All tests pass" ≠
   "verified end-to-end."
+- SERVER RUN 1 (timeout tuning, NOT a logic bug): the first Vertex gate had the planner and the
+  classifier pass clean, then the editorial EXECUTOR call timed out at the asyncio.wait_for in
+  llm.py (retried twice, died). ROOT CAUSE: a 16k-max_tokens plan-bound generation legitimately
+  runs long (~200-270s at Sonnet rates) and can exceed the shared DEFAULT_LLM_TIMEOUT_SECONDS,
+  which is 180s — NOT 30s (the "30s" in the report traces to a STALE gemini.py docstring, now
+  corrected; no `timeout_seconds=` override exists anywhere, so 180s is what the server ran). The
+  proposed "lower to 90-120s" would have REGRESSED (below 180s). FIX: added an optional per-call
+  `timeout` override to LLMClient.complete; _call_editorial_with_retry passes
+  EDITORIAL_LLM_TIMEOUT_SECONDS (300s, a ceiling — normal decks return well under it) on both the
+  first call and the retry; the section-repair path reuses that helper so it inherits the timeout.
+  Planner/classifier/interactive keep the 180s default (per-call, not global). CHECKED every
+  large-gen site: repair (covered via the shared helper); interactive Gemini is 3k max_tokens on
+  2.5 Flash and the heavier 8k-thinking 3.5 Flash classifier already passed at 180s, so interactive
+  is comfortably under (no change). +1 unit test pins the per-call override. If real generations
+  routinely approach 300s, the proper next step is streaming (or a lower max_tokens), not a higher
+  ceiling. Gate re-run pending.
 - Renderer / image pass / interactive pass: ZERO changes (DeckSpec contract frozen; no orchestrator
   signature change — editorial already received the planner's inputs).
 - DONE = this commit + this BUILD_STATE entry + the server Vertex gate green before merge to main.

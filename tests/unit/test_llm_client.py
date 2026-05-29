@@ -15,6 +15,7 @@ We do not exercise real network calls; that's an integration concern.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -139,6 +140,24 @@ async def test_llm_client_returns_text_and_cost() -> None:
     )
     assert response.estimated_cost_usd == pytest.approx(expected_cost)
     assert fake.messages.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_per_call_timeout_overrides_client_default() -> None:
+    # The per-call timeout is the seam the editorial executor uses to give its
+    # 16k-token generation a longer ceiling than the small planner/classifier
+    # calls. A short per-call timeout must fire even when the client default is
+    # long — proving the override reaches the asyncio.wait_for, not just the
+    # constructor default.
+    async def slow() -> Message:
+        await asyncio.sleep(3)
+        return _make_message("never reached")
+
+    fake = _FakeAsyncAnthropic(slow)
+    client = LLMClient(client=fake, timeout_seconds=180, max_retries=0)  # type: ignore[arg-type]
+
+    with pytest.raises(TimeoutError):
+        await client.complete(system="sys", user="usr", timeout=1)
 
 
 @pytest.mark.asyncio

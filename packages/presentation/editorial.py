@@ -114,6 +114,17 @@ logger = logging.getLogger(__name__)
 SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
 DEFAULT_PROJECT_ID: Final[str] = "presentation"
 
+# Per-call timeout for the editorial executor's Sonnet call (and the section
+# repair, which reuses the same helper). The executor runs at 16k max_tokens
+# and now carries the full plan spine, so a complete plan-bound deck
+# legitimately takes minutes — longer than the shared DEFAULT_LLM_TIMEOUT_SECONDS
+# (180s) that suits the small planner/classifier calls. 300s is a CEILING that
+# comfortably covers a ~16k-token generation (~200-270s at Sonnet rates); a
+# typical deck returns well under it, so this never slows a normal call. If real
+# generations routinely approach 300s, the proper fix is streaming the
+# completion (or a lower max_tokens), not a higher ceiling.
+EDITORIAL_LLM_TIMEOUT_SECONDS: Final[int] = 300
+
 # Deck sizing is driven by content volume, not talk duration. Floor 6:
 # anything thinner is not a deck. Ceiling 15: anything fatter is a
 # document, not a presentation (a human making a real 5-minute pitch deck
@@ -814,10 +825,21 @@ class EditorialPass:
         system: str,
         user: str,
     ) -> list[_LLMSlide]:
-        """One Sonnet call; on bad JSON, retry once with a stricter suffix."""
+        """One Sonnet call; on bad JSON, retry once with a stricter suffix.
+
+        Both the initial call and the retry use EDITORIAL_LLM_TIMEOUT_SECONDS
+        (longer than the shared default) because a 16k-token plan-bound
+        generation legitimately runs for minutes. The section-repair path
+        (_repair_failing_sections) routes through here too, so it inherits the
+        same timeout.
+        """
 
         first = await self._get_llm().complete(
-            system=system, user=user, model=SONNET_MODEL, max_tokens=16_000
+            system=system,
+            user=user,
+            model=SONNET_MODEL,
+            max_tokens=16_000,
+            timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
         parsed = _parse_sequence(first.content)
         if parsed is not None:
@@ -827,6 +849,7 @@ class EditorialPass:
             user=user + EDITORIAL_RETRY_SUFFIX,
             model=SONNET_MODEL,
             max_tokens=16_000,
+            timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
         parsed = _parse_sequence(retry.content)
         return parsed if parsed is not None else []

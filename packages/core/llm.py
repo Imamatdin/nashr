@@ -108,9 +108,19 @@ class LLMClient:
         model: str = DEFAULT_HAIKU_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
+        timeout: int | None = None,
     ) -> LLMResponse:
-        """Run one completion with retry, timeout, and cost logging."""
+        """Run one completion with retry, timeout, and cost logging.
 
+        ``timeout`` overrides the client's default per-attempt timeout for THIS
+        call only (``None`` keeps the client default). A large generation — the
+        editorial executor runs at 16k ``max_tokens`` and can legitimately take
+        minutes — passes a longer value so a slow-but-valid completion is not
+        cancelled, while small calls (planner, classifier, claim extraction)
+        keep the tighter default so a genuine hang still surfaces quickly.
+        """
+
+        effective_timeout = timeout if timeout is not None else self._timeout_seconds
         attempt = 0
         last_error: Exception | None = None
         while attempt <= self._max_retries:
@@ -125,7 +135,7 @@ class LLMClient:
                         system=system,
                         messages=messages,
                     ),
-                    timeout=self._timeout_seconds,
+                    timeout=effective_timeout,
                 )
             except AuthenticationError:
                 raise

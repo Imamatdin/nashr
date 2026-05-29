@@ -196,7 +196,7 @@ class GeminiClient:
 
     Behaviour parity with :class:`packages.core.llm.LLMClient`:
 
-    * 30s asyncio timeout per call;
+    * a per-call asyncio timeout (``DEFAULT_LLM_TIMEOUT_SECONDS`` — 180s today);
     * up to two retries on transient API errors (any
       :class:`google.genai.errors.APIError` whose HTTP code is not an
       auth code) or ``asyncio.TimeoutError`` (1s/2s exponential backoff);

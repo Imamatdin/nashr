@@ -81,6 +81,7 @@ class _StubLLM:
         model: str = SONNET_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
+        timeout: int | None = None,
     ) -> LLMResponse:
         self.calls.append((system, user))
         if not self.responses:
@@ -1661,9 +1662,10 @@ async def test_editorial_uses_sonnet_model() -> None:
         model: str = SONNET_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
+        timeout: int | None = None,
     ) -> LLMResponse:
         captured["model"] = model
-        return await original(system, user, model, max_tokens, temperature)
+        return await original(system, user, model, max_tokens, temperature, timeout)
 
     # Manually patch the bound method
     cast: Callable[..., Awaitable[LLMResponse]] = capture_complete
