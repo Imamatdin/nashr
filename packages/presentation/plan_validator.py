@@ -57,19 +57,25 @@ Checks (Phase 1.5):
 Finding order is deterministic: sync findings first, then any classifier
 verdicts in section-index order. Callers and tests can assert on that.
 
-Phase 2 seam :func:`validate_deck_against_plan` declared but not
-implemented — its presence documents the upcoming contract.
+Phase 2 adds the deck-vs-plan gate :func:`validate_deck_against_plan`: a
+pure-function structural check (no LLM) that the editorial pass runs over a
+generated slide sequence to confirm it filled the plan — every planned
+section covered (D-S1), every section's planned figures portrayed (D-F1), no
+person outside the roster on a people slide (D-X1), and a WARN for any slide
+tagged with an unplanned section (D-A1). :func:`critique_deck_adversarially`
+is the Phase-3 seam; it is a no-op (never raises) until Phase 3 lands.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from packages.core.enums import AuditSeverity, Language, NarrativePhase
+from packages.core.enums import AuditSeverity, Language, NarrativePhase, SlideType
 from packages.core.models.presentation import (
     AuditCheckResult,
     DeckPlan,
     PlanValidationResult,
+    SlideSpec,
     ThesisVerdict,
 )
 from packages.core.models.source import SourceClaimCreate
@@ -86,6 +92,23 @@ _CHECK_ARC_EQUALITY: Final[str] = "P-A1"
 _CHECK_ARC_PREDICATION: Final[str] = "P-A3"
 _CHECK_COVERAGE_PHASES: Final[str] = "P-C1"
 _CHECK_COVERAGE_FIGURES: Final[str] = "P-C2"
+
+# Deck-vs-plan check identifiers (Phase 2). The plan-time checks above (P-*)
+# judge the plan in isolation; these (D-*) judge a generated deck against the
+# plan it was supposed to fill.
+_CHECK_DECK_SECTION_COVERAGE: Final[str] = "D-S1"
+_CHECK_DECK_FIGURE_ADHERENCE: Final[str] = "D-F1"
+_CHECK_DECK_INVENTED_FIGURE: Final[str] = "D-X1"
+_CHECK_DECK_INVENTED_SECTION: Final[str] = "D-A1"
+
+# Slide types whose people are SOURCE figures subject to the roster gate.
+# TEAM_CREDITS is excluded on purpose: its ``people`` are the deck's own
+# authors/presenters, never figures the source named, so D-X1 must not flag
+# them. GALLERY_PEOPLE carries names in ``content.people``; TIMELINE carries
+# them in each node's ``portrait_prompt``.
+_PEOPLE_BEARING_TYPES: Final[frozenset[SlideType]] = frozenset(
+    {SlideType.GALLERY_PEOPLE, SlideType.TIMELINE}
+)
 
 
 # ---------------------------------------------------------------------------
@@ -151,28 +174,66 @@ async def validate_plan_async(
     return PlanValidationResult(findings=[*sync_result.findings, *classifier_findings])
 
 
-def validate_deck_against_plan(deck: object, plan: DeckPlan) -> PlanValidationResult:
-    """Phase-2 seam — verify a generated DeckSpec stays inside its DeckPlan.
+def validate_deck_against_plan(slides: list[SlideSpec], plan: DeckPlan) -> PlanValidationResult:
+    """Verify a generated slide sequence stays inside its :class:`DeckPlan`.
 
-    Declared so the public surface documents the upcoming contract; the
-    body is intentionally not implemented yet. Phase 2 will:
+    Pure functions, no LLM — the LLM judgement was the plan-time thesis check
+    (:func:`validate_plan_async`); the deck-vs-plan gate is structural. Called
+    by the live editorial path on the post-processed CONTENT slides, BEFORE the
+    interactive pass and assembly: interactive slides carry no ``section_name``
+    and would pollute the coverage and invented-figure checks.
 
-    * type-narrow ``deck`` to :class:`DeckSpec`,
-    * verify each ``section_name`` across the deck's slides covers the
-      plan's :attr:`PlannedSection.section_name` list,
-    * verify every name appearing on a GALLERY_PEOPLE / TIMELINE slide
-      is in the plan's figure roster, and
-    * verify the deck's overall opening / closing slides align to the
-      plan's thesis and audience_takeaway.
+    Section membership is the resolved canonical ``SlideSpec.section_name``:
+    the executor tags each slide with a ``section_index`` and the editorial
+    pass resolves it to ``plan.sections[i].section_name`` at materialise time,
+    so the join here is by section name. Comparison is normalised (see
+    :func:`_normalize`) so a trailing period or case never breaks a match.
 
-    Calling this raises :class:`NotImplementedError` so any premature
-    integration fails loudly rather than silently passing.
+    Checks (FAIL blocks export; WARN is informational):
+
+    * **D-S1 (section coverage, FAIL)** — every :attr:`PlannedSection.section_name`
+      has at least one slide. A planned section with no slide is the executor
+      dropping part of the argument.
+    * **D-F1 (figure adherence, FAIL)** — for every section that planned
+      ``figure_names``, that section's slides collectively portray those
+      people (by :class:`PersonItem` name, or by a TIMELINE node's
+      ``portrait_prompt``). The deck-side enforcement of the substitution gate.
+    * **D-X1 (no invented figures, FAIL)** — no GALLERY_PEOPLE / TIMELINE slide
+      portrays a person absent from the :attr:`DeckPlan.figures` roster.
+      TEAM_CREDITS is out of scope (its people are the deck's authors). This is
+      the deck-side Beethoven gate and the no-fabricated-people guarantee for
+      sources that name nobody.
+    * **D-A1 (invented section, WARN)** — a slide tagged with a ``section_name``
+      that matches no planned section. The executor added structure beyond the
+      plan; informational, never blocks export.
+
+    Name matching (D-F1 / D-X1) is normalised substring containment in either
+    direction (:func:`_name_matches`) — robust to "Volter" vs
+    "Volter (1694-1778)" without an alias table or any hardcoded names.
     """
 
-    del deck, plan
-    raise NotImplementedError(
-        "validate_deck_against_plan lands in Phase 2; call validate_plan in Phase 1."
-    )
+    findings: list[AuditCheckResult] = []
+    findings.extend(_check_deck_section_coverage(slides, plan))
+    findings.extend(_check_deck_figure_adherence(slides, plan))
+    findings.extend(_check_deck_invented_figures(slides, plan))
+    findings.extend(_check_deck_invented_sections(slides, plan))
+    return PlanValidationResult(findings=findings)
+
+
+def critique_deck_adversarially(slides: list[SlideSpec], plan: DeckPlan) -> PlanValidationResult:
+    """Phase-3 seam — adversarial deck critic. Not yet implemented.
+
+    Phase 3 will add an LLM critic that reads each slide against the plan's
+    section theses and ``why_in_source`` anchors and flags claims the source
+    does not support. Until then this is a NO-OP that returns an empty
+    (passing) result — deliberately NOT a ``NotImplementedError``, because
+    unlike the Phase-1 stub this function shares a module with the live
+    deck-vs-plan path; a raising stub here would be one accidental import away
+    from breaking production. The Phase-2 live path does not call this.
+    """
+
+    del slides, plan
+    return PlanValidationResult(findings=[])
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +504,205 @@ def _check_figure_claim_grounding(
 
 
 # ---------------------------------------------------------------------------
+# Deck-vs-plan checks (Phase 2, structural, no LLM)
+# ---------------------------------------------------------------------------
+
+
+def _section_index_of(slide: SlideSpec, plan: DeckPlan) -> int | None:
+    """The plan-section index a slide belongs to, by normalised name, or None.
+
+    A slide with no ``section_name`` (untagged) returns None — it covers no
+    planned section and is not, by itself, an invented one.
+    """
+
+    name = (slide.section_name or "").strip()
+    if not name:
+        return None
+    norm = _normalize(name)
+    for index, section in enumerate(plan.sections):
+        if _normalize(section.section_name) == norm:
+            return index
+    return None
+
+
+def _slide_person_names(slide: SlideSpec) -> list[str]:
+    """Real-person names a slide portrays: PersonItem names + timeline portraits.
+
+    GALLERY_PEOPLE (and any slide populating ``content.people``) contributes
+    each :class:`PersonItem` name; TIMELINE contributes each node's
+    ``portrait_prompt`` (the editorial prompt sets it to the person's name).
+    """
+
+    names: list[str] = []
+    content = slide.content
+    if content.people:
+        names.extend(person.name for person in content.people)
+    if content.timeline_nodes:
+        names.extend(
+            node.portrait_prompt for node in content.timeline_nodes if node.portrait_prompt
+        )
+    return names
+
+
+def _name_matches(query: str, candidate: str) -> bool:
+    """Normalised substring containment in either direction.
+
+    After normalising (casefold, strip surrounding punctuation, collapse
+    whitespace) ``query`` matches ``candidate`` when either normalised form
+    contains the other — so "Volter" matches "Volter (1694-1778)" and vice
+    versa. No alias table, no hardcoded names.
+    """
+
+    nq, nc = _normalize(query), _normalize(candidate)
+    if not nq or not nc:
+        return False
+    return nq in nc or nc in nq
+
+
+def _check_deck_section_coverage(slides: list[SlideSpec], plan: DeckPlan) -> list[AuditCheckResult]:
+    """D-S1: every planned section must appear on at least one slide."""
+
+    covered = {index for slide in slides if (index := _section_index_of(slide, plan)) is not None}
+    out: list[AuditCheckResult] = []
+    for index, section in enumerate(plan.sections):
+        if index not in covered:
+            out.append(
+                AuditCheckResult(
+                    check_id=_CHECK_DECK_SECTION_COVERAGE,
+                    check_name="deck.section_coverage",
+                    passed=False,
+                    severity=AuditSeverity.FAIL,
+                    slide_index=index,
+                    rule_reference=_CHECK_DECK_SECTION_COVERAGE,
+                    message=(
+                        f"Planned section '{section.section_name}' (#{index}) is "
+                        "covered by no slide in the deck. The executor dropped a "
+                        "section the plan committed to."
+                    ),
+                )
+            )
+    return out
+
+
+def _check_deck_figure_adherence(slides: list[SlideSpec], plan: DeckPlan) -> list[AuditCheckResult]:
+    """D-F1: a section that planned figures must portray them on its slides."""
+
+    out: list[AuditCheckResult] = []
+    for index, section in enumerate(plan.sections):
+        required = [name.strip() for name in section.figure_names if name.strip()]
+        if not required:
+            continue
+        carried = [
+            name
+            for slide in slides
+            if _section_index_of(slide, plan) == index
+            for name in _slide_person_names(slide)
+        ]
+        for figure in required:
+            if not any(_name_matches(figure, person) for person in carried):
+                out.append(
+                    AuditCheckResult(
+                        check_id=_CHECK_DECK_FIGURE_ADHERENCE,
+                        check_name="deck.figure_adherence",
+                        passed=False,
+                        severity=AuditSeverity.FAIL,
+                        slide_index=index,
+                        rule_reference=_CHECK_DECK_FIGURE_ADHERENCE,
+                        message=(
+                            f"Section '{section.section_name}' planned figure "
+                            f"'{figure}' but no slide in that section portrays them. "
+                            "A planned people section that comes back without its "
+                            "named people is the substitution failure."
+                        ),
+                    )
+                )
+    return out
+
+
+def _check_deck_invented_figures(slides: list[SlideSpec], plan: DeckPlan) -> list[AuditCheckResult]:
+    """D-X1: no people slide may portray someone outside the roster."""
+
+    roster = [figure.name.strip() for figure in plan.figures if figure.name.strip()]
+    out: list[AuditCheckResult] = []
+    for slide_index, slide in enumerate(slides):
+        if slide.slide_type not in _PEOPLE_BEARING_TYPES:
+            continue
+        for name in _slide_person_names(slide):
+            if not any(_name_matches(name, roster_name) for roster_name in roster):
+                out.append(
+                    AuditCheckResult(
+                        check_id=_CHECK_DECK_INVENTED_FIGURE,
+                        check_name="deck.no_invented_figures",
+                        passed=False,
+                        severity=AuditSeverity.FAIL,
+                        slide_index=slide_index,
+                        rule_reference=_CHECK_DECK_INVENTED_FIGURE,
+                        message=(
+                            f"Slide #{slide_index} ({slide.slide_type.value}) portrays "
+                            f"'{name}', who is not in the DeckPlan figure roster. The "
+                            "deck must not introduce a person the source did not name."
+                        ),
+                    )
+                )
+    return out
+
+
+def _check_deck_invented_sections(
+    slides: list[SlideSpec], plan: DeckPlan
+) -> list[AuditCheckResult]:
+    """D-A1 (WARN): a slide tagged with a section the plan does not define."""
+
+    out: list[AuditCheckResult] = []
+    for slide_index, slide in enumerate(slides):
+        name = (slide.section_name or "").strip()
+        if not name:
+            continue
+        if _section_index_of(slide, plan) is None:
+            out.append(
+                AuditCheckResult(
+                    check_id=_CHECK_DECK_INVENTED_SECTION,
+                    check_name="deck.invented_section",
+                    passed=False,
+                    severity=AuditSeverity.WARN,
+                    slide_index=slide_index,
+                    rule_reference=_CHECK_DECK_INVENTED_SECTION,
+                    message=(
+                        f"Slide #{slide_index} is tagged section '{name}', which "
+                        "matches no planned section. The executor added structure "
+                        "beyond the plan."
+                    ),
+                )
+            )
+    return out
+
+
+def failing_section_indices(
+    failures: list[AuditCheckResult], slides: list[SlideSpec], plan: DeckPlan
+) -> set[int]:
+    """Map deck-vs-plan FAIL findings to the plan-section indices to repair.
+
+    D-S1 / D-F1 pin a section directly via ``slide_index`` (it IS the section
+    index). D-X1 pins the offending DECK slide, so we resolve that slide back to
+    its section. The editorial pass uses this to scope its one repair attempt to
+    only the failing sections. Findings that pin nothing resolvable are skipped.
+    """
+
+    out: set[int] = set()
+    for finding in failures:
+        index = finding.slide_index
+        if index is None:
+            continue
+        if finding.check_id in (_CHECK_DECK_SECTION_COVERAGE, _CHECK_DECK_FIGURE_ADHERENCE):
+            if 0 <= index < len(plan.sections):
+                out.add(index)
+        elif finding.check_id == _CHECK_DECK_INVENTED_FIGURE and 0 <= index < len(slides):
+            section = _section_index_of(slides[index], plan)
+            if section is not None:
+                out.add(section)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Normalisation helper
 # ---------------------------------------------------------------------------
 
@@ -467,6 +727,8 @@ def _normalize(value: str) -> str:
 
 
 __all__ = [
+    "critique_deck_adversarially",
+    "failing_section_indices",
     "validate_deck_against_plan",
     "validate_plan",
     "validate_plan_async",

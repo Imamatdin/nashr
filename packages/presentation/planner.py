@@ -10,18 +10,18 @@ This pass exists to repair a structural defect in the editorial pipeline:
 :meth:`EditorialPass.generate_deck_spec` discards ``chunks`` (and the
 ``evidence_matrix`` / ``outline``) via a ``del`` statement and authors the
 deck from curated claim strings alone, so the model never sees what the
-source actually says. The figure roster the editorial pass works with is
-itself filtered through a hardcoded keyword list
-(:data:`packages.presentation.editorial._PERSON_KEYWORDS`), which makes
-any figure outside that list invisible to the editorial LLM. The two
-defects compound: the model fills the resulting gap with its prior, e.g.
-substituting Beethoven for Bach + Mozart on an Enlightenment deck.
+source actually says. The figure roster the editorial pass worked with was
+itself filtered through a hardcoded keyword roster inside the editorial
+pass, which made any figure outside that list invisible to the editorial
+LLM. The two defects compounded: the model filled the resulting gap with
+its prior, e.g. substituting Beethoven for Bach + Mozart on an
+Enlightenment deck.
 
 The planner runs BEFORE editorial, reads the chunk text directly, and
 extracts the figure roster from people the source actually names. Phase 1
-(this file plus :mod:`packages.presentation.plan_validator`) is additive:
-editorial's control flow is unchanged. Phase 2 will bind editorial to the
-plan and remove the keyword roster.
+(this file plus :mod:`packages.presentation.plan_validator`) was additive.
+Phase 2 binds editorial to the plan and deletes that keyword roster: this
+pass now produces the roster editorial fills.
 
 The pass is intentionally small: build a source view, call Sonnet with
 the retry-once-on-bad-JSON pattern the editorial pass uses, parse into a
@@ -40,6 +40,7 @@ from pydantic import ValidationError
 
 from packages.core.llm import LLMClient
 from packages.core.models.presentation import (
+    AuditCheckResult,
     DeckPlan,
     PresentationInterviewAnswers,
 )
@@ -49,6 +50,7 @@ from packages.core.models.source import (
     SourceMetadataExtracted,
 )
 from packages.core.prompts import (
+    PLANNER_FEEDBACK_HEADER,
     PLANNER_RETRY_SUFFIX,
     PLANNER_SYSTEM,
     PLANNER_USER,
@@ -106,6 +108,7 @@ class PlannerPass:
         claims: list[SourceClaimCreate],
         chunks: list[SourceChunkCreate],
         source_metadata: list[SourceMetadataExtracted],
+        feedback: list[AuditCheckResult] | None = None,
     ) -> DeckPlan:
         """Run one planner LLM call and return a validated DeckPlan.
 
@@ -114,6 +117,12 @@ class PlannerPass:
         no silent fallback — a downstream executor must never be handed
         a blank plan, because that defeats the structural guarantee the
         planner exists to provide.
+
+        ``feedback`` carries plan-validator findings from a prior rejected
+        plan. When supplied, the specific problems are appended to the user
+        prompt so this re-plan fixes the exact sections/figures the validator
+        flagged (the editorial pass's one plan-reject retry). It is distinct
+        from the malformed-JSON retry inside :meth:`_call_with_retry`.
         """
 
         system = PLANNER_SYSTEM
@@ -127,6 +136,8 @@ class PlannerPass:
             source_claims=_build_claim_view(claims),
             source_metadata_summary=_build_metadata_view(source_metadata),
         )
+        if feedback:
+            user += _format_plan_feedback(feedback)
         return await self._call_with_retry(system, user)
 
     async def _call_with_retry(self, system: str, user: str) -> DeckPlan:
@@ -266,6 +277,21 @@ def _format_headline_numbers(numbers: list[str]) -> str:
     if not numbers:
         return "(none specified)"
     return "\n".join(f"  - {n}" for n in numbers)
+
+
+def _format_plan_feedback(findings: list[AuditCheckResult]) -> str:
+    """Render plan-validator findings as a feedback block for the re-plan.
+
+    Each line carries the check id, the section it concerns (when the finding
+    pins one via ``slide_index``), and the validator's message — enough for the
+    planner to fix the exact sections/figures that were rejected.
+    """
+
+    bullets: list[str] = []
+    for finding in findings:
+        where = f" (section #{finding.slide_index})" if finding.slide_index is not None else ""
+        bullets.append(f"  - [{finding.check_id}]{where} {finding.message or ''}")
+    return PLANNER_FEEDBACK_HEADER + "\n".join(bullets)
 
 
 # ---------------------------------------------------------------------------

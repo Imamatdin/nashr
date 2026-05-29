@@ -219,6 +219,11 @@ def _build_fixture() -> tuple[
     return interview, chunks, claims, metadata
 
 
+# Public alias so other proof harnesses (Phase 2) can reuse this fixture
+# without importing a private symbol.
+build_enlightenment_fixture = _build_fixture
+
+
 # ---------------------------------------------------------------------------
 # Hand-written BAD plan — proves the validator gate bites
 # ---------------------------------------------------------------------------

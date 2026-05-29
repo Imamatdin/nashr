@@ -62,11 +62,13 @@ from packages.core.llm import LLMClient
 from packages.core.models.article import ArticleOutline
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
+    AuditCheckResult,
     CategoryItem,
     ChartSeriesPoint,
     ComparisonColumn,
     ContentAnalysis,
     DebateOption,
+    DeckPlan,
     DeckSpec,
     DesignDirectionSpec,
     FillBlankItem,
@@ -90,6 +92,7 @@ from packages.core.models.source import (
     SourceMetadataExtracted,
 )
 from packages.core.prompts import (
+    EDITORIAL_REPAIR_USER,
     EDITORIAL_RETRY_SUFFIX,
     EDITORIAL_SYSTEM,
     EDITORIAL_USER,
@@ -97,6 +100,13 @@ from packages.core.prompts import (
     INTERACTIVE_SYSTEM,
     INTERACTIVE_USER,
 )
+from packages.presentation.plan_validator import (
+    failing_section_indices,
+    validate_deck_against_plan,
+    validate_plan_async,
+)
+from packages.presentation.planner import PlannerPass
+from packages.presentation.thesis_classifier import ThesisClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -214,43 +224,6 @@ _SPARSE_OPENING_TYPES: Final[frozenset[SlideType]] = frozenset(
     }
 )
 
-# A small fixed list of known people names. The same approach as in the
-# interview engine — enough to power detection without a real NER call.
-_PERSON_KEYWORDS: Final[frozenset[str]] = frozenset(
-    {
-        "newton",
-        "leibniz",
-        "euler",
-        "darwin",
-        "einstein",
-        "tesla",
-        "edison",
-        "curie",
-        "voltaire",
-        "monteske",
-        "montesquieu",
-        "rousseau",
-        "kant",
-        "hegel",
-        "marx",
-        "smith",
-        "keynes",
-        "fisher",
-        "pasteur",
-        "koch",
-        "fleming",
-        "freud",
-        "jung",
-        "skinner",
-        "piaget",
-        "vygotsky",
-        "navoiy",
-        "beruniy",
-        "ibn sino",
-        "ulug'bek",
-        "al-xorazmiy",
-    }
-)
 
 _COMPARISON_MARKERS: Final[tuple[str, ...]] = (
     "compared to",
@@ -314,6 +287,54 @@ _CLAIM_STRENGTH_RANK: Final[dict[ClaimStrength, int]] = {
     ClaimStrength.WEAK: 1,
 }
 
+# Title carried by the SUMMARY_TAKEAWAY slide in the emergency-minimal deck.
+# Used both to build that deck and to detect it: the deck-vs-plan gate is
+# skipped for the emergency deck (the executor returned nothing usable — an
+# infrastructure failure, not a plan mismatch).
+_EMERGENCY_TAKEAWAY_TITLE: Final[str] = "Insufficient source material"
+
+
+# ---------------------------------------------------------------------------
+# Typed editorial failures (Phase 2)
+# ---------------------------------------------------------------------------
+#
+# Editorial historically degraded to the emergency-minimal deck on bad LLM
+# output. Phase 2 keeps that ONLY for "the executor returned nothing usable".
+# A plan that fails validation, or a deck that contradicts its plan, is a
+# QUALITY failure the user should see (and that should refund) — so it raises.
+# The orchestrator's existing ``except Exception -> _OrchestratorError(
+# "editorial", ...)`` surfaces these unchanged.
+
+
+class EditorialError(RuntimeError):
+    """Base class for editorial-pass failures that must not silently degrade."""
+
+
+class EditorialPlanRejectedError(EditorialError):
+    """The planner's plan failed validation twice (initial + one re-plan).
+
+    Carries the failing :class:`AuditCheckResult` findings so the orchestrator
+    and logs can show exactly which sections or figures were rejected.
+    """
+
+    def __init__(self, findings: list[AuditCheckResult]) -> None:
+        self.findings = findings
+        detail = "; ".join(f"[{f.check_id}] {f.message or ''}" for f in findings) or "(no detail)"
+        super().__init__(f"Plan rejected after one re-plan: {detail}")
+
+
+class EditorialDeckPlanMismatchError(EditorialError):
+    """The generated deck contradicted its plan even after one repair.
+
+    Carries the residual failing findings (a section dropped, a planned figure
+    missing, or a person invented) that survived the targeted section repair.
+    """
+
+    def __init__(self, findings: list[AuditCheckResult]) -> None:
+        self.findings = findings
+        detail = "; ".join(f"[{f.check_id}] {f.message or ''}" for f in findings) or "(no detail)"
+        super().__init__(f"Deck contradicts its plan after one repair: {detail}")
+
 
 # ---------------------------------------------------------------------------
 # Parsing schemas for LLM output
@@ -335,6 +356,11 @@ class _LLMSlide(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     slide_index: int = Field(default=0, ge=0)
+    # 0-based index into DeckPlan.sections — the binding tag the executor sets
+    # so deck-vs-plan membership is a deterministic join, not a fuzzy name
+    # match. Optional so a single missing tag salvages (falls back to
+    # section_name) rather than dropping the whole deck.
+    section_index: int | None = Field(default=None, ge=0)
     slide_type: SlideType
     title: str = Field(min_length=1, max_length=300)
     subtitle: str | None = Field(default=None, max_length=300)
@@ -397,9 +423,13 @@ class EditorialPass:
         self,
         llm: LLMClient | None = None,
         gemini: GeminiClient | None = None,
+        planner: PlannerPass | None = None,
+        classifier: ThesisClassifier | None = None,
     ) -> None:
         self._llm = llm
         self._gemini = gemini
+        self._planner = planner
+        self._classifier = classifier
 
     def _get_llm(self) -> LLMClient:
         if self._llm is None:
@@ -410,6 +440,21 @@ class EditorialPass:
         if self._gemini is None:
             self._gemini = GeminiClient()
         return self._gemini
+
+    def _get_planner(self) -> PlannerPass:
+        # Reuse the configured Sonnet client so planner calls share editorial's
+        # client (and its cost accounting) instead of building a second one.
+        if self._planner is None:
+            self._planner = PlannerPass(llm=self._get_llm())
+        return self._planner
+
+    def _get_classifier(self) -> ThesisClassifier:
+        # Reuse the configured Gemini client so the classifier inherits the
+        # same (Vertex) routing as the rest of the pipeline rather than
+        # default-building a fresh client.
+        if self._classifier is None:
+            self._classifier = ThesisClassifier(gemini=self._get_gemini())
+        return self._classifier
 
     async def generate_deck_spec(
         self,
@@ -422,22 +467,41 @@ class EditorialPass:
         outline: ArticleOutline | None = None,
         project_id: str = DEFAULT_PROJECT_ID,
     ) -> DeckSpec:
-        """Run the full editorial pipeline end-to-end."""
+        """Run the full editorial pipeline end-to-end.
 
-        del evidence_matrix, chunks, source_metadata, outline
+        The deck is FILLED from a source-grounded :class:`DeckPlan`, not
+        invented: the planner reads the source chunks and commits to an
+        argument plus a figure roster; editorial fills each section; the
+        deck-vs-plan gate rejects a deck that drops a section, omits a planned
+        figure, or invents a person. ``evidence_matrix`` and ``outline`` are
+        consumed by neither the planner nor editorial in Phase 2.
+        """
+
+        del evidence_matrix, outline
+
+        plan = await self._plan_and_validate(interview, claims, chunks, source_metadata)
+
         analysis = self._analyze_content(claims)
+        # The figure roster now comes from the source-grounded plan, never a
+        # keyword scan. Both consumers — the executor's people brief and the
+        # interactive-matching selector — read people_mentioned from here.
+        analysis = analysis.model_copy(
+            update={"people_mentioned": [fig.name for fig in plan.figures]}
+        )
         arc = self._determine_narrative_arc(interview, analysis)
-        target_count = self._size_deck(interview, analysis)
+        target_count = self._size_deck(interview, plan)
 
         raw_slides = await self._generate_slide_sequence(
             interview=interview,
             design=design,
             analysis=analysis,
             arc=arc,
+            plan=plan,
             target_slide_count=target_count,
             language=interview.language,
         )
         content_slides = self._post_process(raw_slides, interview)
+        content_slides = await self._enforce_plan_adherence(interview, arc, plan, content_slides)
 
         interactive_slides: list[SlideSpec] = []
         if interview.include_interactive:
@@ -451,31 +515,160 @@ class EditorialPass:
         return self._assemble_deck(merged, interview, design, project_id)
 
     # ------------------------------------------------------------------
+    # Plan: produce + validate (with one re-plan), then enforce on the deck
+    # ------------------------------------------------------------------
+
+    async def _plan_and_validate(
+        self,
+        interview: PresentationInterviewAnswers,
+        claims: list[SourceClaimCreate],
+        chunks: list[SourceChunkCreate],
+        source_metadata: list[SourceMetadataExtracted],
+    ) -> DeckPlan:
+        """Produce a source-grounded plan and validate it; re-plan ONCE on reject.
+
+        :class:`PlannerError` / :class:`ThesisClassifierError` propagate
+        unchanged to the orchestrator — a planner or classifier that cannot do
+        its job is a hard stop, not a silent degrade. A plan that PARSES but
+        FAILS validation is recoverable by re-planning with the findings fed
+        back, but only once; a second failure raises
+        :class:`EditorialPlanRejectedError`.
+        """
+
+        planner = self._get_planner()
+        classifier = self._get_classifier()
+        plan = await planner.plan_deck(
+            interview=interview, claims=claims, chunks=chunks, source_metadata=source_metadata
+        )
+        result = await validate_plan_async(
+            plan, classifier=classifier, language=interview.language, claims=claims
+        )
+        if result.passed:
+            return plan
+
+        logger.warning(
+            "editorial_plan_rejected_replanning",
+            extra={"failures": [f.check_id for f in result.failures]},
+        )
+        plan = await planner.plan_deck(
+            interview=interview,
+            claims=claims,
+            chunks=chunks,
+            source_metadata=source_metadata,
+            feedback=result.failures,
+        )
+        result = await validate_plan_async(
+            plan, classifier=classifier, language=interview.language, claims=claims
+        )
+        if not result.passed:
+            raise EditorialPlanRejectedError(result.failures)
+        return plan
+
+    async def _enforce_plan_adherence(
+        self,
+        interview: PresentationInterviewAnswers,
+        arc: NarrativeArc,
+        plan: DeckPlan,
+        content_slides: list[SlideSpec],
+    ) -> list[SlideSpec]:
+        """Validate the deck against the plan; repair the failing sections ONCE.
+
+        Skipped for the emergency-minimal deck: that path means the executor
+        returned nothing usable (an infra failure), not a plan mismatch, and
+        validating it would spuriously fail section coverage.
+        """
+
+        if _is_emergency_deck(content_slides):
+            return content_slides
+        result = validate_deck_against_plan(content_slides, plan)
+        if result.passed:
+            return content_slides
+
+        logger.warning(
+            "editorial_deck_plan_mismatch_repairing",
+            extra={"failures": [f.check_id for f in result.failures]},
+        )
+        content_slides = await self._repair_failing_sections(
+            interview, arc, plan, content_slides, result.failures
+        )
+        result = validate_deck_against_plan(content_slides, plan)
+        if not result.passed:
+            raise EditorialDeckPlanMismatchError(result.failures)
+        return content_slides
+
+    async def _repair_failing_sections(
+        self,
+        interview: PresentationInterviewAnswers,
+        arc: NarrativeArc,
+        plan: DeckPlan,
+        content_slides: list[SlideSpec],
+        failures: list[AuditCheckResult],
+    ) -> list[SlideSpec]:
+        """Regenerate ONLY the failing sections' slides and splice them in place.
+
+        DECISION 2 (path a): a scoped repair, not a whole-deck re-prompt. The
+        replacement slides replace the failing section's slides in place; a
+        section that produced none has its slides inserted at the plan-order
+        position. Afterwards only the order-preserving post-steps run
+        (:func:`_post_process_repaired`) — NOT ``_enforce_density_arc``, which
+        reorders across section boundaries and would re-break the coverage the
+        repair just fixed.
+        """
+
+        failing = failing_section_indices(failures, content_slides, plan)
+        if not failing:
+            return content_slides
+        target = sum(max(1, len(plan.sections[i].planned_slide_types)) for i in failing)
+        system = EDITORIAL_SYSTEM.format(
+            slide_type_descriptions=_format_slide_type_descriptions(),
+            word_limits=_format_word_limits(),
+            arc_description=" → ".join(p.value for p in arc.phases),
+            emphasis_phase=arc.emphasis_phase.value,
+            target_count=target,
+            title_style=interview.title_style.value,
+            language=interview.language.value,
+        )
+        user = EDITORIAL_REPAIR_USER.format(
+            audience=interview.audience.value,
+            language=interview.language.value,
+            plan_spine=_format_plan_spine(plan),
+            current_deck=_format_current_deck(content_slides),
+            failing_sections=_format_failing_sections(plan, failing),
+            findings=_format_findings(failures),
+        )
+        parsed = await self._call_editorial_with_retry(system, user)
+        replacements = _materialise_slides(parsed, plan)
+        spliced = _splice_sections(content_slides, replacements, failing, plan)
+        return _post_process_repaired(spliced)
+
+    # ------------------------------------------------------------------
     # Step 1 - deck sizing
     # ------------------------------------------------------------------
 
     def _size_deck(
         self,
         interview: PresentationInterviewAnswers,
-        analysis: ContentAnalysis,
+        plan: DeckPlan,
     ) -> int:
-        """Size the deck from content volume, not talk duration.
+        """Size the deck from the PLAN, not the claim count.
 
-        Heuristic: each substantive claim seeds roughly one content slide
-        (SPEC: "one main idea per slide"), so ``analysis.total_claims`` is a
-        direct proxy for how many content slides the source material can
-        actually fill. This is the only uncapped volume signal the analysis
-        exposes — ``strongest_claims`` is capped at 10 and the grouped
-        claim lists at 100-200 — so it is what scales with real content.
-        Thin material now yields a tight deck instead of being padded out
-        to match a requested running time.
+        The plan is the binding spine, so the content base is what the plan
+        commits to render: the sum of each section's ``planned_slide_types``,
+        floored at one slide per section (a section that listed no types still
+        produces at least one slide). This replaces the old claim-count proxy
+        so the executor no longer sees two contradictory size signals (a
+        claim-derived target AND a plan implying a different count).
 
-        Section breaks and (optional) interactive slides are layered on top
-        of the clamped content base, preserving the prior meaning of the
-        returned total (content + breaks + interactive).
+        Clamped to the EXISTING ``MIN_CONTENT_SLIDES`` / ``MAX_CONTENT_SLIDES``
+        bounds — the same clamp the claim-count heuristic used, not a new cap.
+        Section breaks and (optional) interactive slides layer on top of the
+        clamped content base, preserving the meaning of the returned total
+        (content + breaks + interactive).
         """
 
-        content_supported = analysis.total_claims
+        content_supported = sum(
+            max(1, len(section.planned_slide_types)) for section in plan.sections
+        )
         content_slides = max(MIN_CONTENT_SLIDES, min(MAX_CONTENT_SLIDES, content_supported))
         section_breaks = max(1, content_slides // 5)
         interactive_slides = 0
@@ -501,8 +694,6 @@ class EditorialPass:
             + " ".join(c.quote for c in claims if c.quote)
         )
         blob_lower = blob.lower()
-
-        people = sorted({kw.title() for kw in _PERSON_KEYWORDS if kw in blob_lower})
 
         numbers: list[str] = []
         for pattern in _NUMBER_PATTERNS:
@@ -532,7 +723,11 @@ class EditorialPass:
             theoretical_arguments=grouped[ClaimType.THEORETICAL_ARGUMENT][:200],
             definitions=grouped[ClaimType.DEFINITION][:100],
             comparisons=grouped[ClaimType.COMPARISON][:100],
-            people_mentioned=people[:50],
+            # Roster comes from the source-grounded DeckPlan downstream
+            # (generate_deck_spec), never a keyword scan — Phase 2 deleted
+            # _PERSON_KEYWORDS. Both consumers (the executor's people brief and
+            # the interactive-matching selector) read it from the plan.
+            people_mentioned=[],
             key_numbers=numbers,
             has_timeline_content=has_timeline,
             has_comparison_content=has_comparison or len(grouped[ClaimType.COMPARISON]) > 0,
@@ -581,10 +776,17 @@ class EditorialPass:
         design: DesignDirectionSpec,
         analysis: ContentAnalysis,
         arc: NarrativeArc,
+        plan: DeckPlan,
         target_slide_count: int,
         language: Language,
     ) -> list[SlideSpec]:
-        """One LLM call (Sonnet) returning the editorial slide sequence."""
+        """One LLM call (Sonnet) returning the editorial slide sequence.
+
+        The plan is rendered into the user prompt as the binding spine; the
+        executor fills each section and tags every slide with its
+        ``section_index``, which :func:`_materialise_slides` resolves to the
+        plan's canonical section name.
+        """
 
         del design  # palette is for the renderer, not the editor
         system = EDITORIAL_SYSTEM.format(
@@ -601,10 +803,11 @@ class EditorialPass:
             language=language.value,
             headline_numbers=_format_headline_numbers(interview.headline_numbers),
             closing_ask=interview.closing_ask or "(none)",
+            plan_spine=_format_plan_spine(plan),
             content_summary=self._build_content_summary(analysis, interview, arc),
         )
         parsed = await self._call_editorial_with_retry(system, user)
-        return _materialise_slides(parsed)
+        return _materialise_slides(parsed, plan)
 
     async def _call_editorial_with_retry(
         self,
@@ -657,11 +860,9 @@ class EditorialPass:
             lines.append("STATISTICS (route to DATA_EMPHASIS or CHART_DATA):")
             lines.extend(f"  - {c}" for c in analysis.statistical_claims[:8])
             lines.append("")
-        if analysis.people_mentioned:
-            lines.append(
-                "PEOPLE (use GALLERY_PEOPLE when 3+): " + ", ".join(analysis.people_mentioned[:15])
-            )
-            lines.append("")
+        # People are carried authoritatively by the DECK PLAN's figure roster
+        # in the user prompt (see _format_plan_spine), so the content summary
+        # no longer lists them — double-listing would just add noise.
         if analysis.key_numbers:
             lines.append("KEY NUMBERS DETECTED: " + ", ".join(analysis.key_numbers[:15]))
             lines.append("")
@@ -1072,8 +1273,205 @@ def _normalise_figure(
     return prompt, subject_type
 
 
-def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
-    """Convert parsed LLM slides into validated :class:`SlideSpec` objects."""
+# ---------------------------------------------------------------------------
+# Plan binding + deck-vs-plan repair helpers (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_section_name(raw: _LLMSlide, plan: DeckPlan | None) -> str | None:
+    """Resolve a slide's section to the plan's CANONICAL section name.
+
+    A valid ``section_index`` wins over any free-form ``section_name`` the model
+    also emitted, so deck-vs-plan membership is a deterministic join. When the
+    index is missing or out of range, fall back to the model's ``section_name``
+    — the validator then surfaces any real coverage gap rather than masking it.
+    """
+
+    if (
+        plan is not None
+        and raw.section_index is not None
+        and 0 <= raw.section_index < len(plan.sections)
+    ):
+        return plan.sections[raw.section_index].section_name
+    return raw.section_name
+
+
+def _format_plan_spine(plan: DeckPlan) -> str:
+    """Render the DeckPlan as the binding spine for the executor prompt."""
+
+    lines = [
+        "DECK PLAN (the binding spine — FILL it, do not re-author):",
+        f"DECK THESIS: {plan.thesis}",
+        f"AUDIENCE TAKEAWAY: {plan.audience_takeaway}",
+        "",
+        "SECTIONS (produce slides for each, IN ORDER; tag every slide with its section_index):",
+    ]
+    for index, section in enumerate(plan.sections):
+        figures = ", ".join(section.figure_names) if section.figure_names else "(none)"
+        types = (
+            ", ".join(t.value for t in section.planned_slide_types)
+            if section.planned_slide_types
+            else "(your discretion)"
+        )
+        lines.append(
+            f"  [section_index {index}] {section.section_name}  (phase: {section.phase.value})"
+        )
+        lines.append(f"      thesis: {section.thesis}")
+        lines.append(f"      required figures: {figures}")
+        lines.append(f"      planned slide types: {types}")
+    lines.append("")
+    if plan.figures:
+        lines.append("FIGURE ROSTER (the ONLY real people you may name; use these exact names):")
+        for fig in plan.figures:
+            years = f" ({fig.years})" if fig.years else ""
+            lines.append(f"  - {fig.name}{years}: {fig.why_in_source}")
+    else:
+        lines.append(
+            "FIGURE ROSTER: (empty — this source names no people. Do NOT add a people "
+            "slide and do NOT name anyone.)"
+        )
+    return "\n".join(lines)
+
+
+def _format_current_deck(slides: list[SlideSpec]) -> str:
+    """Compact, section-tagged summary of the current deck for the repair prompt."""
+
+    lines: list[str] = []
+    for slide in slides:
+        section = slide.section_name or "(unassigned)"
+        people = ", ".join(p.name for p in (slide.content.people or []))
+        extra = f" [people: {people}]" if people else ""
+        lines.append(f"  - [{section}] {slide.slide_type.value}: {slide.content.title}{extra}")
+    return "\n".join(lines) if lines else "(empty)"
+
+
+def _format_failing_sections(plan: DeckPlan, indices: set[int]) -> str:
+    """Render the sections to regenerate, with their theses + required figures."""
+
+    lines: list[str] = []
+    for index in sorted(indices):
+        section = plan.sections[index]
+        figures = ", ".join(section.figure_names) if section.figure_names else "(none)"
+        types = (
+            ", ".join(t.value for t in section.planned_slide_types)
+            if section.planned_slide_types
+            else "(your discretion)"
+        )
+        lines.append(f"  [section_index {index}] {section.section_name}")
+        lines.append(f"      thesis: {section.thesis}")
+        lines.append(f"      required figures: {figures}")
+        lines.append(f"      planned slide types: {types}")
+    return "\n".join(lines)
+
+
+def _format_findings(failures: list[AuditCheckResult]) -> str:
+    return "\n".join(f"  - [{f.check_id}] {f.message or ''}" for f in failures)
+
+
+def _section_index_for(slide: SlideSpec, plan: DeckPlan) -> int | None:
+    """Plan-section index for a slide by EXACT canonical-name match, or None.
+
+    Both content slides and repair replacements carry section names resolved
+    from ``plan.sections[i].section_name`` (see :func:`_resolve_section_name`),
+    so an exact match is correct here; a slide that fell back to a free-form
+    label maps to None and is treated as non-failing / unassigned.
+    """
+
+    name = slide.section_name
+    if not name:
+        return None
+    for index, section in enumerate(plan.sections):
+        if section.section_name == name:
+            return index
+    return None
+
+
+def _splice_sections(
+    content_slides: list[SlideSpec],
+    replacements: list[SlideSpec],
+    failing: set[int],
+    plan: DeckPlan,
+) -> list[SlideSpec]:
+    """Replace each failing section's slides with its regenerated slides.
+
+    A failing section that had slides is replaced in place (replacements land
+    where its first slide was); a failing section that produced NO slides has
+    its replacements inserted before the first later section. Non-failing slides
+    are preserved untouched.
+    """
+
+    by_section: dict[int, list[SlideSpec]] = {}
+    for slide in replacements:
+        section = _section_index_for(slide, plan)
+        if section is not None and section in failing:
+            by_section.setdefault(section, []).append(slide)
+
+    out: list[SlideSpec] = []
+    inserted: set[int] = set()
+    for slide in content_slides:
+        section = _section_index_for(slide, plan)
+        if section is not None and section in failing:
+            if section not in inserted:
+                out.extend(by_section.get(section, []))
+                inserted.add(section)
+            continue  # drop the old failing-section slide (it was replaced)
+        out.append(slide)
+
+    for section in sorted(failing - inserted):
+        reps = by_section.get(section, [])
+        if not reps:
+            continue  # nothing came back for a section the executor still skipped
+        position = _insertion_point_for_section(out, section, plan)
+        out[position:position] = reps
+    return out
+
+
+def _insertion_point_for_section(out: list[SlideSpec], section: int, plan: DeckPlan) -> int:
+    """Index at which to insert a missing section's slides: before the first
+    later section, else at the end."""
+
+    for position, slide in enumerate(out):
+        other = _section_index_for(slide, plan)
+        if other is not None and other > section:
+            return position
+    return len(out)
+
+
+def _post_process_repaired(slides: list[SlideSpec]) -> list[SlideSpec]:
+    """Order-preserving reprocess after a section splice (DECISION 2).
+
+    Runs only the per-slide / order-preserving steps. Deliberately OMITS
+    ``_enforce_density_arc`` (it reorders across section boundaries and would
+    re-break the coverage the repair just fixed) and ``_ensure_first_is_title``
+    (the title slide is never part of a repair).
+    """
+
+    if not slides:
+        return slides
+    slides = _drop_hollow_dividers(slides)
+    slides = _enforce_word_limits(slides)
+    slides = _reindex(slides)
+    return slides
+
+
+def _is_emergency_deck(slides: list[SlideSpec]) -> bool:
+    """True when post-process produced the 2-slide emergency fallback.
+
+    The emergency deck means the executor returned nothing usable (an infra
+    failure), not a plan mismatch — so the deck-vs-plan gate is skipped for it.
+    """
+
+    return any(s.content.title == _EMERGENCY_TAKEAWAY_TITLE for s in slides)
+
+
+def _materialise_slides(parsed: list[_LLMSlide], plan: DeckPlan | None = None) -> list[SlideSpec]:
+    """Convert parsed LLM slides into validated :class:`SlideSpec` objects.
+
+    When ``plan`` is supplied, each slide's ``section_index`` is resolved to the
+    plan's canonical section name (see :func:`_resolve_section_name`) so
+    deck-vs-plan membership is a deterministic join rather than a fuzzy match on
+    a model-paraphrased section label.
+    """
 
     out: list[SlideSpec] = []
     for raw in parsed:
@@ -1121,7 +1519,7 @@ def _materialise_slides(parsed: list[_LLMSlide]) -> list[SlideSpec]:
                 slide_type=raw.slide_type,
                 content=content,
                 source_claim_ids=raw.source_claim_ids,
-                section_name=raw.section_name,
+                section_name=_resolve_section_name(raw, plan),
                 narrative_role=raw.narrative_role.value if raw.narrative_role else None,
             )
         )
@@ -1410,7 +1808,7 @@ def _emergency_minimal_deck(interview: PresentationInterviewAnswers) -> list[Sli
             slide_index=1,
             slide_type=SlideType.SUMMARY_TAKEAWAY,
             content=SlideContent(
-                title="Insufficient source material",
+                title=_EMERGENCY_TAKEAWAY_TITLE,
                 bullets=["Add more source material to generate a full deck."],
             ),
             narrative_role=NarrativePhase.CLOSE.value,
@@ -1523,6 +1921,9 @@ __all__ = [
     "SLIDE_TYPE_DESCRIPTIONS",
     "WORD_LIMITS",
     "ChartSeriesPoint",
+    "EditorialDeckPlanMismatchError",
+    "EditorialError",
     "EditorialPass",
+    "EditorialPlanRejectedError",
     "TableRow",
 ]

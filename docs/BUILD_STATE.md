@@ -588,6 +588,91 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
     verbose-unit value labels must read cleanly. After eyeball, the branch
     merges to main.
 
+## SHIPPED (Phase 2 — planner-bound editorial — branch feat/planner-bound-editorial)
+- WHY: editorial authored decks from a curated claim-bag with the source chunks DISCARDED
+  (`del ... chunks`) and the people roster filtered through a hardcoded `_PERSON_KEYWORDS`
+  frozenset — so the model never saw what the source said and filled gaps with its prior
+  (Beethoven on an Enlightenment music slide the source names Bach + Mozart on). Phase 1/1.5
+  built the planner + plan validator + multilingual thesis classifier ADDITIVELY (890a67f);
+  Phase 2 binds the LIVE editorial path to the plan, adds the deck-vs-plan gate, and deletes
+  the keyword roster.
+- THE REWIRE (`editorial.py`, signature FROZEN): generate_deck_spec is now PLAN → validate plan
+  (one re-plan on reject) → reground people_mentioned from plan.figures → size from plan → FILL
+  → enforce deck-vs-plan (one scoped repair) → assemble. `del evidence_matrix, outline` narrowed
+  (chunks/source_metadata now flow to the planner; the other two stay unused — keeps pyright).
+- DECK-VS-PLAN GATE (`plan_validator.py`, pure functions, no LLM): D-S1 section coverage, D-F1
+  figure adherence, D-X1 no-invented-figure (all FAIL); D-A1 invented-section (WARN). D-X1 is
+  SCOPED to GALLERY_PEOPLE/TIMELINE and EXCLUDES TEAM_CREDITS (deck authors, not source figures).
+  `failing_section_indices()` maps findings→sections for the repair. `critique_deck_adversarially()`
+  is the Phase-3 seam — a no-op that NEVER raises (it shares a module with the live path; a
+  raising stub would be one import away from breaking prod, unlike the Phase-1 NotImplementedError).
+- DECISION 1 (section identity = deterministic int join): the executor tags each slide with a
+  `section_index` (on the internal `_LLMSlide` DTO ONLY — DeckSpec/SlideSpec/SlideContent
+  UNCHANGED); `_materialise_slides` resolves it to the plan's canonical section_name, which the
+  validator joins on — so coverage/adherence never false-fail on a model-paraphrased section label.
+- DECISION 2 (repair = scoped splice, path a): `_repair_failing_sections` regenerates ONLY the
+  failing sections, splices in place, then runs ONLY order-preserving post-steps
+  (`_post_process_repaired`) — it deliberately SKIPS `_enforce_density_arc`, which reorders across
+  section boundaries and would re-break the coverage the repair just fixed (the convergence hazard
+  the web prompt's one-liner hid). One attempt; still-failing → EditorialDeckPlanMismatchError.
+- RETRY/FAILURE POLICY: PlannerError / ThesisClassifierError propagate to the orchestrator's
+  existing _OrchestratorError (a planner/classifier that can't do its job is a hard stop, not a
+  degrade). Plan parses but fails validation → ONE re-plan with the findings fed back
+  (plan_deck(feedback=)) → still failing → EditorialPlanRejectedError. The emergency-minimal deck
+  (executor returned nothing usable) is EXEMPT from the deck-vs-plan gate — infra failure, not a
+  plan mismatch; validating it would spuriously fail D-S1.
+- B1 FIX (people_mentioned had TWO consumers; the web prompt claimed one): the field is KEPT and
+  regrounded from plan.figures, so the executor's people brief AND the interactive-matching
+  selector (`_pick_interactive_types`, ≥3 people) both stay correct. Deleting the field — as the
+  prompt's "only one consumer" implied — would have SILENTLY killed the matching slide. Only the
+  keyword DERIVATION dies; the field lives, now plan-sourced.
+- DI SEAM: EditorialPass(planner=, classifier=) injectable; lazy getters reuse editorial's own
+  LLM/Gemini clients so the classifier inherits Vertex routing rather than default-building a
+  fresh AI-Studio client.
+- PROMPTS (`prompts.py`): EDITORIAL_SYSTEM gained the fill-the-plan contract + section_index in
+  the output schema; EDITORIAL_USER carries the plan spine; added EDITORIAL_REPAIR_USER +
+  PLANNER_FEEDBACK_HEADER. Static rules stay in SYSTEM (cache-friendly per the Phase-4 split);
+  per-deck spine lives in USER.
+- DEVIATIONS (disclosed, Iko-accepted): exception names carry the *Error suffix
+  (EditorialPlanRejectedError / EditorialDeckPlanMismatchError) per repo N818 lint + the existing
+  PlannerError/ThesisClassifierError convention, NOT the master prompt's bare names; one-line
+  Phase-1 public alias `build_enlightenment_fixture` so the Phase-2 harness reuses that fixture
+  without importing a private symbol.
+- A5 (cohesion-note DEFERRED honestly, NOT dropped): DeckPlan.image_cohesion_note →
+  DesignDirectionSpec.image_style_prefix wiring is NOT done here — design runs BEFORE editorial
+  (where the planner now lives), so it needs a pipeline reorder that belongs with the visual-system
+  phase. The DeckPlan docstring was corrected from "Phase 2 will feed this" to point at that phase.
+- DEFERRED DEBT (logged in HYGIENE, NOT silently kept): `interview.py` has its OWN, pre-existing
+  `_PERSON_KEYWORDS` frozenset powering `available_people_count` at interview time. Same disease as
+  the deleted editorial roster but LOWER STAKES (a slightly-off UI count, never a fabricated slide)
+  and UNFIXABLE the Phase-2 way — the interview runs BEFORE any plan exists, so there is nothing to
+  reground from. Left in place; fix in a later phase via NER at interview time or by moving planning
+  earlier in the pipeline. Distinct symbol from the editorial one; deleting it now would break a
+  live feature with no replacement.
+- VERIFIED locally (gates green):
+  - pytest tests/: 1273 passed / 32 skipped (same env-gated skip set: e2e/live-API/LibreOffice/
+    Tesseract). New coverage: 8 deck-vs-plan validator tests (D-S1/F1/X1/A1 + TEAM_CREDITS scoping
+    + empty-roster fabrication guard + year-suffix name match); editorial retry-policy (one re-plan
+    with feedback / reject-twice raises / one section repair); the keyword-path-dead test;
+    plan-driven sizing. The ~10 existing generate_deck_spec tests were migrated to a stub
+    planner+classifier factory + section_index-tagged payloads.
+  - ruff check + format --check: clean on all 10 changed files. pyright packages/: 0/0/0.
+  - sCO2 source fixture (`scripts/sco2_source_fixture.py`, transcribed from the real paper) self-
+    checks + round-trips; the Phase-2 harness imports and wires BOTH fixtures (runs to its env gate).
+- NOT verified locally (server Vertex gate = DONE): live generate_deck_spec on both sources via
+  `python scripts/proof_planner_phase2.py` (needs ANTHROPIC_API_KEY + VERTEX_PROJECT / ADC, or
+  GOOGLE_API_KEY for AI Studio). Bars — Enlightenment: people NOT null, Bach+Mozart not Beethoven,
+  every planned section present, no invented people, INTERACTIVE_MATCHING present, round-trip;
+  sCO2: planner roster EXCLUDES the cited author 'Ahn' (author != portrayed subject), no person
+  portrayed, no people slide forced, charts present, round-trip. WATCH on the run: does Sonnet
+  reliably emit section_index (else _resolve_section_name silently falls back to fuzzy match); does
+  pass 1 clear the gate or lean on the repair (extra Sonnet call); raise-on-mismatch is a NEW
+  delivery-rate behavior (pre-Phase-2 a slightly-off deck still shipped). "All tests pass" ≠
+  "verified end-to-end."
+- Renderer / image pass / interactive pass: ZERO changes (DeckSpec contract frozen; no orchestrator
+  signature change — editorial already received the planner's inputs).
+- DONE = this commit + this BUILD_STATE entry + the server Vertex gate green before merge to main.
+
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b
 2. [~] Editorial structured fields: H tables + G comparison + D-data chart_series — DONE this branch.
@@ -618,4 +703,8 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
 ## STATUS IS TRUTH: `git log -- docs/BUILD_STATE.md` shows what shipped. Not chat memory.
 
 ## HYGIENE (opportunistic): unify Py/TS font allowlists · rotate PAT + SSH · fix unhealthy
-healthcheck · commit debug scaffolding · PDF interactive reveal treatment (gray-band regression).
+healthcheck · commit debug scaffolding · PDF interactive reveal treatment (gray-band regression)
+· interview.py `_PERSON_KEYWORDS` — hardcoded people roster powering `available_people_count` at
+interview time; same anti-pattern as the deleted editorial roster but lower stakes (a slightly-off
+UI count, not a fabricated slide) and unfixable the Phase-2 way (interview runs before the plan
+exists). Fix via NER at interview time or by moving planning earlier in the pipeline.

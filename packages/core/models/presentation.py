@@ -675,8 +675,12 @@ class DeckPlan(BaseModel):
 
     ``image_cohesion_note`` is the one-line aesthetic anchor every
     generated image in the deck shares so the deck reads as authored
-    (a single voice, not a magazine). Phase 2 will feed this toward
-    :attr:`DesignDirectionSpec.image_style_prefix`.
+    (a single voice, not a magazine). Wiring it into
+    :attr:`DesignDirectionSpec.image_style_prefix` is deferred to the
+    visual-system work, NOT Phase 2: the planner runs inside the editorial
+    pass, which the orchestrator invokes AFTER the design pass, so feeding
+    cohesion back to design needs a pipeline reorder that belongs with that
+    phase. Phase 2 binds editorial to the plan but leaves design untouched.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)

@@ -22,6 +22,7 @@ exercised here. The new async path is exercised with a stub classifier.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
 import pytest
 
@@ -36,12 +37,17 @@ from packages.core.enums import (
 from packages.core.models.presentation import (
     AuditCheckResult,
     DeckPlan,
+    PersonItem,
     PlannedFigure,
     PlannedSection,
+    SlideContent,
+    SlideSpec,
     ThesisVerdict,
+    TimelineNode,
 )
 from packages.core.models.source import SourceClaimCreate
 from packages.presentation.plan_validator import (
+    critique_deck_adversarially,
     validate_deck_against_plan,
     validate_plan,
     validate_plan_async,
@@ -420,14 +426,182 @@ def test_claim_grounding_warns_on_unknown_claim_id_when_claims_supplied() -> Non
 
 
 # ---------------------------------------------------------------------------
-# Phase-2 seam
+# Deck-vs-plan checks (Phase 2)
 # ---------------------------------------------------------------------------
 
 
-def test_validate_deck_against_plan_raises_until_phase_2() -> None:
-    plan = _good_plan()
-    with pytest.raises(NotImplementedError):
-        validate_deck_against_plan(object(), plan)
+def _deck_slide(
+    slide_type: SlideType,
+    *,
+    section_name: str | None = None,
+    people: list[str] | None = None,
+    timeline_portraits: list[str] | None = None,
+    title: str = "Slide",
+) -> SlideSpec:
+    """Build a SlideSpec with a resolved section_name and optional people.
+
+    Mirrors what the editorial pass produces after it resolves each slide's
+    ``section_index`` to the plan's canonical ``section_name``.
+    """
+
+    content_kwargs: dict[str, Any] = {"title": title}
+    if people is not None:
+        content_kwargs["people"] = [PersonItem(name=name) for name in people]
+    if timeline_portraits is not None:
+        content_kwargs["timeline_nodes"] = [
+            TimelineNode(date="1700s", label=f"{name} and the period", portrait_prompt=name)
+            for name in timeline_portraits
+        ]
+    return SlideSpec(
+        slide_index=0,
+        slide_type=slide_type,
+        content=SlideContent(**content_kwargs),
+        section_name=section_name,
+    )
+
+
+def _good_deck() -> list[SlideSpec]:
+    """A deck that fills :func:`_good_plan` — every section covered, every
+    planned figure portrayed, no figure outside the roster."""
+
+    return [
+        _deck_slide(SlideType.TITLE_HERO, section_name="Salon culture", title="The Enlightenment"),
+        _deck_slide(SlideType.GALLERY_PEOPLE, section_name="Salon culture", people=["Voltaire"]),
+        _deck_slide(
+            SlideType.GALLERY_PEOPLE,
+            section_name="Constitutional ideas",
+            people=["Montesquieu", "Rousseau"],
+        ),
+        _deck_slide(
+            SlideType.TIMELINE,
+            section_name="Music of the period",
+            timeline_portraits=["Bach", "Mozart"],
+        ),
+        _deck_slide(SlideType.SUMMARY_TAKEAWAY, section_name="Legacy"),
+    ]
+
+
+def test_deck_matching_plan_passes() -> None:
+    result = validate_deck_against_plan(_good_deck(), _good_plan())
+    assert result.passed, _failure_ids(result.findings)
+    assert result.findings == []
+
+
+def test_deck_missing_section_fails_d_s1() -> None:
+    """A planned section that no slide covers → coverage FAIL D-S1."""
+
+    deck = [s for s in _good_deck() if s.section_name != "Legacy"]
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert not result.passed
+    assert "D-S1" in _failure_ids(result.findings)
+    d_s1 = next(f for f in result.failures if f.check_id == "D-S1")
+    assert "Legacy" in (d_s1.message or "")
+
+
+def test_deck_section_missing_planned_figure_fails_d_f1() -> None:
+    """The Music section planned Bach+Mozart but its slide carries neither
+    → figure-adherence FAIL D-F1 (the deck-side substitution gate)."""
+
+    deck = _good_deck()
+    deck[3] = _deck_slide(
+        SlideType.TIMELINE, section_name="Music of the period", timeline_portraits=[]
+    )
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert not result.passed
+    d_f1 = [f for f in result.failures if f.check_id == "D-F1"]
+    assert len(d_f1) == 2  # one each for Bach and Mozart
+    assert any("Bach" in (f.message or "") for f in d_f1)
+    assert any("Mozart" in (f.message or "") for f in d_f1)
+
+
+def test_deck_invented_figure_fails_d_x1() -> None:
+    """A gallery slide portrays Beethoven, who is not in the roster
+    → invented-figure FAIL D-X1 (the deck-side Beethoven gate)."""
+
+    deck = _good_deck()
+    deck[3] = _deck_slide(
+        SlideType.GALLERY_PEOPLE, section_name="Music of the period", people=["Beethoven"]
+    )
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert not result.passed
+    d_x1 = [f for f in result.failures if f.check_id == "D-X1"]
+    assert any("Beethoven" in (f.message or "") for f in d_x1)
+    # D-F1 also fires (Bach/Mozart absent) — both gates catch the substitution.
+    assert "D-F1" in _failure_ids(result.findings)
+
+
+def test_team_credits_authors_not_flagged_d_x1() -> None:
+    """TEAM_CREDITS people are the deck's own authors, never source figures.
+    They must NOT trip the invented-figure gate — the scoping fix."""
+
+    deck = [
+        *_good_deck(),
+        _deck_slide(
+            SlideType.TEAM_CREDITS,
+            section_name="Legacy",
+            people=["Ada Lovelace", "A Student Author"],
+        ),
+    ]
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert result.passed, _failure_ids(result.findings)
+    assert "D-X1" not in _check_ids(result.findings)
+
+
+def test_deck_invented_section_warns_not_fails_d_a1() -> None:
+    """A slide tagged with a section the plan never defined → WARN D-A1,
+    not a FAIL (it does not block export)."""
+
+    deck = [*_good_deck(), _deck_slide(SlideType.CONTENT_SPLIT, section_name="Bonus aside")]
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert result.passed, _failure_ids(result.findings)
+    assert "D-A1" in _check_ids(result.warnings)
+
+
+def test_empty_roster_people_slide_fails_d_x1() -> None:
+    """The sCO2-shaped guarantee: a plan that names NO figures, yet a gallery
+    slide sprouts a person → D-X1. No fabricated people for a source that
+    named nobody; there is no minimum-people quota to fill."""
+
+    plan = _good_plan().model_copy(
+        update={
+            "figures": [],
+            "sections": [s.model_copy(update={"figure_names": []}) for s in _good_plan().sections],
+        }
+    )
+    deck = [
+        _deck_slide(SlideType.TITLE_HERO, section_name="Salon culture", title="t"),
+        _deck_slide(
+            SlideType.GALLERY_PEOPLE, section_name="Constitutional ideas", people=["Newton"]
+        ),
+        _deck_slide(SlideType.CONTENT_SPLIT, section_name="Music of the period"),
+        _deck_slide(SlideType.SUMMARY_TAKEAWAY, section_name="Legacy"),
+    ]
+    result = validate_deck_against_plan(deck, plan)
+    assert not result.passed
+    d_x1 = [f for f in result.failures if f.check_id == "D-X1"]
+    assert any("Newton" in (f.message or "") for f in d_x1)
+
+
+def test_name_match_tolerates_year_suffix() -> None:
+    """The planner rosters "Voltaire"; the executor renders "Voltaire
+    (1694-1778)". Normalised containment must treat them as the same person,
+    so D-F1 is satisfied and D-X1 does not fire."""
+
+    deck = _good_deck()
+    deck[1] = _deck_slide(
+        SlideType.GALLERY_PEOPLE, section_name="Salon culture", people=["Voltaire (1694-1778)"]
+    )
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert result.passed, _failure_ids(result.findings)
+
+
+def test_critique_deck_adversarially_is_noop_not_raising() -> None:
+    """The Phase-3 seam must not raise (it shares a module with the live
+    path) — it returns an empty, passing result until Phase 3 implements it."""
+
+    result = critique_deck_adversarially(_good_deck(), _good_plan())
+    assert result.passed
+    assert result.findings == []
 
 
 # ---------------------------------------------------------------------------

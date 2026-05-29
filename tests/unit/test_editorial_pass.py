@@ -34,16 +34,23 @@ from packages.core.gemini import GEMINI_FLASH_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
+    AuditCheckResult,
     ColorPalette,
-    ContentAnalysis,
+    DeckPlan,
     DeckSpec,
     DesignDirectionSpec,
+    PlannedSection,
     PresentationInterviewAnswers,
     SlideContent,
     SlideSpec,
     StatItem,
+    ThesisVerdict,
 )
-from packages.core.models.source import SourceClaimCreate
+from packages.core.models.source import (
+    SourceChunkCreate,
+    SourceClaimCreate,
+    SourceMetadataExtracted,
+)
 from packages.core.prompts import EDITORIAL_SYSTEM
 from packages.presentation.editorial import (
     SONNET_MODEL,
@@ -53,6 +60,7 @@ from packages.presentation.editorial import (
     _materialise_slides,
     _parse_sequence,
 )
+from packages.presentation.thesis_classifier import ThesisClassifier
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -85,6 +93,116 @@ class _StubLLM:
             latency_ms=5,
             estimated_cost_usd=0.0001,
         )
+
+
+class _StubPlanner:
+    """Returns canned DeckPlan(s) without an LLM call; records re-plan feedback.
+
+    A single plan is reused for every call; a list replays in order with the
+    last entry repeating, so the plan-reject retry test can hand back a first
+    (rejected) plan then a second (accepted) one.
+    """
+
+    def __init__(self, plans: DeckPlan | list[DeckPlan]) -> None:
+        self._plans = [plans] if isinstance(plans, DeckPlan) else list(plans)
+        self.calls = 0
+        self.last_feedback: list[AuditCheckResult] | None = None
+
+    async def plan_deck(
+        self,
+        interview: PresentationInterviewAnswers,
+        claims: list[SourceClaimCreate],
+        chunks: list[SourceChunkCreate],
+        source_metadata: list[SourceMetadataExtracted],
+        feedback: list[AuditCheckResult] | None = None,
+    ) -> DeckPlan:
+        del interview, claims, chunks, source_metadata
+        self.calls += 1
+        self.last_feedback = feedback
+        if len(self._plans) > 1:
+            return self._plans.pop(0)
+        return self._plans[0]
+
+
+class _StubClassifier(ThesisClassifier):
+    """Replays verdict lists without a Gemini call. Defaults to all-pass."""
+
+    def __init__(self, scripts: list[list[ThesisVerdict]] | None = None) -> None:
+        super().__init__(gemini=None)
+        self._scripts = scripts
+        self.call_count = 0
+
+    async def classify(  # type: ignore[override]
+        self,
+        items: list[tuple[str, str]],
+        language: Language,
+    ) -> list[ThesisVerdict]:
+        del language
+        self.call_count += 1
+        if self._scripts is None:
+            return [ThesisVerdict(is_thesis=True, reason="ok") for _ in items]
+        return self._scripts.pop(0)
+
+
+def _section_phases(n: int) -> list[NarrativePhase]:
+    """HOOK ... CLOSE with CORE between, so a stub plan reads as a real arc."""
+
+    if n <= 1:
+        return [NarrativePhase.CORE]
+    return [
+        NarrativePhase.HOOK
+        if i == 0
+        else NarrativePhase.CLOSE
+        if i == n - 1
+        else NarrativePhase.CORE
+        for i in range(n)
+    ]
+
+
+def _stub_plan(n_sections: int = 2) -> DeckPlan:
+    """A minimal, valid DeckPlan: ``n_sections`` figure-free sections that pass
+    the plan validator (distinct theses, an opener and a closer)."""
+
+    phases = _section_phases(n_sections)
+    sections = [
+        PlannedSection(
+            section_name=f"Section {index}",
+            thesis=f"Section {index} argues one specific, concrete point about the topic.",
+            phase=phases[index],
+            figure_names=[],
+            planned_slide_types=[],
+        )
+        for index in range(n_sections)
+    ]
+    return DeckPlan(
+        thesis="The deck makes one specific, concrete argument grounded in the source material.",
+        audience_takeaway="The audience leaves able to state the core argument and its support.",
+        sections=sections,
+        figures=[],
+        image_cohesion_note="A single coherent visual treatment shared across every slide.",
+    )
+
+
+def _editorial(
+    llm: _StubLLM | None = None,
+    *,
+    gemini: _StubLLM | None = None,
+    plan: DeckPlan | list[DeckPlan] | None = None,
+    planner: _StubPlanner | None = None,
+    classifier: ThesisClassifier | None = None,
+) -> EditorialPass:
+    """EditorialPass wired with stub planner + classifier so generate_deck_spec
+    never reaches a real planner/classifier LLM. The default plan is a valid
+    2-section, figure-free plan; pass ``plan`` to override."""
+
+    if planner is None:
+        planner = _StubPlanner(plan if plan is not None else _stub_plan())
+    return EditorialPass(
+        llm=llm,  # type: ignore[arg-type]
+        gemini=gemini,  # type: ignore[arg-type]
+        planner=planner,  # type: ignore[arg-type]
+        classifier=classifier if classifier is not None else _StubClassifier(),
+    )
 
 
 def _claim(
@@ -655,10 +773,15 @@ def _coercible_payload() -> str:
     one slide with an over-long stat unit and one slide with a null title."""
 
     slides = [
-        _minimal_slide_payload("title_hero", "Water savings reach 94.4% in mild climates"),
-        _minimal_slide_payload("concept_definition", "Direct evaporative cooling defined"),
+        _minimal_slide_payload(
+            "title_hero", "Water savings reach 94.4% in mild climates", section_index=0
+        ),
+        _minimal_slide_payload(
+            "concept_definition", "Direct evaporative cooling defined", section_index=0
+        ),
         {
             "slide_index": 2,
+            "section_index": 0,
             "slide_type": "data_emphasis",
             "title": "Recovered heat pays for the retrofit",
             "stats": [
@@ -670,15 +793,16 @@ def _coercible_payload() -> str:
             ],
             "narrative_role": "evidence",
         },
-        _minimal_slide_payload("section_break", "Method"),
+        _minimal_slide_payload("section_break", "Method", section_index=1),
         {
             "slide_index": 4,
+            "section_index": 1,
             "slide_type": "content_split",
             "title": None,
             "body_text": "A three-stage pipeline moves heat off the rack into a dry cooler.",
             "narrative_role": "core",
         },
-        _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot"),
+        _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot", section_index=1),
     ]
     return _llm_slides_payload(slides)
 
@@ -689,7 +813,7 @@ async def test_coercible_violations_yield_full_deck_not_fallback() -> None:
     # response with an over-long unit AND a null title must coerce to a FULL
     # multi-slide deck, never the 2-slide "insufficient source" fallback.
     llm = _StubLLM([_coercible_payload()])
-    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    pass_ = _editorial(llm)
     claims = [
         _claim(
             f"Empirical finding {i} from the cooling pilot.",
@@ -720,7 +844,7 @@ async def test_uncoercible_output_falls_back_to_minimal_deck() -> None:
     # failure. Two responses: the first call plus its one retry.
     bad = _llm_slides_payload([{"slide_index": 0, "slide_type": "bogus", "title": "x"}])
     llm = _StubLLM([bad, bad])
-    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    pass_ = _editorial(llm)
     deck = await pass_.generate_deck_spec(
         interview=_interview(include_interactive=False),
         design=_design(),
@@ -751,18 +875,18 @@ def test_analyze_content_counts_claim_types() -> None:
     assert len(analysis.theoretical_arguments) == 3
 
 
-def test_analyze_content_detects_people() -> None:
+def test_analyze_content_no_longer_derives_people_from_text() -> None:
+    # Phase 2 deleted the hardcoded _PERSON_KEYWORDS roster. _analyze_content no
+    # longer detects people from claim text; the figure roster now comes from
+    # the source-grounded DeckPlan (generate_deck_spec regrounds
+    # people_mentioned from plan.figures). This locks the keyword path dead.
     claims = [
         _claim("Newton's laws of motion underpin classical mechanics."),
         _claim("Leibniz independently developed calculus and proposed notation."),
         _claim("Euler unified analysis with his celebrated identity."),
-        _claim("The committee endorsed the report after revisions."),
     ]
     analysis = EditorialPass._analyze_content(claims)
-    lowered = {p.lower() for p in analysis.people_mentioned}
-    assert "newton" in lowered
-    assert "leibniz" in lowered
-    assert "euler" in lowered
+    assert analysis.people_mentioned == []
 
 
 def test_analyze_content_detects_comparisons() -> None:
@@ -843,16 +967,47 @@ def test_narrative_arc_results() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _analysis_with_claims(n: int) -> ContentAnalysis:
-    """Build a ContentAnalysis whose total_claims is exactly ``n``."""
+def _plan_with_slide_types(n: int) -> DeckPlan:
+    """A DeckPlan whose sections' planned_slide_types sum to exactly ``n``.
 
-    return EditorialPass._analyze_content(
-        [_claim(f"Substantive claim number {i} that carries an idea.") for i in range(n)]
+    Phase 2 sizes the deck from the plan, not the claim count, so the size
+    tests feed a plan whose planned-slide-type total equals what the old
+    claim count was. Types are distributed round-robin (each section capped at
+    the field's max of 10) with every section getting at least one, so the
+    plan-driven content base ``sum(max(1, len(types)))`` equals ``n``.
+    """
+
+    n_sections = max(2, min(8, -(-n // 10)))  # ceil(n / 10), clamped to [2, 8]
+    per = [0] * n_sections
+    placed = 0
+    i = 0
+    while placed < n and not all(count >= 10 for count in per):
+        if per[i] < 10:
+            per[i] += 1
+            placed += 1
+        i = (i + 1) % n_sections
+    phases = _section_phases(n_sections)
+    sections = [
+        PlannedSection(
+            section_name=f"Section {index}",
+            thesis=f"Section {index} argues one specific, concrete point about the topic.",
+            phase=phases[index],
+            figure_names=[],
+            planned_slide_types=[SlideType.CONTENT_SPLIT] * count,
+        )
+        for index, count in enumerate(per)
+    ]
+    return DeckPlan(
+        thesis="The deck makes one specific, concrete argument grounded in the source material.",
+        audience_takeaway="The audience leaves able to state the core argument and its support.",
+        sections=sections,
+        figures=[],
+        image_cohesion_note="A single coherent visual treatment shared across every slide.",
     )
 
 
 def _size(interview: PresentationInterviewAnswers, n_claims: int) -> int:
-    return EditorialPass()._size_deck(interview, _analysis_with_claims(n_claims))
+    return EditorialPass()._size_deck(interview, _plan_with_slide_types(n_claims))
 
 
 def test_size_deck_thin_content_clamps_to_floor() -> None:
@@ -1268,13 +1423,17 @@ async def test_generate_interactive_matching_from_people() -> None:
     }
     gemini = _StubLLM([json.dumps(payload)])
     pass_ = EditorialPass(gemini=gemini)  # type: ignore[arg-type]
+    # people_mentioned now comes from the source-grounded DeckPlan roster, not a
+    # keyword scan; simulate that reground so the matching selector (>= 3 people)
+    # still fires. This is the second consumer of people_mentioned the Phase-2
+    # review flagged — it must keep working when the field is plan-populated.
     analysis = EditorialPass._analyze_content(
         [
             _claim("Newton's laws explain classical motion."),
             _claim("Leibniz proposed the notation for calculus."),
             _claim("Euler unified analysis with his identity."),
         ]
-    )
+    ).model_copy(update={"people_mentioned": ["Newton", "Leibniz", "Euler"]})
     interactive = await pass_._generate_interactive_slides(
         content_slides=[_slide(SlideType.GALLERY_PEOPLE, "Thinkers")],
         analysis=analysis,
@@ -1287,11 +1446,9 @@ async def test_generate_interactive_matching_from_people() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_interactive_skipped_when_disabled() -> None:
-    gemini = _StubLLM([])  # if called, would raise
-    pass_ = EditorialPass(
-        llm=_StubLLM([_llm_slides_payload([_minimal_slide_payload("title_hero")])]),  # type: ignore[arg-type]
-        gemini=gemini,  # type: ignore[arg-type]
-    )
+    gemini = _StubLLM([])  # if called, would raise — interactive disabled, and
+    # the stub classifier never touches gemini, so it must stay untouched.
+    pass_ = _editorial(_StubLLM([_full_pipeline_payload()]), gemini=gemini)
     interview = _interview(include_interactive=False)
     deck = await pass_.generate_deck_spec(
         interview=interview,
@@ -1311,10 +1468,11 @@ async def test_generate_interactive_skipped_when_disabled() -> None:
 
 
 def _minimal_slide_payload(
-    slide_type: str, title: str = "Headline", *, subtitle: str | None = None
+    slide_type: str, title: str = "Headline", *, subtitle: str | None = None, section_index: int = 0
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "slide_index": 0,
+        "section_index": section_index,
         "slide_type": slide_type,
         "title": title,
         "narrative_role": "hook",
@@ -1362,10 +1520,18 @@ def test_merge_reindexes_correctly() -> None:
 
 
 def _full_pipeline_payload() -> str:
+    # section_index 0/1 fill the default _stub_plan's two sections so the
+    # deck-vs-plan gate (D-S1 coverage) passes without a repair.
     slides = [
-        _minimal_slide_payload("title_hero", "Water savings reach 94.4% in mild climates"),
-        _minimal_slide_payload("concept_definition", "Direct evaporative cooling defined"),
-        _minimal_slide_payload("data_emphasis", "94.4% water savings demonstrated"),
+        _minimal_slide_payload(
+            "title_hero", "Water savings reach 94.4% in mild climates", section_index=0
+        ),
+        _minimal_slide_payload(
+            "concept_definition", "Direct evaporative cooling defined", section_index=0
+        ),
+        _minimal_slide_payload(
+            "data_emphasis", "94.4% water savings demonstrated", section_index=0
+        ),
         # Thesis-bearing section break: under invariant I2 a bare "Method" is
         # dropped; the subtitle states the section's argument so it earns its
         # place and survives _drop_hollow_dividers in _post_process.
@@ -1373,10 +1539,11 @@ def _full_pipeline_payload() -> str:
             "section_break",
             "Method",
             subtitle="Three pilots, one protocol, identical instrumentation.",
+            section_index=1,
         ),
-        _minimal_slide_payload("flow_process", "Three-stage cooling pipeline"),
-        _minimal_slide_payload("content_split", "Pilot results across climates"),
-        _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot"),
+        _minimal_slide_payload("flow_process", "Three-stage cooling pipeline", section_index=1),
+        _minimal_slide_payload("content_split", "Pilot results across climates", section_index=1),
+        _minimal_slide_payload("summary_takeaway", "Three lessons from the pilot", section_index=1),
     ]
     return _llm_slides_payload(slides)
 
@@ -1385,7 +1552,7 @@ def _full_pipeline_payload() -> str:
 async def test_generate_deck_spec_full_pipeline() -> None:
     llm = _StubLLM([_full_pipeline_payload()])
     gemini = _StubLLM([])  # interactive disabled
-    pass_ = EditorialPass(llm=llm, gemini=gemini)  # type: ignore[arg-type]
+    pass_ = _editorial(llm, gemini=gemini)
     claims = [
         _claim(
             f"Empirical finding {i} established in pilot studies.",
@@ -1416,7 +1583,7 @@ async def test_generate_deck_spec_full_pipeline() -> None:
 @pytest.mark.asyncio
 async def test_generate_deck_spec_no_outline() -> None:
     llm = _StubLLM([_full_pipeline_payload()])
-    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    pass_ = _editorial(llm)
     deck = await pass_.generate_deck_spec(
         interview=_interview(include_interactive=False),
         design=_design(),
@@ -1432,7 +1599,7 @@ async def test_generate_deck_spec_no_outline() -> None:
 @pytest.mark.asyncio
 async def test_generate_deck_spec_empty_claims_returns_minimal_deck() -> None:
     llm = _StubLLM(["not json"] * 2)
-    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    pass_ = _editorial(llm)
     deck = await pass_.generate_deck_spec(
         interview=_interview(include_interactive=False),
         design=_design(),
@@ -1448,7 +1615,7 @@ async def test_generate_deck_spec_empty_claims_returns_minimal_deck() -> None:
 @pytest.mark.asyncio
 async def test_generate_deck_spec_language_preserved() -> None:
     llm = _StubLLM([_full_pipeline_payload()])
-    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    pass_ = _editorial(llm)
     deck = await pass_.generate_deck_spec(
         interview=_interview(language=Language.RU, include_interactive=False),
         design=_design(),
@@ -1463,7 +1630,7 @@ async def test_generate_deck_spec_language_preserved() -> None:
 @pytest.mark.asyncio
 async def test_generate_deck_spec_export_formats() -> None:
     llm = _StubLLM([_full_pipeline_payload()])
-    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    pass_ = _editorial(llm)
     deck = await pass_.generate_deck_spec(
         interview=_interview(include_interactive=False),
         design=_design(),
@@ -1502,7 +1669,7 @@ async def test_editorial_uses_sonnet_model() -> None:
     cast: Callable[..., Awaitable[LLMResponse]] = capture_complete
     llm.complete = cast  # type: ignore[assignment]
 
-    pass_ = EditorialPass(llm=llm)  # type: ignore[arg-type]
+    pass_ = _editorial(llm)
     await pass_.generate_deck_spec(
         interview=_interview(include_interactive=False),
         design=_design(),
@@ -1548,7 +1715,7 @@ async def test_interactive_uses_gemini_flash_model() -> None:
     cast: Callable[..., Awaitable[LLMResponse]] = capture_complete
     gemini.complete = cast  # type: ignore[assignment]
 
-    pass_ = EditorialPass(llm=llm, gemini=gemini)  # type: ignore[arg-type]
+    pass_ = _editorial(llm, gemini=gemini)
     await pass_.generate_deck_spec(
         interview=_interview(include_interactive=True),
         design=_design(),
@@ -1558,3 +1725,98 @@ async def test_interactive_uses_gemini_flash_model() -> None:
         source_metadata=[],
     )
     assert captured.get("model") == GEMINI_FLASH_MODEL
+
+
+# ---------------------------------------------------------------------------
+# Plan-adherence retry policy (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _reject_then_accept(n: int) -> _StubClassifier:
+    return _StubClassifier(
+        scripts=[
+            [ThesisVerdict(is_thesis=False, reason="label") for _ in range(n)],
+            [ThesisVerdict(is_thesis=True, reason="ok") for _ in range(n)],
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_rejected_triggers_one_replan_with_feedback() -> None:
+    # First validation fails (classifier rejects every thesis), second passes.
+    # The planner must be called twice, the second time WITH the findings fed
+    # back; then generation proceeds normally.
+    plan = _stub_plan()
+    planner = _StubPlanner([plan, plan])
+    pass_ = _editorial(
+        _StubLLM([_full_pipeline_payload()]),
+        planner=planner,
+        classifier=_reject_then_accept(len(plan.sections)),
+    )
+    deck = await pass_.generate_deck_spec(
+        interview=_interview(include_interactive=False),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=[_claim("A finding that matters.")],
+        chunks=[],
+        source_metadata=[],
+    )
+    assert isinstance(deck, DeckSpec)
+    assert planner.calls == 2
+    assert planner.last_feedback is not None and len(planner.last_feedback) >= 1
+
+
+@pytest.mark.asyncio
+async def test_plan_rejected_twice_raises() -> None:
+    from packages.presentation.editorial import EditorialPlanRejectedError
+
+    plan = _stub_plan()
+    n = len(plan.sections)
+    classifier = _StubClassifier(
+        scripts=[
+            [ThesisVerdict(is_thesis=False, reason="label") for _ in range(n)],
+            [ThesisVerdict(is_thesis=False, reason="label") for _ in range(n)],
+        ]
+    )
+    pass_ = _editorial(
+        _StubLLM([_full_pipeline_payload()]),
+        planner=_StubPlanner([plan, plan]),
+        classifier=classifier,
+    )
+    with pytest.raises(EditorialPlanRejectedError):
+        await pass_.generate_deck_spec(
+            interview=_interview(include_interactive=False),
+            design=_design(),
+            evidence_matrix=_evidence_matrix(),
+            claims=[_claim("A finding that matters.")],
+            chunks=[],
+            source_metadata=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_deck_mismatch_triggers_one_section_repair() -> None:
+    # Initial executor output covers only section 0 (deck-vs-plan D-S1 fails for
+    # section 1); the ONE repair call returns section 1's slide; the spliced
+    # deck then passes. Two LLM responses: initial generation + the repair.
+    initial = _llm_slides_payload(
+        [
+            _minimal_slide_payload("title_hero", "Opening", section_index=0),
+            _minimal_slide_payload("content_split", "Section zero body", section_index=0),
+        ]
+    )
+    repair = _llm_slides_payload(
+        [_minimal_slide_payload("content_split", "Section one body", section_index=1)]
+    )
+    pass_ = _editorial(_StubLLM([initial, repair]), plan=_stub_plan())
+    deck = await pass_.generate_deck_spec(
+        interview=_interview(include_interactive=False),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=[_claim("A finding that matters.")],
+        chunks=[],
+        source_metadata=[],
+    )
+    section_names = {s.section_name for s in deck.slides if s.section_name}
+    assert "Section 0" in section_names
+    assert "Section 1" in section_names  # the dropped section was repaired in
