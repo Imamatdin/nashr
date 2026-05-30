@@ -46,6 +46,7 @@ from typing import Any, Final, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from packages.core.enums import (
+    PEOPLE_RENDERING_SLIDE_TYPES,
     AudienceType,
     ChartType,
     ClaimStrength,
@@ -1296,6 +1297,39 @@ def _normalise_figure(
     return prompt, subject_type
 
 
+def _clamp_people_to_legal_types(
+    slide_type: SlideType,
+    people: list[PersonItem] | None,
+) -> list[PersonItem] | None:
+    """Drop ``content.people`` from slide types whose renderer never paints it.
+
+    Sibling of :func:`_normalise_figure`: a per-field legality clamp applied as
+    each slide is materialised. ``content.people`` is rendered only by
+    GALLERY_PEOPLE and TEAM_CREDITS (:data:`PEOPLE_RENDERING_SLIDE_TYPES`);
+    attached to any other slide type it is dead data the executor mis-emitted —
+    the sCO2 leak put a bibliographic citation ("Ahn, Y. et al.") on a
+    ``typographic_keywords`` slide. Unlike :func:`_normalise_figure` this LOGS
+    when it fires: the strip backstops a KNOWN, actively-tracked executor leak,
+    and a silent drop would hide whether the EDITORIAL_SYSTEM placement rule
+    actually stopped it at the source.
+
+    Runs inside :func:`_materialise_slides`, which BOTH the main generation path
+    and the section-repair path funnel through, so a person re-attached during a
+    repair is cleaned by the same clamp.
+    """
+
+    if not people or slide_type in PEOPLE_RENDERING_SLIDE_TYPES:
+        return people
+    logger.warning(
+        "editorial_stripped_misplaced_people",
+        extra={
+            "slide_type": slide_type.value,
+            "dropped": [person.name for person in people],
+        },
+    )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Plan binding + deck-vs-plan repair helpers (Phase 2)
 # ---------------------------------------------------------------------------
@@ -1519,7 +1553,7 @@ def _materialise_slides(parsed: list[_LLMSlide], plan: DeckPlan | None = None) -
             body_text=raw.body_text,
             bullets=raw.bullets,
             stats=raw.stats,
-            people=raw.people,
+            people=_clamp_people_to_legal_types(raw.slide_type, raw.people),
             keywords=raw.keywords,
             left_column=left_col,
             right_column=right_col,

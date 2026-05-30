@@ -736,15 +736,17 @@ sCO2 (English, real paper) — full generate_deck_spec on Vertex — ONE FAIL, n
 - DeckSpec round-trips.
 - OVERALL gate verdict: FAIL — solely because of this one leak; Enlightenment passed clean.
 
-REMAINING FIX (next session — NOT done this run):
+REMAINING FIX — RESOLVED this session (code complete; local gates green). The implementation and its
+four reviewed DEVIATIONS from the literal plan below are recorded in `PHASE 2 — RUN-2 FIX` further
+down. The plan as decided at run-2 was:
 1. WIDEN D-X1 (plan_validator.py `_check_deck_invented_figures`): scan `content.people` against the
    roster on EVERY slide type EXCEPT TEAM_CREDITS (keep that carve-out — its people are the deck's
    own authors, not source figures; `test_team_credits_authors_not_flagged_d_x1` pins it). Per the
    schema, people belong only on gallery / team / timeline slides, so a person on a
    typographic_keywords slide is malformed regardless of roster membership — D-X1 is the
-   production safety net that must catch it. (Currently `_PEOPLE_BEARING_TYPES` =
-   {GALLERY_PEOPLE, TIMELINE}; the fix is to scan content.people on all non-TEAM_CREDITS slides,
-   plus TIMELINE portrait_prompts, against the roster.)
+   production safety net that must catch it. (`_PEOPLE_BEARING_TYPES` was {GALLERY_PEOPLE, TIMELINE}
+   at run-2; the implemented fix scans content.people on all non-TEAM_CREDITS slides, plus TIMELINE
+   portrait_prompts, against the roster, and DELETES that now-dead constant.)
 2. STRIP in _post_process (editorial.py): drop `content.people` from any slide type that is NOT
    GALLERY_PEOPLE / TEAM_CREDITS / TIMELINE, so a stray attachment is cleaned GRACEFULLY instead of
    failing the whole deck. The strip is the graceful cleanup; the D-X1 widening is the safety net
@@ -771,8 +773,89 @@ LOCKED DECISIONS (do not reopen):
   runs before the plan exists; fix later via NER or by moving planning earlier). Do NOT delete it.
 
 DEFINITION OF DONE (Phase 2): both decks pass the Vertex gate (Enlightenment already does; sCO2
-passes once the executor people-leak is fixed per REMAINING FIX), THEN merge
+passes once the executor people-leak is fixed). The leak fix is now CODE COMPLETE with local gates
+green — see `PHASE 2 — RUN-2 FIX` below. DONE = Iko's Vertex re-run is green on BOTH decks, THEN merge
 `feat/planner-bound-editorial` to main.
+
+## PHASE 2 — RUN-2 FIX (sCO2 executor people-leak): CODE COMPLETE, gate ready for re-run
+The run-2 leak (executor attached `people=[Ahn, Y. et al.]` to a `typographic_keywords` slide; D-X1
+was scoped to GALLERY_PEOPLE/TIMELINE and missed it) is fixed in code on
+`feat/planner-bound-editorial`. Implemented MUST + BETTER after a senior review of the run-2 REMAINING
+FIX surfaced four issues in its literal form (recorded as DEVIATIONS below). Local gates green; the
+server Vertex re-run is the one remaining gate (Iko runs it — no Vertex creds locally).
+
+WHAT SHIPPED (6 files: 4 source + 2 test):
+- ONE canonical constant `PEOPLE_RENDERING_SLIDE_TYPES = {GALLERY_PEOPLE, TEAM_CREDITS}` in
+  core/enums.py — grep-verified as the ONLY two layouts that read `slide.content.people`
+  (presentation-worker/src/layouts/gallery-people.ts + team-credits.ts). Imported by BOTH editorial
+  (strip) and plan_validator (D-X2) so the two layers cannot drift. It is a STRUCTURAL schema fact
+  about WHERE the people field may live — NOT a content allowlist of WHICH people may appear (that
+  stays the source-grounded roster's job); said so in the comment to pre-empt the anti-`_PERSON_KEYWORDS`
+  reflex on review.
+- STRIP `_clamp_people_to_legal_types` in editorial.py, wired into `_materialise_slides` at the
+  `people=` line — a sibling of `_normalise_figure`, the existing per-field legality clamp in that
+  same loop. Drops `content.people` from any slide type outside PEOPLE_RENDERING_SLIDE_TYPES and LOGS
+  `editorial_stripped_misplaced_people` (extra: slide_type + dropped names).
+- WIDENED D-X1 (plan_validator `_check_deck_invented_figures`): roster-checks portrayed people on ALL
+  slide types EXCEPT TEAM_CREDITS (was {GALLERY_PEOPLE, TIMELINE}). A non-rostered person on ANY slide
+  type — the Ahn leak included — now fails.
+- NEW D-X2 (`_check_deck_misplaced_people`): roster-INDEPENDENT structural check — `content.people`
+  on a non-PEOPLE_RENDERING slide type FAILS regardless of roster membership. Registered in
+  `validate_deck_against_plan` and in `failing_section_indices` (resolves the pinned slide → its
+  section, same as D-X1). Deleted the now-dead `_PEOPLE_BEARING_TYPES`.
+- PROMPT rule 16 in EDITORIAL_SYSTEM (static/cached): the `people` array is ONLY for gallery_people /
+  team_credits; never attach it to any other slide type; a bibliographic citation is not a figure;
+  timeline figures use portrait_prompt; holds regardless of roster.
+
+DEVIATIONS from the literal run-2 REMAINING FIX (each reviewed BEFORE coding; each is the better fix):
+- Strip lives in `_materialise_slides`, NOT `_post_process` (item 2 said _post_process). The REPAIR
+  path does not pass through `_post_process`: `_repair_failing_sections` → `_materialise_slides` →
+  `_splice_sections` → `_post_process_repaired` (which has no strip). A person re-attached during a
+  repair would have shipped. `_materialise_slides` is the one chokepoint BOTH paths share, so the strip
+  covers the repair path structurally, not by remembering a second call site.
+- Strip carve-out is {GALLERY_PEOPLE, TEAM_CREDITS}, NOT {…, TIMELINE}. `content.people` renders only on
+  those two; TIMELINE people live in `portrait_prompt`, a different field the strip never touches.
+  Including TIMELINE would have been harmless but imprecise.
+- Added D-X2 (BETTER tier). Widened D-X1 is a ROSTER check; the run-2 plan justified it as "malformed
+  regardless of roster membership" — but a ROSTERED figure on a wrong slide type passes D-X1's roster
+  gate. D-X2 is the roster-independent structural backstop that actually delivers that justification
+  (and makes the public `validate_deck_against_plan` self-sufficient on un-stripped decks). D-X1 alone
+  fully fixes the empty-roster sCO2 case; D-X2 closes the rostered-misplacement subclass that didn't
+  occur on either deck but the gate should still catch.
+- The strip LOGS (run-2 plan was silent). A silent drop would hide whether the executor STILL leaks
+  after prompt rule 16. The gate goes green either way (the strip cleans before the gate runs), so the
+  log line is the only tell — see watch-item 2.
+
+LAYERING (honest framing): in the LIVE path the strip runs at materialise, BEFORE the deck-vs-plan gate,
+so the widened D-X1 / D-X2 essentially never fire in production — the strip pre-empts them. They are the
+BACKSTOP that matters when `validate_deck_against_plan` runs on an un-stripped deck (offline tools,
+tests) or if a future refactor bypasses the strip; i.e. they keep the PUBLIC gate honest, they are not
+the live enforcer. The strip is the live enforcer; prompt rule 16 is the soft layer at the source.
+
+VERIFIED locally (gates green):
+- pytest tests/: 1280 passed / 32 skipped (was 1274/32; +6 new — 2 validator [non-rostered person on a
+  keywords slide → D-X1; rostered person on a keywords slide → D-X2 and NOT D-X1] + 4 editorial [strip
+  removes from non-people types and logs; preserves gallery+team; full generate_deck_spec strips the
+  leak BEFORE the gate with NO repair; EDITORIAL_SYSTEM rule-16 text pin]; plus the existing
+  team-credits test strengthened with a D-X2 negative). Same 32-skip env-gated set.
+- ruff check + format --check: clean on all 6 changed files (enums.py working-tree CRLF normalised to
+  LF per ruff.toml line-ending=lf; index was already LF → no churn, the diff is +17 added lines only).
+  pyright packages/: 0 errors / 0 warnings / 0 informations.
+- Renderer / harness / orchestrator: ZERO changes. `scripts/proof_planner_phase2.py` is byte-for-byte
+  unchanged — its `_deck_person_names` reads the FINAL (post-strip) deck, so the sCO2 `no_people` bar
+  passes once the strip runs; no harness edit was needed.
+
+NOT verified locally (server Vertex gate = DONE). On the re-run, watch TWO things:
+1. ENLIGHTENMENT still passes — the D-F1 × strip vector. `_check_deck_figure_adherence` collects
+   portrayed people via `content.people` REGARDLESS of slide_type, so a planned figure parked on a
+   non-gallery slide currently satisfies D-F1; the strip removes it → D-F1 could fail → the one repair
+   fires → if it re-misplaces, raises EditorialDeckPlanMismatchError. Low risk (run-2 put Bach/Mozart on
+   GALLERY slides 2/8/11, which the strip preserves; the harness Bach/Mozart bars catch a regression
+   loudly) — but it is the #1 thing to confirm green.
+2. sCO2 now passes — no person on the keywords slide. Grep `phase2_proof.log` for
+   `editorial_stripped_misplaced_people`: PRESENT = the executor still leaks (now cleaned, gate still
+   green — debt to log); ABSENT = prompt rule 16 stopped it at the source. Either way the gate is green;
+   the log is the only signal of which.
 
 ## PLAN
 1. [x] Free batch: A · C2 · B-interim — DONE 48f713b

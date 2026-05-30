@@ -545,6 +545,55 @@ def test_team_credits_authors_not_flagged_d_x1() -> None:
     result = validate_deck_against_plan(deck, _good_plan())
     assert result.passed, _failure_ids(result.findings)
     assert "D-X1" not in _check_ids(result.findings)
+    # team_credits renders content.people legitimately, so it is exempt from the
+    # misplaced-people structural gate too — neither roster nor placement fires.
+    assert "D-X2" not in _check_ids(result.findings)
+
+
+def test_non_rostered_person_on_keywords_slide_fails_d_x1() -> None:
+    """The sCO2 run-2 leak shape: a non-rostered person attached to a
+    typographic_keywords slide (NOT gallery/timeline) → D-X1 fires.
+
+    D-X1 was scoped to gallery/timeline and missed exactly this — the executor
+    put 'Ahn, Y. et al.' on a typographic_keywords slide and the deck-vs-plan
+    gate waved it through. Widened to all-but-TEAM_CREDITS, D-X1 now catches a
+    non-rostered person on ANY slide type. Driven against the validator directly:
+    in the live path the editorial strip removes it before this gate runs, so
+    this pins the gate's standalone behaviour, not the live pipeline."""
+
+    deck = [
+        *_good_deck(),
+        _deck_slide(
+            SlideType.TYPOGRAPHIC_KEYWORDS, section_name="Legacy", people=["Ahn, Y. et al."]
+        ),
+    ]
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert not result.passed
+    d_x1 = [f for f in result.failures if f.check_id == "D-X1"]
+    assert any("Ahn" in (f.message or "") for f in d_x1)
+
+
+def test_rostered_person_on_wrong_slide_type_fails_d_x2_not_d_x1() -> None:
+    """A ROSTERED figure (Voltaire) on a typographic_keywords slide is malformed
+    even though the roster check passes: D-X2 fires, D-X1 does NOT.
+
+    This is the case widened-D-X1 alone misses — Voltaire IS in the roster, so
+    the roster gate waves the slide through — and is exactly why D-X2 (the
+    roster-independent structural placement check) earns its place."""
+
+    deck = [
+        *_good_deck(),
+        _deck_slide(SlideType.TYPOGRAPHIC_KEYWORDS, section_name="Legacy", people=["Voltaire"]),
+    ]
+    result = validate_deck_against_plan(deck, _good_plan())
+    assert not result.passed
+    assert "D-X2" in _failure_ids(result.findings)
+    # Voltaire is rostered, so the roster gate must NOT flag THIS slide as invented.
+    appended_index = len(deck) - 1
+    d_x1_here = [
+        f for f in result.failures if f.check_id == "D-X1" and f.slide_index == appended_index
+    ]
+    assert d_x1_here == []
 
 
 def test_deck_invented_section_warns_not_fails_d_a1() -> None:

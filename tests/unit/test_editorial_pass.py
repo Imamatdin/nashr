@@ -9,6 +9,7 @@ are tested without any stubs.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -480,6 +481,18 @@ def test_editorial_prompt_carries_subject_pick_guidance() -> None:
     assert "sCO₂ Achieves PUE 1.08" in prompt
 
 
+def test_editorial_prompt_carries_people_field_placement_rule() -> None:
+    # Rule 16 (Phase-2 run-2 fix): the people array is ONLY for gallery_people /
+    # team_credits; the executor must not attach it elsewhere (the sCO2 leak put
+    # a citation on a typographic_keywords slide). The strip is the hard layer,
+    # this prompt rule is the soft one — pin its text so a future edit that drops
+    # the rule is forced through this test, matching the DATA-SHAPE rule pins.
+    prompt = EDITORIAL_SYSTEM
+    assert "gallery_people and team_credits slides" in prompt
+    assert 'NEVER attach "people" to any other slide type' in prompt
+    assert "bibliographic citation" in prompt
+
+
 def _chart_payload(chart_type: str, series: list[dict[str, Any]]) -> dict[str, Any]:
     """Return a minimal chart_data slide payload for the parser."""
 
@@ -651,6 +664,115 @@ def test_no_figure_prompt_leaves_both_fields_null() -> None:
     )
     assert content.figure_prompt is None
     assert content.figure_subject_type is None
+
+
+# ---------------------------------------------------------------------------
+# Misplaced-people strip (the Phase-2 run-2 sCO2 leak fix)
+#
+# Sibling of the object-figure clamp above. content.people is rendered ONLY by
+# gallery_people and team_credits (PEOPLE_RENDERING_SLIDE_TYPES); the executor
+# leaked a bibliographic citation into `people` on a typographic_keywords slide.
+# _materialise_slides clamps the field off any slide type that does not render
+# it — covering BOTH the main path and the section-repair path, which both
+# funnel through _materialise_slides — and LOGS the drop so a still-leaking
+# executor stays visible (no silent data loss).
+# ---------------------------------------------------------------------------
+
+
+def test_materialise_strips_people_from_non_people_slide_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="packages.presentation.editorial"):
+        content = _materialise_one(
+            {
+                "slide_index": 0,
+                "slide_type": "typographic_keywords",
+                "title": "sCO2 thermodynamic advantages",
+                "keywords": [{"term": "Brayton cycle", "explanation": "a supercritical CO2 loop"}],
+                "people": [{"name": "Ahn, Y. et al."}],
+            }
+        )
+    assert content.people is None  # stripped: keywords slides never render people
+    assert content.keywords is not None  # the legitimate field is untouched
+    stripped = [
+        r for r in caplog.records if r.getMessage() == "editorial_stripped_misplaced_people"
+    ]
+    assert len(stripped) == 1
+    assert stripped[0].dropped == ["Ahn, Y. et al."]
+    assert stripped[0].slide_type == "typographic_keywords"
+
+
+def test_materialise_preserves_people_on_gallery_and_team(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="packages.presentation.editorial"):
+        gallery = _materialise_one(
+            {
+                "slide_index": 0,
+                "slide_type": "gallery_people",
+                "title": "Enlightenment thinkers",
+                "people": [{"name": "Voltaire"}, {"name": "Montesquieu"}],
+            }
+        )
+        team = _materialise_one(
+            {
+                "slide_index": 0,
+                "slide_type": "team_credits",
+                "title": "Credits",
+                "people": [{"name": "A Student Author"}],
+            }
+        )
+    assert gallery.people is not None
+    assert [p.name for p in gallery.people] == ["Voltaire", "Montesquieu"]
+    assert team.people is not None
+    assert [p.name for p in team.people] == ["A Student Author"]
+    assert "editorial_stripped_misplaced_people" not in caplog.text
+
+
+async def test_generate_deck_spec_strips_misplaced_person_before_plan_gate() -> None:
+    """End-to-end ordering proof: the executor leaks a non-rostered person onto a
+    typographic_keywords slide, but the materialise-time strip removes it BEFORE
+    the deck-vs-plan gate runs, so the deck passes with NO repair.
+
+    The stub LLM has exactly ONE scripted response; a repair would request a
+    second and raise "ran out of scripted responses". Generation succeeding on
+    one call therefore proves the strip pre-empted the gate (no D-X1/D-X2 fired),
+    which is the live-path ordering the fix depends on. The plan is figure-free,
+    so an un-stripped 'Ahn' would be both non-rostered (D-X1) and misplaced
+    (D-X2)."""
+
+    payload = _llm_slides_payload(
+        [
+            {"slide_index": 0, "section_index": 0, "slide_type": "title_hero", "title": "Cooling"},
+            {
+                "slide_index": 1,
+                "section_index": 0,
+                "slide_type": "typographic_keywords",
+                "title": "Key terms",
+                "keywords": [{"term": "PUE", "explanation": "power usage effectiveness"}],
+                "people": [{"name": "Ahn, Y. et al."}],
+            },
+            {
+                "slide_index": 2,
+                "section_index": 1,
+                "slide_type": "summary_takeaway",
+                "title": "Takeaways",
+                "bullets": ["sCO2 cooling raises achievable rack density."],
+            },
+        ]
+    )
+    editorial = _editorial(_StubLLM([payload]), plan=_stub_plan(2))
+    deck = await editorial.generate_deck_spec(
+        interview=_interview(),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=[_claim("sCO2 cooling reaches 120 kW per rack.")],
+        chunks=[],
+        source_metadata=[],
+    )
+    # The misplaced citation is gone deck-wide — no person survives on any slide.
+    for slide in deck.slides:
+        assert slide.content.people is None
 
 
 # ---------------------------------------------------------------------------

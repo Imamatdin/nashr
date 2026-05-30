@@ -8,6 +8,7 @@ without a migration.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Final
 
 
 class Language(StrEnum):
@@ -138,6 +139,22 @@ class SlideType(StrEnum):
     INTERACTIVE_FILL_BLANK = "interactive_fill_blank"
     INTERACTIVE_TRUE_FALSE = "interactive_true_false"
     INTERACTIVE_DEBATE = "interactive_debate"
+
+
+# Slide types whose renderer actually paints ``SlideContent.people``. Only the
+# gallery-people and team-credits layouts read that field — grep-verified: in
+# packages/presentation-worker/src/layouts/ exactly gallery-people.ts and
+# team-credits.ts consume ``slide.content.people``; every other layout ignores
+# it. This is a STRUCTURAL fact about WHERE the people field may live, NOT a
+# content allowlist of WHICH people may appear (that stays the source-grounded
+# DeckPlan roster's job). The editorial pass clamps ``content.people`` off any
+# other slide type at materialise time, and the deck-vs-plan validator's D-X2
+# check flags it; defining the set once here keeps those two layers from
+# drifting. TIMELINE is intentionally absent: timeline figures live in a node's
+# ``portrait_prompt``, never in ``content.people``.
+PEOPLE_RENDERING_SLIDE_TYPES: Final[frozenset[SlideType]] = frozenset(
+    {SlideType.GALLERY_PEOPLE, SlideType.TEAM_CREDITS}
+)
 
 
 class ChartType(StrEnum):

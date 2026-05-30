@@ -61,7 +61,8 @@ Phase 2 adds the deck-vs-plan gate :func:`validate_deck_against_plan`: a
 pure-function structural check (no LLM) that the editorial pass runs over a
 generated slide sequence to confirm it filled the plan — every planned
 section covered (D-S1), every section's planned figures portrayed (D-F1), no
-person outside the roster on a people slide (D-X1), and a WARN for any slide
+person outside the roster on any slide but TEAM_CREDITS (D-X1), no ``people``
+field on a slide type that does not render it (D-X2), and a WARN for any slide
 tagged with an unplanned section (D-A1). :func:`critique_deck_adversarially`
 is the Phase-3 seam; it is a no-op (never raises) until Phase 3 lands.
 """
@@ -70,7 +71,13 @@ from __future__ import annotations
 
 from typing import Final
 
-from packages.core.enums import AuditSeverity, Language, NarrativePhase, SlideType
+from packages.core.enums import (
+    PEOPLE_RENDERING_SLIDE_TYPES,
+    AuditSeverity,
+    Language,
+    NarrativePhase,
+    SlideType,
+)
 from packages.core.models.presentation import (
     AuditCheckResult,
     DeckPlan,
@@ -99,16 +106,8 @@ _CHECK_COVERAGE_FIGURES: Final[str] = "P-C2"
 _CHECK_DECK_SECTION_COVERAGE: Final[str] = "D-S1"
 _CHECK_DECK_FIGURE_ADHERENCE: Final[str] = "D-F1"
 _CHECK_DECK_INVENTED_FIGURE: Final[str] = "D-X1"
+_CHECK_DECK_MISPLACED_PEOPLE: Final[str] = "D-X2"
 _CHECK_DECK_INVENTED_SECTION: Final[str] = "D-A1"
-
-# Slide types whose people are SOURCE figures subject to the roster gate.
-# TEAM_CREDITS is excluded on purpose: its ``people`` are the deck's own
-# authors/presenters, never figures the source named, so D-X1 must not flag
-# them. GALLERY_PEOPLE carries names in ``content.people``; TIMELINE carries
-# them in each node's ``portrait_prompt``.
-_PEOPLE_BEARING_TYPES: Final[frozenset[SlideType]] = frozenset(
-    {SlideType.GALLERY_PEOPLE, SlideType.TIMELINE}
-)
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +197,20 @@ def validate_deck_against_plan(slides: list[SlideSpec], plan: DeckPlan) -> PlanV
       ``figure_names``, that section's slides collectively portray those
       people (by :class:`PersonItem` name, or by a TIMELINE node's
       ``portrait_prompt``). The deck-side enforcement of the substitution gate.
-    * **D-X1 (no invented figures, FAIL)** — no GALLERY_PEOPLE / TIMELINE slide
-      portrays a person absent from the :attr:`DeckPlan.figures` roster.
-      TEAM_CREDITS is out of scope (its people are the deck's authors). This is
-      the deck-side Beethoven gate and the no-fabricated-people guarantee for
-      sources that name nobody.
+    * **D-X1 (no invented figures, FAIL)** — no slide EXCEPT TEAM_CREDITS
+      portrays a person absent from the :attr:`DeckPlan.figures` roster (by
+      :class:`PersonItem` name or TIMELINE ``portrait_prompt``). TEAM_CREDITS is
+      the sole carve-out (its people are the deck's own authors). This is the
+      deck-side Beethoven gate and the no-fabricated-people guarantee for sources
+      that name nobody — widened from gallery/timeline only, so a non-rostered
+      person leaked onto ANY slide type (the sCO2 "Ahn, Y. et al." on a keywords
+      slide) is caught, not just one on a people slide.
+    * **D-X2 (no misplaced people, FAIL)** — ``content.people`` appears only on
+      the slide types that render it (``PEOPLE_RENDERING_SLIDE_TYPES``:
+      GALLERY_PEOPLE / TEAM_CREDITS). A ``people`` array on any other slide type
+      is malformed REGARDLESS of roster membership — the roster-independent
+      structural complement to D-X1, which catches a rostered figure parked on
+      the wrong slide type that D-X1's roster gate would wave through.
     * **D-A1 (invented section, WARN)** — a slide tagged with a ``section_name``
       that matches no planned section. The executor added structure beyond the
       plan; informational, never blocks export.
@@ -216,6 +224,7 @@ def validate_deck_against_plan(slides: list[SlideSpec], plan: DeckPlan) -> PlanV
     findings.extend(_check_deck_section_coverage(slides, plan))
     findings.extend(_check_deck_figure_adherence(slides, plan))
     findings.extend(_check_deck_invented_figures(slides, plan))
+    findings.extend(_check_deck_misplaced_people(slides))
     findings.extend(_check_deck_invented_sections(slides, plan))
     return PlanValidationResult(findings=findings)
 
@@ -620,12 +629,22 @@ def _check_deck_figure_adherence(slides: list[SlideSpec], plan: DeckPlan) -> lis
 
 
 def _check_deck_invented_figures(slides: list[SlideSpec], plan: DeckPlan) -> list[AuditCheckResult]:
-    """D-X1: no people slide may portray someone outside the roster."""
+    """D-X1: no slide (except TEAM_CREDITS) may portray someone outside the roster.
+
+    Scans every slide's portrayed people — ``content.people`` plus TIMELINE
+    ``portrait_prompt`` names (see :func:`_slide_person_names`) — against the
+    roster on ALL slide types EXCEPT TEAM_CREDITS, whose people are the deck's
+    own authors rather than source figures. The TEAM_CREDITS carve-out is the
+    only exemption: a non-rostered person leaked onto ANY other slide type —
+    a gallery slide (the Beethoven substitution), a timeline node, or a stray
+    ``content.people`` attachment on a keywords/content slide (the sCO2
+    "Ahn, Y. et al." leak) — is the fabrication this gate must surface.
+    """
 
     roster = [figure.name.strip() for figure in plan.figures if figure.name.strip()]
     out: list[AuditCheckResult] = []
     for slide_index, slide in enumerate(slides):
-        if slide.slide_type not in _PEOPLE_BEARING_TYPES:
+        if slide.slide_type is SlideType.TEAM_CREDITS:
             continue
         for name in _slide_person_names(slide):
             if not any(_name_matches(name, roster_name) for roster_name in roster):
@@ -644,6 +663,47 @@ def _check_deck_invented_figures(slides: list[SlideSpec], plan: DeckPlan) -> lis
                         ),
                     )
                 )
+    return out
+
+
+def _check_deck_misplaced_people(slides: list[SlideSpec]) -> list[AuditCheckResult]:
+    """D-X2 (FAIL): ``content.people`` on a slide type whose renderer never paints it.
+
+    Roster-INDEPENDENT, and distinct from D-X1. Only GALLERY_PEOPLE and
+    TEAM_CREDITS render ``content.people`` (:data:`PEOPLE_RENDERING_SLIDE_TYPES`);
+    a ``people`` array on any other slide type is malformed REGARDLESS of whether
+    those people are in the roster. D-X1 (roster membership) misses the case where
+    the misplaced person IS rostered — a planned figure mistakenly attached to a
+    keywords/content slide passes the roster gate yet is still in the wrong place.
+    D-X2 is the structural backstop the editorial strip
+    (:func:`packages.presentation.editorial._clamp_people_to_legal_types`) enforces
+    in the live path. Because that strip runs at materialise time, D-X2 fires only
+    when :func:`validate_deck_against_plan` is handed an un-stripped deck (offline
+    tools, tests, or a path that bypasses the strip) — which is exactly what makes
+    the public gate self-sufficient instead of relying on the strip having run.
+    """
+
+    out: list[AuditCheckResult] = []
+    for slide_index, slide in enumerate(slides):
+        if slide.slide_type in PEOPLE_RENDERING_SLIDE_TYPES or not slide.content.people:
+            continue
+        names = ", ".join(person.name for person in slide.content.people)
+        out.append(
+            AuditCheckResult(
+                check_id=_CHECK_DECK_MISPLACED_PEOPLE,
+                check_name="deck.misplaced_people",
+                passed=False,
+                severity=AuditSeverity.FAIL,
+                slide_index=slide_index,
+                rule_reference=_CHECK_DECK_MISPLACED_PEOPLE,
+                message=(
+                    f"Slide #{slide_index} ({slide.slide_type.value}) attaches people "
+                    f"[{names}], but only gallery_people and team_credits slides render "
+                    "the people field. People belong on those slide types (or a timeline "
+                    "node's portrait_prompt), never here."
+                ),
+            )
+        )
     return out
 
 
@@ -682,11 +742,13 @@ def failing_section_indices(
     """Map deck-vs-plan FAIL findings to the plan-section indices to repair.
 
     D-S1 / D-F1 pin a section directly via ``slide_index`` (it IS the section
-    index). D-X1 pins the offending DECK slide, so we resolve that slide back to
-    its section. The editorial pass uses this to scope its one repair attempt to
-    only the failing sections. Findings that pin nothing resolvable are skipped.
+    index). D-X1 (invented figure) and D-X2 (misplaced people) pin the offending
+    DECK slide, so we resolve that slide back to its section. The editorial pass
+    uses this to scope its one repair attempt to only the failing sections.
+    Findings that pin nothing resolvable are skipped.
     """
 
+    slide_pinning = (_CHECK_DECK_INVENTED_FIGURE, _CHECK_DECK_MISPLACED_PEOPLE)
     out: set[int] = set()
     for finding in failures:
         index = finding.slide_index
@@ -695,7 +757,7 @@ def failing_section_indices(
         if finding.check_id in (_CHECK_DECK_SECTION_COVERAGE, _CHECK_DECK_FIGURE_ADHERENCE):
             if 0 <= index < len(plan.sections):
                 out.add(index)
-        elif finding.check_id == _CHECK_DECK_INVENTED_FIGURE and 0 <= index < len(slides):
+        elif finding.check_id in slide_pinning and 0 <= index < len(slides):
             section = _section_index_of(slides[index], plan)
             if section is not None:
                 out.add(section)
