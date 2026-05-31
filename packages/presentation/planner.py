@@ -23,9 +23,10 @@ extracts the figure roster from people the source actually names. Phase 1
 Phase 2 binds editorial to the plan and deletes that keyword roster: this
 pass now produces the roster editorial fills.
 
-The pass is intentionally small: build a source view, call Sonnet with
-the retry-once-on-bad-JSON pattern the editorial pass uses, parse into a
-:class:`DeckPlan`. There is no silent fallback — a parse failure raises
+The pass is intentionally small: build a source view, call Sonnet with a
+retry-once pattern that feeds the exact schema errors back on a malformed
+response, parse into a :class:`DeckPlan`. There is no silent fallback — a
+repeated parse failure raises
 :class:`PlannerError` rather than degrading to a blank plan, because a
 blank plan is exactly what a downstream executor must not be handed.
 """
@@ -34,9 +35,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 from pydantic import ValidationError
+from pydantic_core import ErrorDetails
 
 from packages.core.llm import LLMClient
 from packages.core.models.presentation import (
@@ -52,6 +54,7 @@ from packages.core.models.source import (
 from packages.core.prompts import (
     PLANNER_FEEDBACK_HEADER,
     PLANNER_RETRY_SUFFIX,
+    PLANNER_SCHEMA_RETRY_HEADER,
     PLANNER_SYSTEM,
     PLANNER_USER,
 )
@@ -79,6 +82,14 @@ _MAX_CHARS_PER_CHUNK: Final[int] = 4_000
 # ContentAnalysis (200) so the planner sees the same breadth the
 # editorial pass would have seen.
 _MAX_CLAIMS_FORWARDED: Final[int] = 200
+
+# How many schema-validation errors we translate into the retry prompt and the
+# log line. A response with more violations than this is malformed beyond
+# targeted repair; we show the first N and tell the model to re-check every
+# field. Bounds prompt/log growth — the same no-unbounded-LLM-input discipline
+# this module applies to chunks and claims above.
+_MAX_SCHEMA_ERRORS_FEEDBACK: Final[int] = 20
+_MAX_SCHEMA_ERRORS_LOGGED: Final[int] = 12
 
 
 class PlannerError(RuntimeError):
@@ -122,7 +133,8 @@ class PlannerPass:
         plan. When supplied, the specific problems are appended to the user
         prompt so this re-plan fixes the exact sections/figures the validator
         flagged (the editorial pass's one plan-reject retry). It is distinct
-        from the malformed-JSON retry inside :meth:`_call_with_retry`.
+        from the parse/schema retry inside :meth:`_call_with_retry`, which
+        recovers a response that never produced a valid DeckPlan at all.
         """
 
         system = PLANNER_SYSTEM
@@ -141,12 +153,24 @@ class PlannerPass:
         return await self._call_with_retry(system, user)
 
     async def _call_with_retry(self, system: str, user: str) -> DeckPlan:
-        """One Sonnet call; on bad JSON or schema, retry once with a stricter suffix.
+        """One Sonnet call; on failure, retry ONCE with a failure-specific nudge.
 
-        Mirrors :meth:`EditorialPass._call_editorial_with_retry`. After two
-        failures we raise rather than synthesising a bland plan: the
-        planner's whole job is to ground the deck, so an ungrounded
-        substitute would silently reintroduce the bug.
+        The retry is INFORMED, not blind. The two failure modes need different
+        corrections, and conflating them is why the first design could not
+        recover a schema violation:
+
+        * Malformed JSON (could not parse, or parsed to a non-object) takes
+          :data:`PLANNER_RETRY_SUFFIX` — "return ONLY a JSON object".
+        * Valid JSON that FAILS DeckPlan validation takes the EXACT field errors,
+          already translated into corrective instructions (see
+          :func:`_format_schema_feedback`). At temperature 0 a blind resample
+          re-rolls the same near-boundary output; telling the model which field
+          violated the contract is what moves it off the boundary.
+
+        After two failures we raise rather than synthesising a bland plan: the
+        planner's whole job is to ground the deck, so an ungrounded substitute
+        would silently reintroduce the bug. We do NOT add a second blind retry
+        for the reason above — more rolls at temperature 0 do not help.
         """
 
         first = await self._get_llm().complete(
@@ -156,23 +180,32 @@ class PlannerPass:
             max_tokens=PLANNER_MAX_TOKENS,
         )
         parsed = _parse_plan(first.content)
-        if parsed is not None:
-            return parsed
+        if parsed.plan is not None:
+            return parsed.plan
 
-        logger.warning(
-            "planner_first_attempt_unparseable",
-            extra={"response_length": len(first.content)},
-        )
+        if parsed.schema_feedback is not None:
+            logger.warning(
+                "planner_first_attempt_schema_invalid_retrying",
+                extra={"response_length": len(first.content)},
+            )
+            retry_user = user + parsed.schema_feedback
+        else:
+            logger.warning(
+                "planner_first_attempt_malformed_json_retrying",
+                extra={"response_length": len(first.content)},
+            )
+            retry_user = user + PLANNER_RETRY_SUFFIX
+
         retry = await self._get_llm().complete(
             system=system,
-            user=user + PLANNER_RETRY_SUFFIX,
+            user=retry_user,
             model=SONNET_MODEL,
             max_tokens=PLANNER_MAX_TOKENS,
         )
         parsed = _parse_plan(retry.content)
-        if parsed is None:
+        if parsed.plan is None:
             raise PlannerError("Planner failed to return a valid DeckPlan after one retry.")
-        return parsed
+        return parsed.plan
 
 
 # ---------------------------------------------------------------------------
@@ -299,31 +332,128 @@ def _format_plan_feedback(findings: list[AuditCheckResult]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _parse_plan(text: str) -> DeckPlan | None:
-    """Decode a planner LLM response into a :class:`DeckPlan`, or None.
+class _PlanParse(NamedTuple):
+    """Outcome of parsing one planner response.
 
-    Returns ``None`` on either malformed JSON or schema-validation failure;
-    the caller retries once and then raises :class:`PlannerError`. We do
-    not attempt the partial-coercion salvage the editorial pass uses,
-    because a planner output that fails schema validation almost always
-    indicates the model misread the contract (figure missing from
-    roster, thesis below 12 chars, sections under 2) — those are exactly
-    the failures the retry suffix is designed to correct, and a coerced
-    plan would silently weaken the very constraints the validator gate
-    will then enforce.
+    ``plan`` is the validated :class:`DeckPlan`, or None on any failure.
+    ``schema_feedback`` is the model-facing correction text — populated ONLY
+    when the response parsed as a JSON object but failed DeckPlan validation,
+    so :meth:`PlannerPass._call_with_retry` can make the retry INFORMED. It
+    stays None on malformed JSON (which takes the generic JSON nudge) and on
+    success. The two-field shape is what lets the caller distinguish the two
+    failure modes — the single ``DeckPlan | None`` it replaced could not.
+    """
+
+    plan: DeckPlan | None
+    schema_feedback: str | None
+
+
+def _parse_plan(text: str) -> _PlanParse:
+    """Decode a planner LLM response into a :class:`DeckPlan`.
+
+    Returns a :class:`_PlanParse`. On malformed JSON (unparseable, or parsed to
+    a non-object) both fields are None — the caller resamples with the generic
+    JSON suffix. On a JSON object that FAILS DeckPlan validation, ``plan`` is
+    None and ``schema_feedback`` carries the exact field errors translated into
+    corrective instructions, so the retry fixes the specific violation instead
+    of resampling blind.
+
+    We do not attempt the partial-coercion salvage the editorial pass uses: a
+    planner output that fails schema validation indicates the model misread the
+    contract (an extra field, an invalid slide_type, sections over 8), and a
+    coerced plan would silently weaken the very constraints the validator gate
+    will then enforce. The informed retry is the correct recovery — it repairs
+    the misread rather than papering over it.
     """
 
     obj = _try_parse_object(text)
     if obj is None:
-        return None
+        return _PlanParse(plan=None, schema_feedback=None)
     try:
-        return DeckPlan.model_validate(obj)
+        return _PlanParse(plan=DeckPlan.model_validate(obj), schema_feedback=None)
     except ValidationError as exc:
+        errors = exc.errors(include_input=False)
         logger.warning(
-            "planner_schema_validation_failed",
-            extra={"error": str(exc)[:1000]},
+            # Summary in the MESSAGE (not just `extra`) so it surfaces even under
+            # a default formatter that drops `extra` fields — the reason the
+            # original error was invisible in the Phase-2 gate console.
+            "planner_schema_validation_failed: %s",
+            _summarise_schema_errors(errors),
+            extra={"error_locs": [_loc_path(e["loc"]) for e in errors]},
         )
-        return None
+        return _PlanParse(plan=None, schema_feedback=_format_schema_feedback(errors))
+
+
+def _loc_path(loc: tuple[int | str, ...]) -> str:
+    """Render a pydantic error ``loc`` tuple as a dotted field path.
+
+    ``('sections', 0, 'planned_slide_types', 0)`` -> ``sections.0.planned_slide_types.0``.
+    """
+
+    return ".".join(str(part) for part in loc)
+
+
+def _summarise_schema_errors(errors: list[ErrorDetails]) -> str:
+    """Compact ``path (type)`` summary for the log line and BUILD_STATE.
+
+    Distinct from :func:`_format_schema_feedback`: this is the operator-facing
+    one-liner (which field, which rule); that one is the model-facing repair
+    instruction. Capped so a wildly malformed response cannot blow up the log.
+    """
+
+    shown = errors[:_MAX_SCHEMA_ERRORS_LOGGED]
+    summary = "; ".join(f"{_loc_path(e['loc'])} ({e['type']})" for e in shown)
+    if len(errors) > _MAX_SCHEMA_ERRORS_LOGGED:
+        summary += f"; (+{len(errors) - _MAX_SCHEMA_ERRORS_LOGGED} more)"
+    return summary
+
+
+def _format_schema_feedback(errors: list[ErrorDetails]) -> str:
+    """Translate pydantic validation errors into model-facing repair instructions.
+
+    Leans on pydantic's own ``msg`` so the valid enum set and the numeric bounds
+    come from the schema at runtime — no hardcoded slide-type list or length
+    caps to drift out of sync. The two common misreads get an explicit
+    imperative; everything else passes ``msg`` through, which is already
+    actionable ("List should have at most 8 items after validation, not 9").
+    Appended to the retry prompt under :data:`PLANNER_SCHEMA_RETRY_HEADER`,
+    mirroring how :func:`_format_plan_feedback` feeds validator findings back.
+    """
+
+    bullets: list[str] = []
+    for err in errors[:_MAX_SCHEMA_ERRORS_FEEDBACK]:
+        loc = _loc_path(err["loc"])
+        error_type = err["type"]
+        message = err["msg"]
+        if error_type == "extra_forbidden":
+            field = err["loc"][-1] if err["loc"] else loc
+            bullets.append(
+                f"  - Remove the field `{field}` (at `{loc}`). The DeckPlan "
+                "schema forbids any field it does not define — emit only the "
+                "documented fields, nothing extra."
+            )
+        elif error_type == "enum":
+            # pydantic's msg lists ALL SlideType values, including the
+            # interactive_* ones rule 6 forbids in planned_slide_types (a later
+            # pass appends those). Add the caveat so the retry menu does not
+            # contradict the system prompt on the prime-suspect trip.
+            caveat = (
+                " Do NOT use any interactive_* value here — those are appended by"
+                " a separate pass, not planned."
+                if "planned_slide_types" in err["loc"]
+                else ""
+            )
+            bullets.append(f"  - The value at `{loc}` is not allowed. {message}.{caveat}")
+        elif error_type == "missing":
+            bullets.append(f"  - Add the required field `{loc}`.")
+        else:
+            bullets.append(f"  - Fix `{loc}`: {message}.")
+    if len(errors) > _MAX_SCHEMA_ERRORS_FEEDBACK:
+        bullets.append(
+            f"  - (+{len(errors) - _MAX_SCHEMA_ERRORS_FEEDBACK} more schema errors "
+            "not shown — re-check every field against the documented schema.)"
+        )
+    return PLANNER_SCHEMA_RETRY_HEADER + "\n".join(bullets)
 
 
 def _try_parse_object(text: str) -> dict[str, Any] | None:

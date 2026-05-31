@@ -777,6 +777,98 @@ passes once the executor people-leak is fixed). The leak fix is now CODE COMPLET
 green — see `PHASE 2 — RUN-2 FIX` below. DONE = Iko's Vertex re-run is green on BOTH decks, THEN merge
 `feat/planner-bound-editorial` to main.
 
+## PHASE 2 — RUN-3 FIX (planner schema-retry robustness): CODE COMPLETE, gate ready for re-run
+SUPERSEDES the run-2 "definition of done" above: in run-3 the run-2 people-leak fix is CONFIRMED
+WORKING, and a different, UPSTREAM blocker surfaced and is now fixed.
+
+WHAT RUN-3 SHOWED:
+- ENLIGHTENMENT: PASS, cleaner than run-2. 24 slides; real thinkers on every gallery slide
+  (Voltaire/Montesquieu/Rousseau/Diderot, Smit/Defoe/Swift/Kant/Goethe, Newton/Leibniz/Euler,
+  Bach/Mozart, Voltaire/Russo); people NOT null; Beethoven ABSENT; INTERACTIVE_MATCHING present;
+  round-trips; scoped repair fired once and passed. The run-2 fix (d12fa2d:
+  `_clamp_people_to_legal_types` + widened D-X1 + D-X2) is confirmed in the running container, and
+  the D-F1 × strip regression vector did NOT bite — Bach/Mozart survived the strip.
+- sCO2: FAIL — but NOT on the people-leak (that fix never got exercised; the planner died upstream).
+  BOTH the first planner attempt AND the retry produced a DeckPlan that FAILED Pydantic validation
+  (`planner_schema_validation_failed` ×2 → PlannerError). This is the run-2 WATCH-ITEM (~line 760)
+  ESCALATING: run-2 the internal retry recovered once; run-3 both attempts failed. "Revisit if
+  frequent" came due.
+
+ROOT CAUSE (diagnosed before any fix — the no-guess discipline):
+- NOT the empty figures roster (the tempting "ironic" hypothesis). Disproven three ways: (1) the
+  schema has NO min_length on `figures` (presentation.py: `Field(default_factory=..., max_length=30)`);
+  a deterministic local probe shows `figures=[]` + empty `figure_names` validates clean. (2) In run-2
+  the sCO2 planner SUCCEEDED (proof harness calls plan_deck directly; `ahn_excluded` passed) —
+  impossible if the schema rejected empty rosters, since the correct plan for this source ALWAYS has
+  `figures=[]`. (3) Every validator guards `if plan.figures:`. The empty roster is correct output and
+  MUST stay valid — no placeholder figure was added (there was no bound to satisfy).
+- The real failure is an INTERMITTENT schema-edge trip. The planner runs at temperature 0
+  (llm.complete default, not overridden) on a deterministic prompt, so this is NOT i.i.d. sampling at
+  some p: the sCO2 source pushes output to the schema boundary (a stray field under extra="forbid",
+  or a slide_type/phase enum near-miss, or sections>8, or a sub-12-char thesis — the full candidate
+  set, probe-confirmed), and the hosted endpoint's residual non-determinism flips run-2 (recovered)
+  vs run-3 (did not). A blind resample at temp 0 re-rolls the same near-boundary output — which is
+  WHY retry-once could not recover and WHY a 2nd blind retry would not help.
+- The retry was BLIND: on schema failure it appended only PLANNER_RETRY_SUFFIX (generic "return ONLY
+  JSON" — carries nothing about WHICH field failed). The editorial layer-2 retry already feeds
+  specific findings back (PLANNER_FEEDBACK_HEADER); the schema retry did not. That asymmetry is the
+  bug.
+
+WHAT SHIPPED (3 files: 2 source + 1 test) on feat/planner-bound-editorial:
+- LOGGING (planner.py `_parse_plan`): logs `exc.errors(include_input=False)` and puts a compact
+  `path (type)` summary IN THE MESSAGE STRING (`planner_schema_validation_failed: <summary>`), so it
+  surfaces even under a default formatter that drops `extra` (the reason run-3's console showed only
+  the bare event). loc/type is in the stderr WARNING lines, BOTH attempts — NOT in the PlannerError
+  message (stays generic). Renamed the misnamed `planner_first_attempt_unparseable` (JSON parsed;
+  schema failed) → branch-specific `..._schema_invalid_retrying` / `..._malformed_json_retrying`.
+- INFORMED RETRY (planner.py `_call_with_retry`; `_parse_plan` now returns `_PlanParse(plan,
+  schema_feedback)`): on a ValidationError (distinct from JSONDecodeError) the exact field errors are
+  translated to corrective instructions (`_format_schema_feedback`) and appended under the new
+  PLANNER_SCHEMA_RETRY_HEADER — mirrors the layer-2 machinery. extra_forbidden → "Remove the field
+  `X`"; enum → pydantic's msg (echoes the valid set at RUNTIME — no hardcoded slide-type list) + an
+  interactive_* caveat when the loc is planned_slide_types (so the menu doesn't contradict rule 6);
+  length/count → pydantic's bound text. Malformed JSON keeps the generic suffix. NO 2nd blind retry.
+  Robust to ALL candidate trips at once, without knowing which fired.
+- PROMPT (PLANNER_SYSTEM, static/cached): rule 7 people-free carve-out (source names no subjects →
+  `figures: []`, `figure_names` empty; a cited author is NOT a portrayed subject); rule 6
+  no-invalid-slide-type (no equation/diagram/schematic; use content_split/data_emphasis/chart_data/
+  table_compact); NEW rule 10 "A PRESENTATION IS NOT A PAPER" (no citation-as-people; no
+  Thank-You/Questions/acknowledgements closer).
+- DEVIATION (better fix, beyond the 4 planned steps): FIXED a latent bug in PLANNER_SYSTEM — its
+  OUTPUT FORMAT schema example carried DOUBLED braces (`{{ }}`), a copy-paste artifact from the
+  `.format()`-ed PLANNER_USER. PLANNER_SYSTEM is used RAW (never `.format()`-ed; its own comment says
+  "fully static"), so the model literally saw malformed `{{ }}` JSON — a confusing schema example
+  that RAISES the schema-edge trip rate this fix targets. Now single braces. Touches BOTH decks
+  (see watch-item 1).
+
+VERIFIED locally (gates green; NO Vertex creds locally — Iko runs the gate):
+- pytest tests/: 1284 passed / 32 skipped (was 1280/32; +4 — informed retry carries the field path;
+  schema failure logs the locs; empty-roster schema guard; people-free plan_deck accepts first try).
+  Same env-gated 32-skip set.
+- ruff check + format --check: clean on all 3 changed files. pyright packages/: 0/0/0.
+- Direct probes (no LLM): `figures=[]` validates; informed retry recovers schema-invalid→valid in 2
+  calls with the field path IN the retry prompt; malformed JSON uses the generic suffix; both-fail
+  raises; enum caveat fires only for planned_slide_types.
+
+NOT verified locally (server Vertex gate = DONE). On the re-run, watch TWO things, CO-EQUAL:
+1. ENLIGHTENMENT MUST STAY CLEAN — the #1 regression risk. The prompt changes (brace fix, rule 10
+   closer guidance, rule 7 carve-out) touch EVERY deck; stubbed unit tests CANNOT prove the live
+   Enlightenment deck still yields Bach/Mozart, Beethoven-absent, INTERACTIVE_MATCHING present,
+   round-trip. Confirm it loud. "1284 passed" says nothing about this.
+2. sCO2 now produces a valid plan — empty-roster, no people slide, charts intact, round-trip.
+   CAPTURE/grep stderr for `planner_schema_validation_failed` on BOTH attempts and record the actual
+   loc/type HERE — the one diagnostic run-3 lacked. If the line still appears but the gate passes,
+   the informed retry recovered (and the prompt fix may be reducing the first-pass trip rate); if it
+   is absent, the prompt carve-out stopped the trip at the source. Either way the gate is green.
+
+PENDING (Iko's Vertex run, then merge): the actual sCO2 loc/type, and both decks' bars. DONE = green
+on BOTH decks → merge feat/planner-bound-editorial to main → Phase 2 closes.
+
+LOGGED DEBT (do NOT chase now; separate quality item): the executor/planner default to
+academic-paper and generic-deck furniture on formal sources — e.g. resources_links / references
+slides the model reaches for by default. Rule 10 attacks the citation/thank-you slop at the planner;
+the broader furniture-overuse tuning is later work, not Phase 2.
+
 ## PHASE 2 — RUN-2 FIX (sCO2 executor people-leak): CODE COMPLETE, gate ready for re-run
 The run-2 leak (executor attached `people=[Ahn, Y. et al.]` to a `typographic_keywords` slide; D-X1
 was scoped to GALLERY_PEOPLE/TIMELINE and missed it) is fixed in code on

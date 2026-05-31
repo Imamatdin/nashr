@@ -7,6 +7,10 @@ mock the LLM client with scripted JSON responses to verify:
 * a valid response yields a :class:`DeckPlan`
 * a malformed response is retried once
 * two malformed responses raise :class:`PlannerError`
+* a schema-invalid response drives an INFORMED retry that names the failing
+  fields (not a blind resample), and that failure is logged with field paths
+* an empty figures roster — the correct plan for a people-free source — is
+  valid, both at the schema layer and through ``plan_deck``
 * the source view fed to the prompt actually contains the chunk text
   (the structural bug the planner exists to fix)
 """
@@ -205,6 +209,141 @@ async def test_plan_deck_raises_planner_error_after_two_failures() -> None:
             source_metadata=[],
         )
     assert len(stub.calls) == 2
+
+
+async def test_plan_deck_informed_retry_carries_the_schema_error() -> None:
+    """The schema-failure retry is INFORMED, not blind — it names the bad field.
+
+    A response that parses as JSON but violates the schema (here an extra
+    top-level field, which ``extra="forbid"`` rejects) must drive a retry whose
+    prompt names the offending field and the fix. At temperature 0 a blind
+    resample re-rolls the same near-boundary output, so the field path reaching
+    the model is what makes recovery possible. The pre-existing
+    ``test_plan_deck_retries_once_on_schema_mismatch`` cannot pin this: its stub
+    replays a valid second response regardless of what the retry prompt says, so
+    it passes whether the retry is informed or blind. This one fails if the
+    retry goes back to the generic suffix.
+    """
+
+    bad_payload = _valid_plan_payload()
+    bad_payload["unexpected_field"] = "the model added a field outside the schema"
+    stub = _StubLLM([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    plan = await planner.plan_deck(
+        interview=_interview(),
+        claims=[],
+        chunks=[_chunk("Volter (1694-1778) din erkinligi ushın gúresken.")],
+        source_metadata=[],
+    )
+    assert isinstance(plan, DeckPlan)
+    assert len(stub.calls) == 2
+    retry_prompt = stub.calls[1][1]
+    assert "unexpected_field" in retry_prompt
+    assert "Remove the field" in retry_prompt
+    # It must be the schema nudge, not the malformed-JSON one.
+    assert "FAILED schema validation" in retry_prompt
+
+
+async def test_plan_deck_logs_schema_error_field_paths(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A schema failure logs WHICH fields failed, in the message itself.
+
+    The Phase-2 gate console showed only ``planner_schema_validation_failed``
+    with no detail because the error was stashed in a logging ``extra`` field
+    that the default formatter drops. The field path + rule must live in the
+    rendered MESSAGE so they surface regardless of the consumer's formatter.
+    """
+
+    bad_payload = _valid_plan_payload()
+    bad_payload["sections"] = [bad_payload["sections"][0]]  # 1 section -> too_short (min 2)
+    stub = _StubLLM([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    with caplog.at_level("WARNING", logger="packages.presentation.planner"):
+        plan = await planner.plan_deck(
+            interview=_interview(),
+            claims=[],
+            chunks=[_chunk("Volter (1694-1778).")],
+            source_metadata=[],
+        )
+    assert isinstance(plan, DeckPlan)
+    rendered = [
+        record.getMessage()
+        for record in caplog.records
+        if "planner_schema_validation_failed" in record.getMessage()
+    ]
+    assert rendered, "expected a schema-validation warning to be logged"
+    assert "sections" in rendered[0]
+    assert "too_short" in rendered[0]
+
+
+def test_empty_figure_roster_is_schema_valid() -> None:
+    """Regression GUARD (not a reproduction): an empty figures roster validates.
+
+    A source that names no biographical people — a technical paper citing only
+    authors in its references — must produce a :class:`DeckPlan` with
+    ``figures: []`` and sections that name no one. This already validates today;
+    the run-3 sCO2 crash was NOT the schema rejecting an empty roster, it was the
+    blind-retry gap. This test exists to keep the no-minimum-people guarantee at
+    the schema layer: it fails the day someone adds a ``min_length`` to
+    ``figures`` or a cross-field rule that assumes people exist.
+    """
+
+    plan = DeckPlan.model_validate(
+        {
+            "thesis": (
+                "Supercritical CO2 cooling redesigns the data center as one thermodynamic system."
+            ),
+            "audience_takeaway": "sCO2 cooling is the credible path past the air/liquid wall.",
+            "sections": [
+                {
+                    "section_name": "The cooling bottleneck",
+                    "thesis": "Cooling, not computation, is the real ceiling on data-center scale.",
+                    "phase": NarrativePhase.HOOK.value,
+                    "figure_names": [],
+                    "planned_slide_types": ["title_hero"],
+                },
+                {
+                    "section_name": "Results",
+                    "thesis": "Supercritical CO2 cuts PUE to 1.08 and recovers waste heat.",
+                    "phase": NarrativePhase.CLOSE.value,
+                    "figure_names": [],
+                    "planned_slide_types": ["chart_data"],
+                },
+            ],
+            "figures": [],
+            "image_cohesion_note": "Clean engineering schematics, cool slate palette, even lighting.",
+        }
+    )
+    assert plan.figures == []
+    assert all(section.figure_names == [] for section in plan.sections)
+
+
+async def test_plan_deck_accepts_people_free_response() -> None:
+    """A people-free response is accepted first try — no retry, no error.
+
+    The pass-level companion to the schema guard: when the model correctly
+    returns ``figures: []`` for a source that names nobody, ``plan_deck`` accepts
+    it on the FIRST attempt. The Phase-1 tests never had this case — the
+    Enlightenment fixture is people-rich — which is why a people-free regression
+    had no unit-level guard.
+    """
+
+    payload = _valid_plan_payload()
+    payload["figures"] = []
+    for section in payload["sections"]:
+        section["figure_names"] = []
+    stub = _StubLLM([json.dumps(payload)])
+    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    plan = await planner.plan_deck(
+        interview=_interview(),
+        claims=[],
+        chunks=[_chunk("A technical paper that cites only Ahn, Y. et al. in its references.")],
+        source_metadata=[],
+    )
+    assert isinstance(plan, DeckPlan)
+    assert plan.figures == []
+    assert len(stub.calls) == 1
 
 
 # ---------------------------------------------------------------------------
