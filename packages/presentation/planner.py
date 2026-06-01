@@ -38,7 +38,6 @@ import logging
 from typing import Any, Final, NamedTuple
 
 from pydantic import ValidationError
-from pydantic_core import ErrorDetails
 
 from packages.core.llm import LLMClient
 from packages.core.models.presentation import (
@@ -57,6 +56,12 @@ from packages.core.prompts import (
     PLANNER_SCHEMA_RETRY_HEADER,
     PLANNER_SYSTEM,
     PLANNER_USER,
+)
+from packages.presentation._schema_feedback import (
+    Loc,
+    format_schema_feedback,
+    loc_path,
+    summarise_errors,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,14 +87,6 @@ _MAX_CHARS_PER_CHUNK: Final[int] = 4_000
 # ContentAnalysis (200) so the planner sees the same breadth the
 # editorial pass would have seen.
 _MAX_CLAIMS_FORWARDED: Final[int] = 200
-
-# How many schema-validation errors we translate into the retry prompt and the
-# log line. A response with more violations than this is malformed beyond
-# targeted repair; we show the first N and tell the model to re-check every
-# field. Bounds prompt/log growth — the same no-unbounded-LLM-input discipline
-# this module applies to chunks and claims above.
-_MAX_SCHEMA_ERRORS_FEEDBACK: Final[int] = 20
-_MAX_SCHEMA_ERRORS_LOGGED: Final[int] = 12
 
 
 class PlannerError(RuntimeError):
@@ -163,7 +160,8 @@ class PlannerPass:
           :data:`PLANNER_RETRY_SUFFIX` — "return ONLY a JSON object".
         * Valid JSON that FAILS DeckPlan validation takes the EXACT field errors,
           already translated into corrective instructions (see
-          :func:`_format_schema_feedback`). At temperature 0 a blind resample
+          :func:`packages.presentation._schema_feedback.format_schema_feedback`).
+          At temperature 0 a blind resample
           re-rolls the same near-boundary output; telling the model which field
           violated the contract is what moves it off the boundary.
 
@@ -378,82 +376,30 @@ def _parse_plan(text: str) -> _PlanParse:
             # a default formatter that drops `extra` fields — the reason the
             # original error was invisible in the Phase-2 gate console.
             "planner_schema_validation_failed: %s",
-            _summarise_schema_errors(errors),
-            extra={"error_locs": [_loc_path(e["loc"]) for e in errors]},
+            summarise_errors(errors),
+            extra={"error_locs": [loc_path(e["loc"]) for e in errors]},
         )
-        return _PlanParse(plan=None, schema_feedback=_format_schema_feedback(errors))
-
-
-def _loc_path(loc: tuple[int | str, ...]) -> str:
-    """Render a pydantic error ``loc`` tuple as a dotted field path.
-
-    ``('sections', 0, 'planned_slide_types', 0)`` -> ``sections.0.planned_slide_types.0``.
-    """
-
-    return ".".join(str(part) for part in loc)
-
-
-def _summarise_schema_errors(errors: list[ErrorDetails]) -> str:
-    """Compact ``path (type)`` summary for the log line and BUILD_STATE.
-
-    Distinct from :func:`_format_schema_feedback`: this is the operator-facing
-    one-liner (which field, which rule); that one is the model-facing repair
-    instruction. Capped so a wildly malformed response cannot blow up the log.
-    """
-
-    shown = errors[:_MAX_SCHEMA_ERRORS_LOGGED]
-    summary = "; ".join(f"{_loc_path(e['loc'])} ({e['type']})" for e in shown)
-    if len(errors) > _MAX_SCHEMA_ERRORS_LOGGED:
-        summary += f"; (+{len(errors) - _MAX_SCHEMA_ERRORS_LOGGED} more)"
-    return summary
-
-
-def _format_schema_feedback(errors: list[ErrorDetails]) -> str:
-    """Translate pydantic validation errors into model-facing repair instructions.
-
-    Leans on pydantic's own ``msg`` so the valid enum set and the numeric bounds
-    come from the schema at runtime — no hardcoded slide-type list or length
-    caps to drift out of sync. The two common misreads get an explicit
-    imperative; everything else passes ``msg`` through, which is already
-    actionable ("List should have at most 8 items after validation, not 9").
-    Appended to the retry prompt under :data:`PLANNER_SCHEMA_RETRY_HEADER`,
-    mirroring how :func:`_format_plan_feedback` feeds validator findings back.
-    """
-
-    bullets: list[str] = []
-    for err in errors[:_MAX_SCHEMA_ERRORS_FEEDBACK]:
-        loc = _loc_path(err["loc"])
-        error_type = err["type"]
-        message = err["msg"]
-        if error_type == "extra_forbidden":
-            field = err["loc"][-1] if err["loc"] else loc
-            bullets.append(
-                f"  - Remove the field `{field}` (at `{loc}`). The DeckPlan "
-                "schema forbids any field it does not define — emit only the "
-                "documented fields, nothing extra."
-            )
-        elif error_type == "enum":
-            # pydantic's msg lists ALL SlideType values, including the
-            # interactive_* ones rule 6 forbids in planned_slide_types (a later
-            # pass appends those). Add the caveat so the retry menu does not
-            # contradict the system prompt on the prime-suspect trip.
-            caveat = (
-                " Do NOT use any interactive_* value here — those are appended by"
-                " a separate pass, not planned."
-                if "planned_slide_types" in err["loc"]
-                else ""
-            )
-            bullets.append(f"  - The value at `{loc}` is not allowed. {message}.{caveat}")
-        elif error_type == "missing":
-            bullets.append(f"  - Add the required field `{loc}`.")
-        else:
-            bullets.append(f"  - Fix `{loc}`: {message}.")
-    if len(errors) > _MAX_SCHEMA_ERRORS_FEEDBACK:
-        bullets.append(
-            f"  - (+{len(errors) - _MAX_SCHEMA_ERRORS_FEEDBACK} more schema errors "
-            "not shown — re-check every field against the documented schema.)"
+        feedback = format_schema_feedback(
+            errors, header=PLANNER_SCHEMA_RETRY_HEADER, caveat=_planned_slide_type_caveat
         )
-    return PLANNER_SCHEMA_RETRY_HEADER + "\n".join(bullets)
+        return _PlanParse(plan=None, schema_feedback=feedback)
+
+
+def _planned_slide_type_caveat(loc: Loc) -> str:
+    """Extra retry guidance for a ``planned_slide_types`` enum miss.
+
+    Pydantic's enum message lists ALL SlideType values, including the
+    interactive_* ones PLANNER_SYSTEM rule 6 forbids in ``planned_slide_types``
+    (a later pass appends those). Without this, the retry menu would contradict
+    the system prompt on the prime-suspect trip for a technical source.
+    """
+
+    if "planned_slide_types" in loc:
+        return (
+            " Do NOT use any interactive_* value here — those are appended by a "
+            "separate pass, not planned."
+        )
+    return ""
 
 
 def _try_parse_object(text: str) -> dict[str, Any] | None:

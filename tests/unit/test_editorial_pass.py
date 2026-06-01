@@ -20,6 +20,7 @@ import pytest
 
 from packages.core.enums import (
     AudienceType,
+    AuditSeverity,
     BackgroundTreatment,
     ClaimStrength,
     ClaimType,
@@ -40,6 +41,8 @@ from packages.core.models.presentation import (
     DeckPlan,
     DeckSpec,
     DesignDirectionSpec,
+    NarrativeArc,
+    PlannedFigure,
     PlannedSection,
     PresentationInterviewAnswers,
     SlideContent,
@@ -56,10 +59,13 @@ from packages.core.prompts import EDITORIAL_SYSTEM
 from packages.presentation.editorial import (
     SONNET_MODEL,
     WORD_LIMITS,
+    EditorialDeckPlanMismatchError,
     EditorialPass,
     _insert_breathing_after_data,
+    _LLMSlide,
     _materialise_slides,
-    _parse_sequence,
+    _parse_editorial_response,
+    _parse_interactive,
 )
 from packages.presentation.thesis_classifier import ThesisClassifier
 
@@ -284,6 +290,13 @@ def _llm_slides_payload(slides: list[dict[str, Any]]) -> str:
     return json.dumps({"slides": slides})
 
 
+def _parse_slides(text: str) -> list[_LLMSlide] | None:
+    """Slides-only view of a parsed editorial response, for tests that do not
+    assert on the retry feedback (the production parser is _parse_editorial_response)."""
+
+    return _parse_editorial_response(text).slides
+
+
 # ---------------------------------------------------------------------------
 # Structured field parsing (tables / comparison / chart series)
 #
@@ -299,7 +312,7 @@ def _llm_slides_payload(slides: list[dict[str, Any]]) -> str:
 def _materialise_one(slide_payload: dict[str, Any]) -> SlideContent:
     """Parse a single LLM slide payload and return its materialised content."""
 
-    parsed = _parse_sequence(_llm_slides_payload([slide_payload]))
+    parsed = _parse_slides(_llm_slides_payload([slide_payload]))
     assert parsed is not None and len(parsed) == 1
     slides = _materialise_slides(parsed)
     assert len(slides) == 1
@@ -781,7 +794,7 @@ async def test_generate_deck_spec_strips_misplaced_person_before_plan_gate() -> 
 # The editorial schema is intentionally tighter than the model's natural
 # output, so a SINGLE bad field on a SINGLE slide used to fail _LLMSequence
 # validation and collapse the whole deck to the 2-slide "Insufficient source
-# material" fallback. _parse_sequence now salvages the two recurring failure
+# material" fallback. _parse_editorial_response now salvages the recurring failure
 # modes — an over-long string and a slide missing its title — and re-validates
 # once, falling back only when the output is genuinely unusable. These tests
 # lock that behaviour: a fixable field must never throw away the deck, and a
@@ -790,7 +803,7 @@ async def test_generate_deck_spec_strips_misplaced_person_before_plan_gate() -> 
 
 
 def test_overlong_unit_is_truncated_not_whole_deck_rejected() -> None:
-    parsed = _parse_sequence(
+    parsed = _parse_slides(
         _llm_slides_payload(
             [
                 {
@@ -815,7 +828,7 @@ def test_overlong_unit_is_truncated_not_whole_deck_rejected() -> None:
 
 
 def test_null_title_repaired_from_body_keeps_slide() -> None:
-    parsed = _parse_sequence(
+    parsed = _parse_slides(
         _llm_slides_payload(
             [
                 {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"},
@@ -833,7 +846,7 @@ def test_null_title_repaired_from_body_keeps_slide() -> None:
 
 
 def test_empty_string_title_repaired_from_stat_label() -> None:
-    parsed = _parse_sequence(
+    parsed = _parse_slides(
         _llm_slides_payload(
             [
                 {"slide_index": 0, "slide_type": "title_hero", "title": "Real title"},
@@ -851,7 +864,7 @@ def test_empty_string_title_repaired_from_stat_label() -> None:
 
 
 def test_missing_title_key_repaired_from_body() -> None:
-    parsed = _parse_sequence(
+    parsed = _parse_slides(
         _llm_slides_payload(
             [
                 {"slide_index": 0, "slide_type": "title_hero", "title": "Real title"},
@@ -868,7 +881,7 @@ def test_missing_title_key_repaired_from_body() -> None:
 
 
 def test_untitled_slide_with_no_text_is_dropped_not_whole_deck() -> None:
-    parsed = _parse_sequence(
+    parsed = _parse_slides(
         _llm_slides_payload(
             [
                 {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"},
@@ -883,7 +896,7 @@ def test_untitled_slide_with_no_text_is_dropped_not_whole_deck() -> None:
 def test_genuinely_invalid_output_is_not_coerced() -> None:
     # An unknown slide_type is a real defect, not a fixable field. Coercion must
     # not mask it: parsing fails so the pipeline can fall back as before.
-    parsed = _parse_sequence(
+    parsed = _parse_slides(
         _llm_slides_payload(
             [{"slide_index": 0, "slide_type": "not_a_real_slide_type", "title": "x"}]
         )
@@ -978,6 +991,272 @@ async def test_uncoercible_output_falls_back_to_minimal_deck() -> None:
     )
     titles = [s.content.title for s in deck.slides]
     assert "Insufficient source material" in titles
+
+
+# ---------------------------------------------------------------------------
+# Schema-failure resilience: salvage an improvised field + informed retry
+#
+# _LLMSlide is extra="ignore", but its nested domain items (KeywordItem, ...)
+# are extra="forbid", so a stray field on a NESTED item used to nuke the whole
+# deck. The executor now (1) strips an extra_forbidden field in place — no
+# retry, so a one-field trip cannot trigger a whole-deck resample that drops a
+# different section's planned people (the run-4 Enlightenment cascade); and
+# (2) on a NON-salvageable schema error, retries with the exact field errors
+# translated into instructions, not a blind resample.
+# ---------------------------------------------------------------------------
+
+
+def test_extra_field_on_nested_item_is_stripped_not_whole_deck_rejected() -> None:
+    # KeywordItem forbids extras; the model improvised `explanation_note`. Salvage
+    # strips just that key and keeps the slide and its real fields intact.
+    parsed = _parse_slides(
+        _llm_slides_payload(
+            [
+                {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"},
+                {
+                    "slide_index": 1,
+                    "slide_type": "typographic_keywords",
+                    "title": "Key terms",
+                    "keywords": [
+                        {
+                            "term": "PUE",
+                            "explanation": "power usage effectiveness",
+                            "explanation_note": "a field the slide schema does not define",
+                        }
+                    ],
+                },
+            ]
+        )
+    )
+    assert parsed is not None and len(parsed) == 2
+    assert parsed[1].keywords is not None
+    keyword = parsed[1].keywords[0]
+    assert keyword.term == "PUE"
+    assert keyword.explanation == "power usage effectiveness"
+
+
+@pytest.mark.asyncio
+async def test_extra_field_is_salvaged_in_place_without_a_retry() -> None:
+    # The cascade-preventer: a stray nested field is stripped locally in ONE LLM
+    # call. No retry means no whole-deck resample — the run-4 failure was a
+    # blind retry re-rolling the deck and dropping a different section's people.
+    payload = _llm_slides_payload(
+        [
+            {"slide_index": 0, "slide_type": "title_hero", "title": "Cooling"},
+            {
+                "slide_index": 1,
+                "slide_type": "typographic_keywords",
+                "title": "Terms",
+                "keywords": [
+                    {
+                        "term": "PUE",
+                        "explanation": "power usage effectiveness",
+                        "explanation_note": "x",
+                    }
+                ],
+            },
+        ]
+    )
+    stub = _StubLLM([payload])  # exactly ONE scripted response — a retry would exhaust it
+    editorial = _editorial(stub)
+    slides = await editorial._call_editorial_with_retry("sys", "user")
+    assert len(stub.calls) == 1
+    assert len(slides) == 2
+
+
+@pytest.mark.asyncio
+async def test_schema_failure_drives_informed_retry_naming_the_field() -> None:
+    # An unknown slide_type is NOT salvageable (no right value to guess), so the
+    # retry fires; it must NAME the offending field, not blindly resample. The
+    # pre-existing blind suffix carried nothing about what failed.
+    bad = _llm_slides_payload([{"slide_index": 0, "slide_type": "not_a_real_type", "title": "x"}])
+    good = _llm_slides_payload(
+        [{"slide_index": 0, "slide_type": "title_hero", "title": "Cooling that pays"}]
+    )
+    stub = _StubLLM([bad, good])
+    editorial = _editorial(stub)
+    slides = await editorial._call_editorial_with_retry("sys", "USERPROMPT")
+    assert slides is not None and len(slides) == 1
+    assert len(stub.calls) == 2
+    retry_prompt = stub.calls[1][1]
+    assert "slide_type" in retry_prompt
+    # The schema-failure header, not the malformed-JSON suffix.
+    assert "FAILED schema validation" in retry_prompt
+
+
+def test_post_coercion_feedback_names_remaining_error_not_stripped_field() -> None:
+    # Both a salvageable stray field AND a non-salvageable enum on one slide: the
+    # retry feedback must name what is STILL wrong (slide_type) after coercion,
+    # never the field coercion already removed (explanation_note).
+    result = _parse_editorial_response(
+        _llm_slides_payload(
+            [
+                {
+                    "slide_index": 0,
+                    "slide_type": "not_a_real_type",
+                    "title": "x",
+                    "keywords": [{"term": "PUE", "explanation": "ok", "explanation_note": "stray"}],
+                }
+            ]
+        )
+    )
+    assert result.slides is None
+    assert result.schema_feedback is not None
+    assert "slide_type" in result.schema_feedback
+    assert "explanation_note" not in result.schema_feedback
+
+
+def test_interactive_extra_field_on_nested_item_is_stripped() -> None:
+    # Same disease as the slide path: MatchingPair is extra="forbid", so an
+    # improvised field on a pair used to nuke the interactive response. Salvage
+    # strips just that key and keeps the pair (so the INTERACTIVE_MATCHING bar
+    # survives a stray field).
+    result = _parse_interactive(
+        json.dumps(
+            {
+                "matching_pairs": [
+                    {"left": "PUE", "right": "power usage effectiveness", "note": "improvised"}
+                ]
+            }
+        )
+    )
+    assert result.content is not None
+    assert result.schema_feedback is None
+    assert result.content.matching_pairs is not None
+    assert result.content.matching_pairs[0].left == "PUE"
+    assert result.content.matching_pairs[0].right == "power usage effectiveness"
+
+
+@pytest.mark.asyncio
+async def test_interactive_schema_failure_drives_informed_retry() -> None:
+    # A non-salvageable interactive schema error (a quiz question missing required
+    # fields) must drive a retry whose prompt names the offending field — the same
+    # informed retry the slide executor got, so the interactive pass is no longer
+    # the un-inoculated component on the INTERACTIVE_MATCHING bar.
+    bad = json.dumps({"quiz_questions": [{"question": "Q?", "explanation_correct": "x"}]})
+    good = json.dumps({"matching_pairs": [{"left": "A", "right": "B"}]})
+    stub = _StubLLM([bad, good])
+    editorial = _editorial(gemini=stub)
+    content = await editorial._call_interactive_with_retry("sys", "USERPROMPT")
+    assert content is not None
+    assert len(stub.calls) == 2
+    retry_prompt = stub.calls[1][1]
+    assert "options" in retry_prompt
+    assert "FAILED schema validation" in retry_prompt
+
+
+# ---------------------------------------------------------------------------
+# Section repair: keep the planned figures (defense-in-depth + the backstop)
+# ---------------------------------------------------------------------------
+
+
+def _figure_plan() -> DeckPlan:
+    """A plan whose first section MUST portray a real figure, second is a closer."""
+
+    return DeckPlan(
+        thesis="The deck makes one specific, concrete argument grounded in the source.",
+        audience_takeaway="The audience leaves able to state the core argument and its support.",
+        sections=[
+            PlannedSection(
+                section_name="Thinkers",
+                thesis="These named figures concretely reshaped the period's debate.",
+                phase=NarrativePhase.CORE,
+                figure_names=["Adam Smit"],
+                planned_slide_types=[SlideType.GALLERY_PEOPLE],
+            ),
+            PlannedSection(
+                section_name="Close",
+                thesis="The argument lands on one concrete, actionable takeaway.",
+                phase=NarrativePhase.CLOSE,
+                figure_names=[],
+                planned_slide_types=[SlideType.SUMMARY_TAKEAWAY],
+            ),
+        ],
+        figures=[
+            PlannedFigure(
+                name="Adam Smit",
+                years="1723-1790",
+                why_in_source="The source names Smith as a central figure of the section.",
+            )
+        ],
+        image_cohesion_note="A single coherent visual treatment shared across every slide.",
+    )
+
+
+def _arc() -> NarrativeArc:
+    return NarrativeArc(
+        phases=[NarrativePhase.HOOK, NarrativePhase.CORE, NarrativePhase.CLOSE],
+        emphasis_phase=NarrativePhase.CORE,
+    )
+
+
+@pytest.mark.asyncio
+async def test_repair_prompt_makes_required_figures_a_hard_constraint() -> None:
+    # Defense-in-depth: a repair regenerating a section with planned figures must
+    # be TOLD, as a hard requirement, to portray those exact people on a
+    # gallery/timeline slide — listing them is not enough.
+    plan = _figure_plan()
+    stub = _StubLLM(['{"slides": []}'])  # content is irrelevant; we assert the PROMPT
+    editorial = _editorial(stub, plan=plan)
+    failing = [
+        AuditCheckResult(
+            check_id="D-F1",
+            check_name="deck.figure_adherence",
+            passed=False,
+            severity=AuditSeverity.FAIL,
+            slide_index=0,
+            rule_reference="D-F1",
+            message="Section 'Thinkers' planned figure 'Adam Smit' but no slide portrays them.",
+        )
+    ]
+    content = [
+        SlideSpec(
+            slide_index=0,
+            slide_type=SlideType.GALLERY_PEOPLE,
+            section_name="Thinkers",
+            content=SlideContent(title="Thinkers"),
+        )
+    ]
+    await editorial._repair_failing_sections(_interview(), _arc(), plan, content, failing)
+    repair_prompt = stub.calls[0][1]
+    assert "Adam Smit" in repair_prompt
+    assert "MUST appear on a gallery_people or timeline slide" in repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_repair_that_still_drops_a_planned_figure_raises_not_ships() -> None:
+    # The backstop: if the repair comes back STILL missing the section's planned
+    # figure, re-validation must fail and the pass must RAISE — never ship a deck
+    # that contradicts its plan. (This is the guarantee that held on run-4.)
+    plan = _figure_plan()
+    # The repair regenerates section 0 but again portrays nobody.
+    repair_payload = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "gallery_people",
+                "title": "Thinkers",
+            }
+        ]
+    )
+    editorial = _editorial(_StubLLM([repair_payload]), plan=plan)
+    content = [
+        SlideSpec(
+            slide_index=0,
+            slide_type=SlideType.GALLERY_PEOPLE,
+            section_name="Thinkers",
+            content=SlideContent(title="Thinkers"),
+        ),
+        SlideSpec(
+            slide_index=1,
+            slide_type=SlideType.SUMMARY_TAKEAWAY,
+            section_name="Close",
+            content=SlideContent(title="Close", bullets=["One concrete takeaway."]),
+        ),
+    ]
+    with pytest.raises(EditorialDeckPlanMismatchError):
+        await editorial._enforce_plan_adherence(_interview(), _arc(), plan, content)
 
 
 # ---------------------------------------------------------------------------

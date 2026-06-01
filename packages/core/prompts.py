@@ -522,8 +522,27 @@ Return ONLY the JSON object described in the system prompt."""
 
 
 EDITORIAL_RETRY_SUFFIX: str = (
-    "\n\nYour previous response was not a valid JSON object with a 'slides' array. "
-    "Respond with ONLY a JSON object — no prose, no markdown fences."
+    "\n\nYour previous response could not be parsed as a JSON object with a "
+    "'slides' array. Respond with ONLY a JSON object — no prose, no markdown "
+    "fences, no leading or trailing text."
+)
+
+
+# Appended to the editorial executor's user prompt on its internal retry when
+# the FIRST response was valid JSON but FAILED slide-schema validation that
+# coercion could not salvage (distinct from EDITORIAL_RETRY_SUFFIX, which
+# handles malformed JSON). The specific, already-translated field errors follow
+# this header so the retry fixes the EXACT fields that broke the contract
+# instead of resampling the whole deck blind — at temperature 0 a blind resample
+# re-rolls the same near-boundary output, and re-rolls every OTHER section too
+# (which is how a one-field trip can drop a different section's planned people).
+# Mirrors PLANNER_SCHEMA_RETRY_HEADER.
+EDITORIAL_SCHEMA_RETRY_HEADER: str = (
+    "\n\nYour previous response was valid JSON but FAILED schema validation: it "
+    "parsed, but specific fields violated the slide contract. Return a corrected "
+    "JSON object with a 'slides' array — no prose, no markdown fences — that fixes "
+    "EXACTLY the problems below and changes nothing else (keep every other slide, "
+    "and every person already named, exactly as before):\n"
 )
 
 
@@ -546,6 +565,8 @@ SECTIONS TO REGENERATE (return slides ONLY for these; tag each slide with its se
 
 VALIDATION FINDINGS TO FIX (each names the section and the exact problem):
 {findings}
+
+HARD REQUIREMENT — DO NOT DROP PLANNED PEOPLE: every name listed as a section's "required figures" MUST appear on a gallery_people or timeline slide within that section's regenerated slides (a gallery_people slide's `people[].name`, or a timeline node's `portrait_prompt`). Dropping a required figure is the exact failure you are repairing, not an option. If a section lists required figures, your slides for it MUST include a slide that portrays them.
 
 Return ONLY a JSON object with a 'slides' array containing slides for the listed sections ONLY."""
 
@@ -819,6 +840,21 @@ Return ONLY the JSON object described in the system prompt."""
 INTERACTIVE_RETRY_SUFFIX: str = (
     "\n\nYour previous response was not a valid JSON object. "
     "Respond with ONLY a JSON object — no prose, no markdown fences."
+)
+
+
+# Appended to the interactive pass's user prompt on its internal retry when the
+# FIRST response was valid JSON but FAILED schema validation that the stray-field
+# strip could not salvage (distinct from INTERACTIVE_RETRY_SUFFIX, which handles
+# malformed JSON). The interactive content models (MatchingPair, QuizQuestion,
+# ...) are extra="forbid" like the slide items, so the same disease — an
+# improvised field on a nested item — applies here; the same informed retry
+# cures it. Mirrors EDITORIAL_SCHEMA_RETRY_HEADER.
+INTERACTIVE_SCHEMA_RETRY_HEADER: str = (
+    "\n\nYour previous response was valid JSON but FAILED schema validation: it "
+    "parsed, but specific fields violated the interactive-content contract. "
+    "Return a corrected JSON object — no prose, no markdown fences — that fixes "
+    "EXACTLY the problems below and changes nothing else:\n"
 )
 
 

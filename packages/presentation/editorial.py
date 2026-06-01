@@ -41,7 +41,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from typing import Any, Final, cast
+from typing import Any, Final, NamedTuple, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -95,11 +95,18 @@ from packages.core.models.source import (
 from packages.core.prompts import (
     EDITORIAL_REPAIR_USER,
     EDITORIAL_RETRY_SUFFIX,
+    EDITORIAL_SCHEMA_RETRY_HEADER,
     EDITORIAL_SYSTEM,
     EDITORIAL_USER,
     INTERACTIVE_RETRY_SUFFIX,
+    INTERACTIVE_SCHEMA_RETRY_HEADER,
     INTERACTIVE_SYSTEM,
     INTERACTIVE_USER,
+)
+from packages.presentation._schema_feedback import (
+    format_schema_feedback,
+    loc_path,
+    summarise_errors,
 )
 from packages.presentation.plan_validator import (
     failing_section_indices,
@@ -826,13 +833,24 @@ class EditorialPass:
         system: str,
         user: str,
     ) -> list[_LLMSlide]:
-        """One Sonnet call; on bad JSON, retry once with a stricter suffix.
+        """One Sonnet call; on failure, retry ONCE with a failure-specific nudge.
 
-        Both the initial call and the retry use EDITORIAL_LLM_TIMEOUT_SECONDS
-        (longer than the shared default) because a 16k-token plan-bound
-        generation legitimately runs for minutes. The section-repair path
-        (_repair_failing_sections) routes through here too, so it inherits the
-        same timeout.
+        The retry is INFORMED, not blind — the two failure modes need different
+        corrections. Malformed JSON takes :data:`EDITORIAL_RETRY_SUFFIX` ("return
+        ONLY a JSON object"); valid JSON that FAILS slide-schema validation
+        (after coercion) takes the EXACT field errors translated into
+        instructions (see :func:`packages.presentation._schema_feedback.format_schema_feedback`).
+        At temperature 0 a blind resample re-rolls the whole deck — which is how
+        a single stray field on one slide could drop a different section's
+        planned people on the prior gate run; telling the model the one field to
+        fix anchors it to its previous output.
+
+        Both calls use EDITORIAL_LLM_TIMEOUT_SECONDS (longer than the shared
+        default) because a 16k-token plan-bound generation legitimately runs for
+        minutes. The section-repair path (_repair_failing_sections) routes
+        through here too, so it inherits both the timeout and the informed retry.
+        Returns ``[]`` after two failures (the emergency-deck path); we do NOT
+        add a second blind retry — at temperature 0 more rolls do not help.
         """
 
         first = await self._get_llm().complete(
@@ -842,18 +860,19 @@ class EditorialPass:
             max_tokens=16_000,
             timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
-        parsed = _parse_sequence(first.content)
-        if parsed is not None:
-            return parsed
+        parsed = _parse_editorial_response(first.content)
+        if parsed.slides is not None:
+            return parsed.slides
+        retry_user = user + (parsed.schema_feedback or EDITORIAL_RETRY_SUFFIX)
         retry = await self._get_llm().complete(
             system=system,
-            user=user + EDITORIAL_RETRY_SUFFIX,
+            user=retry_user,
             model=SONNET_MODEL,
             max_tokens=16_000,
             timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
-        parsed = _parse_sequence(retry.content)
-        return parsed if parsed is not None else []
+        parsed = _parse_editorial_response(retry.content)
+        return parsed.slides if parsed.slides is not None else []
 
     # ------------------------------------------------------------------
     # Content summary builder
@@ -965,21 +984,30 @@ class EditorialPass:
         system: str,
         user: str,
     ) -> _LLMInteractive | None:
-        """One Gemini Flash call; on bad JSON, retry once."""
+        """One Gemini Flash call; on failure, retry ONCE with a failure-specific nudge.
+
+        The interactive content models (MatchingPair, QuizQuestion, ...) are
+        extra="forbid", so an improvised field on a nested item fails validation
+        the same way it does in the slide executor. The retry is INFORMED:
+        malformed JSON takes the generic suffix; valid JSON that fails schema
+        (after the stray-field strip) takes the EXACT field errors. Returns None
+        after two failures (the caller then produces no interactive slides).
+        """
 
         first = await self._get_gemini().complete(
             system=system, user=user, model=GEMINI_FLASH_MODEL, max_tokens=3_000
         )
         parsed = _parse_interactive(first.content)
-        if parsed is not None:
-            return parsed
+        if parsed.content is not None:
+            return parsed.content
+        retry_user = user + (parsed.schema_feedback or INTERACTIVE_RETRY_SUFFIX)
         retry = await self._get_gemini().complete(
             system=system,
-            user=user + INTERACTIVE_RETRY_SUFFIX,
+            user=retry_user,
             model=GEMINI_FLASH_MODEL,
             max_tokens=3_000,
         )
-        return _parse_interactive(retry.content)
+        return _parse_interactive(retry.content).content
 
     # ------------------------------------------------------------------
     # Step 7 - merge interactive slides
@@ -1059,44 +1087,66 @@ def _format_headline_numbers(numbers: list[str]) -> str:
     return "\n".join(f"  - {n}" for n in numbers)
 
 
-def _parse_sequence(text: str) -> list[_LLMSlide] | None:
-    """Decode an editorial LLM response into typed slide objects.
+class _SequenceParse(NamedTuple):
+    """Outcome of parsing one editorial executor response.
+
+    ``slides`` is the typed slide list, or None on any failure. ``schema_feedback``
+    is the model-facing correction text — populated ONLY when the response parsed
+    as a JSON object but failed slide-schema validation that coercion could not
+    salvage, so :meth:`EditorialPass._call_editorial_with_retry` can make the
+    retry INFORMED. It stays None on malformed JSON (which takes the generic
+    suffix) and on success (including coerced recovery).
+    """
+
+    slides: list[_LLMSlide] | None
+    schema_feedback: str | None
+
+
+def _parse_editorial_response(text: str) -> _SequenceParse:
+    """Decode an editorial LLM response, carrying retry feedback on schema failure.
 
     On a validation failure the response is not thrown away outright: a single
-    fixable field — an over-long unit/label, a slide that forgot its title —
-    must not collapse the whole deck into the emergency fallback. We attempt
-    targeted field-level salvage (see :func:`_coerce_llm_object`) and
-    re-validate once; only output that is still invalid after coercion (i.e.
-    genuinely unusable) is rejected.
+    fixable field — an over-long unit/label, a slide that forgot its title, a
+    stray field the model improvised — must not collapse the whole deck into the
+    emergency fallback. We attempt targeted field-level salvage (see
+    :func:`_coerce_llm_object`) and re-validate once. Output still invalid after
+    coercion is rejected, but its EXACT remaining field errors are translated
+    into ``schema_feedback`` so the caller's retry is informed, not blind. The
+    feedback is built from the POST-coercion error (``exc2``) when coercion ran —
+    so it names what is STILL wrong, not the field already stripped.
     """
 
     obj = _try_parse_object(text)
     if obj is None:
         logger.warning("editorial_parse_failed_not_json len=%d head=%s", len(text), text[:300])
-        return None
+        return _SequenceParse(slides=None, schema_feedback=None)
     try:
-        wrapper = _LLMSequence.model_validate(obj)
+        return _SequenceParse(slides=_LLMSequence.model_validate(obj).slides, schema_feedback=None)
     except ValidationError as exc:
         coerced = _coerce_llm_object(obj, exc)
         if coerced is None:
-            logger.warning("editorial_invalid_schema: %s", str(exc)[:3000])
-            return None
+            errors = exc.errors(include_input=False)
+            logger.warning("editorial_invalid_schema: %s", summarise_errors(errors))
+            feedback = format_schema_feedback(errors, header=EDITORIAL_SCHEMA_RETRY_HEADER)
+            return _SequenceParse(slides=None, schema_feedback=feedback)
         try:
             wrapper = _LLMSequence.model_validate(coerced)
         except ValidationError as exc2:
-            logger.warning("editorial_invalid_after_coercion: %s", str(exc2)[:3000])
-            return None
+            errors2 = exc2.errors(include_input=False)
+            logger.warning("editorial_invalid_after_coercion: %s", summarise_errors(errors2))
+            feedback = format_schema_feedback(errors2, header=EDITORIAL_SCHEMA_RETRY_HEADER)
+            return _SequenceParse(slides=None, schema_feedback=feedback)
         logger.info("editorial_coerced_and_recovered slides=%d", len(wrapper.slides))
-    return wrapper.slides
+        return _SequenceParse(slides=wrapper.slides, schema_feedback=None)
 
 
 def _coerce_llm_object(obj: dict[str, Any], exc: ValidationError) -> dict[str, Any] | None:
-    """Salvage the two recurring LLM failure modes that nuke a whole deck.
+    """Salvage the recurring LLM failure modes that nuke a whole deck.
 
     The editorial schema is intentionally tighter than the model's natural
     output, so a single field on a single slide can fail validation and drop
     the entire deck to the "insufficient source material" fallback. This reacts
-    to exactly two pydantic error classes and leaves everything else to that
+    to exactly three pydantic error classes and leaves everything else to that
     fallback (so genuinely garbage output is not masked):
 
     * ``string_too_long`` on any field → clamp the offending string to the
@@ -1104,9 +1154,20 @@ def _coerce_llm_object(obj: dict[str, Any], exc: ValidationError) -> dict[str, A
       to 32 chars is vastly better than a lost deck.
     * a slide ``title`` that is null / empty / missing → synthesise a terse
       title from that slide's own text, or drop that one slide.
+    * ``extra_forbidden`` on a nested item → delete the stray key. The model
+      improvised a field a strict domain model (e.g. KeywordItem) does not
+      define; that field carries no schema meaning the renderer reads, so
+      dropping it is information-preserving AND keeps the rest of the deck (and
+      its already-correct people) intact — far better than a blind whole-deck
+      retry, which re-rolls every section. ``_LLMSlide`` itself is
+      ``extra="ignore"``, so this only ever fires on the nested domain items.
 
-    Mutates ``obj`` in place and returns it for one re-validation, or ``None``
-    when nothing was coercible (the caller then falls back unchanged).
+    Each branch touches ONLY the loc Pydantic flagged. Re-validation by the
+    caller catches anything stripping left invalid (so coercion never masks a
+    genuine defect — a stripped field that exposed a missing required field
+    still fails, and routes to the informed retry). Mutates ``obj`` in place and
+    returns it for one re-validation, or ``None`` when nothing was coercible
+    (the caller then falls back / retries unchanged).
     """
 
     raw_slides = obj.get("slides")
@@ -1123,6 +1184,10 @@ def _coerce_llm_object(obj: dict[str, Any], exc: ValidationError) -> dict[str, A
             ctx = error.get("ctx")
             limit = ctx.get("max_length") if isinstance(ctx, dict) else None
             if isinstance(limit, int) and _truncate_field(obj, loc, limit):
+                changed = True
+        elif etype == "extra_forbidden":
+            if _delete_field(obj, loc):
+                logger.warning("editorial_stripped_extra_field path=%s", loc_path(loc))
                 changed = True
         elif _is_missing_title(loc, etype):
             slide_index = loc[1]
@@ -1192,6 +1257,34 @@ def _truncate_field(obj: dict[str, Any], loc: tuple[int | str, ...], limit: int)
     return False
 
 
+def _delete_field(obj: dict[str, Any], loc: tuple[int | str, ...]) -> bool:
+    """Walk ``loc`` into ``obj`` and delete the terminal dict key.
+
+    The salvage for an ``extra_forbidden`` error: ``loc`` ends in the stray key
+    a strict nested model rejected, so we navigate to its parent container and
+    remove exactly that key. Returns ``True`` when a key was removed. Mirrors
+    :func:`_truncate_field`'s navigation and the same invariant — coercion only
+    ever touches what the schema itself rejected, never a sibling field. An
+    ``extra_forbidden`` loc always ends in a str key (the field name); any
+    structural mismatch along the path returns ``False``.
+    """
+
+    if not loc:
+        return False
+    node: Any = obj
+    for step in loc[:-1]:
+        node = _index_raw(node, step)
+        if node is None:
+            return False
+    last = loc[-1]
+    if isinstance(node, dict) and isinstance(last, str):
+        container = cast("dict[str, Any]", node)
+        if last in container:
+            del container[last]
+            return True
+    return False
+
+
 def _index_raw(node: Any, step: int | str) -> Any:
     """Take one navigation step into a raw JSON node.
 
@@ -1245,17 +1338,56 @@ def _synthesise_title(slide: dict[str, Any]) -> str | None:
     return None
 
 
-def _parse_interactive(text: str) -> _LLMInteractive | None:
-    """Decode the interactive LLM response into typed interactive content."""
+class _InteractiveParse(NamedTuple):
+    """Outcome of parsing one interactive-pass response.
+
+    ``content`` is the typed interactive content, or None on any failure.
+    ``schema_feedback`` is the model-facing correction text, populated ONLY when
+    the response parsed as a JSON object but failed validation that the
+    stray-field strip could not salvage — so the retry is INFORMED, not blind.
+    None on malformed JSON and on success (including a strip-recovery).
+    """
+
+    content: _LLMInteractive | None
+    schema_feedback: str | None
+
+
+def _parse_interactive(text: str) -> _InteractiveParse:
+    """Decode the interactive LLM response, carrying retry feedback on schema failure.
+
+    Same disease as the slide executor: the nested interactive items
+    (MatchingPair, QuizQuestion, ...) are extra="forbid", so an improvised field
+    nukes the response. We strip the stray key(s) in place and re-validate; if
+    still invalid, the EXACT remaining field errors are translated into
+    ``schema_feedback`` so the caller's retry is informed. Feedback is built from
+    the post-strip error when a strip ran (names what is STILL wrong).
+    """
 
     obj = _try_parse_object(text)
     if obj is None:
-        return None
+        return _InteractiveParse(content=None, schema_feedback=None)
     try:
-        return _LLMInteractive.model_validate(obj)
+        return _InteractiveParse(content=_LLMInteractive.model_validate(obj), schema_feedback=None)
     except ValidationError as exc:
-        logger.warning("interactive_invalid_schema", extra={"error": str(exc)[:200]})
-        return None
+        stripped = [
+            loc_path(error["loc"])
+            for error in exc.errors()
+            if error["type"] == "extra_forbidden" and _delete_field(obj, error["loc"])
+        ]
+        if stripped:
+            logger.warning("interactive_stripped_extra_field paths=%s", ", ".join(stripped))
+            try:
+                content = _LLMInteractive.model_validate(obj)
+            except ValidationError as exc2:
+                errors2 = exc2.errors(include_input=False)
+                logger.warning("interactive_invalid_after_coercion: %s", summarise_errors(errors2))
+                feedback = format_schema_feedback(errors2, header=INTERACTIVE_SCHEMA_RETRY_HEADER)
+                return _InteractiveParse(content=None, schema_feedback=feedback)
+            return _InteractiveParse(content=content, schema_feedback=None)
+        errors = exc.errors(include_input=False)
+        logger.warning("interactive_invalid_schema: %s", summarise_errors(errors))
+        feedback = format_schema_feedback(errors, header=INTERACTIVE_SCHEMA_RETRY_HEADER)
+        return _InteractiveParse(content=None, schema_feedback=feedback)
 
 
 def _try_parse_object(text: str) -> dict[str, Any] | None:

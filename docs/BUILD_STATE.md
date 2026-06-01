@@ -777,6 +777,98 @@ passes once the executor people-leak is fixed). The leak fix is now CODE COMPLET
 green — see `PHASE 2 — RUN-2 FIX` below. DONE = Iko's Vertex re-run is green on BOTH decks, THEN merge
 `feat/planner-bound-editorial` to main.
 
+## PHASE 2 — RUN-4 FIX (executor schema-robustness + repair figure constraint): CODE COMPLETE, gate ready for re-run
+SUPERSEDES run-3: the run-3 planner fix WORKED — sCO2 passed EVERY bar (empty roster first-try, no
+people slide, charts intact; rule 10 held — no thank-you closer, no citation-as-person). The prompt
+change then surfaced TWO pre-existing EXECUTOR bugs on Enlightenment — NOT regressions, the same
+temperature-0 near-boundary nondeterminism the planner had, in the one component never inoculated.
+
+WHAT RUN-4 SHOWED:
+- sCO2: PASS, every bar. The run-3 planner-robustness fix is confirmed end-to-end.
+- ENLIGHTENMENT: FAIL. Chain: the executor put a stray field `explanation_note` on a KeywordItem
+  (slide 16) → `editorial_invalid_schema: slides.16.keywords.3.explanation_note extra_forbidden` →
+  first attempt rejected → BLIND whole-deck retry → the retry's fresh sample DROPPED the French
+  thinkers (Adam Smit / Daniel Defoe / Jonatan Swift) → D-F1 → scoped repair → repair came back STILL
+  missing them → re-validate → EditorialDeckPlanMismatchError. Generation correctly REFUSED to ship a
+  plan-contradicting deck (the backstop held); it just could not produce a valid one.
+
+ROOT CAUSE (two executor bugs; the cascade links them):
+- `_LLMSlide` is extra="ignore" (a stray TOP-LEVEL field is dropped), but its nested domain items
+  (KeywordItem, PersonItem, ...) are extra="forbid". So a stray field on a NESTED item nuked the deck,
+  and `_coerce_llm_object` salvaged only string_too_long + missing-title, NOT extra_forbidden. The
+  unsalvageable error forced a BLIND whole-deck retry (EDITORIAL_RETRY_SUFFIX carried nothing about the
+  failing field — the planner's disease, uncured here).
+- THE CASCADE: the schema error (slide 16) and the D-F1 drop (French section, slides ~2-4) are from
+  DIFFERENT attempts. A blind retry regenerates the WHOLE deck, so a one-field trip re-rolls every
+  section and can drop people elsewhere. We could NOT statically confirm whether the repair's own drop
+  was model non-compliance OR the repair hitting its own schema trip and returning [] (both surface as
+  D-F1/D-S1 on re-validate) — the new logging discriminates on the next gate run.
+
+WHAT SHIPPED (5 files: 1 new + 3 source + 1 test) on feat/planner-bound-editorial:
+- NEW packages/presentation/_schema_feedback.py — the pydantic-error → instruction translator,
+  EXTRACTED from the planner (loc_path / summarise_errors / format_schema_feedback) so planner and
+  executor share ONE implementation and cannot drift (the define-once discipline of
+  PEOPLE_RENDERING_SLIDE_TYPES). Planner refactored onto it, behaviour byte-identical (its 12 tests
+  unchanged + green).
+- BUG 1a — SALVAGE extra_forbidden (editorial `_coerce_llm_object` + new `_delete_field`): strip the
+  stray nested key in place, re-validate. Deterministic, local, NO LLM — and the PRIMARY
+  cascade-preventer: it preserves attempt-1's already-correct sections (the French thinkers), where a
+  retry — even an informed one — regenerates the whole deck and could re-drop them. This is what the
+  run-4 plan's "informed retry catches it locally" actually needs: the informed retry is NOT local (it
+  re-rolls the deck); the salvage is. Logged `editorial_stripped_extra_field`.
+- BUG 1b — INFORMED RETRY (editorial `_parse_editorial_response` → `_SequenceParse`;
+  `_call_editorial_with_retry`): for schema errors salvage CANNOT fix (bad enum, missing required
+  nested field) feed the EXACT field errors back under EDITORIAL_SCHEMA_RETRY_HEADER instead of
+  resampling blind. Feedback comes from the POST-coercion error (exc2) when coercion ran, so it names
+  what is STILL wrong, not the field already stripped. Malformed JSON keeps the generic suffix. NO
+  second blind retry. The repair path routes through `_call_editorial_with_retry`, so it INHERITS both
+  the salvage and the informed retry.
+- BUG 1c — INTERACTIVE PASS inoculated (the OTHER un-inoculated component, found in review; run-4's
+  framing of "the one component" was a misconception). `_LLMInteractive` is also extra="ignore"-top /
+  extra="forbid"-nested (MatchingPair, QuizQuestion, ...), and `_parse_interactive` had NO salvage +
+  only a blind retry — so a stray field on a nested interactive item would fail the INTERACTIVE_MATCHING
+  bar (it did NOT trip run-4 only because generation raised before the interactive pass ran). Mirrored
+  the same fix: strip extra_forbidden in place (logged `interactive_stripped_extra_field`), informed
+  retry under INTERACTIVE_SCHEMA_RETRY_HEADER for non-salvageable errors. Reuses `_delete_field` + the
+  shared module. Surfaced and approved as in-scope before shipping.
+- BUG 2 — repair figure constraint (EDITORIAL_REPAIR_USER): a HARD REQUIREMENT that a regenerated
+  failing section MUST portray its "required figures" on a gallery_people/timeline slide. This is
+  DEFENSE-IN-DEPTH, not the confirmed fix — the cause of the drop is not statically confirmable (see
+  cascade); the robust fix is the inherited salvage+informed-retry, and the existing
+  re-validate-and-raise backstop in `_enforce_plan_adherence` already refuses to ship a
+  plan-contradicting deck (it HELD on run-4).
+- LOGGING: editorial schema failures now log the field path+type IN the message
+  (`editorial_invalid_schema: slides.16.keywords.3.explanation_note (extra_forbidden)`), like the
+  planner — so the next gate console names the culprit instead of a 3000-char str(exc) blob.
+
+VERIFIED locally (gates green; NO Vertex creds — Iko runs the gate):
+- pytest tests/: 1292 passed / 32 skipped (was 1284/32; +8 new editorial — salvage strips a stray
+  nested field; salvage takes ONE call, no retry; a non-salvageable error drives an informed retry
+  naming the field; post-coercion feedback names the remaining error not the stripped field; the repair
+  prompt makes required figures a hard constraint; a repair that still drops a figure RAISES; the
+  interactive pass strips a stray field on a matching pair; a non-salvageable interactive error drives
+  an informed retry). Planner 12 unchanged. Same env-gated 32-skip set.
+- ruff check + format --check: clean on all changed files. pyright packages/: 0 errors / 0 warnings.
+- Direct probes (no LLM): stray nested field stripped + recovered with NO retry; bad enum → informed
+  retry carries the field path + schema header; stray+enum → exc2 feedback names the enum, not the
+  stripped field.
+
+NOT verified locally (server Vertex gate = DONE). On the re-run, watch TWO things, CO-EQUAL:
+1. sCO2 MUST STAY CLEAN — `_coerce_llm_object` and `_parse_editorial_response` are on BOTH decks' path;
+   sCO2 passed clean on run-4 and must not regress (the reverse of run-3's Enlightenment watch).
+2. ENLIGHTENMENT now generates — real thinkers on gallery slides (Voltaire/Montesquieu/Rousseau/
+   Diderot, Smit/Defoe/Swift/Kant/Goethe, Newton/Leibniz/Euler, Bach/Mozart), Beethoven ABSENT,
+   INTERACTIVE_MATCHING present, round-trips (the interactive pass is now inoculated too — a stray field
+   on a matching pair is stripped in place, logged `interactive_stripped_extra_field`, so the matching
+   bar survives it). Grep the log: `editorial_stripped_extra_field` / `interactive_stripped_extra_field`
+   PRESENT = the model still improvises fields (now stripped in place, output preserved — debt to log);
+   `editorial_invalid_schema` PRESENT with a repair following = a non-salvageable trip still fired the
+   repair (then the informed retry / figure constraint must carry it). Record the actual field path+type
+   HERE — it tells us whether run-4's repair drop was model non-compliance or the repair's own schema trip.
+
+PENDING (Iko's Vertex run, then merge): both decks' bars, the actual editorial loc/type. DONE = green
+on BOTH decks → merge feat/planner-bound-editorial to main → Phase 2 closes.
+
 ## PHASE 2 — RUN-3 FIX (planner schema-retry robustness): CODE COMPLETE, gate ready for re-run
 SUPERSEDES the run-2 "definition of done" above: in run-3 the run-2 people-leak fix is CONFIRMED
 WORKING, and a different, UPSTREAM blocker surfaced and is now fixed.
