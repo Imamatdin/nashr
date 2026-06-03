@@ -7,6 +7,53 @@ tests; a step is DONE only when a commit changes this file.
 INVARIANTS: See [INVARIANTS.md](INVARIANTS.md) — load-bearing contracts that outrank test
 status. A violation is a bug regardless of whether tests pass. Read after this file.
 
+## RECONCILED TO MAIN (2026-06-03, HEAD 7e8aa57)
+
+Read this first. The SHIPPED blocks below were written on their feature branches; many say
+"THIS BRANCH … NOT main" or "before merge." That is a PRE-MERGE SNAPSHOT and is now STALE —
+every branch's work is on `main`. This block is the current source of truth for merge state;
+the SHIPPED narratives are kept verbatim for institutional memory, each with a one-line
+merge-status correction added under its header. Git-verified: `local main == origin/main ==
+7e8aa57` (via `git merge-base --is-ancestor`, `git branch --merged`, `git cherry`).
+
+| Branch | On main? | Carrying SHA |
+|--------|----------|--------------|
+| feat/image-engine | YES | merge `0533b3b` |
+| feat/chart-renderer | YES | `6528b3f` (direct) |
+| feat/layout-fill | YES | merge `0eae69c` |
+| feat/planner-bound-editorial | YES — branch tip == main (0 ahead / 0 behind) | `7e8aa57` |
+| fix/editorial-structured-fields | YES | `b7e5d0f` |
+| fix/editorial-resilience | YES (feature) — see note | `6a0b504` (under merge `0533b3b`) |
+| fix/data-emphasis-prefixes-breathing | YES | `48f713b` / `5dc17d7` |
+
+Two MERGE COMMITS carried the bulk and were never recorded here until this reconciliation —
+this is the actual drift (there is no "run-5" entry; the merges simply went unlogged):
+- `0533b3b` "merge: image engine, editorial resilience, integrity pass, chart selection"
+- `0eae69c` "merge: layout canvas-fill + Q1 chart-label overflow fix"
+
+`fix/editorial-resilience` NOTE: the standalone branch ref (tip `69f2df1`) shows unmerged
+(`git cherry` → `+`, 1 ahead) because the work was re-committed during integration, not
+patch-equivalent. The FEATURE is on main: `_coerce_llm_object` + the
+`editorial_coerced_and_recovered` path are present in `packages/presentation/editorial.py`
+(`6a0b504`, under merge `0533b3b`). The branch ref is superseded; its content is on main.
+
+PHASE 2 — ON MAIN, GATE STATUS UNVERIFIED. The planner-bound-editorial work
+(`890a67f`→`177c83e`→`4154e8f`→`5af2fb7`→`d12fa2d`→`eb7c0ca`→`7e8aa57`) is on `main` (branch
+tip == main). That is a git fact. It does NOT mean Phase 2 is done. Phase 2's own definition
+of done is a green Vertex gate on BOTH decks, and the repo records NO such run: the last
+recorded run is RUN-4 (HEAD `7e8aa57`), which FAILED Enlightenment (the `explanation_note`
+schema cascade) with the fix marked "CODE COMPLETE, gate ready for re-run." That code is what
+is on main, with no later run recorded.
+- ON MAIN: yes (git-verified).
+- GATE GREEN / PHASE 2 DONE: UNVERIFIED — not witnessed by git.
+- ⚠ WATCH (owed before Phase 2 can be called done): a green Vertex run on BOTH decks
+  (Enlightenment + sCO2) via `python scripts/proof_planner_phase2.py`. Until Iko records that
+  run here, Phase 2 is "merged but un-gated," NOT done. Do not stamp it DONE.
+
+The CONFIRMED BROKEN table below gains a `Status` column (fixed rows cite their SHA) and four
+new rows (I–L) from a live sCO2 render on 2026-06-03 (HEAD `7e8aa57` + image engine); evidence
+screenshots committed under `docs/screens/`, eyeballed against each row before recording.
+
 ## VERIFIED DONE (evidence, not memory)
 - Decimal truncation "73.8 bar" — fixed 8f5b587, renders intact slide 2.
 - Collision/clip/overflow stacking — committed, margins documented.
@@ -14,19 +61,24 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
 - git: laptop == origin == server, clean.
 
 ## CONFIRMED BROKEN — by layer (sCO2 deck: layout.json + last_deck.json)
-| # | Symptom | Layer | Cost | Evidence |
-|---|---------|-------|------|----------|
-| A | data-emphasis: unit drawn twice ("1.58PUE"+"PUE"), labels stranded | RENDERER | free | data-emphasis.ts concat + fixed-fraction y |
-| B | "Key takeaway / preceding data underscores..." hollow slide | CODE→EDITORIAL | free interim / paid real | editorial.py _insert_breathing_after_data hardcoded stub |
-| C | numbered list 1,2,4,5 — model dropped its own #3 | MODEL | PAID | last_deck.json bullets has 4 items |
-| C2| literal "1. " prefixes baked into bullets | MODEL + code guard | paid+free | same bullets |
-| D | chart slide: chart_series=null, data stuck in prose | SCHEMA (not MODEL) | free | _LLMSlide had NO chart_series field; extra="ignore" dropped any emitted — FIX3 adds the field |
-| E | "[Chart placeholder]" — chart renderer unbuilt | UNBUILT (Step 2) | free | chart-data.ts placeholder by design |
-| F | chart title collides with chart box (2-line title under-measured) | RENDERER (Step 11) | free | floor logic correct, fed wrong title height |
-| G | comparison slide: left_column/right_column null, renders blank | PROMPT↔SCHEMA | free | prompt emitted {"comparison":{left,right}} but _LLMSlide only accepts top-level left_column/right_column → extra="ignore" swallowed it — FIX2 |
-| H | table_compact: table_headers/table_rows null, renders empty grid | SCHEMA (not MODEL) | free | _LLMSlide had no table fields; SlideContent + table-compact.ts already rendered them — FIX1 wires the link |
+| # | Symptom | Layer | Cost | Status | Evidence |
+|---|---------|-------|------|--------|----------|
+| A | data-emphasis: unit drawn twice ("1.58PUE"+"PUE"), labels stranded | RENDERER | free | FIXED 48f713b | data-emphasis.ts concat + fixed-fraction y |
+| B | "Key takeaway / preceding data underscores..." hollow slide | CODE→EDITORIAL | free interim / paid real | PARTIAL — interim 48f713b; device default-OFF 0b58208; B-real OPEN (plan 2) | editorial.py _insert_breathing_after_data hardcoded stub |
+| C | numbered list 1,2,4,5 — model dropped its own #3 | MODEL | PAID | OPEN (plan 2, model-quality) | last_deck.json bullets has 4 items |
+| C2| literal "1. " prefixes baked into bullets | MODEL + code guard | paid+free | FIXED 48f713b | same bullets |
+| D | chart slide: chart_series=null, data stuck in prose | SCHEMA (not MODEL) | free | FIXED b7e5d0f (FIX3) | _LLMSlide had NO chart_series field; extra="ignore" dropped any emitted — FIX3 adds the field |
+| E | "[Chart placeholder]" — chart renderer unbuilt | UNBUILT (Step 2) | free | FIXED 6528b3f | chart-data.ts placeholder by design |
+| F | chart title collides with chart box (2-line title under-measured) | RENDERER (Step 11) | free | OPEN (plan 11) | floor logic correct, fed wrong title height |
+| G | comparison slide: left_column/right_column null, renders blank | PROMPT↔SCHEMA | free | FIXED b7e5d0f (FIX2) | prompt emitted {"comparison":{left,right}} but _LLMSlide only accepts top-level left_column/right_column → extra="ignore" swallowed it — FIX2 |
+| H | table_compact: table_headers/table_rows null, renders empty grid | SCHEMA (not MODEL) | free | FIXED b7e5d0f (FIX1) | _LLMSlide had no table fields; SlideContent + table-compact.ts already rendered them — FIX1 wires the link |
+| I | table_compact rows render as oversized bordered boxes (text pinned top, large empty cell below); other rows bare text — inflated row heights + inconsistent borders. Data correct (FIX1), layout wrong | RENDERER (layouts/table-compact.ts) | free | OPEN | live sCO2 render 2026-06-03, slides 6+13 → docs/screens/sco2_2026-06-03_slide-06.jpg, slide-13.jpg |
+| J | generated object-figures + concept diagrams render on pale/near-white grounds against the dark deck — light panel on near-black. I3 covers text-over-bg scrim, NOT figure-panel-vs-deck tonal match | IMAGE-ENGINE or RENDERER (gen-spec / compositing — trace) | free or paid | OPEN | live sCO2 render 2026-06-03, slides 4/7/9/11 → docs/screens/sco2_2026-06-03_slide-04.jpg, -07, -09, -11.jpg |
+| K | AI-generated labeled phase diagram has garbled baked-in text — axis reads "73.8ia7 bar" where the title + diagram both mean 73.8 bar. VIOLATES SPEC §2.6 "never generate AI images containing text"; fix is a ROUTING GUARD (figure subject_type implying labels/axes → mechanical/drawn, NEVER Gemini), not a one-off patch | IMAGE-ENGINE (routing; SPEC §2.6) | free | OPEN (L3 visual-system) | live sCO2 render 2026-06-03, slide 7 → docs/screens/sco2_2026-06-03_slide-07.jpg |
+| L | closing slide renders title pinned top, rest empty — dropped body or failed hero-closer with no background. Layer NOT yet traced (read closing-slide authoring in editorial.py + the closing layout before assigning) | RENDERER or EDITORIAL (trace before fixing) | free or paid | OPEN | live sCO2 render 2026-06-03, slide 18 → docs/screens/sco2_2026-06-03_slide-18.jpg |
 
 ## SHIPPED
+*[RECONCILED 2026-06-03: ON MAIN — 48f713b (A/C2/B-interim) + c79036c (over-long line-count). On main, not pending.]*
 - A (data-emphasis value/unit split + measured CENTERED stacking) — 48f713b. Verified:
   worker `layout` on crafted sCO2 deck = no jammed units, each unit in one block,
   gaps ~1.2%; chromium screenshot reads number→unit→label→comparison clean.
@@ -48,6 +100,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   calibration / F), still open.
 
 ## SHIPPED (cont.)
+*[RECONCILED 2026-06-03: ON MAIN via b7e5d0f. "THIS BRANCH … NOT main" below = pre-merge snapshot.]*
 - Editorial structured fields — H (tables, FIX1) · G (comparison, FIX2) · D-data (chart_series, FIX3)
   — THIS BRANCH (fix/editorial-structured-fields, off the data-emphasis branch HEAD, NOT main:
   main lacks BUILD_STATE + the renderer fixes the eyeball step needs). ROOT CAUSE was a missing
@@ -76,6 +129,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   check used a fabricated sCO2 deck via the durable loop.
 
 ## SHIPPED (Step 2 — chart renderer)
+*[RECONCILED 2026-06-03: ON MAIN via 6528b3f. "THIS BRANCH … NOT main" below = pre-merge snapshot.]*
 - E (chart renderer) — THIS BRANCH (feat/chart-renderer, off fix/editorial-structured-fields
   HEAD, NOT main: main lacks the FIX3 chart_series data flow this renderer consumes + BUILD_STATE).
   Replaced "[Chart placeholder]" with native-shape charts drawn into the collision-safe chartRegion.
@@ -117,6 +171,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
     ("$1.04M" vs "1.04$M"); per-sub-bar value labels on dense (>8) grouped charts.
 
 ## SHIPPED (image engine — branch feat/image-engine, off main @ 6528b3f)
+*[RECONCILED 2026-06-03: ON MAIN via merge 0533b3b. "branch feat/image-engine" framing below = pre-merge snapshot.]*
 - THREE image slots built FIRST-CLASS, all three end-to-end (schema → layout → parallel stage →
   sourcing/generation). Object-figure was built NOW, not deferred. Commits: schema e129482 ·
   layout ecb3737 · portraits c108ded · generation 5b67086 · stage d87dc27.
@@ -172,6 +227,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
     end-to-end." Live tests are gated behind NASHR_LIVE_NET=1 (Commons) and the server's Vertex creds.
 
 ## SHIPPED (integrity + de-slop pass — branch feat/image-engine)
+*[RECONCILED 2026-06-03: ON MAIN — 0b58208, via merge 0533b3b.]*
 - WHY HERE: three load-bearing "interim" decisions on the image + editorial paths were
   silently nullifying a paid feature (premium == standard == 2 images) and littering
   decks with hollow filler. They share a class (a constant standing in for logic on a
@@ -272,6 +328,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   - "All tests pass" ≠ "verified end-to-end." DONE is gated on Iko's server pass.
 
 ## SHIPPED (chart-selection intelligence + Q4 demote — branch feat/image-engine)
+*[RECONCILED 2026-06-03: ON MAIN — f185779, via merge 0533b3b.]*
 - WHY: the editorial pass had NO data-shape → encoding rules, so the model defaulted to
   zero-based bars even where bar misleads — sCO2 deck slide 5 plotted PUE 1.08/1.25/1.675
   as near-equal columns, slide 15 plotted heat-recovery 0/0/5/20 where the zeros drew
@@ -354,6 +411,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   - "All tests pass" ≠ "verified end-to-end." DONE is gated on Iko's server pass.
 
 ## SHIPPED (editorial resilience — branch feat/image-engine)
+*[RECONCILED 2026-06-03: ON MAIN — feature in editorial.py (_coerce_llm_object) via 6a0b504 under merge 0533b3b. NB standalone ref fix/editorial-resilience (69f2df1) shows unmerged — superseded; content is on main.]*
 - WHY HERE, not a hardening branch: the editorial pass was collapsing every run to the 2-slide
   "Insufficient source material" fallback, which BLOCKED testing the image engine on this branch
   (no real deck → no slots to resolve). So the fix lands on feat/image-engine to unblock the image
@@ -394,6 +452,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   server BEFORE merging anywhere.
 
 ## SHIPPED (chart-encoding correctness — branch feat/image-engine)
+*[RECONCILED 2026-06-03: ON MAIN — f4c76b7, via merge 0533b3b. "gate the merge to main" line below = satisfied (merged); the live visual check it names is now tracked as rows I–L.]*
 - WHY: the chart-selection pass (f185779) re-routed low-spread bars to single_value by
   headlining `series[0]` and folding the rest into a subtitle. On the live sCO2 deck slide
   10 "sCO₂ Achieves PUE 1.08" with series [Air 1.57, Liquid 1.25, sCO2 1.08], series[0] is
@@ -467,6 +526,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
   headlines 1.08, slide 14 is bars) gate the merge to main.
 
 ## SHIPPED (layout fill — branch feat/layout-fill)
+*[RECONCILED 2026-06-03: ON MAIN — addc4f9, via merge 0eae69c. "NEEDS SERVER EYEBALL / branch" below = pre-merge snapshot.]*
 - data_emphasis + flow_process were structurally under-filling the slide (live sCO2 deck:
   stat numbers squatting in a 50% mid-slide strip at the 64px tier cap; flow steps nailed to
   y=28..65 by hardcoded y-constants, leaving y=12..28 and y=65..94 as dead space). Fixed at
@@ -518,6 +578,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
     actual editorial output.
 
 ## SHIPPED (Q1 chart-label overflow — branch feat/layout-fill)
+*[RECONCILED 2026-06-03: ON MAIN — c13f644, via merge 0eae69c. "the branch merges to main" below = done.]*
 - Live sCO2 regen of the heat-recovery slide failed Q1: 4 text blocks overflowing
   at 20px on a `chart_type: bar` with verbose unit "% waste heat recovered" (23 chars).
   Reproduced locally with the exact failing content (saved as
@@ -589,6 +650,7 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
     merges to main.
 
 ## SHIPPED (Phase 2 — planner-bound editorial — branch feat/planner-bound-editorial)
+*[RECONCILED 2026-06-03: code ON MAIN (branch tip == main, 7e8aa57). Phase 2 is MERGED BUT UN-GATED — no green Vertex run recorded; see RECONCILED TO MAIN + WATCH at top. Do NOT read this block as DONE.]*
 - WHY: editorial authored decks from a curated claim-bag with the source chunks DISCARDED
   (`del ... chunks`) and the people roster filtered through a hardcoded `_PERSON_KEYWORDS`
   frozenset — so the model never saw what the source said and filled gaps with its prior
@@ -690,16 +752,21 @@ status. A violation is a bug regardless of whether tests pass. Read after this f
 - DONE = this commit + this BUILD_STATE entry + the server Vertex gate green before merge to main.
   STATUS: gate run 2 recorded below — Enlightenment PASSES clean; sCO2 has ONE remaining
   executor people-leak to fix before the gate is fully green and the branch merges.
+*[RECONCILED 2026-06-03: code merged to main (7e8aa57); the gate it names is NOT recorded green — see WATCH at top. Merged ≠ gated.]*
 
 ## PHASE 2 — SERVER GATE (run 2): Enlightenment PASS, sCO2 one FAIL (executor people-leak)
 Run on Vertex via `python scripts/proof_planner_phase2.py` AFTER the run-1 timeout fix
 (EDITORIAL_LLM_TIMEOUT_SECONDS=300). The timeout is gone — both decks generated fully, end to end.
-This is the authoritative status; a fresh session should treat it as the source of truth.
+[RECONCILED 2026-06-03: HISTORICAL run-2 snapshot — SUPERSEDED by run-3/run-4 AND by the merge
+to main. This is NOT the current source of truth; see the RECONCILED TO MAIN block at the top.
+Kept for institutional memory.]
 
 BRANCH / COMMIT STATE:
 - Work is on `feat/planner-bound-editorial`, latest commit `4154e8f` (the
   EDITORIAL_LLM_TIMEOUT_SECONDS=300 per-call timeout fix), pushed to origin.
-- NOT merged to main. main is clean.
+- [RECONCILED 2026-06-03: "NOT merged to main" is now FALSE. The work advanced past `4154e8f`
+  to HEAD `7e8aa57` and IS on `main` (branch tip == main, 0 ahead / 0 behind). Gate status is
+  still open — on main, but NO green Vertex run is recorded; see the Phase-2 WATCH at top.]
 - Phase 1 + 1.5 are already committed and live on main: `890a67f` (DeckPlan contract + planner
   pass + plan-adherence validator) plus the Vertex-routing / Gemini-3.5-Flash classifier fix.
 - (This BUILD_STATE run-2 entry is committed on the branch locally; per standing instruction it is
