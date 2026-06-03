@@ -72,10 +72,84 @@ screenshots committed under `docs/screens/`, eyeballed against each row before r
 | F | chart title collides with chart box (2-line title under-measured) | RENDERER (Step 11) | free | OPEN (plan 11) | floor logic correct, fed wrong title height |
 | G | comparison slide: left_column/right_column null, renders blank | PROMPT↔SCHEMA | free | FIXED b7e5d0f (FIX2) | prompt emitted {"comparison":{left,right}} but _LLMSlide only accepts top-level left_column/right_column → extra="ignore" swallowed it — FIX2 |
 | H | table_compact: table_headers/table_rows null, renders empty grid | SCHEMA (not MODEL) | free | FIXED b7e5d0f (FIX1) | _LLMSlide had no table fields; SlideContent + table-compact.ts already rendered them — FIX1 wires the link |
-| I | table_compact rows render as oversized bordered boxes (text pinned top, large empty cell below); other rows bare text — inflated row heights + inconsistent borders. Data correct (FIX1), layout wrong | RENDERER (layouts/table-compact.ts) | free | OPEN | live sCO2 render 2026-06-03, slides 6+13 → docs/screens/sco2_2026-06-03_slide-06.jpg, slide-13.jpg |
+| I | table_compact rows render as oversized bordered boxes (text pinned top, large empty cell below); other rows bare text — inflated row heights + inconsistent borders. Data correct (FIX1), layout wrong | RENDERER (layouts/table-compact.ts) | free | FIXED (L1 branch fix/L1-worker-render-correctness) — root cause `dataRowHeight=(TABLE_H-HEADER_H)/actualRows` (fixed-fraction → 17.5%-tall rows, text top-anchored). Now: capped/min row band, each cell vertically centered in its band (hug+reposition; both renderers valign:top), table block centered in region. Live eyeball owed (slides 6+13) | live sCO2 render 2026-06-03, slides 6+13 → docs/screens/sco2_2026-06-03_slide-06.jpg, slide-13.jpg |
 | J | generated object-figures + concept diagrams render on pale/near-white grounds against the dark deck — light panel on near-black. I3 covers text-over-bg scrim, NOT figure-panel-vs-deck tonal match | IMAGE-ENGINE or RENDERER (gen-spec / compositing — trace) | free or paid | OPEN | live sCO2 render 2026-06-03, slides 4/7/9/11 → docs/screens/sco2_2026-06-03_slide-04.jpg, -07, -09, -11.jpg |
 | K | AI-generated labeled phase diagram has garbled baked-in text — axis reads "73.8ia7 bar" where the title + diagram both mean 73.8 bar. VIOLATES SPEC §2.6 "never generate AI images containing text"; fix is a ROUTING GUARD (figure subject_type implying labels/axes → mechanical/drawn, NEVER Gemini), not a one-off patch | IMAGE-ENGINE (routing; SPEC §2.6) | free | OPEN (L3 visual-system) | live sCO2 render 2026-06-03, slide 7 → docs/screens/sco2_2026-06-03_slide-07.jpg |
-| L | closing slide renders title pinned top, rest empty — dropped body or failed hero-closer with no background. Layer NOT yet traced (read closing-slide authoring in editorial.py + the closing layout before assigning) | RENDERER or EDITORIAL (trace before fixing) | free or paid | OPEN | live sCO2 render 2026-06-03, slide 18 → docs/screens/sco2_2026-06-03_slide-18.jpg |
+| L | closing slide renders title pinned top, rest empty — dropped body or failed hero-closer with no background. Layer NOT yet traced (read closing-slide authoring in editorial.py + the closing layout before assigning) | RENDERER or EDITORIAL (trace before fixing) | free or paid | TRACED (L1), bucket-UNRESOLVED pending one fact. Worker renders title-only CORRECTLY when a content slide's body arrays are empty (summary_takeaway/data_emphasis/content_split all degenerate to title-only; no worker path drops populated body). 18 slides ⇒ not the emergency deck. ⇒ LEANS EDITORIAL (LLM authored an empty-bodied closer), NOT L1 worker scope. The one fact that settles it: grep slide 18's content in `/app/debug/last_deck.json` on the next live run — empty body ⇒ editorial (defer; I2-on-the-closer, same family as B-real); a populated field the closer layout doesn't read ⇒ worker contract mismatch ⇒ L1. GAP regardless of layer: a title-only content slide slips BOTH Q5 (fires only on zero content) and I2's `_drop_hollow_dividers` (SECTION_BREAK only) | live sCO2 render 2026-06-03, slide 18 → docs/screens/sco2_2026-06-03_slide-18.jpg |
+
+## SHIPPED (L1 — worker render-correctness: Q1 reliability floor + table geometry)
+*[Branch fix/L1-worker-render-correctness, NOT merged. Gate = Iko's live droplet render, NOT recorded green yet. "All tests pass" ≠ DONE.]*
+- SCOPE (approved Stage-1 plan + two owner changes): fix ONLY the two independent worker bugs —
+  (1) the Q1 overflow hard-fail reliability floor, (2) row I table geometry. Canvas-fill (defect
+  4) was DROPPED from L1 by owner decision (see DEFERRED). No editorial/model/schema/image-engine
+  changes. Row J/K → L3, Q1 fit-correctness → L2 (unchanged).
+- DEFECT 1 — Q1 RELIABILITY FLOOR (centerpiece; the live user-facing dead-end):
+  - Bug, end to end: `buildTextBlock` (layouts/shared.ts) shrank to a floor and, if the text
+    STILL didn't fit, set `overflow=true` WITHOUT truncating (docstring claimed the renderer
+    truncates — HTML clips via overflow:hidden but PPTX/PDF do not). Q1 (audit/quality-audit.ts)
+    read `block.overflow`, emitted `severity:'fail'` → `is_exportable=(failed===0)` false → the
+    worker `render` (src/index.ts) `process.exit(1)` rendering NOTHING. Audit is deterministic, so
+    ALL three formats exit 1 (presentation_orchestrator.py appends a warning + continues, never
+    raises) → zero outputs → the bot has nothing to deliver → "an error occurred." Live
+    Enlightenment hit exactly this.
+  - Fix (worker only): buildTextBlock now TRUNCATES-and-ellipsizes at the floor (binary-search the
+    longest char prefix + '…' that fits; RE-MEASURE so measuredHeightPct + downstream stacking
+    stay honest), marking the block `truncated=true` (new optional TextBlock field). Truncation
+    lives at the ONE chokepoint all text passes — not a per-caller opt-in — so it covers
+    titles/body/bullets/table cells/comparison points/keywords (the general content blocks
+    c13f644's chart-label minFontSize path never reached).
+  - Q1 reframed: a `truncated` (or, in a pathologically narrow box, still-`overflow`) block →
+    `severity:'warn'`, NEVER `fail`. A fit/overflow condition can no longer set is_exportable=false.
+    The warning is kept LOUD + logged (slide index + truncated text) so L2 can locate these slides.
+  - I5 AMENDMENT (flagged, owner-approved): docs/INVARIANTS.md I5 — Q1 overflow moved from the
+    `fail`/blocks list to a new "degrade-and-ship (warn)" category, with an explicit paragraph that
+    this is NOT "fit no longer matters" (it changes the RESPONSE: truncate+warn, deck always ships;
+    real fit-correctness is L2). Written so it cannot be read as a cosmetic downgrade.
+- DEFECT 2 — ROW I TABLE GEOMETRY (layouts/table-compact.ts): replaced fixed-fraction
+  `dataRowHeight=(TABLE_H-HEADER_H)/actualRows` (inflated few-row tables to ~17.5% rows, text
+  pinned to the top, odd-row-only zebra reading as bordered boxes) with a capped/min row band,
+  each header/cell hugged + VERTICALLY CENTERED in its band (both HTML and PPTX valign:top, so
+  centering is positioning the hugged block's y), and the table block centered in the region.
+  Odd-row zebra retained on the compact bands. Same fixed-geometry disease addc4f9 cured for
+  data_emphasis/flow_process; table-compact never got it. NOT canvas-fill: no font growth, no fit
+  budget — pure table-internal geometry.
+- DEFERRED, on purpose:
+  - CANVAS-FILL (defect 4) → L2, ENTIRELY (owner call). concept_definition/content_split/
+    comparison/summary_takeaway already do measured document-flow but TOP-ANCHOR (top-third
+    cluster, dead space below). The real fill is FONT-GROWTH, which needs L2's word↔pixel budget;
+    the only L1-safe piece (geometric centering) is marginal, can ORPHAN short prose mid-canvas,
+    and would hand L2 a cosmetic layer to reconcile/undo. Ship NOTHING on canvas-fill in L1. ALL of
+    it — every layout, content_split's full-height-box vertical-align, font-growth-to-fill — is L2.
+    The top-third-cluster look (slide-09) persists visibly until L2; acceptable (cosmetic, never a
+    hard-fail).
+  - Q1 FIT-CORRECTNESS (text actually fitting) → L2. L1 only guarantees the floor degrades. No
+    WORD_LIMITS change, no per-locale constant.
+  - ROW L (closer) → CONFIRMED BROKEN row L: traced, leans editorial, settle via the slide-18 grep
+    on the next live run; Q5+I2 title-only-slide gap logged there.
+  - ROW J (pale figure ground) + ROW K (AI diagram baked text, SPEC §2.6 routing guard) → L3.
+- BLAST RADIUS (tests that pinned old broken behavior → flipped to the degrade contract):
+  quality-audit.test.ts ('fails on overflow' → 'degrades a residual overflow to a WARNING…';
+  'blocks export on a Q1 failure' → 'does NOT block export… degrades to a warning') + a new
+  truncated-block warn test; layout-pass.test.ts ('stops reducing… flags overflow' → 'truncates at
+  the floor… stays exportable'; totalOverflows aggregation → asserts truncation cleared it);
+  text-block-stacking.test.ts +3 buildTextBlock truncation tests; layout-table.test.ts +1
+  compact/centered-rows test. Existing table tests (header count, one-block-per-cell, odd-row zebra
+  ≥2, alignment, fallback) unchanged + green.
+- VERIFIED locally:
+  - `npm --prefix packages/presentation-worker run typecheck` (tsc src + tsconfig.test): clean.
+  - vitest: 352 passed / 3 skipped / 1 FAILED — the failure is the PRE-EXISTING text-measure F red
+    (sCO2 title 1-vs-2 lineCount, plan item 11), confirmed pre-existing by a git-stash round-trip
+    (still fails on clean HEAD with none of this branch's changes; this change touches zero of
+    text-measure.ts). Net +4 passing tests vs main.
+  - Python untouched (no .py edits); pytest/ruff/pyright unaffected.
+- NOT verified locally (server eyeball = DONE): a live droplet render. CENTERPIECE to verify: the
+  Enlightenment deck that was HARD-FAILING now EXPORTS (degraded where text didn't fit — truncated
+  with '…' + a Q1 warning in the log — never the "an error occurred" dead-end). Plus sCO2 slides
+  6+13: tables read as compact, evenly-spaced rows with centered cell text + consistent striping
+  (no giant bordered boxes). Workflow: git pull → docker compose up -d --build bot; proof harness
+  runs detached in the container; grep the log for the Q1 truncation warning + confirm no `Quality
+  audit FAILED`. While there, grep slide 18 in /app/debug/last_deck.json to settle row L.
+- DONE = this branch's fixes + this BUILD_STATE entry + Iko's live-render eyeball. NOT green tests.
 
 ## SHIPPED
 *[RECONCILED 2026-06-03: ON MAIN — 48f713b (A/C2/B-interim) + c79036c (over-long line-count). On main, not pending.]*

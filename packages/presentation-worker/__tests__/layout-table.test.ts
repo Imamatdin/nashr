@@ -125,4 +125,43 @@ describe('layout — TABLE_COMPACT', () => {
     );
     expect(body).toBeDefined();
   });
+
+  it('renders compact, vertically-centered rows — not inflated top-pinned cells (row I)', () => {
+    const cellRows = [
+      ['Air cooling', '25-30 kW', '1.55-1.80'],
+      ['Liquid', '>100 kW', '1.20-1.30'],
+      ['Hybrid', '>100 kW', '1.30-1.45'],
+      ['sCO2', '300 kW', '1.08'],
+    ];
+    const flat = cellRows.flat();
+    const deck = buildTestDeck([
+      makeSlide('table_compact', {
+        title: 'Cooling comparison',
+        table_headers: ['Type', 'Density', 'PUE'],
+        table_rows: rows(cellRows),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    // Rows are NO LONGER inflated: the old code gave each cell a ~17.5%-tall box
+    // (TABLE_H-HEADER_H / rows) with text pinned to the top. Each cell now hugs
+    // its measured height, far below that even-division height.
+    const evenDivision = (75 - 5) / cellRows.length; // old per-row height ≈ 17.5
+    const dataCells = layout.textBlocks.filter((b) => flat.includes(b.text));
+    expect(dataCells.length).toBe(flat.length);
+    for (const c of dataCells) {
+      expect(c.h).toBeLessThan(evenDivision * 0.6);
+    }
+
+    // The table block is centered in its region, not pinned to the top: the
+    // header row sits below TABLE_Y (=15), pushed down by the centering.
+    const header = layout.textBlocks.find((b) => b.text === 'Type')!;
+    expect(header).toBeDefined();
+    expect(header.y).toBeGreaterThan(15);
+
+    // Each cell is vertically centered within its band, so the first data row's
+    // text begins strictly below the (centered) header — not at the band top.
+    const firstRowCell = layout.textBlocks.find((b) => b.text === 'Air cooling')!;
+    expect(firstRowCell.y).toBeGreaterThan(header.y);
+  });
 });

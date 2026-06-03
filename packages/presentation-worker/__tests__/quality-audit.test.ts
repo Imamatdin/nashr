@@ -150,7 +150,7 @@ describe('Q1 — Text overflow', () => {
     expect(resultsFor(report, 'Q1').every((r) => r.passed)).toBe(true);
   });
 
-  it('fails on overflow', () => {
+  it('degrades a residual overflow to a WARNING, never a blocking fail (I5)', () => {
     const deck = buildDeck([makeSlide(0, 'content_split', { title: 'Hi' })]);
     const layout = makeLayout([
       buildSlideLayout({
@@ -162,8 +162,28 @@ describe('Q1 — Text overflow', () => {
     const report = new QualityAudit().audit(deck, layout);
     const q1 = resultsFor(report, 'Q1');
     expect(q1[0].passed).toBe(false);
-    expect(q1[0].severity).toBe('fail');
+    expect(q1[0].severity).toBe('warn');
     expect(q1[0].slide_index).toBe(0);
+    // The reliability floor: a fit problem can never set is_exportable=false.
+    expect(report.is_exportable).toBe(true);
+  });
+
+  it('flags a TRUNCATED block as a warning (degraded, still exportable)', () => {
+    const deck = buildDeck([makeSlide(0, 'content_split', { title: 'Hi' })]);
+    const layout = makeLayout([
+      buildSlideLayout({
+        slideIndex: 0,
+        slideType: 'content_split',
+        // buildTextBlock cleared overflow by truncating; `truncated` is the
+        // degrade breadcrumb the audit surfaces (and L2 follows).
+        textBlocks: [textBlock({ overflow: false, truncated: true, text: 'shortened…' })],
+      }),
+    ]);
+    const report = new QualityAudit().audit(deck, layout);
+    const q1 = resultsFor(report, 'Q1');
+    expect(q1[0].passed).toBe(false);
+    expect(q1[0].severity).toBe('warn');
+    expect(report.is_exportable).toBe(true);
   });
 });
 
@@ -802,7 +822,7 @@ describe('Full audit', () => {
     expect(report.failed).toBe(0);
   });
 
-  it('blocks export on a Q1 (overflow) failure', () => {
+  it('does NOT block export on a Q1 overflow — degrades to a warning (I5)', () => {
     const deck = buildDeck([makeSlide(0, 'content_split', { title: 'Hi' })]);
     const layout = makeLayout([
       buildSlideLayout({
@@ -812,8 +832,10 @@ describe('Full audit', () => {
       }),
     ]);
     const report = new QualityAudit().audit(deck, layout);
-    expect(report.is_exportable).toBe(false);
-    expect(report.failed).toBeGreaterThan(0);
+    // A user who paid for a deck always gets the deck: overflow → warn, not fail.
+    expect(report.is_exportable).toBe(true);
+    expect(report.failed).toBe(0);
+    expect(report.warnings).toBeGreaterThan(0);
   });
 
   it('is exportable when only warnings are present (Q12)', () => {

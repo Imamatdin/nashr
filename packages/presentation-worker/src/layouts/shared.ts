@@ -9,7 +9,7 @@
  */
 
 import { FONT_SIZES, MARGIN, SLIDE_HEIGHT, SLIDE_WIDTH, WORD_LIMITS, type Region } from '../constants.js';
-import { measureText } from '../text-measure.js';
+import { measureText, type TextMeasurement } from '../text-measure.js';
 import type {
   DesignDirectionSpec,
   FontStyle,
@@ -152,19 +152,82 @@ export interface BuildTextBlockOptions {
   minFontSize?: number;
 }
 
+/** Glyph that marks truncated text — one char, fits where the source didn't. */
+const ELLIPSIS = '…';
+
 /**
- * Build a TextBlock and run the overflow-reduction loop.
+ * Truncate `text` to the longest prefix whose `prefix + …` fits the box at
+ * `fontSize`, returning the truncated string and its re-measurement.
  *
- * Starts at the tier maximum, drops fontSize by 2px each iteration
- * until the text fits or the floor is hit. If the final size still
- * overflows, the block is returned with overflow=true and the floor
- * font size — the renderer is expected to truncate visually and the
- * audit will surface the violation.
+ * This is L1's RELIABILITY FLOOR. When text cannot fit even at the smallest
+ * permitted font, the slide must still render and the deck must still EXPORT —
+ * a degraded slide beats a hard-failed deck and a dead-ended bot. Truncation
+ * is renderer-agnostic on purpose: HTML clips via overflow:hidden but PPTX /
+ * LibreOffice do not, so shortening the STRING is the only fix that holds
+ * across all three formats. It is the FLOOR, not the cure: making the full
+ * text fit (the word↔pixel budget) is L2's job, and the `truncated` flag is
+ * the breadcrumb L2 follows to find these slides.
+ */
+function truncateToFit(
+  text: string,
+  fontSize: number,
+  fontFamily: string,
+  fontWeight: FontWeight,
+  maxWidthPx: number,
+  maxHeightPx: number,
+  lineHeight: number,
+): { text: string; measurement: TextMeasurement } {
+  const measureAt = (candidate: string): TextMeasurement =>
+    measureText({
+      text: candidate,
+      fontSize,
+      fontFamily,
+      fontWeight,
+      maxWidth: maxWidthPx,
+      maxHeight: maxHeightPx,
+      lineHeight,
+    });
+
+  // Binary-search the longest character prefix whose prefix + ellipsis fits.
+  // Char-level (not word-level) so a single over-long token — a URL, a long
+  // number — also degrades instead of pin-overflowing. `best` starts at a lone
+  // ellipsis so the pathological "nothing fits" case still returns a string.
+  let lo = 0;
+  let hi = text.length;
+  let best = ELLIPSIS;
+  let bestMeasurement = measureAt(ELLIPSIS);
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const candidate = text.slice(0, mid).trimEnd() + ELLIPSIS;
+    const m = measureAt(candidate);
+    if (m.fitsInBox) {
+      best = candidate;
+      bestMeasurement = m;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  // In a pathologically narrow box even a lone ellipsis overflows; we still
+  // return it (best-effort), and bestMeasurement reports the overflow. The
+  // audit surfaces THAT as a WARNING, never a blocking FAIL — fit never blocks.
+  return { text: best, measurement: bestMeasurement };
+}
+
+/**
+ * Build a TextBlock, shrinking the font to fit, then TRUNCATING as a last
+ * resort so the deck always exports.
  *
- * The floor defaults to `tier.min`, but a caller may pass `minFontSize`
- * (typically `FONT_SIZES.minimum`) to let the loop go below the tier
- * when a width-constrained label would otherwise pin-overflow Q1. See
- * the option docstring for when that's appropriate.
+ * Starts at the tier maximum and drops the font 2px per step until the text
+ * fits its box or the floor is hit (the floor defaults to `tier.min`; a caller
+ * may pass `minFontSize`, typically `FONT_SIZES.minimum`, to let a width-
+ * constrained label shrink below its tier — see the option docstring). If the
+ * text STILL overflows at the floor, the block is truncated-and-ellipsized to
+ * fit (`truncated=true`) rather than returned overflowing: this is L1's
+ * reliability floor, guaranteeing a renderable, exportable slide. The Q1 audit
+ * reports a truncated (or, in a pathologically narrow box, still-overflowing)
+ * block as a WARNING — never a blocking FAIL (I5) — so a paid deck always
+ * ships while the degradation stays observable for L2 to fix the fit for real.
  */
 export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
   const maxWidthPx = regionWidthPx(opts.region);
@@ -194,10 +257,33 @@ export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
     fontSize = Math.max(floor, fontSize - 2);
     measurement = measure(fontSize);
   }
+
+  // RELIABILITY FLOOR: the text does not fit even at the floor font. Truncate
+  // it (with an ellipsis) and re-measure, so the rendered string AND the
+  // stacking height (`measuredHeightPct`) both reflect what actually renders —
+  // re-measuring is what keeps a truncated block from mis-stacking its
+  // neighbours. `truncated` marks the degrade; `overflow` survives true only
+  // in the pathological can't-fit-an-ellipsis case. Neither blocks export.
+  let text = opts.text;
+  let truncated = false;
+  if (!measurement.fitsInBox) {
+    const fit = truncateToFit(
+      opts.text,
+      fontSize,
+      opts.fontFamily,
+      opts.fontWeight,
+      maxWidthPx,
+      maxHeightPx,
+      opts.lineHeight,
+    );
+    text = fit.text;
+    measurement = fit.measurement;
+    truncated = true;
+  }
   const overflow = !measurement.fitsInBox;
 
   const block: TextBlock = {
-    text: opts.text,
+    text,
     x: opts.region.x,
     y: opts.region.y,
     w: opts.region.w,
@@ -212,6 +298,7 @@ export function buildTextBlock(opts: BuildTextBlockOptions): TextBlock {
     overflow,
     measuredHeightPct: (measurement.height / SLIDE_HEIGHT) * 100,
   };
+  if (truncated) block.truncated = true;
   if (opts.role !== undefined) block.role = opts.role;
   if (opts.groupId !== undefined) block.groupId = opts.groupId;
   if (opts.dataIndex !== undefined) block.dataIndex = opts.dataIndex;

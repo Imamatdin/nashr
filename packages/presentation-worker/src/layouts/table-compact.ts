@@ -27,7 +27,7 @@ import type {
   TextAlign,
   TextBlock,
 } from '../types.js';
-import { buildTextBlock, compose, defaultBackground } from './shared.js';
+import { buildTextBlock, compose, defaultBackground, hugHeightToMeasured } from './shared.js';
 import { layoutContentSplit } from './content-split.js';
 
 const TITLE: Region = { x: 5, y: 4, w: 90, h: 8 };
@@ -37,6 +37,18 @@ const TABLE_Y = 15;
 const TABLE_H = 75;
 const HEADER_H = 5;
 const MAX_ROWS = 6;
+/**
+ * Cap on a single data row's band height (slide %). Without it, few-row tables
+ * divided the whole 70% data area evenly — `(TABLE_H-HEADER_H)/rows` — giving a
+ * 4-row table ~17.5%-tall rows with text pinned to the top of each and a large
+ * empty cell below (row I). Capping the band, vertically centering each cell's
+ * text within it, and centering the whole table block in the region keeps rows
+ * compact and the table balanced. This is table geometry, NOT content
+ * canvas-fill (deferred to L2): it neither grows fonts nor needs a fit budget.
+ */
+const MAX_ROW_BAND = 12;
+/** Min band so a row never collapses thinner than a comfortable line. */
+const MIN_ROW_BAND = 6;
 const CITATION: Region = { x: 5, y: 92, w: 90, h: 4 };
 const NUMERIC_RE = /^[\d$%.,\s+-]+$/;
 
@@ -67,14 +79,24 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
   const columnCount = headers.length;
   const columnWidth = TABLE_W / columnCount;
   const actualRows = Math.max(1, rows.length);
-  const dataRowHeight = (TABLE_H - HEADER_H) / actualRows;
+
+  // Compact, capped row band instead of dividing the whole data area evenly —
+  // the latter inflated few-row tables into oversized cells with text pinned to
+  // the top and a large empty cell below (row I). Center the whole table block
+  // in the region so a sparse table reads balanced rather than top-anchored.
+  const rowBand = Math.min(
+    MAX_ROW_BAND,
+    Math.max(MIN_ROW_BAND, (TABLE_H - HEADER_H) / actualRows),
+  );
+  const tableHeight = HEADER_H + actualRows * rowBand;
+  const tableTop = TABLE_Y + Math.max(0, (TABLE_H - tableHeight) / 2);
 
   const columnAlignments = detectColumnAlignments(columnCount, rows);
 
   shapes.push({
     type: 'rect',
     x: TABLE_X,
-    y: TABLE_Y,
+    y: tableTop,
     w: TABLE_W,
     h: HEADER_H,
     fill: design.palette.accent,
@@ -84,33 +106,37 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
   headers.forEach((header, j) => {
     const region: Region = {
       x: TABLE_X + j * columnWidth,
-      y: TABLE_Y,
+      y: tableTop,
       w: columnWidth,
       h: HEADER_H,
     };
     blocks.push(
-      buildTextBlock({
-        text: header,
-        region,
-        fontFamily: design.body_font,
-        fontWeight: 'bold',
-        color: design.palette.text,
-        align: columnAlignments[j] ?? 'left',
-        tier: FONT_SIZES.small,
-        lineHeight: LINE_HEIGHTS.caption,
-      }),
+      centerInBand(
+        buildTextBlock({
+          text: header,
+          region,
+          fontFamily: design.body_font,
+          fontWeight: 'bold',
+          color: design.palette.text,
+          align: columnAlignments[j] ?? 'left',
+          tier: FONT_SIZES.small,
+          lineHeight: LINE_HEIGHTS.caption,
+        }),
+        tableTop,
+        HEADER_H,
+      ),
     );
   });
 
   rows.forEach((row, i) => {
-    const rowY = TABLE_Y + HEADER_H + i * dataRowHeight;
+    const bandY = tableTop + HEADER_H + i * rowBand;
     if (i % 2 === 1) {
       shapes.push({
         type: 'rect',
         x: TABLE_X,
-        y: rowY,
+        y: bandY,
         w: TABLE_W,
-        h: dataRowHeight,
+        h: rowBand,
         fill: design.palette.surface,
         opacity: 0.03,
       });
@@ -119,21 +145,25 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
       const cell = row.cells[j] ?? '';
       const region: Region = {
         x: TABLE_X + j * columnWidth,
-        y: rowY,
+        y: bandY,
         w: columnWidth,
-        h: dataRowHeight,
+        h: rowBand,
       };
       blocks.push(
-        buildTextBlock({
-          text: cell,
-          region,
-          fontFamily: design.body_font,
-          fontWeight: 'normal',
-          color: design.palette.text,
-          align: columnAlignments[j] ?? 'left',
-          tier: FONT_SIZES.small,
-          lineHeight: LINE_HEIGHTS.caption,
-        }),
+        centerInBand(
+          buildTextBlock({
+            text: cell,
+            region,
+            fontFamily: design.body_font,
+            fontWeight: 'normal',
+            color: design.palette.text,
+            align: columnAlignments[j] ?? 'left',
+            tier: FONT_SIZES.small,
+            lineHeight: LINE_HEIGHTS.caption,
+          }),
+          bandY,
+          rowBand,
+        ),
       );
     }
   });
@@ -155,6 +185,19 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
 
   const background = defaultBackground(design);
   return compose(slide, blocks, [], shapes, background);
+}
+
+/**
+ * Hug a header/cell block to its measured height and vertically center it
+ * within its row band, so short cell text sits in the middle of the band
+ * instead of pinned to the top with an empty gap below (row I). Both the HTML
+ * and PPTX renderers top-anchor text inside a box, so the centering is done by
+ * positioning the (hugged) block's y — not via a renderer vertical-align.
+ */
+function centerInBand(block: TextBlock, bandY: number, bandH: number): TextBlock {
+  hugHeightToMeasured(block);
+  block.y = bandY + Math.max(0, (bandH - block.h) / 2);
+  return block;
 }
 
 function detectColumnAlignments(

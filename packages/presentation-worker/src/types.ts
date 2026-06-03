@@ -346,6 +346,16 @@ export interface TextBlock {
   lineHeight: number;
   overflow: boolean;
   /**
+   * Set when buildTextBlock could not fit the text even at the floor font and
+   * TRUNCATED it (with an ellipsis) so the slide still renders and the deck
+   * still EXPORTS. This is L1's reliability floor — a degraded slide, not a
+   * blocked one. The Q1 audit reports it as a WARNING (never a blocking FAIL,
+   * per I5), and it is the breadcrumb L2 follows to find slides whose text
+   * genuinely doesn't fit and reconcile the word↔pixel budget. Absent/false
+   * means the text fit normally. Truncation is the floor, NOT the fit fix.
+   */
+  truncated?: boolean;
+  /**
    * Real rendered height of this block as a PERCENTAGE of slide height —
    * the same unit as `y`/`h`. Captured from measureText at construction
    * (measurement.height px ÷ SLIDE_HEIGHT × 100) so stacking layouts can

@@ -295,7 +295,7 @@ describe('LayoutPass overflow handling', () => {
     expect(title!.fontSize).toBeLessThanOrEqual(FONT_SIZES.heading.max);
   });
 
-  it('stops reducing at the floor and flags overflow if the text still does not fit', () => {
+  it('truncates at the floor when text still does not fit, so the deck stays exportable', () => {
     const wallOfText = 'word '.repeat(2000).trim();
     const deck = buildDeck([
       makeSlide(0, 'summary_takeaway', { title: 'X', body_text: wallOfText }),
@@ -304,8 +304,12 @@ describe('LayoutPass overflow handling', () => {
     const body = findBlock(layout.textBlocks, 'word');
     expect(body).toBeDefined();
     expect(body!.fontSize).toBeGreaterThanOrEqual(FONT_SIZES.minimum);
-    expect(body!.overflow).toBe(true);
-    expect(layout.hasOverflow).toBe(true);
+    // L1 reliability floor: instead of being left overflowing (which used to
+    // hard-fail Q1 and dead-end the bot), the text is truncated to fit. The
+    // degrade lives on `truncated`; `overflow` is cleared so export proceeds.
+    expect(body!.truncated).toBe(true);
+    expect(body!.overflow).toBe(false);
+    expect(layout.hasOverflow).toBe(false);
   });
 });
 
@@ -489,7 +493,7 @@ describe('LayoutPass deck-level outputs', () => {
     }
   });
 
-  it('reports totalOverflows and totalWordLimitViolations across the deck', () => {
+  it('aggregates deck-level counts; a wall of text is truncated (degraded), not left overflowing', () => {
     const deck = buildDeck([
       makeSlide(0, 'title_hero', { title: 'Short' }),
       makeSlide(1, 'summary_takeaway', {
@@ -498,7 +502,12 @@ describe('LayoutPass deck-level outputs', () => {
       }),
     ]);
     const layout = new LayoutPass().layout(deck);
-    expect(layout.totalOverflows).toBeGreaterThanOrEqual(1);
+    // The L1 floor truncates the wall of text, so no slide is left overflowing
+    // and the deck exports. The degrade lives on the block's `truncated` flag,
+    // which the Q1 audit surfaces as a warning (observable, never blocking).
+    expect(layout.totalOverflows).toBe(0);
+    const body = layout.slides[1]!.textBlocks.find((b) => b.text.includes('…'));
+    expect(body?.truncated).toBe(true);
     expect(typeof layout.totalWordLimitViolations).toBe('number');
   });
 });
