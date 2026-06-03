@@ -105,6 +105,15 @@ screenshots committed under `docs/screens/`, eyeballed against each row before r
     `fail`/blocks list to a new "degrade-and-ship (warn)" category, with an explicit paragraph that
     this is NOT "fit no longer matters" (it changes the RESPONSE: truncate+warn, deck always ships;
     real fit-correctness is L2). Written so it cannot be read as a cosmetic downgrade.
+  - OBSERVABILITY (review fix — the warn must be LOCATABLE, not just counted): the worker `render`
+    command previously printed only a warning COUNT on success (the per-slide `[Q1] …slide N…` detail
+    was printed only by the `audit` subcommand), and presentation_orchestrator.py logged worker stderr
+    only on a NON-zero exit — so post-fix a degraded-but-exported deck would have HIDDEN its
+    truncation (the severity flip from fail→warn silently reduced observability on the render path).
+    Fixed: `render` now emits each warning's `[Q1] (slide N) <message + truncated text>` to stderr on
+    success, AND the orchestrator logs that stderr (`presentation_render_warnings`) on the success
+    path. This is what makes the I5/BUILD_STATE promise ("slide index + truncated text, logged for
+    L2") true on the production path — and what the live-gate grep below actually finds.
 - DEFECT 2 — ROW I TABLE GEOMETRY (layouts/table-compact.ts): replaced fixed-fraction
   `dataRowHeight=(TABLE_H-HEADER_H)/actualRows` (inflated few-row tables to ~17.5% rows, text
   pinned to the top, odd-row-only zebra reading as bordered boxes) with a capped/min row band,
@@ -130,18 +139,29 @@ screenshots committed under `docs/screens/`, eyeballed against each row before r
 - BLAST RADIUS (tests that pinned old broken behavior → flipped to the degrade contract):
   quality-audit.test.ts ('fails on overflow' → 'degrades a residual overflow to a WARNING…';
   'blocks export on a Q1 failure' → 'does NOT block export… degrades to a warning') + a new
-  truncated-block warn test; layout-pass.test.ts ('stops reducing… flags overflow' → 'truncates at
-  the floor… stays exportable'; totalOverflows aggregation → asserts truncation cleared it);
-  text-block-stacking.test.ts +3 buildTextBlock truncation tests; layout-table.test.ts +1
-  compact/centered-rows test. Existing table tests (header count, one-block-per-cell, odd-row zebra
-  ≥2, alignment, fallback) unchanged + green.
+  truncated-block warn test + a new END-TO-END test (real LayoutPass → real audit: a wall of text
+  truncates and STILL exports — the closest local proxy to "Enlightenment now exports");
+  layout-pass.test.ts ('stops reducing… flags overflow' → 'truncates at the floor… stays
+  exportable'; totalOverflows aggregation → asserts truncation cleared it); text-block-stacking.test.ts
+  +3 buildTextBlock truncation tests; layout-table.test.ts +1 compact/centered-rows test. Existing
+  table tests (header count, one-block-per-cell, odd-row zebra ≥2, alignment, fallback) unchanged +
+  green.
+- FILES: types.ts (+truncated), layouts/shared.ts (truncateToFit + buildTextBlock floor),
+  audit/quality-audit.ts (Q1 → warn), layouts/table-compact.ts (row geometry), src/index.ts (render
+  emits per-warning detail on success), packages/bot/orchestrators/presentation_orchestrator.py
+  (logs worker stderr on the success path) + the 4 test files + INVARIANTS.md/BUILD_STATE.md.
 - VERIFIED locally:
   - `npm --prefix packages/presentation-worker run typecheck` (tsc src + tsconfig.test): clean.
-  - vitest: 352 passed / 3 skipped / 1 FAILED — the failure is the PRE-EXISTING text-measure F red
+  - vitest: 353 passed / 3 skipped / 1 FAILED — the failure is the PRE-EXISTING text-measure F red
     (sCO2 title 1-vs-2 lineCount, plan item 11), confirmed pre-existing by a git-stash round-trip
     (still fails on clean HEAD with none of this branch's changes; this change touches zero of
-    text-measure.ts). Net +4 passing tests vs main.
-  - Python untouched (no .py edits); pytest/ruff/pyright unaffected.
+    text-measure.ts). Net +5 passing tests vs main.
+  - Python: ONE edit (orchestrator success-path warning log). `python -m pytest tests/`: 1292 passed
+    / 32 skipped (baseline, unchanged); orchestrator suite 25 passed; ruff check + format --check on
+    the edited file clean, LF. (The repo's 3 pre-existing ruff errors + format-drift live in files
+    this branch never touched — local ruff newer than the repo pin; not introduced here.)
+  - NB the bare `pytest` shim resolves to the wrong interpreter on this box (60 spurious collection
+    errors); `python -m pytest` is the correct invocation and is green.
 - NOT verified locally (server eyeball = DONE): a live droplet render. CENTERPIECE to verify: the
   Enlightenment deck that was HARD-FAILING now EXPORTS (degraded where text didn't fit — truncated
   with '…' + a Q1 warning in the log — never the "an error occurred" dead-end). Plus sCO2 slides

@@ -838,6 +838,34 @@ describe('Full audit', () => {
     expect(report.warnings).toBeGreaterThan(0);
   });
 
+  it('end-to-end: a genuinely-overflowing deck truncates and STILL exports (real layout + audit)', () => {
+    // The literal L1 contract, end to end through the REAL LayoutPass and the
+    // REAL audit (not hand-crafted blocks) — the closest local proxy to "the
+    // Enlightenment deck that was hard-failing now exports". A wall of text that
+    // cannot fit at the floor is truncated by the layout; the audit reports a Q1
+    // WARNING (degraded, observable) while keeping the deck exportable.
+    const deck = buildDeck([
+      makeSlide(0, 'title_hero', { title: 'Opening' }),
+      makeSlide(1, 'summary_takeaway', {
+        title: 'Takeaways',
+        body_text: 'word '.repeat(2000).trim(),
+      }),
+    ]);
+    const layout = new LayoutPass().layout(deck);
+    const report = new QualityAudit().audit(deck, layout);
+
+    // Degrade-and-ship: the overflow did NOT block export.
+    expect(report.is_exportable).toBe(true);
+    // The real layout pass truncated the offending block.
+    expect(layout.slides[1]!.textBlocks.some((b) => b.truncated)).toBe(true);
+    // ...and the audit surfaced it as a Q1 warning on that slide (observable).
+    const q1Warn = report.results.find(
+      (r) =>
+        r.check_id === 'Q1' && r.severity === 'warn' && !r.passed && r.slide_index === 1,
+    );
+    expect(q1Warn).toBeDefined();
+  });
+
   it('is exportable when only warnings are present (Q12)', () => {
     const deck = buildDeck([
       makeSlide(0, 'title_hero', { title: 'Opening' }),

@@ -134,6 +134,19 @@ program
     }
     if (auditReport.warnings > 0) {
       process.stderr.write(`Quality audit: ${auditReport.warnings} warning(s)\n`);
+      // Emit each warning's detail (not just the count) so a DEGRADE stays
+      // locatable in the logs — in particular Q1 truncation (slide index +
+      // truncated text), L1's reliability floor. These never block export
+      // (is_exportable stays true); the per-slide line is the breadcrumb L2
+      // follows to fix the fit for real.
+      for (const w of auditReport.results) {
+        if (w.passed || w.severity !== 'warn') continue;
+        const slidePart =
+          w.slide_index !== null && w.slide_index !== undefined
+            ? ` (slide ${w.slide_index})`
+            : '';
+        process.stderr.write(`  [${w.check_id}]${slidePart} ${w.message ?? ''}\n`);
+      }
     }
 
     mkdirSync(options.output, { recursive: true });

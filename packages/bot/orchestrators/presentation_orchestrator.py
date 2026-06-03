@@ -540,6 +540,17 @@ class PresentationOrchestrator:
                 )
                 continue
 
+            # Render succeeded, but the worker still writes audit WARNINGS to
+            # stderr — notably Q1 truncation (L1's reliability floor degraded a
+            # slide so the deck could still export). Surface them so the degrade
+            # is locatable in the logs instead of being swallowed on success.
+            warn_text = (completed.stderr or "").strip()
+            if warn_text:
+                logger.warning(
+                    "presentation_render_warnings",
+                    extra={"format": ext, "stderr_tail": warn_text[:3000]},
+                )
+
             produced = _find_output_file(output_dir, ext)
             if produced is None:
                 result.warnings.append(f"{ext}: renderer reported success but no file appeared")
