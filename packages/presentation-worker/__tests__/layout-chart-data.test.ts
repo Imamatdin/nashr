@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { MARGIN } from '../src/constants.js';
 import { LayoutPass } from '../src/layout-pass.js';
 import type { ChartSeriesPoint } from '../src/types.js';
 import { buildTestDeck, makeSlide } from './helpers.js';
+
+const CONTENT_BOTTOM = 100 - MARGIN.bottom; // 94: the bottom content margin (R16)
 
 describe('layout — CHART_DATA', () => {
   it('reserves the chart region with a centred placeholder block', () => {
@@ -18,8 +21,59 @@ describe('layout — CHART_DATA', () => {
     expect(placeholder!.x).toBe(5);
     expect(placeholder!.y).toBe(15);
     expect(placeholder!.w).toBe(65);
-    expect(placeholder!.h).toBe(72);
+    // The chart no longer keeps the frozen body height (72); it FILLS down to the
+    // bottom content margin, so the box bottom is pinned to 100 - MARGIN.bottom.
+    expect(placeholder!.y + placeholder!.h).toBeCloseTo(CONTENT_BOTTOM);
     expect(placeholder!.align).toBe('center');
+  });
+
+  it('a long title stays clear of the chart, which stays pinned at its top and fills to the bottom margin', () => {
+    // The chart's top is the never-stack-upward floor: max(designed body top 15,
+    // title measured bottom + gap). The frozen title region (h:8) bounds the
+    // title's measured height, so its bottom (~11.4%) stays above the chart's
+    // designed top (15) — the down-push branch cannot fire for chart_data, and
+    // the chart stays pinned at 15. What a long title MUST NOT do is overlap the
+    // chart, and the box must still fill to the bottom margin regardless of title
+    // length (h = CONTENT_BOTTOM - top, so y+h == CONTENT_BOTTOM either way).
+    const deck = buildTestDeck([
+      makeSlide('chart_data', {
+        title:
+          'Renewable energy generation capacity across every major economy continues to accelerate dramatically year over year as solar and wind costs collapse worldwide',
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const placeholder = layout.textBlocks.find((b) =>
+      b.text.includes('[Chart placeholder]'),
+    );
+    const title = layout.textBlocks.find((b) => b.fontWeight === 'bold');
+    expect(placeholder).toBeDefined();
+    expect(title).toBeDefined();
+    const titleBottom = title!.y + title!.measuredHeightPct;
+    expect(titleBottom).toBeLessThanOrEqual(placeholder!.y);
+    expect(placeholder!.y).toBe(15);
+    expect(placeholder!.y + placeholder!.h).toBeCloseTo(CONTENT_BOTTOM);
+  });
+
+  it('tall-title chart stays horizontally clear of the citation', () => {
+    const deck = buildTestDeck([
+      makeSlide('chart_data', {
+        title:
+          'Renewable energy generation capacity across every major economy continues to accelerate dramatically year over year as solar and wind costs collapse worldwide',
+        source_citation: 'IEA Renewables Report 2025',
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const placeholder = layout.textBlocks.find((b) =>
+      b.text.includes('[Chart placeholder]'),
+    );
+    const cite = layout.textBlocks.find((b) => b.text.includes('IEA Renewables'));
+    expect(placeholder).toBeDefined();
+    expect(cite).toBeDefined();
+    // Chart owns x:5..70; the citation sits at x>=70. Edge-adjacent, disjoint:
+    // the chart's right edge must not cross into the citation column.
+    expect(placeholder!.x).toBe(5);
+    expect(cite!.x).toBeGreaterThanOrEqual(70);
+    expect(placeholder!.x + placeholder!.w).toBeLessThanOrEqual(cite!.x);
   });
 
   it('renders the body_text as an annotation in the right-side column', () => {

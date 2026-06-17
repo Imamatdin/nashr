@@ -155,6 +155,8 @@ export const SLIDE_REGIONS: Partial<Record<SlideType, SlideRegions>> = {
   },
   content_split: {
     title: { x: 5, y: 5, w: 48, h: 8 },
+    // h is a MAX bound only — layoutContentSplit derives the body column's height
+    // from the title's measured bottom down to the caption strip.
     body: { x: 5, y: 18, w: 48, h: 65 },
     image: { x: 52, y: 0, w: 48, h: 100 },
     // A contained figure sits inset from the full-bleed `image` panel so the
@@ -196,6 +198,8 @@ export const SLIDE_REGIONS: Partial<Record<SlideType, SlideRegions>> = {
   },
   chart_data: {
     title: { x: 5, y: 4, w: 90, h: 8 },
+    // h is a MAX bound only — layoutChartData derives the chart region's height
+    // from the title's measured bottom down to the bottom content margin.
     body: { x: 5, y: 15, w: 65, h: 72 },
     caption: { x: 72, y: 15, w: 23, h: 30 },
     citation: { x: 70, y: 90, w: 25, h: 4 },
@@ -297,40 +301,5 @@ export function getKeywordPositions(count: number): Array<{ term: Region; explai
   return Array.from({ length: count }, (_, i) => ({
     term: { x: 5, y: startY + i * stepY, w: 35, h: rowHeight },
     explain: { x: 42, y: startY + i * stepY, w: 50, h: rowHeight },
-  }));
-}
-
-/**
- * Timeline node positions for horizontal layout (3-5 nodes).
- * Returns one Region per node, with x spread between 10% and 90%.
- */
-export function getTimelinePositions(count: number): Region[] {
-  if (count <= 0) return [];
-  if (count === 1) return [{ x: 45, y: 35, w: 10, h: 25 }];
-  const startX = 10;
-  const endX = 90;
-  const span = endX - startX;
-  const step = span / (count - 1);
-  const halfNodeW = 5;
-  return Array.from({ length: count }, (_, i) => ({
-    x: startX + i * step - halfNodeW,
-    y: 35,
-    w: halfNodeW * 2,
-    h: 25,
-  }));
-}
-
-/**
- * Flow process step positions: 3-5 steps horizontally distributed.
- */
-export function getFlowStepPositions(count: number): Region[] {
-  if (count <= 0) return [];
-  const totalGutter = 4 * (count - 1);
-  const stepWidth = (90 - totalGutter) / count;
-  return Array.from({ length: count }, (_, i) => ({
-    x: 5 + i * (stepWidth + 4),
-    y: 30,
-    w: stepWidth,
-    h: 40,
   }));
 }

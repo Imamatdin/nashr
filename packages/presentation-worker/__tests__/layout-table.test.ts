@@ -292,3 +292,184 @@ describe('layout — TABLE_COMPACT', () => {
     expect(firstRowCell.y).toBeGreaterThan(header.y);
   });
 });
+
+describe('pixel-identical equivalence lock (real pre-migration baselines)', () => {
+  // These two fixtures were captured by running the UNMODIFIED (pre-migration)
+  // table-compact.ts on the exact inputs below. They are the contract the
+  // shared-engine re-point must reproduce byte-for-byte. toBeCloseTo(.,6)
+  // absorbs <=1 ULP of float-reassociation drift while still failing on any
+  // real geometric regression (a band shift, an off-by-one row map, a scale
+  // that fires when it should not).
+
+  it('fixture (a) non-overflow: all 15 cells match the captured baseline', () => {
+    const deck = buildTestDeck([
+      makeSlide('table_compact', {
+        title: 'Comparison',
+        table_headers: ['Name', 'Year', 'Score'],
+        table_rows: rows([
+          ['Alice', '2024', '90'],
+          ['Bob', '2025', '85'],
+          ['Carol', '2026', '95'],
+          ['Dan', '2027', '80'],
+        ]),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    // x is column-driven (region.x=5, columnWidth=90/3=30, CELL_PAD_X=1):
+    // col0=6, col1=36, col2=66. w=cellWidth=28. h is the scaled band height.
+    const X = { Name: 6, Year: 36, Score: 66 };
+    const W = 28;
+    const H = 4.790741;
+
+    // Each row's three cells share one y (the band top). Header band is band 0,
+    // each data row k is band k+1 — captured baselines below.
+    const expected: Array<{ text: string; x: number; y: number }> = [
+      { text: 'Name', x: X.Name, y: 40.523148 },
+      { text: 'Year', x: X.Year, y: 40.523148 },
+      { text: 'Score', x: X.Score, y: 40.523148 },
+      { text: 'Alice', x: X.Name, y: 45.313889 },
+      { text: '2024', x: X.Year, y: 45.313889 },
+      { text: '90', x: X.Score, y: 45.313889 },
+      { text: 'Bob', x: X.Name, y: 50.104630 },
+      { text: '2025', x: X.Year, y: 50.104630 },
+      { text: '85', x: X.Score, y: 50.104630 },
+      { text: 'Carol', x: X.Name, y: 54.895370 },
+      { text: '2026', x: X.Year, y: 54.895370 },
+      { text: '95', x: X.Score, y: 54.895370 },
+      { text: 'Dan', x: X.Name, y: 59.686111 },
+      { text: '2027', x: X.Year, y: 59.686111 },
+      { text: '80', x: X.Score, y: 59.686111 },
+    ];
+    // 3 headers + 4 rows * 3 cols = 15 distinct cells; assert every one.
+    expect(expected).toHaveLength(15);
+
+    for (const e of expected) {
+      const cell = layout.textBlocks.find((b) => b.text === e.text)!;
+      expect(cell, `cell ${e.text} must exist`).toBeDefined();
+      expect(cell.x, `${e.text}.x`).toBeCloseTo(e.x, 6);
+      expect(cell.y, `${e.text}.y`).toBeCloseTo(e.y, 6);
+      expect(cell.w, `${e.text}.w`).toBeCloseTo(W, 6);
+      expect(cell.h, `${e.text}.h`).toBeCloseTo(H, 6);
+    }
+
+    // Explicit off-by-one guard for rowTop(k) -> fit.tops[k+1]: the first data
+    // row ('Alice') must sit at the row0 band top, NOT the header band
+    // (40.523148) and NOT row1's band (50.104630). A header-vs-row0 or
+    // row0-vs-row1 shift makes exactly this assertion fail.
+    const alice = layout.textBlocks.find((b) => b.text === 'Alice')!;
+    expect(alice.y).toBeCloseTo(45.313889, 6);
+    expect(alice.y).not.toBeCloseTo(40.523148, 4);
+    expect(alice.y).not.toBeCloseTo(50.104630, 4);
+
+    // Strict monotonic top-to-bottom: header < row0 < row1 < row2 < row3.
+    const yOf = (t: string): number => layout.textBlocks.find((b) => b.text === t)!.y;
+    expect(yOf('Name')).toBeLessThan(yOf('Alice'));
+    expect(yOf('Alice')).toBeLessThan(yOf('Bob'));
+    expect(yOf('Bob')).toBeLessThan(yOf('Carol'));
+    expect(yOf('Carol')).toBeLessThan(yOf('Dan'));
+  });
+
+  it('fixture (c) scale===1 minimal: bands are bit-exact', () => {
+    const deck = buildTestDeck([
+      makeSlide('table_compact', {
+        title: 'Minimal',
+        table_headers: ['A', 'B'],
+        table_rows: rows([['x', 'y']]),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    // x: region.x=5, columnWidth=90/2=45, CELL_PAD_X=1 → col0=6, col1=51.
+    // w=cellWidth=43. With scale===1 the band height is exact, so assert h with
+    // toBe (bit-identical) and y with toBeCloseTo(.,6).
+    const expected: Array<{ text: string; x: number; y: number }> = [
+      { text: 'A', x: 6, y: 47.709259 },
+      { text: 'B', x: 51, y: 47.709259 },
+      { text: 'x', x: 6, y: 52.5 },
+      { text: 'y', x: 51, y: 52.5 },
+    ];
+    const W = 43;
+    // Bit-exact band height when scale===1. The spec's "4.790741" is this value
+    // rounded to 6 dp; toBe() locks the full-precision constant so any change to
+    // the one-line band math (CELL_PAD_Y, tier, line-height) trips the lock.
+    const H = 4.790740740740741;
+
+    for (const e of expected) {
+      const cell = layout.textBlocks.find((b) => b.text === e.text)!;
+      expect(cell, `cell ${e.text} must exist`).toBeDefined();
+      expect(cell.x, `${e.text}.x`).toBeCloseTo(e.x, 6);
+      expect(cell.y, `${e.text}.y`).toBeCloseTo(e.y, 6);
+      expect(cell.w, `${e.text}.w`).toBeCloseTo(W, 6);
+      // scale===1 ⇒ band height is the exact constant, bit-for-bit.
+      expect(cell.h, `${e.text}.h`).toBe(H);
+    }
+  });
+
+  it('fixture (b) overflow: scaled bands, fonts, and truncation match the captured baseline', () => {
+    // The scale<1 path. buildCell builds each cell against the SCALED band height
+    // BEFORE emitBandCell re-stamps it, so the engine's scale must feed the cell
+    // build — not just the box geometry. Captured from the UNMODIFIED layout. y/h
+    // are the character-width-estimation values this suite runs under (asserted
+    // with toBeCloseTo); fontSize / truncated / overflow are the build-against-the
+    // -scaled-band discriminators (asserted exactly): a regression that measured a
+    // cell at the wrong height then re-stamped h would keep y/h but flip fontSize
+    // (12 -> larger) or truncated (true -> false).
+    const long = 'A genuinely long descriptive cell that wraps across several lines '.repeat(12);
+    const deck = buildTestDeck([
+      makeSlide('table_compact', {
+        title: 'Overstuffed',
+        table_headers: ['Col A', 'Col B', 'Col C'],
+        table_rows: rows([
+          [long, long, long],
+          ['x', 'y', 'z'],
+          [long, long, long],
+          ['x', 'y', 'z'],
+          [long, long, long],
+          ['x', 'y', 'z'],
+          [long, long, long],
+        ]),
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+
+    // Header band (scaled): one line at the full tier, never truncated.
+    const header = layout.textBlocks.find((b) => b.text === 'Col A')!;
+    expect(header.y).toBeCloseTo(15, 6);
+    expect(header.h).toBeCloseTo(2.231609, 6);
+    expect(header.fontSize).toBe(14);
+    expect(header.truncated ?? false).toBe(false);
+    expect(header.overflow).toBe(false);
+
+    // Long cells: built against the SCALED band (16.518391% tall), shrunk to the
+    // tier floor (12px) and truncated — the load-bearing "build at the scaled
+    // band" signal. Every long cell is identical; assert all 12 (4 rows * 3 cols).
+    const longCells = layout.textBlocks.filter((b) => b.text.startsWith('A genuinely'));
+    expect(longCells).toHaveLength(12);
+    for (const c of longCells) {
+      expect(c.h, 'long cell band height').toBeCloseTo(16.518391, 6);
+      expect(c.fontSize, 'long cell shrunk to tier floor').toBe(12);
+      expect(c.truncated, 'long cell truncated at the scaled band').toBe(true);
+      expect(c.overflow, 'reliability floor held').toBe(false);
+    }
+    const firstLong = longCells.reduce((a, b) => (b.y < a.y ? b : a));
+    expect(firstLong.y, 'first long row sits directly under the header band').toBeCloseTo(17.231609, 6);
+
+    // Short cells: one line, full tier, not truncated (9 = 3 rows * 3 cols).
+    const shortCells = layout.textBlocks.filter((b) => ['x', 'y', 'z'].includes(b.text));
+    expect(shortCells).toHaveLength(9);
+    for (const c of shortCells) {
+      expect(c.h).toBeCloseTo(2.231609, 6);
+      expect(c.fontSize).toBe(14);
+      expect(c.truncated ?? false).toBe(false);
+      expect(c.overflow).toBe(false);
+    }
+
+    // Scale fired and the table fills exactly to the region bottom (y=90), never
+    // past it: the last long row bottom is the captured 90.0.
+    const maxBottom = Math.max(
+      ...layout.textBlocks.filter((b) => b.text !== 'Overstuffed').map((b) => b.y + b.h),
+    );
+    expect(maxBottom).toBeCloseTo(90, 6);
+  });
+});

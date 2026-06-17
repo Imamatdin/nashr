@@ -31,6 +31,7 @@ import {
 } from '../constants.js';
 import type { DeckSpec, ShapeBlock, SlideLayout, SlideSpec, TextBlock } from '../types.js';
 import { buildTextBlock, compose, defaultBackground, hugHeightToMeasured, type FontTier } from './shared.js';
+import { fitMeasuredStack } from './fit.js';
 
 /** Horizontal layout: the step grid occupies the central 80% of the slide. */
 const FLOW_LEFT_MARGIN = 10;
@@ -186,17 +187,39 @@ export function layoutFlowProcess(slide: SlideSpec, deck: DeckSpec): SlideLayout
   // share a top-y so they hang off the label strip uniformly, but each
   // column keeps its own measured height — a longer description renders
   // taller than its short neighbours rather than clipping.
-  const maxNumberH = Math.max(...stepBlocks.map((s) => s.number.measuredHeightPct));
-  const maxLabelH = Math.max(...stepBlocks.map((s) => s.label.measuredHeightPct));
-  const maxDescriptionH = Math.max(...stepBlocks.map((s) => s.description.measuredHeightPct));
+  // Fit the three SHARED rows (number/label/description) ONCE and reuse the tops
+  // for every column, so the grid reads as horizontal strips (the connector cuts
+  // the number row) while each column keeps its own measured block height.
+  //
+  // measure() returns each row's max HUGGED height (block.h, which already carries
+  // hugHeightToMeasured's anti-clip epsilon) — NOT measuredHeightPct — so the
+  // distributed bottom band reserves that epsilon and the tallest description
+  // lands exactly on the region bottom instead of 0.2pp past it.
+  //
+  // ANCHOR DECISION — distribute: the step rows SPACE OUT across the content
+  // region (airy strips) rather than clumping in a centred block;
+  // NUMBER_TO_LABEL_GAP / LABEL_TO_DESCRIPTION_GAP are the floor gaps and the
+  // surplus is spread evenly between them. overflow:'truncate' keeps scale=1 — the
+  // blocks are already built at their own hugged height, so a global scale would
+  // compress the tops while the blocks stayed full size and overlap; per-block
+  // buildTextBlock shrink (minFontSize) is the reliability floor.
+  const maxNumberH = Math.max(...stepBlocks.map((s) => s.number.h));
+  const maxLabelH = Math.max(...stepBlocks.map((s) => s.label.h));
+  const maxDescriptionH = Math.max(...stepBlocks.map((s) => s.description.h));
 
-  const stackHeight =
-    maxNumberH + NUMBER_TO_LABEL_GAP + maxLabelH + LABEL_TO_DESCRIPTION_GAP + maxDescriptionH;
-  const stackTop = regionTop + Math.max(0, (regionHeight - stackHeight) / 2);
-
-  const numberY = stackTop;
-  const labelY = numberY + maxNumberH + NUMBER_TO_LABEL_GAP;
-  const descriptionY = labelY + maxLabelH + LABEL_TO_DESCRIPTION_GAP;
+  const fit = fitMeasuredStack({
+    region: { x: FLOW_LEFT_MARGIN, y: regionTop, w: FLOW_TOTAL_WIDTH, h: regionHeight },
+    items: [
+      { measure: () => maxNumberH, gapAfter: NUMBER_TO_LABEL_GAP },
+      { measure: () => maxLabelH, gapAfter: LABEL_TO_DESCRIPTION_GAP },
+      { measure: () => maxDescriptionH },
+    ],
+    overflow: 'truncate',
+    anchor: 'distribute',
+  });
+  const numberY = fit.tops[0]!;
+  const labelY = fit.tops[1]!;
+  const descriptionY = fit.tops[2]!;
 
   for (const sb of stepBlocks) {
     sb.number.y = numberY;
