@@ -138,26 +138,43 @@ export class QualityAudit {
   }
 
   // -------------------------------------------------------------------------
-  // Q1: Text overflow (FAIL, R16/R17)
+  // Q1: Text overflow → degrade + WARN (R16). NEVER blocks export (I5).
+  //
+  // A block that could not fit at the floor font is truncated-and-ellipsized
+  // by buildTextBlock (L1's reliability floor) and carries `truncated`; a block
+  // that still overflows even after truncation (a pathologically narrow box)
+  // keeps `overflow`. Either way the slide is DEGRADED, not broken — it renders
+  // and exports. Per invariant I5 this is a WARNING, never a blocking FAIL: a
+  // user who paid for a deck always gets the deck, so overflow-at-floor can no
+  // longer drive is_exportable=false. The breakage stays observable HERE
+  // (slide index, the text, "truncated") so L2 — the word↔pixel fit contract —
+  // can locate these slides and make the text actually fit. Truncation is the
+  // floor; it is NOT the fit fix.
   // -------------------------------------------------------------------------
 
   private checkQ1TextOverflow(layout: DeckLayout): AuditCheckResult[] {
     const results: AuditCheckResult[] = [];
     for (const slide of layout.slides) {
-      const overflowBlocks = slide.textBlocks.filter((b) => b.overflow);
-      if (overflowBlocks.length > 0) {
-        const blockSummary = overflowBlocks
-          .map((b) => `"${b.text.slice(0, 30)}..." at ${b.fontSize}px`)
+      const degraded = slide.textBlocks.filter((b) => b.truncated || b.overflow);
+      if (degraded.length > 0) {
+        const blockSummary = degraded
+          .map(
+            (b) =>
+              `"${b.text.slice(0, 30)}" @${b.fontSize}px ` +
+              `(${b.overflow ? 'still overflows' : 'truncated to fit'})`,
+          )
           .join('; ');
         results.push({
           check_id: 'Q1',
-          check_name: 'Text overflow',
+          check_name: 'Text overflow (degraded, truncated to fit)',
           passed: false,
-          severity: 'fail',
+          severity: 'warn',
           slide_index: slide.slideIndex,
           rule_reference: 'R16',
           message:
-            `${overflowBlocks.length} text block(s) overflow on slide ${slide.slideIndex}. ` +
+            `${degraded.length} text block(s) did not fit at the floor font on slide ` +
+            `${slide.slideIndex} and were truncated so the deck still exports. ` +
+            `Real fit-correctness (word↔pixel budget) is L2, not this floor. ` +
             `Blocks: ${blockSummary}`,
         });
       } else {
@@ -165,7 +182,7 @@ export class QualityAudit {
           check_id: 'Q1',
           check_name: 'Text overflow',
           passed: true,
-          severity: 'fail',
+          severity: 'warn',
           slide_index: slide.slideIndex,
         });
       }

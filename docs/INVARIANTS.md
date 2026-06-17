@@ -102,13 +102,16 @@ deferral, by name, IN THIS FILE.
 
 A user who paid for a deck gets the deck. The audit's job is to keep correctness
 failures off the user's screen (text that doesn't render, contrast that can't be
-read, an interactive without a correct answer) — not to gatekeep on style. A
-stylistic concern means: a real human designer might argue with the choice but the
-deck is still legible, accurate, and complete.
+read, an interactive without a correct answer) — not to gatekeep on style, and
+not to refuse the whole deck over a single slide that can be DEGRADED into a
+legible, exportable state. A stylistic concern means: a real human designer might
+argue with the choice but the deck is still legible, accurate, and complete.
 
-- **Correctness failures (severity: `fail`, blocks export):** Q1 text overflow,
-  Q2 WCAG contrast, Q5 empty slide, Q7 unrenderable font, Q9 interactive without a
-  correct answer, Q10 quiz without feedback, Q13 deck in the wrong language.
+- **Correctness failures (severity: `fail`, blocks export):** Q2 WCAG contrast,
+  Q5 empty slide, Q7 unrenderable font, Q9 interactive without a correct answer,
+  Q10 quiz without feedback, Q13 deck in the wrong language.
+- **Degrade-and-ship (severity: `warn`, never blocks — the content still
+  RENDERS):** Q1 text overflow-at-floor, truncated to fit (see below).
 - **Stylistic / cosmetic concerns (severity: `warn`, never blocks):** Q4 adjacent
   same-layout, Q3 word count over, Q6 unresolved background image, Q8 mixed
   script, Q11 visible cards, Q12 generic title, Q14 consecutive data slides,
@@ -119,6 +122,23 @@ defined above. If a check upgrades from `warn` to `fail`, the upgrade must name
 the specific user-visible breakage it prevents and be defended here. The
 `is_exportable` flag is computed from `failed === 0`, so the line lives in the
 severity field — keep it honest.
+
+Q1 specifically (text overflow → degrade-and-ship). Text that does not fit IS a
+real correctness problem — this is **not** a statement that fit no longer matters.
+It is a statement about the RESPONSE. The right response to "does not fit even at
+the floor font" is to TRUNCATE-and-ellipsize the text so the slide still renders
+and the deck still EXPORTS, then WARN — not to block the whole deck and dead-end
+the user with "an error occurred" (the live failure on the Enlightenment deck
+before this). Truncation (`buildTextBlock`, the `truncated` flag) is L1's
+RELIABILITY FLOOR, **not the cure**. The cure — reconciling editorial's word
+budget with the renderer's pixel budget so the full text genuinely fits — is L2's
+shared fit contract. The Q1 warning is therefore kept LOUD and logged, carrying
+the slide index and the truncated text, precisely so L2 can locate every
+truncated slide and fix the fit for real. A fit/overflow condition can NEVER again
+set `is_exportable=false` — including the pathological case where even an ellipsis
+will not fit a degenerate box, which also resolves to a warning. Q1 is now a
+`warn` (see `quality-audit.ts` and the tests `degrades a residual overflow to a
+WARNING` / `does NOT block export on a Q1 overflow`).
 
 Q4 specifically: adjacent same-layout was a `fail` historically and blocked the
 sCO2 deck from exporting. It is now `warn` (see `quality-audit.ts` and the test

@@ -419,6 +419,26 @@ def test_slide_content_table_round_trips() -> None:
     assert again.table_rows[2].cells[0] == "sCO2"
 
 
+def test_slide_content_table_emphasis_round_trips() -> None:
+    content = SlideContent(
+        title="sCO2 wins on every dimension",
+        table_headers=["Cooling", "Density", "PUE"],
+        table_rows=[TableRow(cells=["sCO2", "120 kW/rack", "1.04"])],
+        table_preferred_column=2,
+        table_hero_row=0,
+    )
+    again = SlideContent.model_validate(content.model_dump(mode="json"))
+    assert again == content
+    assert again.table_preferred_column == 2
+    assert again.table_hero_row == 0
+
+
+def test_slide_content_table_emphasis_defaults_none() -> None:
+    content = SlideContent(title="Neutral reference", table_headers=["A", "B"])
+    assert content.table_preferred_column is None
+    assert content.table_hero_row is None
+
+
 # ---------------------------------------------------------------------------
 # SlideSpec
 # ---------------------------------------------------------------------------
@@ -433,6 +453,20 @@ def test_slide_spec_construction() -> None:
     assert spec.slide_index == 0
     assert spec.slide_type is SlideType.TITLE_HERO
     assert spec.accent_override is None
+    assert spec.section_thesis is None
+
+
+def test_slide_spec_section_thesis_round_trips() -> None:
+    spec = SlideSpec(
+        slide_index=2,
+        slide_type=SlideType.TABLE_COMPACT,
+        content=SlideContent(title="Results"),
+        section_name="Results",
+        section_thesis="sCO2 cooling pays back its capital within a few years.",
+    )
+    again = SlideSpec.model_validate(spec.model_dump(mode="json"))
+    assert again == spec
+    assert again.section_thesis == "sCO2 cooling pays back its capital within a few years."
 
 
 def test_slide_spec_accent_override_validates_hex() -> None:

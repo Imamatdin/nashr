@@ -339,6 +339,63 @@ def test_table_fields_parse_and_materialise() -> None:
     assert content.table_rows[0].cells == ["Air", "8 kW/rack", "1.58"]
 
 
+def test_table_emphasis_fields_parse_and_materialise() -> None:
+    # _LLMSlide uses extra="ignore"; if it stops declaring these the executor's
+    # authored emphasis is silently dropped and the gate's executor count is 0.
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "table_compact",
+            "title": "sCO2 wins on every dimension",
+            "table_headers": ["Metric", "Air", "sCO2"],
+            "table_rows": [{"cells": ["PUE", "1.55", "1.08"]}],
+            "table_preferred_column": 2,
+            "table_hero_row": 0,
+        }
+    )
+    assert content.table_preferred_column == 2
+    assert content.table_hero_row == 0
+
+
+def test_stat_highlight_parses_and_materialises() -> None:
+    content = _materialise_one(
+        {
+            "slide_index": 0,
+            "slide_type": "data_emphasis",
+            "title": "The headline number",
+            "stats": [
+                {"value": "1.08", "unit": "PUE", "label": "efficiency", "highlight": True},
+                {"value": "1.55", "unit": "PUE", "label": "baseline"},
+            ],
+        }
+    )
+    assert content.stats is not None
+    assert content.stats[0].highlight is True
+    assert content.stats[1].highlight is False
+
+
+def test_section_thesis_carried_from_plan() -> None:
+    plan = _stub_plan(2)
+    parsed = _parse_slides(
+        _llm_slides_payload(
+            [
+                {
+                    "slide_index": 0,
+                    "section_index": 1,
+                    "slide_type": "table_compact",
+                    "title": "A results table",
+                    "table_headers": ["Metric", "Air", "sCO2"],
+                    "table_rows": [{"cells": ["PUE", "1.55", "1.08"]}],
+                }
+            ]
+        )
+    )
+    assert parsed is not None
+    slides = _materialise_slides(parsed, plan)
+    assert slides[0].section_name == plan.sections[1].section_name
+    assert slides[0].section_thesis == plan.sections[1].thesis
+
+
 def test_comparison_columns_parse_from_top_level_keys() -> None:
     # The prompt now emits left_column/right_column at the TOP level (not a
     # nested "comparison" object). These are the keys _LLMSlide declares, so

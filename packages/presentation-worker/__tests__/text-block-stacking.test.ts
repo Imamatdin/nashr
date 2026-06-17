@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS } from '../src/constants.js';
+import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../src/constants.js';
 import { LayoutPass } from '../src/layout-pass.js';
 import { buildTextBlock } from '../src/layouts/shared.js';
 import type { FontWeight, TextAlign } from '../src/types.js';
@@ -36,6 +36,52 @@ describe('buildTextBlock — measuredHeightPct capture', () => {
     // The long block wraps to many lines in the same region; its measured
     // height must be well above the single-line short block.
     expect(long.measuredHeightPct).toBeGreaterThan(short.measuredHeightPct * 2);
+  });
+});
+
+describe('buildTextBlock — reliability floor (truncation, L1)', () => {
+  // Tiny box that a long string cannot fit even at the floor font → truncation.
+  const TINY: Region = { x: 5, y: 5, w: 15, h: 3 };
+  const LONG = 'word '.repeat(30).trim();
+
+  function tinyBlock(text: string, region: Region = TINY) {
+    return buildTextBlock({
+      text,
+      region: { ...region },
+      fontFamily: 'Inter',
+      fontWeight: 'normal' as FontWeight,
+      color: '#000000',
+      align: 'left' as TextAlign,
+      tier: FONT_SIZES.body,
+      lineHeight: LINE_HEIGHTS.body,
+    });
+  }
+
+  it('truncates text that cannot fit at the floor, clears overflow, and ellipsizes', () => {
+    const b = tinyBlock(LONG);
+    expect(b.truncated).toBe(true);
+    // Truncation made it fit, so there is no residual overflow in a normal box —
+    // which is exactly why the deck now exports instead of hard-failing Q1.
+    expect(b.overflow).toBe(false);
+    expect(b.text.endsWith('…')).toBe(true);
+    expect(b.text.length).toBeLessThan(LONG.length);
+    // The height is re-measured from the truncated string, so stacking stays honest.
+    expect(b.measuredHeightPct).toBeLessThanOrEqual(TINY.h + 0.5);
+  });
+
+  it('leaves text that already fits untouched (no truncation, no ellipsis)', () => {
+    const b = tinyBlock('Hi');
+    expect(b.truncated).toBeFalsy();
+    expect(b.text).toBe('Hi');
+    expect(b.overflow).toBe(false);
+  });
+
+  it('never throws in a pathologically narrow box — returns a renderable block', () => {
+    // Even a lone ellipsis cannot fit here; the floor must still return a block
+    // (marked truncated) so the audit warns instead of the export hard-failing.
+    const b = tinyBlock(LONG, { x: 5, y: 5, w: 1, h: 1 });
+    expect(b.truncated).toBe(true);
+    expect(b.text.length).toBeGreaterThan(0);
   });
 });
 

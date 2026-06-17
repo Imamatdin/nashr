@@ -202,7 +202,7 @@ export class PptxRenderer {
       bold: block.fontWeight === 'bold' || block.fontWeight === 'semibold',
       italic: block.fontStyle === 'italic',
       align: block.align,
-      valign: 'top',
+      valign: block.valign ?? 'top',
       lineSpacingMultiple: block.lineHeight,
       wrap: true,
     };
