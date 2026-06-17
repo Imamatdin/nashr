@@ -108,6 +108,7 @@ from packages.presentation._schema_feedback import (
     loc_path,
     summarise_errors,
 )
+from packages.presentation.emphasis import EmphasisProvenance, apply_emphasis_fallback
 from packages.presentation.plan_validator import (
     failing_section_indices,
     validate_deck_against_plan,
@@ -392,6 +393,8 @@ class _LLMSlide(BaseModel):
     right_column: _LLMComparison | None = None
     table_headers: list[str] | None = Field(default=None, max_length=6)
     table_rows: list[TableRow] | None = Field(default=None, max_length=7)
+    table_preferred_column: int | None = Field(default=None, ge=0)
+    table_hero_row: int | None = Field(default=None, ge=0)
     chart_series: list[ChartSeriesPoint] | None = Field(default=None, max_length=8)
     chart_type: ChartType | None = None
     chart_group_labels: list[str] | None = Field(default=None, max_length=6)
@@ -449,6 +452,11 @@ class EditorialPass:
         self._gemini = gemini
         self._planner = planner
         self._classifier = classifier
+        # Provenance of the last deck's emphasis fields (executor vs fallback),
+        # captured by the post-assembly fallback. Ship ignores it; the GATE A
+        # script reads it to prove the executor — not the fallback — authored
+        # the table/stat emphasis. Reset on each generate_deck_spec call.
+        self.last_emphasis_provenance: EmphasisProvenance | None = None
 
     def _get_llm(self) -> LLMClient:
         if self._llm is None:
@@ -531,7 +539,12 @@ class EditorialPass:
             )
 
         merged = self._merge_slides(content_slides, interactive_slides)
-        return self._assemble_deck(merged, interview, design, project_id)
+        deck = self._assemble_deck(merged, interview, design, project_id)
+        # Last-resort guarantee: fill any emphasis field the executor left unmarked
+        # (so a DATA_EMPHASIS slide never ships flat) and record where each field
+        # came from. Ship discards the provenance; the gate reads it off the instance.
+        self.last_emphasis_provenance = apply_emphasis_fallback(deck)
+        return deck
 
     # ------------------------------------------------------------------
     # Plan: produce + validate (with one re-plan), then enforce on the deck
@@ -1485,6 +1498,25 @@ def _resolve_section_name(raw: _LLMSlide, plan: DeckPlan | None) -> str | None:
     return raw.section_name
 
 
+def _resolve_section_thesis(raw: _LLMSlide, plan: DeckPlan | None) -> str | None:
+    """Carry the plan's section THESIS (the section's argument) onto the slide.
+
+    Mirrors :func:`_resolve_section_name`'s section_index join, but pulls the
+    section's ``thesis`` rather than its label. The planner already commits to
+    this thesis; here it becomes a slide-level signal. ``None`` when the slide
+    has no resolvable plan section (the executor's free-form section_name carries
+    no thesis of its own).
+    """
+
+    if (
+        plan is not None
+        and raw.section_index is not None
+        and 0 <= raw.section_index < len(plan.sections)
+    ):
+        return plan.sections[raw.section_index].thesis
+    return None
+
+
 def _format_plan_spine(plan: DeckPlan) -> str:
     """Render the DeckPlan as the binding spine for the executor prompt."""
 
@@ -1691,6 +1723,8 @@ def _materialise_slides(parsed: list[_LLMSlide], plan: DeckPlan | None = None) -
             right_column=right_col,
             table_headers=raw.table_headers,
             table_rows=raw.table_rows,
+            table_preferred_column=raw.table_preferred_column,
+            table_hero_row=raw.table_hero_row,
             chart_series=raw.chart_series,
             chart_type=raw.chart_type,
             chart_group_labels=raw.chart_group_labels,
@@ -1709,6 +1743,7 @@ def _materialise_slides(parsed: list[_LLMSlide], plan: DeckPlan | None = None) -
                 content=content,
                 source_claim_ids=raw.source_claim_ids,
                 section_name=_resolve_section_name(raw, plan),
+                section_thesis=_resolve_section_thesis(raw, plan),
                 narrative_role=raw.narrative_role.value if raw.narrative_role else None,
             )
         )

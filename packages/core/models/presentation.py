@@ -315,6 +315,16 @@ class SlideContent(BaseModel):
     table_headers: list[str] | None = Field(default=None, max_length=6)
     table_rows: list[TableRow] | None = Field(default=None, max_length=7)
 
+    # Emphasis the slide AUTHOR (editorial executor) carries onto a TABLE_COMPACT
+    # so the renderer can give the table a visual subject instead of rendering
+    # every column/row identically. ``table_preferred_column`` indexes
+    # ``table_headers`` (the winning/subject column); ``table_hero_row`` indexes
+    # ``table_rows`` (the dominant row). Both are ``None`` when the table has no
+    # clear subject (a neutral reference table legitimately has no winner) — that
+    # is a decided outcome, not an unset default.
+    table_preferred_column: int | None = Field(default=None, ge=0)
+    table_hero_row: int | None = Field(default=None, ge=0)
+
     chart_series: list[ChartSeriesPoint] | None = Field(default=None, max_length=8)
     chart_type: ChartType | None = None
     chart_group_labels: list[str] | None = Field(default=None, max_length=6)
@@ -361,6 +371,14 @@ class SlideSpec(BaseModel):
 
     section_name: str | None = Field(default=None, max_length=100)
     narrative_role: str | None = Field(default=None, max_length=50)
+
+    # The claim-bearing sibling of ``section_name``: the PlannedSection.thesis the
+    # planner committed to, carried onto every slide in that section (resolved by
+    # the same section_index join as ``section_name``). It is the section's
+    # ARGUMENT, not its label — a signal downstream passes (and the table/stat
+    # emphasis fallback) can read. ``None`` when the slide has no resolvable plan
+    # section.
+    section_thesis: str | None = Field(default=None, max_length=300)
 
     @field_validator("accent_override")
     @classmethod

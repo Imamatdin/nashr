@@ -1,25 +1,31 @@
 /**
  * TABLE_COMPACT layout.
  *
- * Up to 6 rows of structured data. The header row carries a bold
- * weight and a faint accent-coloured bar (8% opacity); odd data
- * rows pick up a 3% palette.surface shade so the eye can track
- * across the table without explicit grid lines (R37).
+ * Geometry is COMPUTED FROM CONTENT, not divided from a frozen area. Every cell
+ * is measured (buildTextBlock's measuredHeightPct); each row band hugs its
+ * tallest cell plus padding; the bands are summed and the whole table is the
+ * thing that must fit the region — when it fits it is centred, when it doesn't
+ * every band scales by the same content-derived factor (never a clamped min/max
+ * row height). Cells centre vertically via `valign:'middle'`, honoured by both
+ * renderers from one source instead of the layout faking it through `y`.
  *
- * Column alignment is detected per-column. If more than half of a
- * column's data cells match the "numeric" character class
- * (digits, currency/percent symbols, ±, separators), the whole
- * column is right-aligned (R38). Mixed and text-only columns stay
- * left-aligned.
+ * Emphasis is read from the contract the editorial executor authored:
+ * `table_preferred_column` gets an accent column tint + an accent, bold header
+ * (the subject the table argues for); `table_hero_row` gets a surface band + a
+ * heavier cell weight (the dominant row). A flat table with a clear subject no
+ * longer renders every column identically.
  *
- * A header-less call (no `table_headers` on the content) falls
- * back to CONTENT_SPLIT so the slide still renders something
- * meaningful instead of an empty grid.
+ * Column alignment is still detected per-column (numeric → right): alignment is
+ * a readability concern, distinct from — and coexisting with — emphasis.
+ *
+ * A header-less call falls back to CONTENT_SPLIT so the slide still renders
+ * something meaningful instead of an empty grid.
  */
 
-import { FONT_SIZES, LINE_HEIGHTS, type Region } from '../constants.js';
+import { FONT_SIZES, LINE_HEIGHTS, SLIDE_HEIGHT, SLIDE_REGIONS, type Region } from '../constants.js';
 import type {
   DeckSpec,
+  FontWeight,
   ShapeBlock,
   SlideLayout,
   SlideSpec,
@@ -27,29 +33,35 @@ import type {
   TextAlign,
   TextBlock,
 } from '../types.js';
-import { buildTextBlock, compose, defaultBackground, hugHeightToMeasured } from './shared.js';
+import { buildTextBlock, compose, defaultBackground } from './shared.js';
 import { layoutContentSplit } from './content-split.js';
 
-const TITLE: Region = { x: 5, y: 4, w: 90, h: 8 };
-const TABLE_X = 5;
-const TABLE_W = 90;
-const TABLE_Y = 15;
-const TABLE_H = 75;
-const HEADER_H = 5;
-const MAX_ROWS = 6;
-/**
- * Cap on a single data row's band height (slide %). Without it, few-row tables
- * divided the whole 70% data area evenly — `(TABLE_H-HEADER_H)/rows` — giving a
- * 4-row table ~17.5%-tall rows with text pinned to the top of each and a large
- * empty cell below (row I). Capping the band, vertically centering each cell's
- * text within it, and centering the whole table block in the region keeps rows
- * compact and the table balanced. This is table geometry, NOT content
- * canvas-fill (deferred to L2): it neither grows fonts nor needs a fit budget.
- */
-const MAX_ROW_BAND = 12;
-/** Min band so a row never collapses thinner than a comfortable line. */
-const MIN_ROW_BAND = 6;
-const CITATION: Region = { x: 5, y: 92, w: 90, h: 4 };
+// Model cap: SlideContent.table_rows is max_length 7 — never render more rows
+// than the contract can carry.
+const MAX_ROWS = 7;
+
+// Vertical breathing above + below a cell's text inside its row band (slide %).
+// The one design number that sets how airy the table reads; everything else is
+// derived from the measured content.
+const CELL_PAD_Y = 1.3;
+// Horizontal inset so cell text never touches the column edge or the adjacent
+// column's highlight fill (slide %).
+const CELL_PAD_X = 1.0;
+
+// Accent tint behind the subject (preferred) column — strong enough to read as
+// "this column is the answer", light enough to keep the cell text at full
+// contrast over it.
+const PREFERRED_COLUMN_OPACITY = 0.14;
+// Surface band behind the dominant (hero) row — a readable highlight, not the
+// old 0.03 ghost zebra.
+const HERO_ROW_OPACITY = 0.5;
+// Accent rule under the header row, and the faint dividers between data rows
+// that replace per-row zebra with one uniform, intentional treatment.
+const HEADER_RULE_OPACITY = 0.6;
+const HEADER_RULE_THICKNESS = 0.25; // slide %
+const ROW_DIVIDER_OPACITY = 0.12;
+const ROW_DIVIDER_THICKNESS = 0.1; // slide %
+
 const NUMERIC_RE = /^[\d$%.,\s+-]+$/;
 
 export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayout {
@@ -60,13 +72,15 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
   }
 
   const { design } = deck;
+  const regions = SLIDE_REGIONS.table_compact!;
+  const region = regions.body!;
   const blocks: TextBlock[] = [];
   const shapes: ShapeBlock[] = [];
 
   blocks.push(
     buildTextBlock({
       text: slide.content.title,
-      region: TITLE,
+      region: regions.title!,
       fontFamily: design.heading_font,
       fontWeight: 'bold',
       color: design.palette.text,
@@ -77,93 +91,137 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
   );
 
   const columnCount = headers.length;
-  const columnWidth = TABLE_W / columnCount;
-  const actualRows = Math.max(1, rows.length);
+  const columnWidth = region.w / columnCount;
+  const cellWidth = Math.max(1, columnWidth - 2 * CELL_PAD_X);
+  const cellTier = FONT_SIZES.small;
+  // A non-empty cell is at least one line tall; derive that floor from the line
+  // box so an all-but-empty row never collapses to a hairline (NOT a frozen min).
+  const oneLinePct = ((cellTier.max * LINE_HEIGHTS.caption) / SLIDE_HEIGHT) * 100;
+  const alignments = detectColumnAlignments(columnCount, rows);
 
-  // Compact, capped row band instead of dividing the whole data area evenly —
-  // the latter inflated few-row tables into oversized cells with text pinned to
-  // the top and a large empty cell below (row I). Center the whole table block
-  // in the region so a sparse table reads balanced rather than top-anchored.
-  const rowBand = Math.min(
-    MAX_ROW_BAND,
-    Math.max(MIN_ROW_BAND, (TABLE_H - HEADER_H) / actualRows),
+  // --- Measure: each band hugs its tallest cell's wrapped content ---
+  const measure = (text: string, weight: FontWeight): number =>
+    buildTextBlock({
+      text: text || ' ',
+      region: { x: 0, y: 0, w: cellWidth, h: region.h },
+      fontFamily: design.body_font,
+      fontWeight: weight,
+      color: design.palette.text,
+      align: 'left',
+      tier: cellTier,
+      lineHeight: LINE_HEIGHTS.caption,
+    }).measuredHeightPct;
+
+  const headerContent = Math.max(oneLinePct, ...headers.map((h) => measure(h, 'bold')));
+  const rowContent = rows.map((row) =>
+    Math.max(
+      oneLinePct,
+      ...Array.from({ length: columnCount }, (_, j) => measure(row.cells[j] ?? '', 'normal')),
+    ),
   );
-  const tableHeight = HEADER_H + actualRows * rowBand;
-  const tableTop = TABLE_Y + Math.max(0, (TABLE_H - tableHeight) / 2);
 
-  const columnAlignments = detectColumnAlignments(columnCount, rows);
+  // Bands = measured content + padding. Sum them; the table is the thing that
+  // must fit the region. It fits → centre it; it overflows → scale every band by
+  // the same content/region factor (derived, not a clamped row height) and let
+  // buildTextBlock's shrink+truncate be the per-cell reliability floor.
+  const rawHeader = headerContent + 2 * CELL_PAD_Y;
+  const rawRows = rowContent.map((h) => h + 2 * CELL_PAD_Y);
+  const rawTotal = rawHeader + rawRows.reduce((sum, h) => sum + h, 0);
+  const scale = rawTotal > region.h ? region.h / rawTotal : 1;
 
-  shapes.push({
-    type: 'rect',
-    x: TABLE_X,
-    y: tableTop,
-    w: TABLE_W,
-    h: HEADER_H,
-    fill: design.palette.accent,
-    opacity: 0.08,
-  });
+  const headerBand = rawHeader * scale;
+  const rowBands = rawRows.map((h) => h * scale);
+  const tableHeight = headerBand + rowBands.reduce((sum, h) => sum + h, 0);
+  const tableTop = region.y + Math.max(0, (region.h - tableHeight) / 2);
 
-  headers.forEach((header, j) => {
-    const region: Region = {
-      x: TABLE_X + j * columnWidth,
+  const preferredColumn = indexInRange(slide.content.table_preferred_column, columnCount);
+  const heroRow = indexInRange(slide.content.table_hero_row, rows.length);
+
+  const rowTop = (i: number): number =>
+    tableTop + headerBand + rowBands.slice(0, i).reduce((sum, h) => sum + h, 0);
+
+  // --- Emphasis + structure fills (behind the text) ---
+  if (heroRow !== null) {
+    shapes.push({
+      type: 'rect',
+      x: region.x,
+      y: rowTop(heroRow),
+      w: region.w,
+      h: rowBands[heroRow]!,
+      fill: design.palette.surface,
+      opacity: HERO_ROW_OPACITY,
+    });
+  }
+  if (preferredColumn !== null) {
+    shapes.push({
+      type: 'rect',
+      x: region.x + preferredColumn * columnWidth,
       y: tableTop,
       w: columnWidth,
-      h: HEADER_H,
-    };
+      h: tableHeight,
+      fill: design.palette.accent,
+      opacity: PREFERRED_COLUMN_OPACITY,
+    });
+  }
+  shapes.push({
+    type: 'rect',
+    x: region.x,
+    y: tableTop + headerBand - HEADER_RULE_THICKNESS,
+    w: region.w,
+    h: HEADER_RULE_THICKNESS,
+    fill: design.palette.accent,
+    opacity: HEADER_RULE_OPACITY,
+  });
+  for (let i = 0; i < rowBands.length - 1; i++) {
+    shapes.push({
+      type: 'rect',
+      x: region.x,
+      y: rowTop(i) + rowBands[i]! - ROW_DIVIDER_THICKNESS / 2,
+      w: region.w,
+      h: ROW_DIVIDER_THICKNESS,
+      fill: design.palette.text_secondary,
+      opacity: ROW_DIVIDER_OPACITY,
+    });
+  }
+
+  // --- Header cells (preferred column header reads in accent) ---
+  headers.forEach((header, j) => {
     blocks.push(
-      centerInBand(
-        buildTextBlock({
-          text: header,
-          region,
-          fontFamily: design.body_font,
-          fontWeight: 'bold',
-          color: design.palette.text,
-          align: columnAlignments[j] ?? 'left',
-          tier: FONT_SIZES.small,
-          lineHeight: LINE_HEIGHTS.caption,
-        }),
-        tableTop,
-        HEADER_H,
-      ),
+      buildCell({
+        text: header,
+        columnIndex: j,
+        bandTop: tableTop,
+        bandHeight: headerBand,
+        weight: 'bold',
+        color: j === preferredColumn ? design.palette.accent : design.palette.text,
+        align: alignments[j] ?? 'left',
+        region,
+        columnWidth,
+        cellWidth,
+        fontFamily: design.body_font,
+      }),
     );
   });
 
+  // --- Data cells (hero row reads heavier) ---
   rows.forEach((row, i) => {
-    const bandY = tableTop + HEADER_H + i * rowBand;
-    if (i % 2 === 1) {
-      shapes.push({
-        type: 'rect',
-        x: TABLE_X,
-        y: bandY,
-        w: TABLE_W,
-        h: rowBand,
-        fill: design.palette.surface,
-        opacity: 0.03,
-      });
-    }
+    const bandTop = rowTop(i);
+    const weight: FontWeight = i === heroRow ? 'semibold' : 'normal';
     for (let j = 0; j < columnCount; j++) {
-      const cell = row.cells[j] ?? '';
-      const region: Region = {
-        x: TABLE_X + j * columnWidth,
-        y: bandY,
-        w: columnWidth,
-        h: rowBand,
-      };
       blocks.push(
-        centerInBand(
-          buildTextBlock({
-            text: cell,
-            region,
-            fontFamily: design.body_font,
-            fontWeight: 'normal',
-            color: design.palette.text,
-            align: columnAlignments[j] ?? 'left',
-            tier: FONT_SIZES.small,
-            lineHeight: LINE_HEIGHTS.caption,
-          }),
-          bandY,
-          rowBand,
-        ),
+        buildCell({
+          text: row.cells[j] ?? '',
+          columnIndex: j,
+          bandTop,
+          bandHeight: rowBands[i]!,
+          weight,
+          color: design.palette.text,
+          align: alignments[j] ?? 'left',
+          region,
+          columnWidth,
+          cellWidth,
+          fontFamily: design.body_font,
+        }),
       );
     }
   });
@@ -172,7 +230,7 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
     blocks.push(
       buildTextBlock({
         text: slide.content.source_citation,
-        region: CITATION,
+        region: regions.citation!,
         fontFamily: design.body_font,
         fontWeight: 'normal',
         color: design.palette.text_secondary,
@@ -183,32 +241,62 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
     );
   }
 
-  const background = defaultBackground(design);
-  return compose(slide, blocks, [], shapes, background);
+  return compose(slide, blocks, [], shapes, defaultBackground(design));
+}
+
+interface CellOptions {
+  text: string;
+  columnIndex: number;
+  bandTop: number;
+  bandHeight: number;
+  weight: FontWeight;
+  color: string;
+  align: TextAlign;
+  region: Region;
+  columnWidth: number;
+  cellWidth: number;
+  fontFamily: string;
 }
 
 /**
- * Hug a header/cell block to its measured height and vertically center it
- * within its row band, so short cell text sits in the middle of the band
- * instead of pinned to the top with an empty gap below (row I). Both the HTML
- * and PPTX renderers top-anchor text inside a box, so the centering is done by
- * positioning the (hugged) block's y — not via a renderer vertical-align.
+ * Build a cell text block sized to its full row band and vertically centred.
+ *
+ * The box spans the whole band (`bandHeight`); the measured text is shorter
+ * (the band already added padding), so `valign:'middle'` leaves equal breathing
+ * above and below. When the table was scaled down to fit, the band is tighter
+ * than the content and buildTextBlock shrinks/truncates the cell — the per-cell
+ * reliability floor — and the centring still holds.
  */
-function centerInBand(block: TextBlock, bandY: number, bandH: number): TextBlock {
-  hugHeightToMeasured(block);
-  block.y = bandY + Math.max(0, (bandH - block.h) / 2);
+function buildCell(opts: CellOptions): TextBlock {
+  const block = buildTextBlock({
+    text: opts.text,
+    region: {
+      x: opts.region.x + opts.columnIndex * opts.columnWidth + CELL_PAD_X,
+      y: opts.bandTop,
+      w: opts.cellWidth,
+      h: opts.bandHeight,
+    },
+    fontFamily: opts.fontFamily,
+    fontWeight: opts.weight,
+    color: opts.color,
+    align: opts.align,
+    tier: FONT_SIZES.small,
+    lineHeight: LINE_HEIGHTS.caption,
+  });
+  block.valign = 'middle';
   return block;
 }
 
-function detectColumnAlignments(
-  columnCount: number,
-  rows: TableRow[],
-): TextAlign[] {
+/** Clamp an authored emphasis index to a valid slot, or null when absent/out of range. */
+function indexInRange(value: number | null | undefined, count: number): number | null {
+  if (value === null || value === undefined) return null;
+  return value >= 0 && value < count ? value : null;
+}
+
+function detectColumnAlignments(columnCount: number, rows: TableRow[]): TextAlign[] {
   const result: TextAlign[] = [];
   for (let j = 0; j < columnCount; j++) {
-    const values = rows
-      .map((r) => (r.cells[j] ?? '').trim())
-      .filter((v) => v.length > 0);
+    const values = rows.map((r) => (r.cells[j] ?? '').trim()).filter((v) => v.length > 0);
     if (values.length === 0) {
       result.push('left');
       continue;

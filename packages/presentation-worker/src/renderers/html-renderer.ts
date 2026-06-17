@@ -238,6 +238,13 @@ html, body {
       `line-height:${block.lineHeight}`,
     ];
 
+    // Vertical centering within the box is driven by the block (table cells set
+    // valign:'middle'); default top-anchoring stays a plain block so every other
+    // layout renders exactly as before. text-align keeps horizontal placement.
+    if (block.valign === 'middle') {
+      styleParts.push('display:flex', 'flex-direction:column', 'justify-content:center');
+    }
+
     const classes = ['text-block'];
     const dataAttrs: string[] = [];
 

@@ -222,6 +222,11 @@ export interface SlideContent {
   quote_attribution?: string | null;
   table_headers?: string[] | null;
   table_rows?: TableRow[] | null;
+  /** Index into table_headers of the winning/subject column, or null when the
+   *  table has no clear subject. Authored by the editorial executor. */
+  table_preferred_column?: number | null;
+  /** Index into table_rows of the dominant row, or null. Authored by the editorial executor. */
+  table_hero_row?: number | null;
   chart_series?: ChartSeriesPoint[] | null;
   chart_type?: ChartType | null;
   chart_group_labels?: string[] | null;
@@ -255,6 +260,9 @@ export interface SlideSpec {
   source_claim_ids: string[];
   section_name?: string | null;
   narrative_role?: string | null;
+  /** The planner's section thesis (the section's argument) carried onto the slide.
+   *  No renderer consumer yet — carried for the contract. */
+  section_thesis?: string | null;
 }
 
 export interface ColorPalette {
@@ -343,6 +351,14 @@ export interface TextBlock {
   fontStyle: FontStyle;
   color: string;
   align: TextAlign;
+  /**
+   * Vertical alignment of the text within its `h` box. Absent/`'top'` keeps the
+   * legacy top-anchored behaviour every non-table layout relies on; table cells
+   * set `'middle'` so the text centres in its row band and BOTH renderers honour
+   * it from one source — no more layout faking centering via `y` while the
+   * renderers hardcode top.
+   */
+  valign?: 'top' | 'middle';
   lineHeight: number;
   overflow: boolean;
   /**

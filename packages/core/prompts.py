@@ -428,7 +428,8 @@ TITLE-SUBJECT ALIGNMENT (data slides — DATA_EMPHASIS / CHART_DATA / single_val
 - When the slide argues for a SPECIFIC value (one row of a comparison, the WINNER of a benchmark), the title MUST name that subject in the same wording that appears in the stat label / chart series label. The renderer headlines the subject the title names; a title that says "sCO₂ Achieves PUE 1.08" with a series of [Air 1.57, Liquid 1.25, sCO2 1.08] will pick the sCO2 point. A title that names no subject ("Cooling efficiency compared") falls back to the metric polarity (lower-is-better for PUE/cost/latency/payback; higher-is-better for efficiency/savings/recovery/throughput), so name the subject explicitly whenever the slide has one.
 
 STRUCTURED FIELDS — populate the field that matches the slide_type, or the slide renders BLANK:
-- table_compact: you MUST fill table_headers (the column labels) AND table_rows (one object per row, each with a "cells" array aligned 1:1 to the headers). Put the data ONLY in these fields — never in body_text, bullets, or speaker_notes. 2-5 columns, 2-7 rows. Example: "table_headers": ["Cooling", "Density", "PUE"], "table_rows": [{{"cells": ["Air", "8 kW/rack", "1.58"]}}, {{"cells": ["Liquid", "40 kW/rack", "1.10"]}}].
+- table_compact: you MUST fill table_headers (the column labels) AND table_rows (one object per row, each with a "cells" array aligned 1:1 to the headers). Put the data ONLY in these fields — never in body_text, bullets, or speaker_notes. 2-5 columns, 2-7 rows. Example: "table_headers": ["Cooling", "Density", "PUE"], "table_rows": [{{"cells": ["Air", "8 kW/rack", "1.58"]}}, {{"cells": ["Liquid", "40 kW/rack", "1.10"]}}]. EMPHASIS — when the table argues that ONE column is its subject (a proposed solution, a recommended option, the deck's own approach — the column the slide/deck is FOR), set table_preferred_column to that column's 0-based index so the renderer gives it visual weight; set table_hero_row to the 0-based index of the single most important row (the metric the slide leads with). The subject is the deck's argument, not the rightmost column by reflex; reason from the title/thesis. Leave EITHER null when the table is a neutral reference with no winner or no dominant row — do not force one.
+- data_emphasis: fill stats (1-4 objects, each {{"value", "unit", "label"}}). Mark EXACTLY ONE stat with "highlight": true — the single headline number the slide argues (the one the title names). The renderer renders the highlighted stat in the accent colour; a slide with no highlighted stat reads flat, and more than one defeats the emphasis. Never highlight zero or two.
 - comparison: you MUST fill BOTH left_column and right_column (each a heading plus 2-4 points), contrasting two genuinely opposable things (e.g. "Air cooling" vs "Liquid cooling"). If the content is NOT a two-sided contrast — a framing point, a narrative beat, a single subject — DO NOT use comparison; use content_split or summary_takeaway instead. NEVER emit a comparison slide with null or empty columns.
 - chart_data: you MUST fill chart_series with the actual data points — each an object {{"label", "value" (a number), "unit"}}. body_text may carry a ONE-LINE caption only; never put the data in prose. Example: "chart_series": [{{"label": "Air", "value": 8, "unit": "kW/rack"}}, {{"label": "Liquid", "value": 40, "unit": "kW/rack"}}, {{"label": "sCO2", "value": 120, "unit": "kW/rack"}}].
   Set chart_type to match the data (defaults to "bar" if omitted):
@@ -472,7 +473,7 @@ Return ONLY a JSON object. No prose, no markdown fences. Schema:
       "body_text": "..." or null,
       "bullets": ["...", "..."] or null,
       "stats": [
-        {{"value": "94.4", "unit": "%", "label": "water savings"}}
+        {{"value": "94.4", "unit": "%", "label": "water savings", "highlight": true}}
       ] or null,
       "people": [
         {{"name": "...", "years": "..." or null, "role": "..." or null,
@@ -483,6 +484,8 @@ Return ONLY a JSON object. No prose, no markdown fences. Schema:
       "right_column": {{"heading": "...", "points": ["...", "..."]}} or null,
       "table_headers": ["Column A", "Column B", "Column C"] or null,
       "table_rows": [{{"cells": ["a1", "b1", "c1"]}}, {{"cells": ["a2", "b2", "c2"]}}] or null,
+      "table_preferred_column": 2 or null,
+      "table_hero_row": 1 or null,
       "chart_series": [{{"label": "Air", "value": 8.0, "unit": "kW/rack", "values": [6, 1.5, 0.5] or null}}] or null,
       "chart_type": "bar" | "line" | "single_value" | "grouped_bar" | "stacked_bar" or null,
       "chart_group_labels": ["IT load", "Cooling", "Other"] or null,
