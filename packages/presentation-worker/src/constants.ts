@@ -169,6 +169,9 @@ export const SLIDE_REGIONS: Partial<Record<SlideType, SlideRegions>> = {
   },
   comparison: {
     title: { x: 5, y: 5, w: 90, h: 8 },
+    // body/image y and h are MAX bounds only — layoutComparison derives both
+    // columns' top from the title's measured bottom and their height from there
+    // to the bottom margin. Only x/w are load-bearing.
     body: { x: 5, y: 15, w: 43, h: 75 },
     image: { x: 52, y: 15, w: 43, h: 75 },
   },
@@ -188,6 +191,8 @@ export const SLIDE_REGIONS: Partial<Record<SlideType, SlideRegions>> = {
     caption: { x: 5, y: 88, w: 90, h: 4 },
   },
   typographic_keywords: {
+    // title.h is a build cap (max bound); the keyword rows derive from the
+    // title's measured bottom via fitMeasuredStack, not a fixed band.
     title: { x: 5, y: 4, w: 90, h: 8 },
   },
   timeline: {
@@ -286,20 +291,4 @@ export function getPortraitPositions(count: number): Region[] {
     { x: 56, y: 15, w: 14, h: 30 },
     { x: 73, y: 15, w: 14, h: 30 },
   ];
-}
-
-/**
- * Per-keyword (term + explanation) positions for TYPOGRAPHIC_KEYWORDS.
- * Distributes count rows evenly between y=18 and y=88 (70% vertical band).
- */
-export function getKeywordPositions(count: number): Array<{ term: Region; explain: Region }> {
-  if (count <= 0) return [];
-  const startY = 18;
-  const bandHeight = 70;
-  const stepY = bandHeight / count;
-  const rowHeight = Math.min(stepY * 0.7, 10);
-  return Array.from({ length: count }, (_, i) => ({
-    term: { x: 5, y: startY + i * stepY, w: 35, h: rowHeight },
-    explain: { x: 42, y: startY + i * stepY, w: 50, h: rowHeight },
-  }));
 }
