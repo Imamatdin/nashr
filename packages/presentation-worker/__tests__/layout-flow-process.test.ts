@@ -154,24 +154,21 @@ describe('layout — FLOW_PROCESS region fill and no overlap', () => {
 });
 
 /**
- * Distribute (space-between) anchor lock — L2 layout-engine extraction (Run 1).
+ * Center anchor lock — L2 layout-engine extraction (Run 1).
  *
- * flow_process now routes its three shared rows (number / label / description)
- * through fitMeasuredStack with anchor:'distribute', overflow:'truncate'.
- * Distribute pins the first band to the region top, the last band to the region
- * BOTTOM, and spreads leftover slack evenly into the n−1 interior gaps on top of
- * the bare gapAfter floors. These tests discriminate that behaviour from the old
- * centred stack: under 'center' the description bottom would sit at
- * 94 − slack/2 (well above 94) and the interior gaps would equal the bare floors
- * exactly (no spread). They also pin the closure-returns-HUGGED-h decision in the
- * source: measure() returns each row's max block.h (carrying HUG_EPSILON_PCT 0.2),
- * NOT measuredHeightPct, so the tallest description lands exactly on the region
- * bottom rather than 0.2pp past it.
+ * flow_process routes its three shared rows through fitMeasuredStack with
+ * anchor:'center', overflow:'truncate'. The number/label/description trio stays
+ * tight (bare gapAfter floors only); surplus slack splits equally above and below
+ * the stack. measure() returns each row's max block.h (HUGGED, carrying
+ * HUG_EPSILON_PCT), NOT measuredHeightPct.
  */
-describe('layout — FLOW_PROCESS distribute anchor', () => {
+describe('layout — FLOW_PROCESS center anchor', () => {
   const REGION_BOTTOM = 100 - MARGIN.bottom; // 94
-  // Mirror the floor gaps declared in src/layouts/flow-process.ts. Distribute
-  // adds even-spread slack ON TOP of these, so the realised gaps must EXCEED them.
+  const titleRegion = SLIDE_REGIONS.flow_process!.title!;
+  const TITLE_BOTTOM = titleRegion.y + titleRegion.h; // 10
+  const TITLE_GAP = 3; // mirror flow-process.ts
+  const REGION_TOP = TITLE_BOTTOM + TITLE_GAP; // 13
+  const REGION_HEIGHT = REGION_BOTTOM - REGION_TOP; // 81
   const NUMBER_TO_LABEL_GAP = 2;
   const LABEL_TO_DESCRIPTION_GAP = 1.5;
 
@@ -187,22 +184,17 @@ describe('layout — FLOW_PROCESS distribute anchor', () => {
     return layout.textBlocks.filter((b) => b.text !== 'Pipeline');
   }
 
-  it('distribute pins the last row to the region bottom', () => {
-    // Short single-line descriptions ⇒ large positive slack. Under distribute
-    // the last band (descriptions) bottom-aligns to the region bottom; under a
-    // centred stack the bottom would sit far above 94. The tallest description's
-    // bottom (max over y+h) lands on 94 within HUG_EPSILON tolerance.
+  it('centers the number/label/description trio as a tight group in the region', () => {
     const blocks = flowLayout(3);
-    const descs = blocks.filter((b) => /^Description \d+\.$/.test(b.text));
-    expect(descs).toHaveLength(3);
-    const maxDescriptionBottom = Math.max(...descs.map((d) => d.y + d.h));
-    expect(maxDescriptionBottom).toBeCloseTo(REGION_BOTTOM, 1); // |Δ| < 0.05, well inside ~0.3
+    const stackTop = Math.min(...blocks.map((b) => b.y));
+    const stackBottom = Math.max(...blocks.map((b) => b.y + b.h));
+    const contentSpan = stackBottom - stackTop;
+    const slack = REGION_HEIGHT - contentSpan;
+    expect(stackTop).toBeCloseTo(REGION_TOP + slack / 2, 1);
+    expect(stackBottom).toBeCloseTo(REGION_BOTTOM - slack / 2, 1);
   });
 
-  it('interior gaps exceed the bare floors', () => {
-    // Distribute spreads surplus slack into BOTH interior gaps, so each realised
-    // gap strictly exceeds its gapAfter floor — proving the slack was spread, not
-    // clumped at one end (centre) nor stranded at the bottom (start).
+  it('interior gaps equal the bare gap floors (no distribute spread)', () => {
     const blocks = flowLayout(3);
     const numbers = blocks.filter((b) => /^[1-9]$/.test(b.text));
     const labels = blocks.filter((b) => /^Step \d+$/.test(b.text));
@@ -217,25 +209,15 @@ describe('layout — FLOW_PROCESS distribute anchor', () => {
     const maxNumberH = Math.max(...numbers.map((b) => b.h));
     const maxLabelH = Math.max(...labels.map((b) => b.h));
 
-    expect(labelY - (numberY + maxNumberH)).toBeGreaterThan(NUMBER_TO_LABEL_GAP);
-    expect(descriptionY - (labelY + maxLabelH)).toBeGreaterThan(LABEL_TO_DESCRIPTION_GAP);
+    expect(labelY - (numberY + maxNumberH)).toBeCloseTo(NUMBER_TO_LABEL_GAP, 1);
+    expect(descriptionY - (labelY + maxLabelH)).toBeCloseTo(LABEL_TO_DESCRIPTION_GAP, 1);
   });
 
-  it('HUG_EPSILON regression guard', () => {
-    // Long (~180-char) descriptions wrap to a multi-line band while still leaving
-    // positive slack. measure() returns the HUGGED block.h (measuredHeightPct +
-    // HUG_EPSILON_PCT 0.2), so distribute lands the tallest description bottom on
-    // 94.0 EXACTLY. A refactor that returns measuredHeightPct from measure() while
-    // the block keeps its hugged h would short the band by 0.2pp and push the
-    // bottom to ~94.2. The threshold sits strictly between 94.0 and 94.2 so that
-    // regression fails loudly; the lower bound confirms the band still fills to
-    // the bottom (not stranded/overflowed). The spec's nominal 0.25 tolerance is
-    // intentionally tightened — at 0.25 the broken 94.2 would slip through.
+  it('HUG_EPSILON no-bottom-overflow guard', () => {
     const long =
       'A deliberately long step description meant to wrap across several lines so the description band consumes meaningful vertical space within the content region of this flow slide here.';
     const blocks = flowLayout(3, [long, long, long]);
     const maxBottom = Math.max(...blocks.map((b) => b.y + b.h));
-    expect(maxBottom).toBeLessThanOrEqual(94.1);
-    expect(maxBottom).toBeGreaterThan(93.8);
+    expect(maxBottom).toBeLessThanOrEqual(REGION_BOTTOM + 0.1);
   });
 });

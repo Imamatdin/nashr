@@ -196,13 +196,10 @@ export function layoutFlowProcess(slide: SlideSpec, deck: DeckSpec): SlideLayout
   // distributed bottom band reserves that epsilon and the tallest description
   // lands exactly on the region bottom instead of 0.2pp past it.
   //
-  // ANCHOR DECISION — distribute: the step rows SPACE OUT across the content
-  // region (airy strips) rather than clumping in a centred block;
-  // NUMBER_TO_LABEL_GAP / LABEL_TO_DESCRIPTION_GAP are the floor gaps and the
-  // surplus is spread evenly between them. overflow:'truncate' keeps scale=1 — the
-  // blocks are already built at their own hugged height, so a global scale would
-  // compress the tops while the blocks stayed full size and overlap; per-block
-  // buildTextBlock shrink (minFontSize) is the reliability floor.
+  // ANCHOR DECISION — center: the three shared rows stay a tight trio with bare
+  // NUMBER_TO_LABEL_GAP / LABEL_TO_DESCRIPTION_GAP between them; surplus slack
+  // splits equally above and below the stack (pre-migration behaviour). distribute
+  // over-separated the rows and read detached. overflow:'truncate' keeps scale=1.
   const maxNumberH = Math.max(...stepBlocks.map((s) => s.number.h));
   const maxLabelH = Math.max(...stepBlocks.map((s) => s.label.h));
   const maxDescriptionH = Math.max(...stepBlocks.map((s) => s.description.h));
@@ -215,7 +212,7 @@ export function layoutFlowProcess(slide: SlideSpec, deck: DeckSpec): SlideLayout
       { measure: () => maxDescriptionH },
     ],
     overflow: 'truncate',
-    anchor: 'distribute',
+    anchor: 'center',
   });
   const numberY = fit.tops[0]!;
   const labelY = fit.tops[1]!;
