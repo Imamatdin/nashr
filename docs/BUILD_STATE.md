@@ -1237,3 +1237,6 @@ healthcheck · commit debug scaffolding · PDF interactive reveal treatment (gra
 interview time; same anti-pattern as the deleted editorial roster but lower stakes (a slightly-off
 UI count, not a fabricated slide) and unfixable the Phase-2 way (interview runs before the plan
 exists). Fix via NER at interview time or by moving planning earlier in the pipeline.
+
+## 2026-06-19 — L2 layout engine Run 1 of 4 (merged to main)
+L2 layout engine Run 1 of 4 — merged to main. Extracted shared fitMeasuredStack + emitBandCell from table-compact (pixel-identical re-point, Codex-verified equivalence locks from real pre-migration baselines). Migrated flow_process (center anchor), chart_data (fill-to-bottom-margin), drawMultiStat (center), content_split (removed the y18 floor, body now hugs title). Deleted getFlowStepPositions + getTimelinePositions orphans; deleted MIN_CHART_HEIGHT + MIN_BODY_H (derived/floored). Live sCO2 render verified all four on real fonts. Logged polish: narrow 5-column flow labels can wrap awkwardly (lone-letter orphan). REMAINING L2: Runs 2-4 (data_emphasis/comparison/concept_definition/typographic_keywords, then timeline/gallery/team/resources/interactives, then title/section/quote), per-locale length budget, auditor->routing judge.
