@@ -152,3 +152,72 @@ describe('layout — FLOW_PROCESS region fill and no overlap', () => {
     }
   });
 });
+
+/**
+ * Center anchor lock — L2 layout-engine extraction (Run 1).
+ *
+ * flow_process routes its three shared rows through fitMeasuredStack with
+ * anchor:'center', overflow:'truncate'. The number/label/description trio stays
+ * tight (bare gapAfter floors only); surplus slack splits equally above and below
+ * the stack. measure() returns each row's max block.h (HUGGED, carrying
+ * HUG_EPSILON_PCT), NOT measuredHeightPct.
+ */
+describe('layout — FLOW_PROCESS center anchor', () => {
+  const REGION_BOTTOM = 100 - MARGIN.bottom; // 94
+  const titleRegion = SLIDE_REGIONS.flow_process!.title!;
+  const TITLE_BOTTOM = titleRegion.y + titleRegion.h; // 10
+  const TITLE_GAP = 3; // mirror flow-process.ts
+  const REGION_TOP = TITLE_BOTTOM + TITLE_GAP; // 13
+  const REGION_HEIGHT = REGION_BOTTOM - REGION_TOP; // 81
+  const NUMBER_TO_LABEL_GAP = 2;
+  const LABEL_TO_DESCRIPTION_GAP = 1.5;
+
+  function flowLayout(stepCount: number, descriptions?: string[]): TextBlock[] {
+    const flowSteps: FlowStep[] = Array.from({ length: stepCount }, (_, i) => ({
+      label: `Step ${i + 1}`,
+      description: descriptions?.[i] ?? `Description ${i + 1}.`,
+    }));
+    const deck = buildTestDeck([
+      makeSlide('flow_process', { title: 'Pipeline', steps: flowSteps }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    return layout.textBlocks.filter((b) => b.text !== 'Pipeline');
+  }
+
+  it('centers the number/label/description trio as a tight group in the region', () => {
+    const blocks = flowLayout(3);
+    const stackTop = Math.min(...blocks.map((b) => b.y));
+    const stackBottom = Math.max(...blocks.map((b) => b.y + b.h));
+    const contentSpan = stackBottom - stackTop;
+    const slack = REGION_HEIGHT - contentSpan;
+    expect(stackTop).toBeCloseTo(REGION_TOP + slack / 2, 1);
+    expect(stackBottom).toBeCloseTo(REGION_BOTTOM - slack / 2, 1);
+  });
+
+  it('interior gaps equal the bare gap floors (no distribute spread)', () => {
+    const blocks = flowLayout(3);
+    const numbers = blocks.filter((b) => /^[1-9]$/.test(b.text));
+    const labels = blocks.filter((b) => /^Step \d+$/.test(b.text));
+    const descs = blocks.filter((b) => /^Description \d+\.$/.test(b.text));
+    expect(numbers).toHaveLength(3);
+    expect(labels).toHaveLength(3);
+    expect(descs).toHaveLength(3);
+
+    const numberY = numbers[0]!.y;
+    const labelY = labels[0]!.y;
+    const descriptionY = descs[0]!.y;
+    const maxNumberH = Math.max(...numbers.map((b) => b.h));
+    const maxLabelH = Math.max(...labels.map((b) => b.h));
+
+    expect(labelY - (numberY + maxNumberH)).toBeCloseTo(NUMBER_TO_LABEL_GAP, 1);
+    expect(descriptionY - (labelY + maxLabelH)).toBeCloseTo(LABEL_TO_DESCRIPTION_GAP, 1);
+  });
+
+  it('HUG_EPSILON no-bottom-overflow guard', () => {
+    const long =
+      'A deliberately long step description meant to wrap across several lines so the description band consumes meaningful vertical space within the content region of this flow slide here.';
+    const blocks = flowLayout(3, [long, long, long]);
+    const maxBottom = Math.max(...blocks.map((b) => b.y + b.h));
+    expect(maxBottom).toBeLessThanOrEqual(REGION_BOTTOM + 0.1);
+  });
+});

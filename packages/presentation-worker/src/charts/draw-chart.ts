@@ -19,6 +19,7 @@
 
 import { FONT_SIZES, LINE_HEIGHTS, type Region } from '../constants.js';
 import { buildTextBlock, type FontTier, hugHeightToMeasured } from '../layouts/shared.js';
+import { fitMeasuredStack } from '../layouts/fit.js';
 import type {
   ChartSeriesPoint,
   DesignDirectionSpec,
@@ -395,15 +396,23 @@ function drawMultiStat(
       ),
     );
 
-    // Centre the measured stack vertically within the chart region; never
-    // start above the region top (the never-stack-upward floor).
-    const stackHeight =
-      stack.reduce((sum, b) => sum + b.h, 0) + MULTI_STAT_BLOCK_GAP * (stack.length - 1);
-    let cursorY = region.y + Math.max(0, (region.h - stackHeight) / 2);
-    for (const block of stack) {
-      block.y = cursorY;
-      cursorY = block.y + block.h + MULTI_STAT_BLOCK_GAP;
-    }
+    // Centre the measured stack vertically within the chart region via the shared
+    // engine. anchor:'center' reproduces the previous
+    // region.y + max(0,(region.h - stackHeight)/2) placement; overflow:'truncate'
+    // keeps scale=1 (the cards keep their own hugged heights — a global scale would
+    // compress the tops while the blocks stayed full size and overlap). measure()
+    // returns b.h (post-hug, includes the anti-clip epsilon) — NOT measuredHeightPct
+    // — so the stack height matches the previous sum exactly. No emitBandCell/valign:
+    // the cards read number→unit→label top-down inside the centred stack.
+    const fit = fitMeasuredStack({
+      region,
+      items: stack.map((b) => ({ measure: () => b.h, gapAfter: MULTI_STAT_BLOCK_GAP })),
+      overflow: 'truncate',
+      anchor: 'center',
+    });
+    stack.forEach((b, k) => {
+      b.y = fit.tops[k]!;
+    });
     blocks.push(...stack);
   });
 

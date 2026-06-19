@@ -34,6 +34,7 @@ import type {
   TextBlock,
 } from '../types.js';
 import { buildTextBlock, compose, defaultBackground } from './shared.js';
+import { fitMeasuredStack, emitBandCell } from './fit.js';
 import { layoutContentSplit } from './content-split.js';
 
 // Model cap: SlideContent.table_rows is max_length 7 — never render more rows
@@ -120,25 +121,35 @@ export function layoutTableCompact(slide: SlideSpec, deck: DeckSpec): SlideLayou
     ),
   );
 
-  // Bands = measured content + padding. Sum them; the table is the thing that
-  // must fit the region. It fits → centre it; it overflows → scale every band by
-  // the same content/region factor (derived, not a clamped row height) and let
-  // buildTextBlock's shrink+truncate be the per-cell reliability floor.
-  const rawHeader = headerContent + 2 * CELL_PAD_Y;
-  const rawRows = rowContent.map((h) => h + 2 * CELL_PAD_Y);
-  const rawTotal = rawHeader + rawRows.reduce((sum, h) => sum + h, 0);
-  const scale = rawTotal > region.h ? region.h / rawTotal : 1;
-
-  const headerBand = rawHeader * scale;
-  const rowBands = rawRows.map((h) => h * scale);
-  const tableHeight = headerBand + rowBands.reduce((sum, h) => sum + h, 0);
-  const tableTop = region.y + Math.max(0, (region.h - tableHeight) / 2);
+  // Fit the measured stack: the table is the thing that must fit the region. It
+  // fits → centre it; it overflows → the shared engine scales every band by one
+  // content/region factor (derived, not a clamped row height) and buildCell's
+  // buildTextBlock shrink+truncate is the per-cell reliability floor. The table
+  // passes its FROZEN body region verbatim (it opts out of the title-bottom→margin
+  // region derivation the P0 layouts use — that is what keeps the output
+  // pixel-identical); the band breathing is CELL_PAD_Y; the centre anchor
+  // preserves the "balanced, not top-pinned" placement.
+  const fit = fitMeasuredStack({
+    region,
+    padding: CELL_PAD_Y,
+    overflow: 'scale',
+    anchor: 'center',
+    items: [
+      { measure: () => headerContent },
+      ...rowContent.map((h) => ({ measure: () => h })),
+    ],
+  });
+  const headerBand = fit.heights[0]!;
+  const rowBands = fit.heights.slice(1);
+  const tableHeight = fit.heights.reduce((sum, h) => sum + h, 0);
+  const tableTop = fit.tops[0]!;
 
   const preferredColumn = indexInRange(slide.content.table_preferred_column, columnCount);
   const heroRow = indexInRange(slide.content.table_hero_row, rows.length);
 
-  const rowTop = (i: number): number =>
-    tableTop + headerBand + rowBands.slice(0, i).reduce((sum, h) => sum + h, 0);
+  // The header occupies band 0, so data row k is band k+1 → fit.tops[i + 1] (NOT
+  // tops[i]). The equivalence-lock test guards this off-by-one explicitly.
+  const rowTop = (i: number): number => fit.tops[i + 1]!;
 
   // --- Emphasis + structure fills (behind the text) ---
   if (heroRow !== null) {
@@ -283,8 +294,10 @@ function buildCell(opts: CellOptions): TextBlock {
     tier: FONT_SIZES.small,
     lineHeight: LINE_HEIGHTS.caption,
   });
-  block.valign = 'middle';
-  return block;
+  // buildTextBlock already built at y=bandTop / h=bandHeight (so its shrink/
+  // truncate fired against the scaled band); emitBandCell re-stamps idempotently
+  // and sets valign:'middle' from the one shared source both renderers honour.
+  return emitBandCell(block, opts.bandTop, opts.bandHeight);
 }
 
 /** Clamp an authored emphasis index to a valid slot, or null when absent/out of range. */

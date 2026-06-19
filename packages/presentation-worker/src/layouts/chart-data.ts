@@ -27,11 +27,10 @@ import type {
   SlideSpec,
   TextBlock,
 } from '../types.js';
-import { buildTextBlock, compose, defaultBackground, stackBelow } from './shared.js';
+import { availableHeightBelow, buildTextBlock, compose, defaultBackground, stackBelow } from './shared.js';
 
 const CHART_PLACEHOLDER_TEXT = '[Chart placeholder]';
 const TITLE_GAP = 2;
-const MIN_CHART_HEIGHT = 20;
 
 export function layoutChartData(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const regions = SLIDE_REGIONS.chart_data!;
@@ -51,20 +50,21 @@ export function layoutChartData(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   });
   blocks.push(titleBlock);
 
-  // Never-stack-upward floor: the chart box (and its annotation column)
-  // start at max(the designed body region y, the title's measured bottom).
-  // The max() — never a min-clamp — means the content can only ever move
-  // DOWN to clear a multi-line title, never up into it, so the title can't
-  // overlap the chart. A short title leaves the content at its designed top.
-  // Pin the chart bottom and shrink the box from the top so it stays
-  // on-slide when pushed down.
+  // Never-stack-upward floor: the chart starts at max(the designed body top, the
+  // title's measured bottom + gap), so a multi-line title pushes it DOWN, never up
+  // into the title. FILL: the chart then spans down to the bottom content margin
+  // (R16) via availableHeightBelow — the frozen body height (72) is demoted to a
+  // max bound and gone from the height, and there is no MIN clamp (a pathological
+  // title shrinks the box; computePlotArea's plot-floor + per-bar buildTextBlock
+  // shrink is the reliability floor). Collision-safe: the chart owns x:5..70; the
+  // annotation column (x:72) and citation (x:70..95) are edge-adjacent on the
+  // right, horizontally disjoint, so filling down the left side to y≈94 is clear.
   const baseChart = regions.body!;
-  const chartBottom = baseChart.y + baseChart.h;
   const contentTop = Math.max(baseChart.y, stackBelow(titleBlock, TITLE_GAP));
   const chartRegion: Region = {
     ...baseChart,
     y: contentTop,
-    h: Math.max(MIN_CHART_HEIGHT, chartBottom - contentTop),
+    h: availableHeightBelow(contentTop),
   };
   shapes.push({
     type: 'rect',

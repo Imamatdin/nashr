@@ -5,8 +5,10 @@
  * image filling the right half to the slide edge. Italic caption
  * sits at the bottom of the text side when present.
  *
- * Also acts as the temporary fallback for the 6 interactive slide
- * types until Task 21 replaces them with their proper renderers.
+ * Also acts as the fallback for a header-less table_compact slide and a
+ * keyword-less typographic_keywords slide (each delegates here when it has no
+ * structured content to render). The six interactive slide types now have their
+ * own renderers and no longer fall back here.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../constants.js';
@@ -27,6 +29,7 @@ import {
   hugHeightToMeasured,
   stackBelow,
 } from './shared.js';
+import { fitMeasuredStack } from './fit.js';
 
 // Gap below the title before the body. Includes a one-line buffer because
 // fontkit and PowerPoint/LibreOffice wrap headings to DIFFERENT line counts
@@ -34,7 +37,9 @@ import {
 // measured. Reserving an extra heading line guarantees the body never
 // overlaps a title that wrapped longer in the actual renderer.
 const BODY_GAP = 2;
-const MIN_BODY_H = 10; // never give the body less than this even if the title is tall
+// Clearance (slide %) between the body's bottom and the caption strip so the two
+// boxes never touch (was an inline magic `caption.y - 1`).
+const CAPTION_CLEARANCE = 1;
 
 export function layoutContentSplit(slide: SlideSpec, deck: DeckSpec): SlideLayout {
   const regions = SLIDE_REGIONS.content_split!;
@@ -63,32 +68,46 @@ export function layoutContentSplit(slide: SlideSpec, deck: DeckSpec): SlideLayou
 
   const bodyText = composeBodyText(slide.content);
   if (bodyText) {
-    // Never-stack-upward floor: rest at the designed body y, drop lower only if
-    // the title's measured bottom reaches past it. The body fills the column
-    // down to the caption strip (or the bottom margin), so it owns its area and
-    // shrinks-to-fit there rather than clipping under a fixed slot.
-    const bodyY = Math.max(regions.body!.y, stackBelow(titleBlock, BODY_GAP));
-    // Bottom edge of the body: just above the caption strip, or the slide's
-    // bottom content margin (availableHeightBelow(y) + y) when there's no caption.
-    const bodyBottom = regions.caption ? regions.caption.y - 1 : bodyY + availableHeightBelow(bodyY);
+    // Body region derives from the title's REAL bottom (no frozen floor): dropping
+    // the old Math.max(regions.body.y, …) is what removes the dead gap that
+    // stranded a short body at the designed body.y (18) even under a short title.
+    // The column spans down to the caption strip (or the bottom content margin);
+    // the frozen body height is demoted to a max bound and unused here.
+    const bodyY = stackBelow(titleBlock, BODY_GAP);
+    const bodyBottom = regions.caption
+      ? regions.caption.y - CAPTION_CLEARANCE
+      : bodyY + availableHeightBelow(bodyY);
     const bodyRegion: Region = {
       x: regions.body!.x,
       y: bodyY,
       w: regions.body!.w,
-      h: Math.max(MIN_BODY_H, bodyBottom - bodyY),
+      h: Math.max(0, bodyBottom - bodyY),
     };
-    blocks.push(
-      buildTextBlock({
-        text: bodyText,
-        region: bodyRegion,
-        fontFamily: design.body_font,
-        fontWeight: 'normal',
-        color: design.palette.text,
-        align: 'left',
-        tier: FONT_SIZES.body,
-        lineHeight: LINE_HEIGHTS.body,
-      }),
-    );
+    // Build against the full column so a LONG body shrinks-to-fit there; route the
+    // single block through the shared engine (anchor:'start' ⇒ tops[0] === bodyY)
+    // for one geometry path; then hug so a SHORT body owns only its content with no
+    // dead box trailing below. valign stays 'top' (do NOT emitBandCell — the body
+    // reads from the top). MIN_BODY_H is gone: the height is now a measured/engine
+    // output, and buildTextBlock's per-block shrink+truncate is the reliability floor.
+    const bodyBlock = buildTextBlock({
+      text: bodyText,
+      region: bodyRegion,
+      fontFamily: design.body_font,
+      fontWeight: 'normal',
+      color: design.palette.text,
+      align: 'left',
+      tier: FONT_SIZES.body,
+      lineHeight: LINE_HEIGHTS.body,
+    });
+    const fit = fitMeasuredStack({
+      region: bodyRegion,
+      items: [{ measure: () => bodyBlock.measuredHeightPct }],
+      overflow: 'truncate',
+      anchor: 'start',
+    });
+    bodyBlock.y = fit.tops[0]!;
+    hugHeightToMeasured(bodyBlock);
+    blocks.push(bodyBlock);
   }
 
   if (slide.content.caption) {

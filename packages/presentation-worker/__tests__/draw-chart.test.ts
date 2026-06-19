@@ -240,6 +240,46 @@ describe('drawChart — encoding guard', () => {
     expect(result.blocks.some((b) => b.text === 'Liquid')).toBe(true);
   });
 
+  it('vertically centres the multi_stat stack within the region (fitMeasuredStack center)', () => {
+    // A clustered, all-non-zero series (max/min = 1.57/1.08 = 1.45 < 1.5)
+    // routes to multi_stat. Independent of the colour/text checks above, the
+    // stat stack inside each column must be CENTRED — fitMeasuredStack with
+    // anchor:'center' places top0 at region.y + (region.h - content)/2, so the
+    // top slack and the bottom slack are equal. start/top-pin would give a top
+    // slack of 0; this asserts the centre placement specifically.
+    const lowSpread = [
+      { label: 'Air', value: 1.57, unit: 'PUE' },
+      { label: 'Liquid', value: 1.25, unit: 'PUE' },
+      { label: 'sCO2', value: 1.08, unit: 'PUE' },
+    ];
+    const result = drawChart(
+      REGION,
+      content({ title: 'Cooling PUE comparison', chart_type: 'bar', chart_series: lowSpread }),
+      DESIGN,
+    )!;
+    // Guard the routing: multi_stat draws no rect shapes. If this accidentally
+    // fell through to drawBar the x-filter below would grab bars + labels and
+    // the centring math would be measured against the wrong geometry.
+    expect(result.shapes.filter((s) => s.type === 'rect')).toHaveLength(0);
+
+    // Isolate one column's stack. drawMultiStat lays out n columns at
+    // slotX = region.x + i * (region.w / n); filter to the first column by x.
+    const slotW = REGION.w / lowSpread.length;
+    const column = result.blocks.filter((b) => Math.abs(b.x - REGION.x) < slotW / 2);
+    expect(column.length).toBeGreaterThanOrEqual(3); // number + unit + label
+
+    const top = column.reduce((a, b) => (b.y < a.y ? b : a));
+    const bottom = column.reduce((a, b) => (b.y + b.h > a.y + a.h ? b : a));
+    const topSlack = top.y - REGION.y;
+    const bottomSlack = REGION.y + REGION.h - (bottom.y + bottom.h);
+
+    // Centred, not top-pinned: a real gap above the first block and below the last.
+    expect(topSlack).toBeGreaterThan(0);
+    expect(bottom.y + bottom.h).toBeLessThan(REGION.y + REGION.h);
+    // Symmetric: top slack ≈ bottom slack (anchor:'center' splits the slack evenly).
+    expect(Math.abs(topSlack - bottomSlack)).toBeLessThan(0.5);
+  });
+
   it('re-routes a 2-point payback line off line into a clean two-bar chart', () => {
     // The sCO2 deck slide 14 case: payback Liquid 5yr vs sCO2 3.2yr was
     // emitted as `line` (which implies a continuous trend across discrete
