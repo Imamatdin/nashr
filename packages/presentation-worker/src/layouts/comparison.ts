@@ -6,11 +6,11 @@
  * midline. The column flagged `is_preferred` gets the accent colour
  * on its heading; the other gets the standard text colour.
  *
- * Both columns share a top edge that floors below the title's measured bottom,
- * and within each column the bullet points stack below the heading's real
- * bottom and below each other (stackBelow + hugHeightToMeasured) rather than
- * dropping into fixed equal-height slots — so a long heading or a point that
- * wraps to two lines pushes the next point down instead of clipping.
+ * Both columns share a top edge hugged below the title's measured bottom, and
+ * within each column the heading + points are placed by the shared fit engine
+ * (fitMeasuredStack, anchor:'start') — each block hugs its own measured height,
+ * so a long heading or a point that wraps to two lines pushes the next one down
+ * instead of dropping into a fixed equal-height slot.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../constants.js';
@@ -32,6 +32,7 @@ import {
   stackBelow,
   stripListPrefix,
 } from './shared.js';
+import { fitMeasuredStack } from './fit.js';
 
 const COLUMN_GAP = 2; // below the title before the columns
 const HEADING_GAP = 2; // below a column heading before its first point
@@ -57,9 +58,11 @@ export function layoutComparison(slide: SlideSpec, deck: DeckSpec): SlideLayout 
   );
   blocks.push(titleBlock);
 
-  // Both columns start at the same top edge: their designed y, floored below a
-  // tall title's measured bottom so the title can't overlap the columns.
-  const columnTop = Math.max(regions.body!.y, stackBelow(titleBlock, COLUMN_GAP));
+  // Both columns start at the same top edge, hugged below the title's REAL
+  // measured bottom (no fixed floor): dropping the old Math.max(regions.body.y, …)
+  // removes the dead gap that stranded the columns at the designed body.y (15)
+  // even under a short title.
+  const columnTop = stackBelow(titleBlock, COLUMN_GAP);
   const columnHeight = availableHeightBelow(columnTop);
   const leftRegion: Region = { ...regions.body!, y: columnTop, h: columnHeight };
   const rightRegion: Region = { ...regions.image!, y: columnTop, h: columnHeight };
@@ -89,45 +92,50 @@ function layoutComparisonColumn(
 ): void {
   if (!column) return;
 
-  const columnBottom = region.y + region.h;
+  // Build tall against the full column (so a long heading/point shrinks-to-fit
+  // there), then let the shared fit engine place the stack. The heading-color
+  // branch below is the column-emphasis contract — keep it byte-identical.
+  const headingBlock = buildTextBlock({
+    text: column.heading,
+    region,
+    fontFamily: design.heading_font,
+    fontWeight: 'bold',
+    color: column.is_preferred ? design.palette.accent : design.palette.text,
+    align: 'left',
+    tier: FONT_SIZES.subheading,
+    lineHeight: LINE_HEIGHTS.heading,
+  });
 
-  const headingBlock = hugHeightToMeasured(
+  const pointBlocks = (column.points ?? []).map((point) =>
     buildTextBlock({
-      text: column.heading,
-      region: { x: region.x, y: region.y, w: region.w, h: region.h },
-      fontFamily: design.heading_font,
-      fontWeight: 'bold',
-      color: column.is_preferred ? design.palette.accent : design.palette.text,
+      text: `• ${stripListPrefix(point)}`,
+      region,
+      fontFamily: design.body_font,
+      fontWeight: 'normal',
+      color: design.palette.text,
       align: 'left',
-      tier: FONT_SIZES.subheading,
-      lineHeight: LINE_HEIGHTS.heading,
+      tier: FONT_SIZES.body,
+      lineHeight: LINE_HEIGHTS.body,
     }),
   );
-  blocks.push(headingBlock);
 
-  const points = column.points ?? [];
-  if (points.length === 0) return;
+  // anchor:'start' ⇒ tops[0] === region.y (= columnTop); each block then hugs its
+  // own measured height (valign stays 'top' — do NOT emitBandCell). overflow:
+  // 'truncate' makes per-block shrink+truncate the only reliability floor.
+  const stack = [headingBlock, ...pointBlocks];
+  const fit = fitMeasuredStack({
+    region,
+    items: [
+      { measure: () => headingBlock.measuredHeightPct, gapAfter: HEADING_GAP },
+      ...pointBlocks.map((p) => ({ measure: () => p.measuredHeightPct, gapAfter: POINT_GAP })),
+    ],
+    overflow: 'truncate',
+    anchor: 'start',
+  });
 
-  let cursorY = stackBelow(headingBlock, HEADING_GAP);
-  points.forEach((point) => {
-    const pointBlock = hugHeightToMeasured(
-      buildTextBlock({
-        text: `• ${stripListPrefix(point)}`,
-        region: {
-          x: region.x,
-          y: cursorY,
-          w: region.w,
-          h: Math.max(0, columnBottom - cursorY),
-        },
-        fontFamily: design.body_font,
-        fontWeight: 'normal',
-        color: design.palette.text,
-        align: 'left',
-        tier: FONT_SIZES.body,
-        lineHeight: LINE_HEIGHTS.body,
-      }),
-    );
-    blocks.push(pointBlock);
-    cursorY = stackBelow(pointBlock, POINT_GAP);
+  stack.forEach((block, i) => {
+    block.y = fit.tops[i]!;
+    hugHeightToMeasured(block);
+    blocks.push(block);
   });
 }

@@ -41,6 +41,7 @@ import {
   stackBelow,
   stripListPrefix,
 } from './shared.js';
+import { fitMeasuredStack } from './fit.js';
 
 const LEFT_X = 5;
 const TITLE_W = 50;
@@ -69,14 +70,23 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
   );
   blocks.push(titleBlock);
 
-  let cursorY = stackBelow(titleBlock, TITLE_GAP);
+  // The definition + bullets stack below the title's measured bottom. Each block
+  // is built tall against the column (measure-tall), then placed by the shared
+  // fit engine (anchor:'start' ⇒ tops follow the old stackBelow chain exactly);
+  // each then hugs its own measured height so a wrapped block pushes the next one
+  // down instead of clipping. The TITLE stays outside the engine — it is the
+  // region anchor, and keeping it standalone leaves its geometry byte-identical.
+  const stackTop = stackBelow(titleBlock, TITLE_GAP);
+  const stackRegion = { x: LEFT_X, y: stackTop, w: COLUMN_W, h: availableHeightBelow(stackTop) };
+
+  const entries: Array<{ block: TextBlock; gapAfter: number }> = [];
 
   const definition = pickDefinition(slide.content.subtitle, slide.content.body_text);
   if (definition) {
-    const definitionBlock = hugHeightToMeasured(
-      buildTextBlock({
+    entries.push({
+      block: buildTextBlock({
         text: definition,
-        region: { x: LEFT_X, y: cursorY, w: COLUMN_W, h: availableHeightBelow(cursorY) },
+        region: stackRegion,
         fontFamily: design.body_font,
         fontWeight: 'normal',
         fontStyle: 'italic',
@@ -85,17 +95,16 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
         tier: FONT_SIZES.subheading,
         lineHeight: LINE_HEIGHTS.body,
       }),
-    );
-    blocks.push(definitionBlock);
-    cursorY = stackBelow(definitionBlock, DEFINITION_GAP);
+      gapAfter: DEFINITION_GAP,
+    });
   }
 
   const bullets = (slide.content.bullets ?? []).slice(0, MAX_BULLETS);
-  bullets.forEach((bullet) => {
-    const bulletBlock = hugHeightToMeasured(
-      buildTextBlock({
+  for (const bullet of bullets) {
+    entries.push({
+      block: buildTextBlock({
         text: `• ${stripListPrefix(bullet)}`,
-        region: { x: LEFT_X, y: cursorY, w: COLUMN_W, h: availableHeightBelow(cursorY) },
+        region: stackRegion,
         fontFamily: design.body_font,
         fontWeight: 'normal',
         color: design.palette.text,
@@ -103,9 +112,20 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
         tier: FONT_SIZES.caption,
         lineHeight: LINE_HEIGHTS.body,
       }),
-    );
-    blocks.push(bulletBlock);
-    cursorY = stackBelow(bulletBlock, BULLET_GAP);
+      gapAfter: BULLET_GAP,
+    });
+  }
+
+  const fit = fitMeasuredStack({
+    region: stackRegion,
+    items: entries.map((e) => ({ measure: () => e.block.measuredHeightPct, gapAfter: e.gapAfter })),
+    overflow: 'truncate',
+    anchor: 'start',
+  });
+  entries.forEach((e, i) => {
+    e.block.y = fit.tops[i]!;
+    hugHeightToMeasured(e.block);
+    blocks.push(e.block);
   });
 
   // A contained object-figure (when resolved) occupies the right column, clear
