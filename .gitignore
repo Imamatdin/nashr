@@ -10,6 +10,9 @@ claude-code-system-prompts-main/
 .env
 .env.*
 !.env.example
+nashr-droplet
+nashr-droplet.pub
+files (5).zip
 
 # Python
 __pycache__/
@@ -30,6 +33,7 @@ dist/
 node_modules/
 .next/
 .turbo/
+packages/presentation-worker/.review-build-*/
 
 # OS
 .DS_Store
