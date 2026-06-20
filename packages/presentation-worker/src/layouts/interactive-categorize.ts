@@ -11,6 +11,14 @@
  * Supports 2-5 categories. With 2-4 the layout uses the canonical GRID
  * tracks (R19); 5 columns are computed inline since no preset exists
  * for that count.
+ *
+ * Vertical layout (L2 fit migration): the category-label header band (LABEL_Y) and
+ * every column's x/w stay frozen. Each column's items are fit INDEPENDENTLY on
+ * their own vertical axis via fitCompositeStack from ITEMS_START_Y — which adds the
+ * previously-missing per-column overflow guard: a tall column scales-to-fit (and
+ * flags hasOverflow if it still can't) instead of running its items off the slide
+ * on the old fixed ITEM_STEP pitch. Columns are independent, so one tall column
+ * never shifts or rescales another.
  */
 
 import { FONT_SIZES, GRID, LINE_HEIGHTS, type Region } from '../constants.js';
@@ -22,15 +30,22 @@ import type {
   SlideSpec,
   TextBlock,
 } from '../types.js';
-import { buildScrim, buildTextBlock, compose, defaultBackground } from './shared.js';
+import {
+  availableHeightBelow,
+  buildScrim,
+  buildTextBlock,
+  compose,
+  defaultBackground,
+  fitCompositeStack,
+  type CompositeItem,
+} from './shared.js';
 
 const TITLE: Region = { x: 5, y: 3, w: 90, h: 7 };
 const SUBTITLE: Region = { x: 5, y: 10, w: 90, h: 3 };
 const LABEL_Y = 15;
 const LABEL_H = 5;
 const ITEMS_START_Y = 22;
-const ITEM_H = 4;
-const ITEM_STEP = 5;
+const ITEM_GAP = 1.5; // between stacked items within a column
 
 interface ColumnSpec {
   x: number;
@@ -96,28 +111,39 @@ export function layoutInteractiveCategorize(slide: SlideSpec, deck: DeckSpec): S
 
     const groupId = `cat${catIdx}`;
     const itemsInCat = items.filter((it) => it.category === label);
-    itemsInCat.forEach((item, itemIdx) => {
-      blocks.push(
-        buildTextBlock({
-          text: item.term,
-          region: {
-            x: col.x + 1,
-            y: ITEMS_START_Y + itemIdx * ITEM_STEP,
-            w: col.w - 2,
-            h: ITEM_H,
-          },
-          fontFamily: design.body_font,
-          fontWeight: 'normal',
-          color: design.palette.text,
-          align: 'left',
-          tier: FONT_SIZES.small,
-          lineHeight: LINE_HEIGHTS.body,
-          role: 'category_item',
-          groupId,
-          dataIndex: itemIdx,
-        }),
-      );
-    });
+
+    // Fit THIS column's items on their own vertical axis from ITEMS_START_Y, with
+    // the per-column overflow guard: a column with many items scales-to-fit (and
+    // flags overflow if it still can't) rather than running off the slide on a
+    // fixed pitch. Column x/w are frozen; columns are independent of each other.
+    const colRegion: Region = {
+      x: col.x + 1,
+      y: ITEMS_START_Y,
+      w: col.w - 2,
+      h: availableHeightBelow(ITEMS_START_Y),
+    };
+    const composites: CompositeItem[] = itemsInCat.map((item, itemIdx) => ({
+      gapAfter: ITEM_GAP,
+      subs: [
+        {
+          build: (y, h) =>
+            buildTextBlock({
+              text: item.term,
+              region: { x: col.x + 1, y, w: col.w - 2, h },
+              fontFamily: design.body_font,
+              fontWeight: 'normal',
+              color: design.palette.text,
+              align: 'left',
+              tier: FONT_SIZES.small,
+              lineHeight: LINE_HEIGHTS.body,
+              role: 'category_item',
+              groupId,
+              dataIndex: itemIdx,
+            }),
+        },
+      ],
+    }));
+    blocks.push(...fitCompositeStack(colRegion, composites).blocks);
   });
 
   const background = buildBackground(deck);

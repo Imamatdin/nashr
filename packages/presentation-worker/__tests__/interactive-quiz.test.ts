@@ -66,6 +66,28 @@ describe('layout — INTERACTIVE_QUIZ_MCQ', () => {
     expect(layout.textBlocks.filter((b) => b.role === 'feedback_wrong')).toHaveLength(3);
   });
 
+  it('co-locates feedback_correct and feedback_wrong at the same y per question', () => {
+    // The two feedback blocks are mutually-exclusive overlays (the renderer
+    // reveals exactly one per answer), so they MUST share a y. This is the
+    // frozen-by-design invariant a naive fitMeasuredStack migration would break.
+    const deck = buildTestDeck([
+      makeSlide('interactive_quiz_mcq', {
+        title: 'Quiz',
+        quiz_questions: [makeQuestion(0), makeQuestion(1), makeQuestion(2)],
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const correct = layout.textBlocks.filter((b) => b.role === 'feedback_correct');
+    const wrong = layout.textBlocks.filter((b) => b.role === 'feedback_wrong');
+    expect(correct).toHaveLength(3);
+    expect(wrong).toHaveLength(3);
+    for (const c of correct) {
+      const w = wrong.find((b) => b.groupId === c.groupId);
+      expect(w).toBeDefined();
+      expect(w!.y).toBe(c.y);
+    }
+  });
+
   it('uses localized feedback labels (ru / kaa)', () => {
     const ruDeck = buildTestDeck(
       [

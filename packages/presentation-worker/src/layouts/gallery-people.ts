@@ -1,10 +1,19 @@
 /**
  * GALLERY_PEOPLE layout.
  *
- * 3-5 portrait cutouts spread horizontally, each with name +
+ * 1-5 portrait cutouts spread horizontally, each with name +
  * optional dates/role + optional description stacked below. The
  * portraits sit directly on the deck background (R24) — no frames,
  * no cards.
+ *
+ * FROZEN BY DESIGN (not migrated to fitMeasuredStack). Portrait placement is a
+ * horizontal row from the shared `getPortraitPositions` allocator: its `x`/`w`
+ * are load-bearing and its vertical band (`y:15` + per-count `h`) is a reserved
+ * slot. Every caption stacks BELOW that band via `position.y + position.h`, so
+ * all captions across the row share one baseline — a vertical fit would collapse
+ * the row and leak the reserved band into caption sizing. Horizontal centring of
+ * small (1-2 person) rows is handled inside the allocator, shared with
+ * TEAM_CREDITS.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, getPortraitPositions, type Region } from '../constants.js';

@@ -40,4 +40,37 @@ describe('layout — TEAM_CREDITS', () => {
       expect(role.color).toBe(deck.design.palette.text_secondary);
     }
   });
+
+  it('places every name caption on one shared baseline (frozen portrait band)', () => {
+    const deck = buildTestDeck([
+      makeSlide('team_credits', { title: 'Credits', people: people(3) }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const names = layout.textBlocks.filter((b) => /^Person \d+$/.test(b.text));
+    expect(names).toHaveLength(3);
+    expect(new Set(names.map((b) => b.y)).size).toBe(1);
+  });
+
+  it('centres small (1-2 person) rows about the slide centre', () => {
+    const deck1 = buildTestDeck([
+      makeSlide('team_credits', { title: 'Solo', people: people(1) }),
+    ]);
+    const layout1 = new LayoutPass().layoutSlide(deck1.slides[0]!, deck1);
+    const one = layout1.textBlocks.filter((b) => /^Person \d+$/.test(b.text));
+    expect(one).toHaveLength(1);
+    expect(one[0]!.x + one[0]!.w / 2).toBeCloseTo(50, 1);
+
+    const deck2 = buildTestDeck([
+      makeSlide('team_credits', { title: 'Duo', people: people(2) }),
+    ]);
+    const layout2 = new LayoutPass().layoutSlide(deck2.slides[0]!, deck2);
+    const two = layout2.textBlocks
+      .filter((b) => /^Person \d+$/.test(b.text))
+      .sort((a, b) => a.x - b.x);
+    expect(two).toHaveLength(2);
+    const centres = two.map((b) => b.x + b.w / 2);
+    expect((centres[0]! + centres[1]!) / 2).toBeCloseTo(50, 1);
+    expect(centres[0]!).toBeLessThan(50);
+    expect(centres[1]!).toBeGreaterThan(50);
+  });
 });
