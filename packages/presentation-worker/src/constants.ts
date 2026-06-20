@@ -231,17 +231,22 @@ export const GRID = {
 // ---------------------------------------------------------------------------
 
 /**
- * Column bands for the stat row(s). Horizontal positions match the
- * original 1/2/3/4 layouts; vertical bands span the full content envelope
- * — title bottom (y≈14 after a 1pp breather) to the bottom margin
- * (y=94) — so the number can read big like a Canva headline instead of
- * being trapped in a 50% mid-slide strip. For 4 stats the band splits
- * into two equal rows so the 2×2 grid still reads as two distinct rows.
+ * Column bands for the stat row(s). Horizontal `x`/`w` are LOAD-BEARING —
+ * they place each stat column and the data_emphasis layout still reads them.
  *
- * The data_emphasis layout consumes y/h as the band envelope; an
- * adaptive font tier (computed from band height) decides how big the
- * number actually renders. Do NOT shrink these back to 50% — the under-
- * fill bug this fixes lives in band geometry.
+ * Vertical `y`/`h` are NO LONGER the rendered band. As of the L2 fit
+ * migration, data_emphasis derives the stat envelope from the title's
+ * measured bottom (title-hug) and splits it into equal rows via
+ * fitMeasuredStack. `y`/`h` are retained for TWO reasons:
+ *   1. ROW-GROUPING KEY — groupRows() partitions positions by `${y}:${h}`,
+ *      so the 4-stat set (y:14 ×2, y:55 ×2) still splits into two rows while
+ *      1/2/3 (all y:14) stay a single row. The RELATIVE values matter; the
+ *      absolute ones no longer reach the renderer. Keep each row's y distinct.
+ *   2. a documented MAX-BOUND record of the original frozen layout.
+ * Do NOT delete `y`/`h` (groupRows depends on them) and do NOT treat them as
+ * the band — the band is title-derived. The numbers below preserve the
+ * original frozen geometry (1pp breather under the title at y≈14, two equal
+ * 4-stat rows) as that reference.
  */
 export const STAT_POSITIONS: Record<1 | 2 | 3 | 4, readonly Region[]> = {
   1: [{ x: 25, y: 14, w: 50, h: 80 }],

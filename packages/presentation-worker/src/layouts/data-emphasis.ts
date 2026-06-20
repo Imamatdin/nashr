@@ -35,6 +35,7 @@
 import {
   FONT_SIZES,
   LINE_HEIGHTS,
+  MARGIN,
   SLIDE_HEIGHT,
   SLIDE_WIDTH,
   SLIDE_REGIONS,
@@ -56,11 +57,33 @@ import {
   compose,
   defaultBackground,
   hugHeightToMeasured,
+  stackBelow,
   type FontTier,
 } from './shared.js';
+import { fitMeasuredStack } from './fit.js';
 
 /** Vertical gap (slide %) between a stat's number/unit/label/comparison blocks. */
 const STAT_BLOCK_GAP = 1;
+
+/** Vertical gap (slide %) below the title's measured bottom before the stat region.
+ *  Sibling-consistent with comparison.COLUMN_GAP / typographic.TITLE_ROWS_GAP (=2).
+ *  Exported for the layout test, which re-derives the content region from it. */
+export const TITLE_GAP = 2;
+
+/** Vertical gap (slide %) between the two rows of the 4-stat 2×2 grid. Matches the
+ *  original frozen STAT_POSITIONS[4] gap (row-0 bottom 53 → row-1 top 55 = 2).
+ *  Exported for the layout test. */
+export const ROW_GAP = 2;
+
+/** Bottom content margin (slide %), mirrored from R16. Exported for layout tests. */
+export const REGION_BOTTOM = 100 - MARGIN.bottom;
+
+/** Minimum vertical space (slide %) reserved for the stat grid below the title.
+ *  Title-hug caps here so a pathological multi-line headline cannot consume the
+ *  stat band (Codex P2). A normal 1-line title derives contentTop ≈ 15–17 via
+ *  stackBelow, well above REGION_BOTTOM − MIN (44), so sCO₂ one-line stat slides
+ *  are byte-identical. */
+export const MIN_STAT_REGION_H = 50;
 
 /** Probe floor for uniform number sizing — never let a pathological long
  *  value drag the row's font size below the displayLarge minimum. The existing
@@ -191,10 +214,22 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
   const { design } = deck;
   const blocks: TextBlock[] = [];
 
-  blocks.push(
+  // Hug the title so the stat region derives from its REAL measured bottom (kills the frozen
+  // y:14). Cap the title's fit-height so it cannot grow past the stat-reservation floor —
+  // otherwise a pathological wrap would hug most of the slide and leave the stats in a
+  // hairline band that overflows the bottom margin (Codex P2).
+  const statContentTopCap = REGION_BOTTOM - MIN_STAT_REGION_H;
+  const titleMaxH = Math.max(
+    regions.title!.h,
+    statContentTopCap - regions.title!.y - TITLE_GAP,
+  );
+  const titleBlock = hugHeightToMeasured(
     buildTextBlock({
       text: slide.content.title,
-      region: regions.title!,
+      region: {
+        ...regions.title!,
+        h: Math.min(availableHeightBelow(regions.title!.y), titleMaxH),
+      },
       fontFamily: design.heading_font,
       fontWeight: 'bold',
       color: design.palette.text,
@@ -203,6 +238,7 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
       lineHeight: LINE_HEIGHTS.heading,
     }),
   );
+  blocks.push(titleBlock);
 
   const stats = (slide.content.stats ?? []).slice(0, 4) as StatItem[];
   const count = Math.max(1, stats.length) as 1 | 2 | 3 | 4;
@@ -222,14 +258,32 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
 
   const rows = groupRows(positions);
 
-  for (const rowIndices of rows) {
+  // Derive the stat envelope from the title-hugged content region, then partition it into equal
+  // row bands via the shared fit engine. Each measure() returns REGION GEOMETRY only (equalBandH
+  // from contentH/ROW_GAP) — never the number's measured height — so the adaptive number ceiling
+  // (which reads bandHeight) is NOT fed back into the band derivation (that feedback is the
+  // circular collapse the frozen-band recipe would have introduced). For numRows===1 this
+  // degenerates to a single band == the full content region (the number fills it); for
+  // numRows===2 it yields two equal bands separated by ROW_GAP, the lower flush at the margin.
+  const contentTop = Math.min(stackBelow(titleBlock, TITLE_GAP), statContentTopCap);
+  const contentH = availableHeightBelow(contentTop);
+  const numRows = rows.length;
+  const equalBandH = Math.max(0, (contentH - (numRows - 1) * ROW_GAP) / numRows);
+  const rowFit = fitMeasuredStack({
+    region: { x: regions.title!.x, y: contentTop, w: regions.title!.w, h: contentH },
+    items: rows.map(() => ({ measure: () => equalBandH, gapAfter: ROW_GAP })),
+    overflow: 'truncate',
+    anchor: 'start',
+  });
+
+  for (const [rowIdx, rowIndices] of rows.entries()) {
     if (rowIndices.length === 0) continue;
     const rowPositions = rowIndices.map((i) => positions[i]!);
     const rowStats = rowIndices.map((i) => stats[i]).filter((s): s is StatItem => Boolean(s));
     if (rowStats.length === 0) continue;
 
-    const bandTop = rowPositions[0]!.y;
-    const bandHeight = rowPositions[0]!.h;
+    const bandTop = rowFit.tops[rowIdx]!;
+    const bandHeight = rowFit.heights[rowIdx]!;
 
     // BELOW PASS: build each stat's unit/label/comparison stack at its tier.
     // These probe against the available height down to the bottom margin so
@@ -248,7 +302,7 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
           hugHeightToMeasured(
             buildTextBlock({
               text: stat.unit,
-              region: measureRegion(position.y),
+              region: measureRegion(bandTop),
               fontFamily: design.body_font,
               fontWeight: 'normal',
               color: design.palette.text_secondary,
@@ -263,7 +317,7 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
         hugHeightToMeasured(
           buildTextBlock({
             text: stat.label,
-            region: measureRegion(position.y),
+            region: measureRegion(bandTop),
             fontFamily: design.body_font,
             fontWeight: 'normal',
             color: design.palette.text,
@@ -278,7 +332,7 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
           hugHeightToMeasured(
             buildTextBlock({
               text: stat.comparison,
-              region: measureRegion(position.y),
+              region: measureRegion(bandTop),
               fontFamily: design.body_font,
               fontWeight: 'normal',
               color: design.palette.text_secondary,
@@ -322,7 +376,11 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
     // height here (not in the probe pass) so the renderer's overflow:hidden
     // box hugs the text after the shared-baseline reposition.
     const numberBlocks: TextBlock[] = rowStats.map((stat, idx) => {
-      const position = rowPositions[idx]!;
+      // Column x/w stay frozen (horizontal placement); anchor the number's
+      // measurement box at the DERIVED bandTop so its height ceiling
+      // (availableHeightBelow inside buildNumberBlock) tracks the real band, not
+      // the frozen STAT_POSITIONS y — the last frozen-y removed by this migration.
+      const position = { ...rowPositions[idx]!, y: bandTop };
       return hugHeightToMeasured(
         buildNumberBlock({
           text: stat.value,
