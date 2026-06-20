@@ -10,7 +10,8 @@
 
 import { describe, expect, it } from 'vitest';
 import { LayoutPass } from '../src/layout-pass.js';
-import { FONT_SIZES, MARGIN, STAT_POSITIONS } from '../src/constants.js';
+import { FONT_SIZES, MARGIN } from '../src/constants.js';
+import { ROW_GAP, TITLE_GAP } from '../src/layouts/data-emphasis.js';
 import type { DeckSpec, SlideContent, SlideSpec, SlideType, StatItem, TextBlock } from '../src/types.js';
 
 function buildDeck(slides: SlideSpec[]): DeckSpec {
@@ -227,27 +228,31 @@ describe('DATA_EMPHASIS — band fill and shared baseline', () => {
     for (const s of sizes) expect(s).toBeGreaterThanOrEqual(FONT_SIZES.displayLarge.min);
   });
 
-  it('spans the majority of the available content region (3 stats)', () => {
+  it('spans the majority of the derived content region (3 stats)', () => {
     const stats: StatItem[] = [
       { value: '94.4', unit: '%', label: 'Water savings', comparison: 'vs 30% baseline' },
       { value: '35', unit: '%', label: 'Overhead reduction', comparison: 'down from 60%' },
       { value: '12', unit: 'MW', label: 'Cooling capacity', comparison: 'rack-scale' },
     ];
-    const blocks = statBlocks(stats);
-    const band = STAT_POSITIONS[3][0]!;
-    const bandHeight = band.h;
+    const deck = buildDeck([makeSlide(0, 'data_emphasis', { title: 'In numbers', stats })]);
+    const allBlocks = new LayoutPass().layoutSlide(deck.slides[0]!, deck).textBlocks;
+    const title = allBlocks.find((b) => b.text === 'In numbers')!;
+    const blocks = allBlocks.filter((b) => b !== title);
+
+    // Denominator = the title-DERIVED content region the layout actually places
+    // into post-migration (title-hug → titleBottom + TITLE_GAP → bottom margin),
+    // NOT the now-dead frozen STAT_POSITIONS band. Mirrors the layout's own
+    // derivation in data-emphasis.ts.
+    const contentTop = title.y + title.measuredHeightPct + TITLE_GAP;
+    const derivedHeight = REGION_BOTTOM - contentTop;
+
     const tops = blocks.map((b) => b.y);
     const bottoms = blocks.map((b) => b.y + b.h);
-    const contentTop = Math.min(...tops);
-    const contentBottom = Math.max(...bottoms);
-    const contentSpan = contentBottom - contentTop;
-    // Content must occupy the majority of the band height (>50%). The
-    // under-fill bug squatted at ~30% of an 81pp content envelope while
-    // confined to a 50pp band — both halves of the regression. The single-
-    // line number constraint caps how big the number can grow in a narrow
-    // 3-stat column, so we don't push the ratio above the majority
-    // threshold the prompt requires.
-    expect(contentSpan / bandHeight).toBeGreaterThan(0.5);
+    const contentSpan = Math.max(...bottoms) - Math.min(...tops);
+    // Keep the >0.5 MAJORITY bar — do NOT tighten. The single-line-number
+    // constraint caps how full a narrow 3-stat column can get, so a tighter
+    // "real fill" assertion would spuriously fail a faithful migration.
+    expect(contentSpan / derivedHeight).toBeGreaterThan(0.5);
   });
 
   it('never overflows the bottom margin', () => {
@@ -286,5 +291,98 @@ describe('DATA_EMPHASIS — band fill and shared baseline', () => {
       );
     expect(topPairSpread).toBeLessThan(0.5);
     expect(bottomPairSpread).toBeLessThan(0.5);
+  });
+});
+
+/**
+ * Title-hug + derived row bands (L2 fit migration).
+ *
+ * The stat envelope is no longer the frozen STAT_POSITIONS band — it derives
+ * from the title's measured bottom and is partitioned into equal rows via
+ * fitMeasuredStack. These lock: (1) a taller title pushes the stats down;
+ * (2) the 4-stat rows are equal-split and the bottom row derives from the
+ * title (not frozen at y:55); (3) the band stays the full available region so
+ * the adaptive number still grows to fill it (no circular collapse).
+ */
+describe('DATA_EMPHASIS — title-hug + derived row bands', () => {
+  const REGION_BOTTOM = 100 - MARGIN.bottom; // 94
+
+  function layoutFor(title: string, stats: StatItem[]): TextBlock[] {
+    const deck = buildDeck([makeSlide(0, 'data_emphasis', { title, stats })]);
+    return new LayoutPass().layoutSlide(deck.slides[0]!, deck).textBlocks;
+  }
+
+  const TWO_STAT: StatItem[] = [
+    { value: '94.4', unit: '%', label: 'Water savings' },
+    { value: '35', unit: '%', label: 'Overhead' },
+  ];
+  // Long enough to wrap onto a second line in the full-width title band.
+  const LONG_TITLE =
+    'A deliberately long data emphasis headline written to wrap across two full lines inside the title band area';
+
+  const minStatTop = (blocks: TextBlock[], titleText: string): number =>
+    Math.min(...blocks.filter((b) => b.text !== titleText).map((b) => b.y));
+
+  it('a 2-line title pushes the stat region down vs a 1-line title', () => {
+    const shortBlocks = layoutFor('Short', TWO_STAT);
+    const longBlocks = layoutFor(LONG_TITLE, TWO_STAT);
+    const shortTitle = shortBlocks.find((b) => b.text === 'Short')!;
+    const longTitle = longBlocks.find((b) => b.text === LONG_TITLE)!;
+
+    // The long title genuinely wraps taller.
+    expect(longTitle.measuredHeightPct).toBeGreaterThan(shortTitle.measuredHeightPct);
+
+    const shortStatTop = minStatTop(shortBlocks, 'Short');
+    const longStatTop = minStatTop(longBlocks, LONG_TITLE);
+
+    // The taller title pushes the whole stat region down — a frozen y:14 would not move.
+    expect(longStatTop).toBeGreaterThan(shortStatTop);
+    // No stat intrudes above the title's measured bottom + the title gap.
+    expect(longStatTop).toBeGreaterThanOrEqual(
+      longTitle.y + longTitle.measuredHeightPct + TITLE_GAP - 0.5,
+    );
+  });
+
+  it('4-stat: equal row bands, bottom row derived from the title (not frozen at y:55)', () => {
+    // Identical-format values in both rows → symmetric per-row centering, so the
+    // top→bottom baseline pitch equals the band pitch (equalBandH + ROW_GAP).
+    const stats: StatItem[] = [
+      { value: '94', unit: '%', label: 'a' },
+      { value: '35', unit: '%', label: 'b' },
+      { value: '12', unit: '%', label: 'c' },
+      { value: '70', unit: '%', label: 'd' },
+    ];
+    const blocks = layoutFor('Grid', stats);
+    const title = blocks.find((b) => b.text === 'Grid')!;
+    const numbers = stats.map((s) => blocks.find((b) => b.text === s.value)!);
+
+    const contentTop = title.y + title.measuredHeightPct + TITLE_GAP;
+    const contentH = REGION_BOTTOM - contentTop;
+    const equalBandH = (contentH - ROW_GAP) / 2;
+
+    const pitch =
+      numbers[2]!.y + numbers[2]!.measuredHeightPct - (numbers[0]!.y + numbers[0]!.measuredHeightPct);
+    expect(Math.abs(pitch - (equalBandH + ROW_GAP))).toBeLessThan(1);
+
+    // Derived, not frozen: a 2-line title shifts the bottom row down.
+    const longBlocks = layoutFor(LONG_TITLE, stats);
+    const longTitle = longBlocks.find((b) => b.text === LONG_TITLE)!;
+    const longBottomRowNumber = longBlocks.find((b) => b.text === '12')!;
+    expect(longTitle.measuredHeightPct).toBeGreaterThan(title.measuredHeightPct);
+    expect(longBottomRowNumber.y).toBeGreaterThan(numbers[2]!.y);
+  });
+
+  it('keeps the number above its tier (band stays region-derived; fill not collapsed)', () => {
+    // Terse single-char values + labels: the number grows above the static
+    // displayLarge tier toward the adaptive ceiling. The circular-collapse bug
+    // would pin numberRegionHeight to the number's own size and crater it back
+    // to ~the probe floor.
+    const stats: StatItem[] = [
+      { value: '9', unit: '%', label: 'a' },
+      { value: '8', unit: '%', label: 'b' },
+      { value: '7', unit: '%', label: 'c' },
+    ];
+    const number = layoutFor('Terse', stats).find((b) => b.text === '9')!;
+    expect(number.fontSize).toBeGreaterThan(FONT_SIZES.displayLarge.max);
   });
 });
