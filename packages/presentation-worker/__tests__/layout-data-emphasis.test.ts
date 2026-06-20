@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import { LayoutPass } from '../src/layout-pass.js';
 import { FONT_SIZES, MARGIN } from '../src/constants.js';
-import { ROW_GAP, TITLE_GAP } from '../src/layouts/data-emphasis.js';
+import { ROW_GAP, TITLE_GAP, MIN_STAT_REGION_H, REGION_BOTTOM } from '../src/layouts/data-emphasis.js';
 import type { DeckSpec, SlideContent, SlideSpec, SlideType, StatItem, TextBlock } from '../src/types.js';
 
 function buildDeck(slides: SlideSpec[]): DeckSpec {
@@ -384,5 +384,79 @@ describe('DATA_EMPHASIS — title-hug + derived row bands', () => {
     ];
     const number = layoutFor('Terse', stats).find((b) => b.text === '9')!;
     expect(number.fontSize).toBeGreaterThan(FONT_SIZES.displayLarge.max);
+  });
+});
+
+/**
+ * MIN_STAT_REGION_H reservation (Codex P2).
+ *
+ * A pathological multi-line title must not consume the stat band and push the
+ * bottom row past the bottom margin. A normal 1-line title must derive the same
+ * contentTop as uncapped stackBelow (cap is a no-op).
+ */
+describe('DATA_EMPHASIS — min stat region reservation', () => {
+  const TWO_STAT: StatItem[] = [
+    { value: '94.4', unit: '%', label: 'Water savings' },
+    { value: '35', unit: '%', label: 'Overhead' },
+  ];
+  const FOUR_STAT: StatItem[] = [
+    { value: '94', unit: '%', label: 'a' },
+    { value: '35', unit: '%', label: 'b' },
+    { value: '12', unit: 'MW', label: 'c' },
+    { value: '70', unit: '%', label: 'd' },
+  ];
+
+  function layoutFor(title: string, stats: StatItem[]): TextBlock[] {
+    const deck = buildDeck([makeSlide(0, 'data_emphasis', { title, stats })]);
+    return new LayoutPass().layoutSlide(deck.slides[0]!, deck).textBlocks;
+  }
+
+  function contentTopFor(blocks: TextBlock[], titleText: string): number {
+    const title = blocks.find((b) => b.text === titleText)!;
+    return title.y + title.measuredHeightPct + TITLE_GAP;
+  }
+
+  /** Run-2b golden contentTop for TWO_STAT — cap must not move these. */
+  const ONE_LINE_GOLDEN_CONTENT_TOP: Record<string, number> = {
+    'In numbers': 12.296296296296298,
+    'Cooling economics': 12.296296296296298,
+    Grid: 12.296296296296298,
+    Terse: 12.296296296296298,
+    Short: 12.296296296296298,
+  };
+
+  /** Codex repro: 30-word headline with long tokens — previously maxBottom ~107. */
+  const PATHOLOGICAL_TITLE = Array(30)
+    .fill('Supercalifragilisticexpialidocious')
+    .join(' ');
+
+  it('1-line titles: contentTop equals uncapped stackBelow (MIN_STAT_REGION is a no-op)', () => {
+    const statContentTopCap = REGION_BOTTOM - MIN_STAT_REGION_H;
+    for (const title of Object.keys(ONE_LINE_GOLDEN_CONTENT_TOP)) {
+      const blocks = layoutFor(title, TWO_STAT);
+      const uncappedTop = contentTopFor(blocks, title);
+      expect(uncappedTop).toBeLessThan(statContentTopCap);
+      expect(uncappedTop).toBeCloseTo(ONE_LINE_GOLDEN_CONTENT_TOP[title]!, 5);
+      expect(Math.min(uncappedTop, statContentTopCap)).toBeCloseTo(uncappedTop, 5);
+    }
+  });
+
+  it('pathological 30-word title: no block exceeds the bottom margin', () => {
+    const blocks = layoutFor(PATHOLOGICAL_TITLE, FOUR_STAT);
+    const maxBottom = Math.max(...blocks.map((b) => b.y + b.h));
+    expect(maxBottom).toBeLessThanOrEqual(REGION_BOTTOM + 0.1);
+  });
+
+  it('pathological title: reserves at least MIN_STAT_REGION_H for stats', () => {
+    const blocks = layoutFor(PATHOLOGICAL_TITLE, FOUR_STAT);
+    const title = blocks[0]!;
+    expect(title.text.startsWith('Supercalifragilisticexpialidocious')).toBe(true);
+    const stackBelowTitle = title.y + title.measuredHeightPct + TITLE_GAP;
+    const statContentTopCap = REGION_BOTTOM - MIN_STAT_REGION_H;
+    expect(stackBelowTitle).toBeLessThanOrEqual(statContentTopCap + 0.5);
+    const contentTop = Math.min(stackBelowTitle, statContentTopCap);
+    const contentH = REGION_BOTTOM - contentTop;
+    expect(contentH).toBeGreaterThanOrEqual(MIN_STAT_REGION_H - 0.5);
+    expect(title.truncated).toBe(true);
   });
 });

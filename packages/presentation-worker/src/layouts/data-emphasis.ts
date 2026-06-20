@@ -35,6 +35,7 @@
 import {
   FONT_SIZES,
   LINE_HEIGHTS,
+  MARGIN,
   SLIDE_HEIGHT,
   SLIDE_WIDTH,
   SLIDE_REGIONS,
@@ -73,6 +74,16 @@ export const TITLE_GAP = 2;
  *  original frozen STAT_POSITIONS[4] gap (row-0 bottom 53 → row-1 top 55 = 2).
  *  Exported for the layout test. */
 export const ROW_GAP = 2;
+
+/** Bottom content margin (slide %), mirrored from R16. Exported for layout tests. */
+export const REGION_BOTTOM = 100 - MARGIN.bottom;
+
+/** Minimum vertical space (slide %) reserved for the stat grid below the title.
+ *  Title-hug caps here so a pathological multi-line headline cannot consume the
+ *  stat band (Codex P2). A normal 1-line title derives contentTop ≈ 15–17 via
+ *  stackBelow, well above REGION_BOTTOM − MIN (44), so sCO₂ one-line stat slides
+ *  are byte-identical. */
+export const MIN_STAT_REGION_H = 50;
 
 /** Probe floor for uniform number sizing — never let a pathological long
  *  value drag the row's font size below the displayLarge minimum. The existing
@@ -204,12 +215,21 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
   const blocks: TextBlock[] = [];
 
   // Hug the title so the stat region derives from its REAL measured bottom (kills the frozen
-  // y:14). Build tall (h = availableHeightBelow) so a long title can wrap, then hug to measured —
-  // the comparison.ts / typographic-keywords.ts idiom.
+  // y:14). Cap the title's fit-height so it cannot grow past the stat-reservation floor —
+  // otherwise a pathological wrap would hug most of the slide and leave the stats in a
+  // hairline band that overflows the bottom margin (Codex P2).
+  const statContentTopCap = REGION_BOTTOM - MIN_STAT_REGION_H;
+  const titleMaxH = Math.max(
+    regions.title!.h,
+    statContentTopCap - regions.title!.y - TITLE_GAP,
+  );
   const titleBlock = hugHeightToMeasured(
     buildTextBlock({
       text: slide.content.title,
-      region: { ...regions.title!, h: availableHeightBelow(regions.title!.y) },
+      region: {
+        ...regions.title!,
+        h: Math.min(availableHeightBelow(regions.title!.y), titleMaxH),
+      },
       fontFamily: design.heading_font,
       fontWeight: 'bold',
       color: design.palette.text,
@@ -245,7 +265,7 @@ export function layoutDataEmphasis(slide: SlideSpec, deck: DeckSpec): SlideLayou
   // circular collapse the frozen-band recipe would have introduced). For numRows===1 this
   // degenerates to a single band == the full content region (the number fills it); for
   // numRows===2 it yields two equal bands separated by ROW_GAP, the lower flush at the margin.
-  const contentTop = stackBelow(titleBlock, TITLE_GAP);
+  const contentTop = Math.min(stackBelow(titleBlock, TITLE_GAP), statContentTopCap);
   const contentH = availableHeightBelow(contentTop);
   const numRows = rows.length;
   const equalBandH = Math.max(0, (contentH - (numRows - 1) * ROW_GAP) / numRows);
