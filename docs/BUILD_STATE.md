@@ -1252,3 +1252,33 @@ L2 layout engine Run 3 — merged to main. Gallery centering fixed (1-2 person c
 
 ## 2026-06-21 — title_hero PPTX seam fix (merged to main)
 Merged `fix/title-hero-pptx-scrim-seam`. `pptx-renderer.ts`: always paint `bg.color` underlay, full-bleed background via `addImage` (not `slide.background.path`), 12-slice gradient scrim (not one hard 70% rect). **Fixed:** bare white right 30% + hard vertical cut on title slide. Slide-13 `chart_data` panel verified byte-identical main vs fix (pre-existing surface rect, not a regression). **KNOWN REMAINING (title slide, cosmetic):** faint vertical hairlines from multi-slice scrim gradient — fade is correct; native OOXML `gradFill` would remove slice seams (queued). **LOGGED (pre-existing, own tasks):** PPTX font embedding (`fontFace` by name only → WPS clips/missing-font); LibreOffice-only render gate misses WPS/Windows viewer deltas.
+
+## WHEN SCALING — DEFERRED: editorial system-prompt caching (refactor + cache wiring)
+Deferred from the 2026-06-21 prompt-caching work (which wired drafter + planner + design only).
+TRIGGER TO REVISIT: sustained concurrent deck traffic (so cross-deck cache reads actually land
+within the 5-min TTL) AND capacity to A/B editorial output for equivalence. Until then this stays
+out of the active blast radius — the taste-engine core is not worth touching for a benefit that
+does not exist at low volume.
+
+WHY EDITORIAL DOES NOT CACHE TODAY: `EDITORIAL_SYSTEM` (prompts.py) is a `.format()` template that
+injects five per-deck scalars — arc_description, emphasis_phase, target_count, title_style, language
+(prompts.py:457-461) — BEFORE its ~3.6k-token output schema. Filled at editorial.py:824 (generation)
+and editorial.py:654 (repair). So the cached prefix breaks every deck (≈0 cross-deck hit rate), and
+because repair uses a different target_count, repair cannot even hit the generation cache within one
+job. (Contrast: PLANNER_SYSTEM and SECTION_DRAFTING_SYSTEM are raw static constants and cache as-is.)
+
+THE REFACTOR (when undertaken): relocate those five scalars out of EDITORIAL_SYSTEM into
+EDITORIAL_USER and EDITORIAL_REPAIR_USER — language already lives in the user template at
+EDITORIAL_USER:512 and is currently DUPLICATED. EDITORIAL_SYSTEM.format() then keeps only the two
+STATIC substitutions (slide_type_descriptions, word_limits) → byte-stable across decks. Move the
+kwargs from the system .format() to the user .format() at editorial.py:824 and :654. Consequence:
+generation and repair share an identical system → repair hits the generation cache within one job,
+and decks share it across the TTL. This is also a structure/correctness fix independent of caching:
+per-call task parameters belong in the user message, not in a system prompt.
+
+GATE (mandatory — this change is semantic, not transport): run the editorial pass on representative
+decks at temperature 0 BEFORE and AFTER the refactor via the local live harness (dotenv.load_dotenv()
++ runpy; needs ANTHROPIC_API_KEY + Vertex ADC; modeled on scripts/proof_planner_phase1.py and
+scripts/gate_a_emphasis_provenance.py) and diff the materialised slides. Equivalent → keep and add
+cache="5m" to the editorial complete() calls (editorial.py:869,880). Any regression → revert the
+refactor ONLY; drafter/planner/design caching is independent and unaffected.

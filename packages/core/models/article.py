@@ -152,6 +152,7 @@ class DraftResult(BaseModel):
     warnings: list[str] = Field(default_factory=list[str], max_length=50)
     llm_calls_made: int = Field(default=0, ge=0, le=10)
     tokens_used: int = Field(default=0, ge=0)
+    section_cost_usd: float = Field(default=0.0, ge=0.0)
 
 
 class ArticleQualitySummary(BaseModel):

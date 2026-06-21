@@ -181,6 +181,7 @@ class SectionDrafter:
         first_response = await self._call_llm_safe(system_prompt, user_prompt)
         llm_calls = 1 if first_response is not None else 0
         tokens_used = first_response.tokens if first_response is not None else 0
+        cost_used = first_response.cost if first_response is not None else 0.0
         parsed = _try_parse_object(first_response.content) if first_response is not None else None
 
         if first_response is None or parsed is None:
@@ -203,6 +204,7 @@ class SectionDrafter:
                 warnings=warnings,
                 llm_calls_made=llm_calls,
                 tokens_used=tokens_used,
+                section_cost_usd=cost_used,
             )
 
         article_section = _build_article_section(
@@ -230,6 +232,7 @@ class SectionDrafter:
             if revision_response is not None:
                 llm_calls += 1
                 tokens_used += revision_response.tokens
+                cost_used += revision_response.cost
                 revised_parsed = _try_parse_object(revision_response.content)
                 if revised_parsed is not None:
                     revised_section = _build_article_section(
@@ -260,6 +263,7 @@ class SectionDrafter:
             warnings=warnings,
             llm_calls_made=llm_calls,
             tokens_used=tokens_used,
+            section_cost_usd=cost_used,
         )
 
     async def _call_llm_safe(
@@ -280,6 +284,7 @@ class SectionDrafter:
                 user=user_prompt,
                 model=SONNET_MODEL,
                 max_tokens=DRAFT_MAX_TOKENS,
+                cache="1h",
             )
         except Exception as exc:
             logger.warning(
@@ -292,6 +297,7 @@ class SectionDrafter:
             return _LLMCallResult(
                 content=first.content,
                 tokens=int(first.input_tokens) + int(first.output_tokens),
+                cost=first.estimated_cost_usd,
             )
 
         try:
@@ -300,6 +306,7 @@ class SectionDrafter:
                 user=user_prompt + SECTION_DRAFTING_RETRY_SUFFIX,
                 model=SONNET_MODEL,
                 max_tokens=DRAFT_MAX_TOKENS,
+                cache="1h",
             )
         except Exception as exc:
             logger.warning(
@@ -309,6 +316,7 @@ class SectionDrafter:
             return _LLMCallResult(
                 content=first.content,
                 tokens=int(first.input_tokens) + int(first.output_tokens),
+                cost=first.estimated_cost_usd,
             )
         return _LLMCallResult(
             content=retry.content,
@@ -316,6 +324,7 @@ class SectionDrafter:
             + int(first.output_tokens)
             + int(retry.input_tokens)
             + int(retry.output_tokens),
+            cost=first.estimated_cost_usd + retry.estimated_cost_usd,
         )
 
 
@@ -412,7 +421,7 @@ class ArticleDrafter:
         total_word_count = sum(r.section.word_count for r in ordered_results)
         total_llm_calls = sum(r.llm_calls_made for r in ordered_results)
         total_tokens = sum(r.tokens_used for r in ordered_results)
-        estimated_cost = _estimate_cost(total_tokens)
+        estimated_cost = sum(r.section_cost_usd for r in ordered_results)
         quality_summary = _build_quality_summary(ordered_results)
 
         return ArticleDraftResult(
@@ -432,13 +441,14 @@ class ArticleDrafter:
 
 
 class _LLMCallResult:
-    """Tiny POD bundling the parsed-out content and accumulated tokens."""
+    """Tiny POD bundling the parsed-out content with accumulated tokens and cost."""
 
-    __slots__ = ("content", "tokens")
+    __slots__ = ("content", "cost", "tokens")
 
-    def __init__(self, content: str, tokens: int) -> None:
+    def __init__(self, content: str, tokens: int, cost: float) -> None:
         self.content = content
         self.tokens = tokens
+        self.cost = cost
 
 
 # ---------------------------------------------------------------------------
@@ -791,19 +801,6 @@ def _quality_for(section: ArticleSection, outline_section: OutlineSection) -> Qu
 # ---------------------------------------------------------------------------
 # Cost / summary helpers
 # ---------------------------------------------------------------------------
-
-
-def _estimate_cost(total_tokens: int) -> float:
-    """Approximate USD cost for ``total_tokens`` at Sonnet-blended pricing.
-
-    Keeps the formula simple — exact accounting lives on
-    :class:`LLMResponse.estimated_cost_usd` per call. This is just a
-    rolled-up summary so the orchestrator can surface a budget figure
-    without re-reading every individual call.
-    """
-
-    blended_per_mtok = 9.0  # midpoint of Sonnet input ($3) and output ($15) per Mtok
-    return round((total_tokens / 1_000_000.0) * blended_per_mtok, 6)
 
 
 def _build_quality_summary(results: list[DraftResult]) -> ArticleQualitySummary:
