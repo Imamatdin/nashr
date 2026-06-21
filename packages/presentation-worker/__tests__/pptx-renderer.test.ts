@@ -469,8 +469,7 @@ describe('PptxRenderer — shapes', () => {
     expect(lines.length).toBeGreaterThan(0);
   });
 
-  it('converts scrim opacity into pptx transparency (1 - opacity) * 100', async () => {
-    // title_hero with a background URL triggers a scrim at opacity 0.6.
+  it('title_hero: paints deck colour underlay and full-bleed background image', async () => {
     const deck = buildTestDeck([
       makeSlide('title_hero', {
         title: 'Hero',
@@ -478,16 +477,34 @@ describe('PptxRenderer — shapes', () => {
       }, 0),
     ]);
     await renderDeck(deck);
-    // Find a rect with fill.transparency set — the scrim is the first one.
-    const scrim = mockState.slides[0]!.shapeCalls.find((s) => {
+    const slide = mockState.slides[0]!;
+    expect(slide.background).toEqual({ color: '1A120B' });
+    expect(slide.imageCalls).toHaveLength(1);
+    expect(slide.imageCalls[0]!.w).toBeCloseTo(13.33, 2);
+    expect(slide.imageCalls[0]!.h).toBeCloseTo(7.5, 2);
+  });
+
+  it('approximates scrim as a multi-slice gradient fade (not one hard rect)', async () => {
+    // title_hero with a background URL triggers a left-to-right scrim at opacity 0.6.
+    const deck = buildTestDeck([
+      makeSlide('title_hero', {
+        title: 'Hero',
+        background_url: 'https://example.com/img.jpg',
+      }, 0),
+    ]);
+    await renderDeck(deck);
+    const scrimRects = mockState.slides[0]!.shapeCalls.filter((s) => {
       if (s.shape !== 'rect') return false;
       const fill = s.options.fill as { transparency?: number } | undefined;
       return fill?.transparency !== undefined;
     });
-    expect(scrim).toBeDefined();
-    const fill = scrim!.options.fill as { transparency: number };
-    // 0.6 opacity → 40 transparency.
-    expect(fill.transparency).toBe(40);
+    expect(scrimRects.length).toBeGreaterThan(1);
+    const transparencies = scrimRects.map(
+      (s) => (s.options.fill as { transparency: number }).transparency,
+    );
+    // Left slice ≈ 40% transparency (0.6 opacity); right slices fade toward fully transparent.
+    expect(Math.min(...transparencies)).toBe(40);
+    expect(Math.max(...transparencies)).toBeGreaterThan(40);
   });
 });
 

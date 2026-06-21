@@ -46,6 +46,9 @@ const FEEDBACK_WRONG_COLOR = 'C0392B';
 /** Correct-answer marker color used on feedback slides. */
 const FEEDBACK_CORRECT_COLOR = '4CAF50';
 
+/** Stripe count when approximating HTML scrim linear-gradient in PPTX. */
+const SCRIM_GRADIENT_STEPS = 12;
+
 export class PptxRenderer {
   /** 16:9 canvas in inches. */
   private readonly SLIDE_W_INCHES = 13.33;
@@ -154,11 +157,20 @@ export class PptxRenderer {
   // -------------------------------------------------------------------------
 
   private applyBackground(slide: PptxGenJS.Slide, bg: SlideBackground): void {
-    const imageSrc = bg.image?.src;
-    if (imageSrc && !this.isPlaceholder(imageSrc)) {
-      slide.background = { path: imageSrc };
-    } else if (bg.color) {
+    // Mirror HTML stacking: .bg-color underlay, then .bg-image, then .scrim.
+    // Always paint the deck background colour first (section_break is colour-only;
+    // title_hero keeps bg.color even when an image URL is present). The old
+    // if/else skipped colour when path was set, so a failed or partial embed
+    // fell through to PowerPoint's default white — the bare right 30%.
+    if (bg.color) {
       slide.background = { color: this.stripHash(bg.color) };
+    }
+
+    const image = bg.image;
+    if (image?.src && !this.isPlaceholder(image.src)) {
+      // Full-bleed from layout ImageBlock geometry (w/h in slide %) — same as
+      // html-renderer renderImageBlock(isBackground), not slide.background path.
+      this.addImage(slide, image);
     }
 
     if (bg.scrim) {
@@ -167,18 +179,61 @@ export class PptxRenderer {
   }
 
   private addScrim(slide: PptxGenJS.Slide, scrim: ScrimBlock): void {
-    // pptxgenjs has no native CSS gradients. We approximate the scrim with a
-    // single semi-transparent rectangle in the scrim's nominal color. The
-    // visual is a uniform tint instead of a fade — acceptable for v1.
-    const transparency = Math.round((1 - scrim.opacity) * 100);
-    slide.addShape('rect', {
-      x: this.pctToInchesX(scrim.x),
-      y: this.pctToInchesY(scrim.y),
-      w: this.pctToInchesW(scrim.w),
-      h: this.pctToInchesH(scrim.h),
-      fill: { color: this.stripHash(scrim.color), transparency },
-      line: { color: this.stripHash(scrim.color), width: 0 },
-    });
+    // pptxgenjs has no native CSS gradients. Approximate html-renderer
+    // `linear-gradient(..., rgba(color, opacity), transparent)` with stacked
+    // slices of decreasing opacity — avoids the hard 70%-wide uniform rect.
+    const steps = SCRIM_GRADIENT_STEPS;
+    const baseColor = this.stripHash(scrim.color);
+    const horizontal =
+      scrim.direction === 'left-to-right' || scrim.direction === 'right-to-left';
+
+    for (let i = 0; i < steps; i++) {
+      const along = steps > 1 ? i / (steps - 1) : 0;
+      let opacityScale: number;
+      switch (scrim.direction) {
+        case 'left-to-right':
+        case 'top-to-bottom':
+          opacityScale = 1 - along;
+          break;
+        case 'right-to-left':
+        case 'bottom-to-top':
+          opacityScale = along;
+          break;
+      }
+      const sliceOpacity = scrim.opacity * opacityScale;
+      if (sliceOpacity < 0.02) continue;
+      const transparency = Math.round((1 - sliceOpacity) * 100);
+
+      if (horizontal) {
+        const sliceW = scrim.w / steps;
+        const sliceX =
+          scrim.direction === 'left-to-right'
+            ? scrim.x + i * sliceW
+            : scrim.x + (steps - 1 - i) * sliceW;
+        slide.addShape('rect', {
+          x: this.pctToInchesX(sliceX),
+          y: this.pctToInchesY(scrim.y),
+          w: this.pctToInchesW(sliceW),
+          h: this.pctToInchesH(scrim.h),
+          fill: { color: baseColor, transparency },
+          line: { color: baseColor, width: 0 },
+        });
+      } else {
+        const sliceH = scrim.h / steps;
+        const sliceY =
+          scrim.direction === 'top-to-bottom'
+            ? scrim.y + i * sliceH
+            : scrim.y + (steps - 1 - i) * sliceH;
+        slide.addShape('rect', {
+          x: this.pctToInchesX(scrim.x),
+          y: this.pctToInchesY(sliceY),
+          w: this.pctToInchesW(scrim.w),
+          h: this.pctToInchesH(sliceH),
+          fill: { color: baseColor, transparency },
+          line: { color: baseColor, width: 0 },
+        });
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
