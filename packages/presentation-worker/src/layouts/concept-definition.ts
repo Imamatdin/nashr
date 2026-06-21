@@ -37,11 +37,12 @@ import {
   compose,
   defaultBackground,
   figureImageBlock,
+  fitCompositeStack,
   hugHeightToMeasured,
   stackBelow,
   stripListPrefix,
+  type CompositeItem,
 } from './shared.js';
-import { fitMeasuredStack } from './fit.js';
 
 const LEFT_X = 5;
 const TITLE_W = 50;
@@ -70,63 +71,64 @@ export function layoutConceptDefinition(slide: SlideSpec, deck: DeckSpec): Slide
   );
   blocks.push(titleBlock);
 
-  // The definition + bullets stack below the title's measured bottom. Each block
-  // is built tall against the column (measure-tall), then placed by the shared
-  // fit engine (anchor:'start' ⇒ tops follow the old stackBelow chain exactly);
-  // each then hugs its own measured height so a wrapped block pushes the next one
-  // down instead of clipping. The TITLE stays outside the engine — it is the
+  // The definition + bullets stack below the title's measured bottom as single-block
+  // composite items, scaled-to-fit by the shared engine: when they fit, geometry is
+  // identical to the old stackBelow chain (anchor:'start'); when a long definition +
+  // many bullets would overrun the column, the engine scales them down (fonts shrink,
+  // blocks rebuilt) so the text can never run past the column bottom — and flags
+  // hasOverflow if it still cannot fit. The TITLE stays outside the engine — it is the
   // region anchor, and keeping it standalone leaves its geometry byte-identical.
   const stackTop = stackBelow(titleBlock, TITLE_GAP);
   const stackRegion = { x: LEFT_X, y: stackTop, w: COLUMN_W, h: availableHeightBelow(stackTop) };
 
-  const entries: Array<{ block: TextBlock; gapAfter: number }> = [];
+  const composites: CompositeItem[] = [];
 
   const definition = pickDefinition(slide.content.subtitle, slide.content.body_text);
   if (definition) {
-    entries.push({
-      block: buildTextBlock({
-        text: definition,
-        region: stackRegion,
-        fontFamily: design.body_font,
-        fontWeight: 'normal',
-        fontStyle: 'italic',
-        color: design.palette.text,
-        align: 'left',
-        tier: FONT_SIZES.subheading,
-        lineHeight: LINE_HEIGHTS.body,
-      }),
+    composites.push({
       gapAfter: DEFINITION_GAP,
+      subs: [
+        {
+          build: (y, h) =>
+            buildTextBlock({
+              text: definition,
+              region: { x: LEFT_X, y, w: COLUMN_W, h },
+              fontFamily: design.body_font,
+              fontWeight: 'normal',
+              fontStyle: 'italic',
+              color: design.palette.text,
+              align: 'left',
+              tier: FONT_SIZES.subheading,
+              lineHeight: LINE_HEIGHTS.body,
+            }),
+        },
+      ],
     });
   }
 
   const bullets = (slide.content.bullets ?? []).slice(0, MAX_BULLETS);
   for (const bullet of bullets) {
-    entries.push({
-      block: buildTextBlock({
-        text: `• ${stripListPrefix(bullet)}`,
-        region: stackRegion,
-        fontFamily: design.body_font,
-        fontWeight: 'normal',
-        color: design.palette.text,
-        align: 'left',
-        tier: FONT_SIZES.caption,
-        lineHeight: LINE_HEIGHTS.body,
-      }),
+    composites.push({
       gapAfter: BULLET_GAP,
+      subs: [
+        {
+          build: (y, h) =>
+            buildTextBlock({
+              text: `• ${stripListPrefix(bullet)}`,
+              region: { x: LEFT_X, y, w: COLUMN_W, h },
+              fontFamily: design.body_font,
+              fontWeight: 'normal',
+              color: design.palette.text,
+              align: 'left',
+              tier: FONT_SIZES.caption,
+              lineHeight: LINE_HEIGHTS.body,
+            }),
+        },
+      ],
     });
   }
 
-  const fit = fitMeasuredStack({
-    region: stackRegion,
-    items: entries.map((e) => ({ measure: () => e.block.measuredHeightPct, gapAfter: e.gapAfter })),
-    overflow: 'truncate',
-    anchor: 'start',
-  });
-  entries.forEach((e, i) => {
-    e.block.y = fit.tops[i]!;
-    hugHeightToMeasured(e.block);
-    blocks.push(e.block);
-  });
+  blocks.push(...fitCompositeStack(stackRegion, composites).blocks);
 
   // A contained object-figure (when resolved) occupies the right column, clear
   // of the left-hand text. When present it IS the slide's visual, so we skip the

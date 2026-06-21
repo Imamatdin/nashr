@@ -268,11 +268,39 @@ export const STAT_POSITIONS: Record<1 | 2 | 3 | 4, readonly Region[]> = {
 };
 
 /**
- * Portrait positions for GALLERY_PEOPLE based on count.
- * Returns an empty array when count is out of supported range (1-2 or 6+).
+ * Portrait positions for GALLERY_PEOPLE (and TEAM_CREDITS, which shares this
+ * allocator for consistent cutout spacing).
+ *
+ * This is a FROZEN slot table, intentionally NOT migrated to fitMeasuredStack
+ * (the STAT_POSITIONS precedent): horizontal `x`/`w` are LOAD-BEARING column
+ * placement a vertical fit cannot reconstruct, and the vertical band (`y:15`
+ * plus the per-count `h`) is a reserved portrait slot — both callers stack
+ * their captions BELOW it via `position.y + position.h`, so all captions in a
+ * row share one baseline. Keep the band frozen; only the *horizontal centring*
+ * of under-filled rows is computed here.
+ *
+ * Counts actually handled (callers pre-slice people to 5):
+ *   - count <= 0 → `[]` (no portraits).
+ *   - count 1 / 2 → centred about x=50 (was previously left-clustered at the
+ *     5-slot's x=5 / x=22 fall-through — a visual defect on small decks).
+ *   - count 3 / 4 → dedicated wider spreads.
+ *   - count 5 (and any other unusual count) → five evenly spaced cutouts.
  */
 export function getPortraitPositions(count: number): Region[] {
   if (count <= 0) return [];
+  if (count === 1) {
+    // Single portrait: centre the frozen 14%-wide band about x=50 (centre 50)
+    // instead of the 5-slot's far-left x=5. y/h stay frozen; only x centres.
+    return [{ x: 43, y: 15, w: 14, h: 30 }];
+  }
+  if (count === 2) {
+    // Two portraits: symmetric about x=50 on the 5-slot's 17% pitch
+    // (centres 41.5 / 58.5), not the left-clustered x=5 / x=22 fall-through.
+    return [
+      { x: 34.5, y: 15, w: 14, h: 30 },
+      { x: 51.5, y: 15, w: 14, h: 30 },
+    ];
+  }
   if (count === 3) {
     return [
       { x: 10, y: 15, w: 20, h: 35 },

@@ -1,0 +1,128 @@
+{
+  "project_id": "p-run3",
+  "title": "Run 3 Coverage Deck",
+  "subtitle": "Renders the otherwise-dark Run-3 layouts",
+  "language": "en",
+  "created_at": "2026-05-11T00:00:00Z",
+  "design": {
+    "mood": "warm_historical",
+    "palette": {
+      "background": "#1A120B",
+      "surface": "#2A1F15",
+      "text": "#F5F0E8",
+      "accent": "#C4923A",
+      "text_secondary": "#A89F91"
+    },
+    "heading_font": "Playfair Display",
+    "body_font": "EB Garamond",
+    "decorative_font": null,
+    "image_style_prefix": "classical",
+    "background_treatment": "dark"
+  },
+  "interview": {},
+  "slides": [
+    {
+      "slide_index": 0,
+      "slide_type": "team_credits",
+      "content": {
+        "title": "Acknowledgements",
+        "people": [
+          { "name": "Aigerim Nurlanova", "role": "Lead Researcher" },
+          { "name": "Bobur Karimov", "role": "Translation & Sources" },
+          { "name": "Dilnoza Rashidova", "role": "Design & Layout" }
+        ]
+      },
+      "source_claim_ids": []
+    },
+    {
+      "slide_index": 1,
+      "slide_type": "resources_links",
+      "content": {
+        "title": "Further Reading",
+        "resources": [
+          {
+            "name": "Stanford Encyclopedia of Philosophy",
+            "description": "Peer-reviewed entries on Enlightenment thinkers and their works, with extensive bibliographies for each major figure and movement.",
+            "url": "https://plato.stanford.edu/"
+          },
+          {
+            "name": "Kant — What is Enlightenment?",
+            "description": "The 1784 essay defining enlightenment as humanity's emergence from self-imposed immaturity.",
+            "url": "https://www.gutenberg.org/"
+          },
+          {
+            "name": "Internet History Sourcebooks",
+            "description": "Primary-source readers covering the long eighteenth century.",
+            "url": "https://sourcebooks.fordham.edu/"
+          }
+        ]
+      },
+      "source_claim_ids": []
+    },
+    {
+      "slide_index": 2,
+      "slide_type": "interactive_categorize",
+      "content": {
+        "title": "Sort the Thinkers",
+        "subtitle": "Group each philosopher by tradition",
+        "category_labels": ["Rationalists", "Empiricists"],
+        "category_items": [
+          { "term": "Descartes", "category": "Rationalists" },
+          { "term": "Spinoza", "category": "Rationalists" },
+          { "term": "Leibniz", "category": "Rationalists" },
+          { "term": "Locke", "category": "Empiricists" },
+          { "term": "Hume", "category": "Empiricists" },
+          { "term": "Berkeley", "category": "Empiricists" }
+        ]
+      },
+      "source_claim_ids": []
+    },
+    {
+      "slide_index": 3,
+      "slide_type": "interactive_true_false",
+      "content": {
+        "title": "True or False?",
+        "subtitle": "Decide, then reveal the answer",
+        "true_false_items": [
+          {
+            "statement": "Immanuel Kant argued that enlightenment is the human being's emergence from a self-imposed immaturity, summed up in the motto Sapere aude — dare to know — and to be achieved through the public use of reason.",
+            "is_true": true,
+            "explanation": "This paraphrases the opening of Kant's 1784 essay."
+          },
+          {
+            "statement": "Voltaire was a leading figure of the German Romantic movement.",
+            "is_true": false,
+            "explanation": "Voltaire was a French Enlightenment writer, not a German Romantic."
+          },
+          {
+            "statement": "Montesquieu proposed the separation of governmental powers.",
+            "is_true": true,
+            "explanation": "Set out in The Spirit of the Laws (1748)."
+          }
+        ]
+      },
+      "source_claim_ids": []
+    },
+    {
+      "slide_index": 4,
+      "slide_type": "interactive_debate",
+      "content": {
+        "title": "Reason vs. Tradition",
+        "subtitle": "Whose framework is more persuasive?",
+        "debate_prompt": "Should a society reform its institutions by appeal to abstract reason, or preserve inherited traditions that have survived the test of time?",
+        "debate_options": [
+          {
+            "position": "Institutions should be redesigned from first principles whenever reason shows them to be unjust, because no tradition is sacred merely by being old and enduring injustice is still injustice.",
+            "framework_label": "Rationalist reform"
+          },
+          {
+            "position": "Inherited customs encode hard-won practical wisdom, so reform should be gradual and respectful of precedent.",
+            "framework_label": "Burkean conservatism"
+          }
+        ]
+      },
+      "source_claim_ids": []
+    }
+  ],
+  "export_formats": ["html", "pptx_editable", "pdf"]
+}

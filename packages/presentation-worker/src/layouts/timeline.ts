@@ -8,6 +8,15 @@
  * Circle shape positioning follows the SVG `cx,cy` convention: the
  * `x`,`y` fields name the *centre* of the circle, not its top-left
  * corner. The renderer reads them as the node centre.
+ *
+ * FROZEN BY DESIGN (not migrated to fitMeasuredStack). This is a horizontal
+ * armature, not a vertical content stack: node `x` is driven by the total node
+ * count (`nodeXFor` spreads nodes 10%→90%), and the date/portrait sit ABOVE
+ * the line while the label sits BELOW it on fixed bands (PORTRAIT_Y, DATE_Y,
+ * LINE_Y, LABEL_Y). A vertical fit ignores `x`/`w` and emits one top-down
+ * column, so it cannot reconstruct either the horizontal spread or the
+ * above/below-line topology. Nothing stacks below the title, so hugging it
+ * would gain nothing. The constants below are load-bearing geometry — keep them.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, SLIDE_REGIONS, type Region } from '../constants.js';

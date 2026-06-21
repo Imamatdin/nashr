@@ -7,9 +7,16 @@
  * user clicks "Show answer," while the PPTX renderer leaves it visible
  * as a study aid.
  *
- * Up to 5 items per slide (15% slide height per item). The clean,
- * exam-paper background uses the palette background colour with no
- * scrim, decorative texture, or image.
+ * Up to 5 items per slide. The clean, exam-paper background uses the
+ * palette background colour with no scrim, decorative texture, or image.
+ *
+ * Vertical layout (L2 fit migration): the title and subtitle stay frozen chrome
+ * at the top; the items band is SCALE-STACKED via fitCompositeStack. Each item is
+ * a composite of two sub-blocks (statement, then its answer); a statement that
+ * wraps pushes its own answer and the following item DOWN, and if the whole stack
+ * is too tall it is scaled-to-fit (fonts shrink, content rebuilt) so it can never
+ * run past the band — which reserves room at the bottom for the reveal trigger.
+ * Horizontal `x`/`w` stay caller-side; only the vertical axis is engine-driven.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, type Region } from '../constants.js';
@@ -21,12 +28,25 @@ import type {
   SlideSpec,
   TextBlock,
 } from '../types.js';
-import { buildTextBlock, compose, defaultBackground } from './shared.js';
+import {
+  buildTextBlock,
+  compose,
+  defaultBackground,
+  fitCompositeStack,
+  type CompositeItem,
+} from './shared.js';
 
 const TITLE: Region = { x: 5, y: 3, w: 90, h: 7 };
 const SUBTITLE: Region = { x: 5, y: 10, w: 90, h: 3 };
+const STATEMENT_X = 8;
+const STATEMENT_W = 84;
+const ANSWER_X = 10;
+const ANSWER_W = 80;
 const ITEMS_BAND_Y = 16;
-const ITEM_BLOCK_H = 15;
+const INNER_GAP = 1; // statement → its answer, within one item
+const ITEM_GAP = 4; // between consecutive items
+const TRIGGER_GAP = 2; // last answer → reveal trigger
+const TRIGGER_FLOOR_Y = 92; // bottom-margin clamp for the reveal trigger
 const MAX_ITEMS = 5;
 
 export function layoutInteractiveFillBlank(slide: SlideSpec, deck: DeckSpec): SlideLayout {
@@ -64,49 +84,71 @@ export function layoutInteractiveFillBlank(slide: SlideSpec, deck: DeckSpec): Sl
   );
 
   const items = (slide.content.fill_blanks ?? []).slice(0, MAX_ITEMS);
-  let lastItemY = ITEMS_BAND_Y;
-  items.forEach((item, fIdx) => {
+
+  // The items band reserves room at the bottom for the reveal trigger, so a full,
+  // scaled-to-fit stack never collides with it. Each item is a composite of a
+  // statement + its answer; fitCompositeStack scales the items down (and rebuilds
+  // them so the fonts shrink/truncate) when their natural height overflows the
+  // band — content can never run past `bandRegion`'s bottom.
+  const bandRegion: Region = {
+    x: STATEMENT_X,
+    y: ITEMS_BAND_Y,
+    w: STATEMENT_W,
+    h: TRIGGER_FLOOR_Y - TRIGGER_GAP - ITEMS_BAND_Y,
+  };
+
+  const composites: CompositeItem[] = items.map((item, fIdx) => {
     const groupId = `f${fIdx}`;
-    const itemY = ITEMS_BAND_Y + fIdx * ITEM_BLOCK_H;
-
-    blocks.push(
-      buildTextBlock({
-        text: `${fIdx + 1}. ${item.statement}`,
-        region: { x: 8, y: itemY, w: 84, h: 5 },
-        fontFamily: design.body_font,
-        fontWeight: 'normal',
-        color: design.palette.text,
-        align: 'left',
-        tier: FONT_SIZES.body,
-        lineHeight: LINE_HEIGHTS.body,
-        role: 'blank_statement',
-        groupId,
-        dataIndex: fIdx,
-      }),
-    );
-
-    blocks.push(
-      buildTextBlock({
-        text: `→ ${item.answer}`,
-        region: { x: 10, y: itemY + 6, w: 80, h: 4 },
-        fontFamily: design.body_font,
-        fontWeight: 'normal',
-        fontStyle: 'italic',
-        color: design.palette.accent,
-        align: 'left',
-        tier: FONT_SIZES.caption,
-        lineHeight: LINE_HEIGHTS.caption,
-        role: 'blank_answer',
-        groupId,
-        dataIndex: fIdx,
-      }),
-    );
-    lastItemY = itemY;
+    return {
+      gapAfter: ITEM_GAP,
+      subs: [
+        {
+          innerGapAfter: INNER_GAP,
+          build: (y, h) =>
+            buildTextBlock({
+              text: `${fIdx + 1}. ${item.statement}`,
+              region: { x: STATEMENT_X, y, w: STATEMENT_W, h },
+              fontFamily: design.body_font,
+              fontWeight: 'normal',
+              color: design.palette.text,
+              align: 'left',
+              tier: FONT_SIZES.body,
+              lineHeight: LINE_HEIGHTS.body,
+              role: 'blank_statement',
+              groupId,
+              dataIndex: fIdx,
+            }),
+        },
+        {
+          build: (y, h) =>
+            buildTextBlock({
+              text: `→ ${item.answer}`,
+              region: { x: ANSWER_X, y, w: ANSWER_W, h },
+              fontFamily: design.body_font,
+              fontWeight: 'normal',
+              fontStyle: 'italic',
+              color: design.palette.accent,
+              align: 'left',
+              tier: FONT_SIZES.caption,
+              lineHeight: LINE_HEIGHTS.caption,
+              role: 'blank_answer',
+              groupId,
+              dataIndex: fIdx,
+            }),
+        },
+      ],
+    };
   });
 
-  // Reveal trigger sits below the last item. The HTML renderer keeps
-  // every `blank_answer` block hidden until this trigger is clicked.
-  const triggerY = items.length > 0 ? Math.min(lastItemY + 12, 92) : 92;
+  const fitted = fitCompositeStack(bandRegion, composites);
+  blocks.push(...fitted.blocks);
+
+  // Reveal trigger sits below the last fitted item's measured bottom (clamped to
+  // the bottom margin). The band reserved space above the floor for it, so it
+  // never overlaps content. The HTML renderer keeps every `blank_answer` hidden
+  // until this trigger is clicked.
+  const triggerY =
+    items.length > 0 ? Math.min(fitted.lastBottom + TRIGGER_GAP, TRIGGER_FLOOR_Y) : TRIGGER_FLOOR_Y;
   blocks.push(
     buildTextBlock({
       text: labels.interactive.showAnswer,

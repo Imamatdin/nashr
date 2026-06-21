@@ -15,6 +15,15 @@
  *
  * Every user-facing string is sourced from `getLabels(deck.language)` so
  * a Russian or Karakalpak deck does not leak English chrome.
+ *
+ * FROZEN BY DESIGN (not migrated to fitMeasuredStack). `feedback_correct` and
+ * `feedback_wrong` are deliberately CO-LOCATED at the same y (`questionY+24`):
+ * they are mutually-exclusive overlays — the renderer reveals exactly one per
+ * answer and both start hidden. A vertical fit would give them distinct tops
+ * and reserve height for invisible content (the data_emphasis "reserved band
+ * you must not feed into the fit" trap). Unlike data_emphasis there is no
+ * overflow bug to fix here — the fixed Q_BLOCK_H slots fit comfortably — so the
+ * frozen slots stay and the feedback overlay co-location is intentional.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, type Region } from '../constants.js';

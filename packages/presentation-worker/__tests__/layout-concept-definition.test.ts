@@ -174,3 +174,55 @@ describe('layout — CONCEPT_DEFINITION measured stacking (banked-deck clipping 
     expect(layout.background.scrim!.direction).toBe('left-to-right');
   });
 });
+
+describe('layout — CONCEPT_DEFINITION overflow containment (scale-to-fit)', () => {
+  const LONG =
+    'In the eighteenth century the philosophers of the Enlightenment argued at ' +
+    'considerable length that human institutions could be perfected through the ' +
+    'patient application of reason, observation, and sustained public debate.';
+
+  it('scales a long definition + many bullets to fit the column (no block past 94%)', () => {
+    const deck = buildDeck([
+      makeSlide({
+        title: 'A reasonably long concept title that wraps to two lines on the slide',
+        subtitle: LONG,
+        bullets: [LONG, LONG, LONG, LONG, LONG],
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const maxBottom = Math.max(...layout.textBlocks.map((b) => b.y + b.measuredHeightPct));
+    expect(maxBottom).toBeLessThanOrEqual(94);
+  });
+
+  it('flags hasOverflow when the column content cannot fit even after scaling', () => {
+    const HUGE = 'Reason and observation '.repeat(80).trim();
+    const deck = buildDeck([
+      makeSlide({
+        title: 'Concept',
+        subtitle: HUGE,
+        bullets: [HUGE, HUGE, HUGE, HUGE, HUGE],
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    expect(Math.max(...layout.textBlocks.map((b) => b.y + b.measuredHeightPct))).toBeLessThanOrEqual(94);
+    expect(layout.hasOverflow).toBe(true);
+  });
+
+  it('flags hasOverflow when a single item is truncated at the natural/full pass (scale===1)', () => {
+    // The case the original containment proof missed: one composite item so tall it
+    // truncates even against the FULL band, so the stack does NOT scale (scale===1)
+    // and the natural block is reused verbatim — its truncation must STILL surface as
+    // hasOverflow. (No bullets ⇒ a single definition item.)
+    const HUGE = 'word '.repeat(600).trim();
+    const deck = buildDeck([makeSlide({ title: 'Concept', subtitle: HUGE })]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const def = layout.textBlocks.find((b) => b.text.startsWith('word'))!;
+    expect(def).toBeDefined();
+    expect(def.truncated).toBe(true);
+    // the truncated block itself carries the overflow flag (not just the downstream
+    // hasOverflow) — proves the natural/full-band (scale===1) path sets it
+    expect(def.overflow).toBe(true);
+    expect(def.y + def.measuredHeightPct).toBeLessThanOrEqual(94);
+    expect(layout.hasOverflow).toBe(true);
+  });
+});

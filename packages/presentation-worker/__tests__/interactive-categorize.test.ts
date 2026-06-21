@@ -98,4 +98,38 @@ describe('layout — INTERACTIVE_CATEGORIZE', () => {
     expect(itemBlocks.filter((b) => b.groupId === 'cat1')).toHaveLength(1);
     expect(itemBlocks.filter((b) => b.groupId === 'cat2')).toHaveLength(4);
   });
+
+  // --- L2 fit-migration tripwire ----------------------------------------------
+
+  it('fits each column independently — a tall column stays on-slide and does not desync the others', () => {
+    const labels = ['A', 'B'];
+    const items: CategoryItem[] = [
+      ...Array.from({ length: 20 }, (_, i) => ({ term: `A item ${i}`, category: 'A' })),
+      { term: 'B item 1', category: 'B' },
+      { term: 'B item 2', category: 'B' },
+    ];
+    const deck = buildTestDeck([
+      makeSlide('interactive_categorize', {
+        title: 'Sort',
+        category_labels: labels,
+        category_items: items,
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const catA = layout.textBlocks.filter((b) => b.role === 'category_item' && b.groupId === 'cat0');
+    const catB = layout.textBlocks.filter((b) => b.role === 'category_item' && b.groupId === 'cat1');
+    expect(catA).toHaveLength(20);
+    expect(catB).toHaveLength(2);
+    // The tall column stays on-slide (the guard the old fixed-pitch layout lacked:
+    // 20 items at ITEM_STEP=5 from y=22 would have run to ~117%).
+    const maxA = Math.max(...catA.map((b) => b.y + b.measuredHeightPct));
+    expect(maxA).toBeLessThanOrEqual(94);
+    // Independence: both columns' first item starts at the same band top (the tall
+    // column's scaling does not shift the short column).
+    const firstA = Math.min(...catA.map((b) => b.y));
+    const firstB = Math.min(...catB.map((b) => b.y));
+    expect(firstA).toBeCloseTo(firstB, 5);
+    // The short column is not shrunk by the tall column's overflow (per-column scale).
+    expect(catB[0]!.fontSize).toBeGreaterThanOrEqual(catA[0]!.fontSize);
+  });
 });

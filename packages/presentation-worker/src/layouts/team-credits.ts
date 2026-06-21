@@ -9,6 +9,14 @@
  * Portrait positions share the GALLERY_PEOPLE allocator so a deck
  * with both a gallery slide and a credits slide gets visually
  * consistent cutout spacing.
+ *
+ * FROZEN BY DESIGN (not migrated to fitMeasuredStack). Like GALLERY_PEOPLE this
+ * is a horizontal row from the shared `getPortraitPositions` allocator: `x`/`w`
+ * are load-bearing and the portrait band (`y:15` + per-count `h`) is frozen.
+ * `nameY = position.y + position.h + NAME_OFFSET` uses the uniform per-count `h`,
+ * so every column's name (and role) sits on the SAME baseline — a vertical fit
+ * would collapse the row and desync that baseline. Small-row centring (1-2
+ * people) lives in the allocator and so applies to both consumers.
  */
 
 import { FONT_SIZES, LINE_HEIGHTS, getPortraitPositions, type Region } from '../constants.js';

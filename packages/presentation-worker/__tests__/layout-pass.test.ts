@@ -219,6 +219,43 @@ describe('LayoutPass.layoutSlide — GALLERY_PEOPLE', () => {
     expect(findBlock(layout.textBlocks, 'Kant')).toBeDefined();
     expect(findBlock(layout.textBlocks, 'Rousseau')).toBeDefined();
   });
+
+  it('centres small (1-2 person) galleries about the slide centre', () => {
+    const deck1 = buildDeck([
+      makeSlide(0, 'gallery_people', { title: 'Solo', people: [{ name: 'Alpha' }] }),
+    ]);
+    const layout1 = new LayoutPass().layoutSlide(deck1.slides[0]!, deck1);
+    const a1 = findBlock(layout1.textBlocks, 'Alpha')!;
+    expect(a1.x + a1.w / 2).toBeCloseTo(50, 1);
+
+    const deck2 = buildDeck([
+      makeSlide(0, 'gallery_people', {
+        title: 'Duo',
+        people: [{ name: 'Alpha' }, { name: 'Beta' }],
+      }),
+    ]);
+    const layout2 = new LayoutPass().layoutSlide(deck2.slides[0]!, deck2);
+    const a2 = findBlock(layout2.textBlocks, 'Alpha')!;
+    const b2 = findBlock(layout2.textBlocks, 'Beta')!;
+    const ca = a2.x + a2.w / 2;
+    const cb = b2.x + b2.w / 2;
+    expect((ca + cb) / 2).toBeCloseTo(50, 1);
+    expect(Math.min(ca, cb)).toBeLessThan(50);
+    expect(Math.max(ca, cb)).toBeGreaterThan(50);
+  });
+
+  it('places gallery name captions on one shared baseline', () => {
+    const deck = buildDeck([
+      makeSlide(0, 'gallery_people', {
+        title: 'Trio',
+        people: [{ name: 'Alpha' }, { name: 'Beta' }, { name: 'Gamma' }],
+      }),
+    ]);
+    const layout = new LayoutPass().layoutSlide(deck.slides[0]!, deck);
+    const names = ['Alpha', 'Beta', 'Gamma'].map((n) => findBlock(layout.textBlocks, n)!);
+    expect(names.every(Boolean)).toBe(true);
+    expect(new Set(names.map((b) => b.y)).size).toBe(1);
+  });
 });
 
 describe('LayoutPass.layoutSlide — COMPARISON', () => {

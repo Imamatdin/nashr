@@ -9,6 +9,7 @@
  */
 
 import { FONT_SIZES, MARGIN, SLIDE_HEIGHT, SLIDE_WIDTH, WORD_LIMITS, type Region } from '../constants.js';
+import { fitMeasuredStack } from './fit.js';
 import { measureText, type TextMeasurement } from '../text-measure.js';
 import type {
   DesignDirectionSpec,
@@ -352,6 +353,128 @@ export function availableHeightBelow(y: number): number {
 export function hugHeightToMeasured(block: TextBlock): TextBlock {
   block.h = block.measuredHeightPct + HUG_EPSILON_PCT;
   return block;
+}
+
+// ---------------------------------------------------------------------------
+// Composite-item vertical fit (scale-to-fit + rebuild)
+// ---------------------------------------------------------------------------
+
+/**
+ * One sub-block of a composite item. `build(y, maxHeightPct)` constructs the
+ * block at top `y` with the given max height — the closure owns `x`/`w`/text/
+ * font/role/colour; the engine drives only `y`/`h`. It is called TWICE: once tall
+ * (natural measure) and, only when the stack overflows, again bounded to the
+ * sub-block's scaled share so `buildTextBlock`'s shrink/truncate fires.
+ */
+export interface CompositeSub {
+  build: (y: number, maxHeightPct: number) => TextBlock;
+  /** Min gap (slide %) below this sub-block before the next sub IN THE SAME item. Dropped for the last sub. */
+  innerGapAfter?: number;
+}
+
+/** A composite item: a short vertical sub-stack that must stay together. */
+export interface CompositeItem {
+  subs: CompositeSub[];
+  /** Min gap (slide %) after this item before the next item. Dropped for the last item. */
+  gapAfter?: number;
+}
+
+export interface CompositeStackResult {
+  /** Placed sub-blocks, in item then sub order. */
+  blocks: TextBlock[];
+  /** Measured bottom (slide %) of the last placed sub-block; the band top if there are no items. */
+  lastBottom: number;
+  /** True iff a sub-block still could not fit after scaling (the engine set its `overflow`). */
+  overflow: boolean;
+}
+
+/**
+ * Place composite items into `region`, SCALING-TO-FIT so the stack can never run
+ * past the region bottom — the containment the plain `hug → stackBelow → fit`
+ * recipe lacks (there, each sub is measured against the full remaining height, so
+ * a tall multi-item stack overflows the slide silently).
+ *
+ * Two passes:
+ *  1. Build each sub TALL (natural height) and fit the composite items with
+ *     `fitMeasuredStack(overflow:'scale')`. When the natural stack fits, scale === 1
+ *     and the result is byte-identical to the old `overflow:'truncate'` placement.
+ *  2. When it overflows (scale < 1) REBUILD each sub bounded to `natural * scale`
+ *     (and scale the inner/item gaps by the same factor) so `buildTextBlock` shrinks
+ *     the font — and truncates only as the last resort — against the REAL budget.
+ *     This is the table's `overflow:'scale'` + rebuild contract generalised to a
+ *     multi-block item; we rebuild rather than clamp tops, because clamping tops
+ *     while blocks keep their natural height would silently OVERLAP.
+ *
+ * Containment proof: each rebuilt sub measures ≤ natural*scale and gaps scale by
+ * the same factor, so a item's content ≤ its scaled band and items never overlap;
+ * the scaled bands+gaps sum to exactly `region.h`, so the last block's measured
+ * bottom ≤ region bottom.
+ *
+ * Overflow invariant: a block that is `truncated` AS FINALLY EMITTED is marked
+ * `overflow` so `compose()`'s `hasOverflow` becomes true — full stop, with no
+ * exception for where the truncation originated (a single item too tall even in the
+ * natural/full-band pass at scale===1 counts, as does a both-passes truncation).
+ */
+export function fitCompositeStack(region: Region, items: CompositeItem[]): CompositeStackResult {
+  const bandTop = region.y;
+  if (items.length === 0) return { blocks: [], lastBottom: bandTop, overflow: false };
+
+  // Pass 1 — natural measure: build each sub tall against the full band.
+  const natural = items.map((item) =>
+    item.subs.map((sub) => {
+      const block = sub.build(bandTop, region.h);
+      return { sub, block, naturalH: block.measuredHeightPct };
+    }),
+  );
+
+  const compositeNaturalH = natural.map((subs) =>
+    subs.reduce(
+      (acc, s, k) => acc + s.naturalH + (k < subs.length - 1 ? (s.sub.innerGapAfter ?? 0) : 0),
+      0,
+    ),
+  );
+
+  const fit = fitMeasuredStack({
+    region,
+    items: compositeNaturalH.map((h, i) => ({
+      measure: () => h,
+      gapAfter: i < items.length - 1 ? (items[i]!.gapAfter ?? 0) : 0,
+    })),
+    overflow: 'scale',
+    anchor: 'start',
+  });
+  const scale = fit.scale;
+
+  const blocks: TextBlock[] = [];
+  let overflow = false;
+  let lastBottom = bandTop;
+
+  natural.forEach((subs, i) => {
+    let y = fit.tops[i]!;
+    subs.forEach((s, k) => {
+      const isLastSub = k === subs.length - 1;
+      const innerGap = isLastSub ? 0 : (s.sub.innerGapAfter ?? 0) * scale;
+      let block: TextBlock;
+      if (scale < 1) {
+        // Rebuild bounded to the scaled budget so the font shrinks / truncates to fit.
+        block = s.sub.build(y, Math.max(0, s.naturalH * scale));
+      } else {
+        block = s.block;
+        block.y = y;
+      }
+      // INVARIANT: a block that is truncated AS FINALLY EMITTED dropped content and
+      // could not fit — surface it as overflow so compose()'s hasOverflow is true,
+      // regardless of which pass (natural full-band or scaled rebuild) truncated it.
+      if (block.truncated === true) block.overflow = true;
+      hugHeightToMeasured(block);
+      if (block.overflow) overflow = true;
+      blocks.push(block);
+      lastBottom = block.y + block.measuredHeightPct;
+      y = stackBelow(block, innerGap);
+    });
+  });
+
+  return { blocks, lastBottom, overflow };
 }
 
 // ---------------------------------------------------------------------------
