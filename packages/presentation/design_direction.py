@@ -342,6 +342,7 @@ class DesignDirectionPass:
             model=SONNET_MODEL,
             max_tokens=DESIGN_MAX_TOKENS,
             temperature=DESIGN_TEMPERATURE,
+            cache="5m",
         )
         spec = _parse_and_validate(first.content, treatment)
         if spec is not None:
@@ -352,6 +353,7 @@ class DesignDirectionPass:
             model=SONNET_MODEL,
             max_tokens=DESIGN_MAX_TOKENS,
             temperature=DESIGN_TEMPERATURE,
+            cache="5m",
         )
         return _parse_and_validate(retry.content, treatment)
 

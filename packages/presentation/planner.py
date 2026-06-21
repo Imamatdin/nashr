@@ -176,6 +176,7 @@ class PlannerPass:
             user=user,
             model=SONNET_MODEL,
             max_tokens=PLANNER_MAX_TOKENS,
+            cache="5m",
         )
         parsed = _parse_plan(first.content)
         if parsed.plan is not None:
@@ -199,6 +200,7 @@ class PlannerPass:
             user=retry_user,
             model=SONNET_MODEL,
             max_tokens=PLANNER_MAX_TOKENS,
+            cache="5m",
         )
         parsed = _parse_plan(retry.content)
         if parsed.plan is None:

@@ -55,6 +55,7 @@ class _StubLLM:
         model: str = SONNET_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
+        cache: bool | str = False,
     ) -> LLMResponse:
         self.calls.append((system, user))
         if not self.responses:

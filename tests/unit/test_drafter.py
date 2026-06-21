@@ -82,6 +82,7 @@ class _StubLLM:
         self.responses = list(responses or [])
         self.raise_on_call = raise_on_call
         self.calls: list[tuple[str, str]] = []
+        self.cache_args: list[bool | str] = []
 
     async def complete(
         self,
@@ -90,8 +91,10 @@ class _StubLLM:
         model: str = "claude-haiku-4-5-20251001",
         max_tokens: int = 2000,
         temperature: float = 0.0,
+        cache: bool | str = False,
     ) -> LLMResponse:
         self.calls.append((system, user))
+        self.cache_args.append(cache)
         if self.raise_on_call is not None:
             raise self.raise_on_call
         if not self.responses:
@@ -1179,6 +1182,85 @@ class TestDraftArticle:
         assert result.total_word_count == sum(r.section.word_count for r in result.sections)
         assert result.total_llm_calls >= 3
         assert result.estimated_cost_usd > 0.0
+
+    @pytest.mark.asyncio
+    async def test_rolled_up_cost_sums_real_per_call_cost(self) -> None:
+        # The drafter must roll up the real per-call estimated_cost_usd (so prompt-cache
+        # savings are reflected), not re-derive a blended figure from total tokens. The stub
+        # bills 0.0005 per call; the rolled-up cost must equal calls x 0.0005 exactly.
+        outline, matrix, claims, chunks, chunk_uuids, claim_uuids = (
+            _three_section_outline_and_evidence()
+        )
+        responses = [
+            _good_paragraph_response(
+                source_id=chunk_uuids[i],
+                claim_id=claim_uuids[i],
+                paragraph_text=(
+                    f"Section {i}. Identifies an explicit research gap "
+                    f"and states the contribution [{chunk_uuids[i]}]."
+                ),
+            )
+            for i in range(3)
+        ]
+        llm = _StubLLM(responses=responses)
+        drafter = ArticleDrafter(SectionDrafter())
+        drafter._section_drafter._llm = llm  # type: ignore[attr-defined]
+        result = await drafter.draft_article(
+            outline=outline,
+            evidence_matrix=matrix,
+            claims=claims,
+            chunks=chunks,
+            user_answers=[],
+            questions=[],
+            language="en",
+            calibration_level=CalibrationLevel.UNDERGRADUATE,
+        )
+        # The stub pops one scripted response per SUCCESSFUL call and bills 0.0005 for it;
+        # a starved call records in llm.calls but bills nothing, so cost tracks responses
+        # consumed, not attempts. This must equal the per-section sum (not a token-blended figure).
+        consumed = 3 - len(llm.responses)
+        assert consumed >= 1
+        assert result.estimated_cost_usd == pytest.approx(consumed * 0.0005)
+        assert sum(r.section_cost_usd for r in result.sections) == pytest.approx(
+            result.estimated_cost_usd
+        )
+
+    @pytest.mark.asyncio
+    async def test_section_drafting_opts_into_caching_with_stable_system(self) -> None:
+        # Caching only pays if EVERY section call opts in AND the cached prefix (the system
+        # prompt) is byte-identical across sections — otherwise section 2..N re-write instead
+        # of reading. Proven deterministically here; PR1 covers cache flag -> cache_control block.
+        outline, matrix, claims, chunks, chunk_uuids, claim_uuids = (
+            _three_section_outline_and_evidence()
+        )
+        responses = [
+            _good_paragraph_response(
+                source_id=chunk_uuids[i],
+                claim_id=claim_uuids[i],
+                paragraph_text=(
+                    f"Section {i}. Identifies an explicit research gap "
+                    f"and states the contribution [{chunk_uuids[i]}]."
+                ),
+            )
+            for i in range(3)
+        ]
+        llm = _StubLLM(responses=responses)
+        drafter = ArticleDrafter(SectionDrafter())
+        drafter._section_drafter._llm = llm  # type: ignore[attr-defined]
+        await drafter.draft_article(
+            outline=outline,
+            evidence_matrix=matrix,
+            claims=claims,
+            chunks=chunks,
+            user_answers=[],
+            questions=[],
+            language="en",
+            calibration_level=CalibrationLevel.UNDERGRADUATE,
+        )
+        assert llm.cache_args, "expected at least one drafting call"
+        assert all(c == "1h" for c in llm.cache_args)
+        systems = {system for system, _ in llm.calls}
+        assert len(systems) == 1  # identical cached prefix across every section
 
     @pytest.mark.asyncio
     async def test_quality_summary_populated(self) -> None:
