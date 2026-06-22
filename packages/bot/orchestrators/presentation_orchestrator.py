@@ -39,6 +39,7 @@ from packages.bot.orchestrators.article_orchestrator import (
 )
 from packages.core.constants import image_budget_for_package
 from packages.core.enums import (
+    AuditSeverity,
     ExportFormat,
     GenerationPackage,
     SourceQuality,
@@ -48,6 +49,7 @@ from packages.core.models.presentation import (
     DeckSpec,
     DesignDirectionSpec,
     PresentationInterviewAnswers,
+    SlideRegenResult,
 )
 from packages.platform.credits import CreditLedger, FreeCreditsReason
 from packages.platform.database import DatabaseClient
@@ -56,6 +58,7 @@ from packages.presentation.design_direction import DesignDirectionPass
 from packages.presentation.editorial import EditorialPass
 from packages.presentation.image_pass import ImagePass
 from packages.presentation.interview import PresentationInterviewEngine
+from packages.presentation.plan_validator import validate_section_against_plan
 from packages.workers.article.evidence_matrix import EvidenceMatrixBuilder
 from packages.workers.source.pipeline import SourcePipeline
 
@@ -436,6 +439,29 @@ class PresentationOrchestrator:
         """
 
         await progress("Resolving images", 6, TOTAL_STEPS)
+        return await self._resolve_deck_images(deck_spec, sources, project_id, package=package)
+
+    async def _resolve_deck_images(
+        self,
+        deck_spec: DeckSpec,
+        sources: SourceProcessingResult,
+        project_id: str,
+        *,
+        package: GenerationPackage,
+        only_slide_ids: frozenset[str] | None = None,
+    ) -> DeckSpec:
+        """Resolve the deck's unfilled image slots (best-effort, no progress step).
+
+        The progress-free core shared by the full pipeline's :meth:`resolve_images`
+        and the single-slide :meth:`regenerate_slide`. When no storage is
+        configured it abstains; any failure is swallowed so a deck with no images
+        still renders. ``only_slide_ids`` is forwarded to
+        :meth:`ImagePass.resolve_deck`: ``None`` (the full pipeline) resolves every
+        slot, while the regen path passes the regenerated slide's id so re-resolution
+        touches ONLY its slots — an abstained slot on an untouched slide is never
+        silently re-attempted.
+        """
+
         storage = self._storage
         if storage is None:
             return deck_spec
@@ -447,6 +473,7 @@ class PresentationOrchestrator:
                 project_id=project_id,
                 figures=sources.figures,
                 max_generated_images=budget,
+                only_slide_ids=only_slide_ids,
             )
         except Exception as exc:
             logger.warning(
@@ -454,6 +481,73 @@ class PresentationOrchestrator:
                 extra={"error_type": type(exc).__name__},
             )
             return deck_spec
+
+    # ====================================================================
+    # Single-slide regeneration (judge + conversational edit layer)
+    # ====================================================================
+
+    async def regenerate_slide(
+        self,
+        deck: DeckSpec,
+        slide_id: str,
+        sources: SourceProcessingResult,
+        project_id: str,
+        progress: ProgressCallback,
+        *,
+        package: GenerationPackage,
+        instruction: str | None = None,
+    ) -> tuple[DeckSpec, SlideRegenResult]:
+        """Regenerate one slide end-to-end: content → splice → re-validate → images.
+
+        Chains the editorial single-slide regen, the id-keyed splice (with title
+        propagation for the hero), the section-scoped figure re-check, and a
+        scoped image re-resolution restricted to the regenerated slide's id (so
+        only its null-URL slots resolve and every other slide keeps its image).
+        Returns the updated deck plus a :class:`SlideRegenResult` whose findings
+        combine the per-slide checks and the section-scoped re-check — the caller
+        (quality judge or edit layer) reads ``passed`` to decide whether to keep or
+        retry.
+
+        The image re-run consumes the tier's generated-image budget for the
+        regenerated slide even if the edit did not touch its image; the budget is
+        logged (``presentation_slide_regenerated``) so a judge regenerating many
+        slides can see the per-regen cost ceiling.
+        :class:`EditorialSlideRegenError` (missing plan, unknown id, empty LLM
+        output) propagates unchanged — it is a precise, caller-actionable error,
+        not a generic pipeline stage failure.
+        """
+
+        await progress("Regenerating slide", 1, 2)
+        result = await self._editorial_pass.regenerate_slide_content(
+            deck, slide_id, instruction=instruction, claims=sources.claims
+        )
+        new_deck = self._editorial_pass.splice_regenerated_slide(deck, result.slide)
+
+        findings = list(result.findings)
+        if new_deck.plan is not None:
+            findings.extend(
+                validate_section_against_plan(new_deck.slides, new_deck.plan, result.slide)
+            )
+        passed = not any(f.severity is AuditSeverity.FAIL for f in findings)
+        logger.info(
+            "presentation_slide_regenerated",
+            extra={
+                "slide_id": slide_id,
+                "passed": passed,
+                "findings": len(findings),
+                "image_budget": image_budget_for_package(package),
+            },
+        )
+
+        await progress("Resolving slide image", 2, 2)
+        new_deck = await self._resolve_deck_images(
+            new_deck,
+            sources,
+            project_id,
+            package=package,
+            only_slide_ids=frozenset({result.slide.slide_id}),
+        )
+        return new_deck, SlideRegenResult(slide=result.slide, findings=findings)
 
     # ====================================================================
     # STEP 7 — render via Node worker

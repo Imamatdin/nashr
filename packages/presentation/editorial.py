@@ -48,6 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from packages.core.enums import (
     PEOPLE_RENDERING_SLIDE_TYPES,
     AudienceType,
+    AuditSeverity,
     ChartType,
     ClaimStrength,
     ClaimType,
@@ -81,11 +82,13 @@ from packages.core.models.presentation import (
     PresentationInterviewAnswers,
     QuizQuestion,
     SlideContent,
+    SlideRegenResult,
     SlideSpec,
     StatItem,
     TableRow,
     TimelineNode,
     TrueFalseItem,
+    find_slide_by_id,
 )
 from packages.core.models.source import (
     SourceChunkCreate,
@@ -96,6 +99,8 @@ from packages.core.prompts import (
     EDITORIAL_REPAIR_USER,
     EDITORIAL_RETRY_SUFFIX,
     EDITORIAL_SCHEMA_RETRY_HEADER,
+    EDITORIAL_SLIDE_REGEN_SYSTEM,
+    EDITORIAL_SLIDE_REGEN_USER,
     EDITORIAL_SYSTEM,
     EDITORIAL_USER,
     INTERACTIVE_RETRY_SUFFIX,
@@ -113,6 +118,7 @@ from packages.presentation.plan_validator import (
     failing_section_indices,
     validate_deck_against_plan,
     validate_plan_async,
+    validate_slide_against_plan,
 )
 from packages.presentation.planner import PlannerPass
 from packages.presentation.thesis_classifier import ThesisClassifier
@@ -356,6 +362,18 @@ class EditorialDeckPlanMismatchError(EditorialError):
         super().__init__(f"Deck contradicts its plan after one repair: {detail}")
 
 
+class EditorialSlideRegenError(EditorialError):
+    """Single-slide regeneration could not produce a result at all.
+
+    Distinct from a regen that PRODUCED a slide with quality findings (that is a
+    :class:`SlideRegenResult` with FAIL findings, not an exception). This is
+    raised only when there is nothing to return: the deck has no persisted plan
+    (so the figure-roster grounding guard would be disabled — the exact
+    fabrication risk the system exists to stop), the target ``slide_id`` is not
+    in the deck, or the LLM returned nothing usable after its informed retry.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Parsing schemas for LLM output
 # ---------------------------------------------------------------------------
@@ -539,7 +557,7 @@ class EditorialPass:
             )
 
         merged = self._merge_slides(content_slides, interactive_slides)
-        deck = self._assemble_deck(merged, interview, design, project_id)
+        deck = self._assemble_deck(merged, interview, design, project_id, plan)
         # Last-resort guarantee: fill any emphasis field the executor left unmarked
         # (so a DATA_EMPHASIS slide never ships flat) and record where each field
         # came from. Ship discards the provenance; the gate reads it off the instance.
@@ -672,6 +690,120 @@ class EditorialPass:
         replacements = _materialise_slides(parsed, plan)
         spliced = _splice_sections(content_slides, replacements, failing, plan)
         return _post_process_repaired(spliced)
+
+    # ------------------------------------------------------------------
+    # Single-slide regeneration (judge + conversational edit layer)
+    # ------------------------------------------------------------------
+
+    async def regenerate_slide_content(
+        self,
+        deck: DeckSpec,
+        slide_id: str,
+        *,
+        instruction: str | None = None,
+        claims: list[SourceClaimCreate],
+    ) -> SlideRegenResult:
+        """Regenerate ONE content slide of an existing deck, preserving its type.
+
+        The single-slide sibling of :meth:`_repair_failing_sections`: it produces
+        a stronger replacement for ``slide_id`` while KEEPING the slide's type,
+        stable id, and section membership, grounded in the persisted plan's figure
+        roster plus the ``claims`` pool. ``instruction`` is the optional
+        edit-layer request, honoured only within the grounding rules (the system
+        prompt ranks the roster/source above it).
+
+        Returns a :class:`SlideRegenResult` — the new slide plus per-slide
+        findings — so the caller (the quality judge or the edit layer) decides
+        whether to accept, retry, or reject. A FAIL finding (a fabricated figure,
+        a changed type, or a hollow divider) means do not ship without a retry;
+        word-limit overflow is auto-trimmed, as in whole-deck generation.
+
+        Raises :class:`EditorialSlideRegenError` only when no result is possible:
+        the deck has no persisted plan (the roster grounding guard would be off),
+        ``slide_id`` is absent, or the LLM returned nothing after its retry.
+
+        Image URLs are intentionally NOT resolved here: the fresh slide carries
+        image HINTS with null URLs, and the orchestrator re-runs the image stage
+        after the splice (a separate downstream step, by design).
+        """
+
+        plan = deck.plan
+        if plan is None:
+            raise EditorialSlideRegenError(
+                "cannot regenerate a slide on a deck with no persisted plan: the "
+                "figure-roster grounding guard would be disabled"
+            )
+        located = find_slide_by_id(deck, slide_id)
+        if located is None:
+            raise EditorialSlideRegenError(f"no slide with id {slide_id!r} in the deck")
+        position, target = located
+        prev_slide = deck.slides[position - 1] if position > 0 else None
+        next_slide = deck.slides[position + 1] if position + 1 < len(deck.slides) else None
+
+        system = EDITORIAL_SLIDE_REGEN_SYSTEM.format(
+            slide_type=target.slide_type.value,
+            title_style=deck.interview.title_style.value,
+            slide_type_descriptions=_format_slide_type_descriptions(),
+            word_limits=_format_word_limits(),
+            language=deck.interview.language.value,
+        )
+        user = _format_slide_regen_brief(
+            deck, plan, target, prev_slide, next_slide, instruction, claims
+        )
+        parsed = await self._call_editorial_with_retry(system, user)
+        if not parsed:
+            raise EditorialSlideRegenError(
+                f"slide regeneration for id {slide_id!r} returned no usable slide"
+            )
+        materialised = _materialise_slides([parsed[0]], plan)[0]
+
+        # Inherit identity + deliberate per-slide design from the TARGET: the LLM
+        # is not trusted to echo the stable id or section, and _materialise_slides
+        # carries forward neither the background/accent overrides nor the source
+        # claim ids. Keeping source_claim_ids is the traceability floor — a regen
+        # must not silently strip the provenance the slide already carried.
+        slide = materialised.model_copy(
+            update={
+                "slide_id": target.slide_id,
+                "slide_index": target.slide_index,
+                "section_name": target.section_name,
+                "section_thesis": target.section_thesis,
+                "background_override": target.background_override,
+                "accent_override": target.accent_override,
+                "source_claim_ids": list(target.source_claim_ids),
+            }
+        )
+        slide = _enforce_word_limits([slide])[0]
+        findings = _collect_slide_regen_findings(slide, target, plan)
+        return SlideRegenResult(slide=slide, findings=findings)
+
+    def splice_regenerated_slide(self, deck: DeckSpec, new_slide: SlideSpec) -> DeckSpec:
+        """Splice a regenerated slide back into the deck by its stable id.
+
+        Id-keyed replacement in place (order preserved, reindexed). When the
+        regenerated slide is the title hero at position 0, its new title/subtitle
+        propagate to ``deck.title``/``deck.subtitle`` — both because the deck title
+        is derived from the first slide and because the title-hero background image
+        is generated downstream from the deck title/subtitle, not a slide field.
+
+        Image URLs are deliberately NOT touched: the regenerated slide already
+        carries null URLs (the editorial pass authored hints, not URLs), so a
+        downstream image re-run resolves exactly its slots and leaves every other
+        slide's resolved image untouched.
+        """
+
+        del self
+        spliced = _splice_single_slide(deck.slides, new_slide)
+        update: dict[str, Any] = {"slides": spliced}
+        if (
+            spliced
+            and spliced[0].slide_id == new_slide.slide_id
+            and new_slide.slide_type is SlideType.TITLE_HERO
+        ):
+            update["title"] = new_slide.content.title[:300]
+            subtitle = new_slide.content.subtitle
+            update["subtitle"] = subtitle[:300] if subtitle else None
+        return deck.model_copy(update=update)
 
     # ------------------------------------------------------------------
     # Step 1 - deck sizing
@@ -1060,8 +1192,15 @@ class EditorialPass:
         interview: PresentationInterviewAnswers,
         design: DesignDirectionSpec,
         project_id: str,
+        plan: DeckPlan | None = None,
     ) -> DeckSpec:
-        """Wrap the validated slides plus metadata into the final DeckSpec."""
+        """Wrap the validated slides plus metadata into the final DeckSpec.
+
+        ``plan`` is persisted on the deck so a single slide can later be
+        regenerated with the deck-wide authorship context (thesis, figure
+        roster, section theses) that is otherwise lost when this method
+        returns. ``None`` only on the emergency path, where there is no plan.
+        """
 
         if not slides:
             slides = _emergency_minimal_deck(interview)
@@ -1076,6 +1215,7 @@ class EditorialPass:
             language=interview.language,
             design=design,
             interview=interview,
+            plan=plan,
             slides=slides,
             export_formats=[ExportFormat.HTML],
         )
@@ -1589,6 +1729,179 @@ def _format_findings(failures: list[AuditCheckResult]) -> str:
     return "\n".join(f"  - [{f.check_id}] {f.message or ''}" for f in failures)
 
 
+# ---------------------------------------------------------------------------
+# Single-slide regeneration: brief builder + per-slide re-validation
+# ---------------------------------------------------------------------------
+
+_REGEN_CLAIM_POOL_LIMIT: Final[int] = 40
+
+
+def _format_slide_regen_brief(
+    deck: DeckSpec,
+    plan: DeckPlan,
+    target: SlideSpec,
+    prev_slide: SlideSpec | None,
+    next_slide: SlideSpec | None,
+    instruction: str | None,
+    claims: list[SourceClaimCreate],
+) -> str:
+    """Assemble the single-slide regeneration user prompt.
+
+    Carries the three things a slide-in-isolation regen needs that the section
+    repair one-liner (:func:`_format_current_deck`) cannot: deck COHESION (thesis,
+    cohesion note, palette, roster), the slide's OWN full current content plus its
+    section argument, and the immediate NEIGHBOURS for continuity — plus the
+    grounding claim pool and the optional edit instruction.
+    """
+
+    instruction_text = instruction.strip() if instruction and instruction.strip() else "(none)"
+    return EDITORIAL_SLIDE_REGEN_USER.format(
+        slide_type=target.slide_type.value,
+        audience=deck.interview.audience.value,
+        language=deck.interview.language.value,
+        cohesion=_format_regen_cohesion(plan, deck.design),
+        section=_format_regen_section(target),
+        current_slide=_format_regen_current_slide(target),
+        neighbors=_format_regen_neighbors(prev_slide, next_slide),
+        instruction=instruction_text,
+        claim_pool=_format_regen_claim_pool(claims),
+    )
+
+
+def _format_regen_cohesion(plan: DeckPlan, design: DesignDirectionSpec) -> str:
+    """Deck-wide voice for a regen: thesis, cohesion note, palette, figure roster."""
+
+    palette = design.palette
+    lines = [
+        f"DECK THESIS: {plan.thesis}",
+        f"AUDIENCE TAKEAWAY: {plan.audience_takeaway}",
+        f"VISUAL COHESION NOTE (the one voice every slide shares): {plan.image_cohesion_note}",
+        (
+            f"PALETTE: background {palette.background}, surface {palette.surface}, "
+            f"text {palette.text}, accent {palette.accent}"
+        ),
+        f"TYPOGRAPHY: headings {design.heading_font}, body {design.body_font}",
+    ]
+    if plan.figures:
+        lines.append("FIGURE ROSTER (the ONLY real people you may name — use these exact names):")
+        for fig in plan.figures:
+            years = f" ({fig.years})" if fig.years else ""
+            lines.append(f"  - {fig.name}{years}: {fig.why_in_source}")
+    else:
+        lines.append(
+            "FIGURE ROSTER: (empty — this source names no people. Do NOT name anyone "
+            "and do NOT add a people slide.)"
+        )
+    return "\n".join(lines)
+
+
+def _format_regen_section(target: SlideSpec) -> str:
+    """The slide's plan section and the section argument it must serve."""
+
+    name = target.section_name or "(unassigned)"
+    thesis = target.section_thesis or "(no section thesis recorded)"
+    return f"SECTION: {name}\nSECTION ARGUMENT (this slide must serve it): {thesis}"
+
+
+def _format_regen_current_slide(target: SlideSpec) -> str:
+    """The target's current content as JSON, minus resolved image URLs.
+
+    The model sees exactly what it is replacing. Image URLs are stripped: they
+    are noise for an editorial rewrite (the fresh slide re-resolves its own images
+    downstream) and a stale URL must never read as content to preserve.
+    """
+
+    # Exclude resolved image URLs (top-level and nested) declaratively, so the
+    # dump stays strongly typed — no Any-typed post-hoc mutation of the dict.
+    data = target.content.model_dump(
+        exclude_none=True,
+        exclude={
+            "figure_url": True,
+            "background_url": True,
+            "people": {"__all__": {"portrait_url"}},
+            "timeline_nodes": {"__all__": {"portrait_url"}},
+        },
+    )
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def _format_regen_neighbors(prev_slide: SlideSpec | None, next_slide: SlideSpec | None) -> str:
+    """Prev/next slide type + title so the regen flows without seeing the whole deck."""
+
+    def line(label: str, slide: SlideSpec | None, edge: str) -> str:
+        if slide is None:
+            return f"{label}: (none — this is the {edge} slide)"
+        return f'{label}: {slide.slide_type.value} — "{slide.content.title}"'
+
+    return "\n".join([line("PREVIOUS", prev_slide, "first"), line("NEXT", next_slide, "last")])
+
+
+def _format_regen_claim_pool(claims: list[SourceClaimCreate]) -> str:
+    """Bounded list of source claim texts to ground the regenerated content."""
+
+    if not claims:
+        return (
+            "(no source claims available — keep the slide to what the deck already "
+            "establishes; invent nothing)"
+        )
+    lines: list[str] = []
+    for claim in claims[:_REGEN_CLAIM_POOL_LIMIT]:
+        text = claim.claim_text.strip()
+        if claim.quote:
+            text += f"  [quote: {claim.quote.strip()}]"
+        lines.append(f"  - {text}")
+    extra = len(claims) - _REGEN_CLAIM_POOL_LIMIT
+    if extra > 0:
+        lines.append(f"  - … (+{extra} more claims in the source)")
+    return "\n".join(lines)
+
+
+def _collect_slide_regen_findings(
+    slide: SlideSpec, target: SlideSpec, plan: DeckPlan
+) -> list[AuditCheckResult]:
+    """Per-slide re-validation for a regenerated slide (the safe-in-isolation set).
+
+    Surfaces — never silently fixes — the failures the caller must act on: a type
+    change (PR2 is type-preserving; a mismatch is a FAIL the caller retries on,
+    not a silent force that could blank the slide), a fabricated/misplaced person
+    (D-X1/D-X2 via :func:`validate_slide_against_plan`), and a hollow SECTION_BREAK
+    (invariant I2). Word-limit overflow is already auto-trimmed upstream, so it is
+    not a finding.
+    """
+
+    findings: list[AuditCheckResult] = []
+    if slide.slide_type is not target.slide_type:
+        findings.append(
+            AuditCheckResult(
+                check_id="R-T1",
+                check_name="regen.type_changed",
+                passed=False,
+                severity=AuditSeverity.FAIL,
+                slide_index=slide.slide_index,
+                message=(
+                    f"Regenerated slide changed type from {target.slide_type.value} to "
+                    f"{slide.slide_type.value}; single-slide regeneration preserves the type."
+                ),
+            )
+        )
+    findings.extend(validate_slide_against_plan(slide, plan))
+    if slide.slide_type is SlideType.SECTION_BREAK and not _section_break_has_thesis(slide):
+        findings.append(
+            AuditCheckResult(
+                check_id="R-H1",
+                check_name="regen.hollow_divider",
+                passed=False,
+                severity=AuditSeverity.FAIL,
+                slide_index=slide.slide_index,
+                message=(
+                    "Regenerated SECTION_BREAK carries no thesis in subtitle or body "
+                    "(invariant I2): a divider that only names the section is hollow."
+                ),
+            )
+        )
+    return findings
+
+
 def _section_index_for(slide: SlideSpec, plan: DeckPlan) -> int | None:
     """Plan-section index for a slide by EXACT canonical-name match, or None.
 
@@ -1999,6 +2312,22 @@ def _enforce_density_arc(slides: list[SlideSpec]) -> list[SlideSpec]:
             continue
         out[slot], out[swap_target] = out[swap_target], out[slot]
     return out
+
+
+def _splice_single_slide(slides: list[SlideSpec], new_slide: SlideSpec) -> list[SlideSpec]:
+    """Replace the slide whose stable id matches ``new_slide``, then reindex.
+
+    Id-keyed (distinct from the section-keyed :func:`_splice_sections`): order is
+    preserved, every other slide is untouched, and :func:`_reindex` rewrites the
+    positional ``slide_index`` afterwards. Keeps the order-preserving discipline
+    of :func:`_post_process_repaired` — deliberately no ``_enforce_density_arc``,
+    whose full-deck reorder would move the slide out of place. If no id matches
+    the slides are returned reindexed but unchanged; the caller locates the slide
+    first, so a miss is an upstream programming error, never a silent drop here.
+    """
+
+    out = [new_slide if slide.slide_id == new_slide.slide_id else slide for slide in slides]
+    return _reindex(out)
 
 
 def _reindex(slides: list[SlideSpec]) -> list[SlideSpec]:

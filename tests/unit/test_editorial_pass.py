@@ -61,11 +61,16 @@ from packages.presentation.editorial import (
     WORD_LIMITS,
     EditorialDeckPlanMismatchError,
     EditorialPass,
+    EditorialSlideRegenError,
+    _count_words_in_content,
     _insert_breathing_after_data,
     _LLMSlide,
     _materialise_slides,
     _parse_editorial_response,
     _parse_interactive,
+    _reindex,
+    _splice_sections,
+    _splice_single_slide,
 )
 from packages.presentation.thesis_classifier import ThesisClassifier
 
@@ -843,6 +848,136 @@ async def test_generate_deck_spec_strips_misplaced_person_before_plan_gate() -> 
     # The misplaced citation is gone deck-wide — no person survives on any slide.
     for slide in deck.slides:
         assert slide.content.people is None
+
+
+# ---------------------------------------------------------------------------
+# Stable slide identity through the pipeline (generation, reindex, merge, splice)
+#
+# slide_id is the durable address a single-slide regeneration will splice on; these
+# pin that it is unique on a generated deck, that the persisted plan rides along,
+# and that the identity survives the order-mutating steps — except a SECTION repair,
+# which mints fresh ids (the reason per-slide regen must thread the id explicitly).
+# ---------------------------------------------------------------------------
+
+
+def _id_slide(section_name: str, title: str, slide_id: str | None = None) -> SlideSpec:
+    fields: dict[str, Any] = {
+        "slide_index": 0,
+        "slide_type": SlideType.CONTENT_SPLIT,
+        "content": SlideContent(title=title),
+        "section_name": section_name,
+    }
+    if slide_id is not None:
+        fields["slide_id"] = slide_id
+    return SlideSpec(**fields)
+
+
+async def test_generated_deck_assigns_unique_slide_ids() -> None:
+    payload = _llm_slides_payload(
+        [
+            {"slide_index": 0, "section_index": 0, "slide_type": "title_hero", "title": "Cooling"},
+            {
+                "slide_index": 1,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Direct cooling defined",
+                "body_text": "A definition grounded in the source.",
+            },
+            {
+                "slide_index": 2,
+                "section_index": 1,
+                "slide_type": "summary_takeaway",
+                "title": "Takeaways",
+                "bullets": ["sCO2 cooling raises achievable rack density."],
+            },
+        ]
+    )
+    editorial = _editorial(_StubLLM([payload]), plan=_stub_plan(2))
+    deck = await editorial.generate_deck_spec(
+        interview=_interview(),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=[_claim("sCO2 cooling reaches 120 kW per rack.")],
+        chunks=[],
+        source_metadata=[],
+    )
+    ids = [s.slide_id for s in deck.slides]
+    assert all(ids)
+    assert len(set(ids)) == len(ids)
+
+
+async def test_generated_deck_persists_plan() -> None:
+    plan = _stub_plan(2)
+    payload = _llm_slides_payload(
+        [
+            {"slide_index": 0, "section_index": 0, "slide_type": "title_hero", "title": "Cooling"},
+            {
+                "slide_index": 1,
+                "section_index": 1,
+                "slide_type": "summary_takeaway",
+                "title": "Takeaways",
+                "bullets": ["sCO2 cooling raises achievable rack density."],
+            },
+        ]
+    )
+    editorial = _editorial(_StubLLM([payload]), plan=plan)
+    deck = await editorial.generate_deck_spec(
+        interview=_interview(),
+        design=_design(),
+        evidence_matrix=_evidence_matrix(),
+        claims=[_claim("sCO2 cooling reaches 120 kW per rack.")],
+        chunks=[],
+        source_metadata=[],
+    )
+    assert deck.plan is not None
+    assert deck.plan.thesis == plan.thesis
+    assert [s.section_name for s in deck.plan.sections] == [s.section_name for s in plan.sections]
+
+
+def test_reindex_preserves_slide_id_and_rewrites_index() -> None:
+    slides = [
+        _id_slide("Section 0", "A", slide_id="id-a"),
+        _id_slide("Section 1", "B", slide_id="id-b"),
+    ]  # both built with slide_index=0
+    out = _reindex(slides)
+    assert [s.slide_id for s in out] == ["id-a", "id-b"]
+    assert [s.slide_index for s in out] == [0, 1]
+
+
+def test_merge_slides_preserves_slide_ids() -> None:
+    content = [
+        _id_slide("Section 0", "A", slide_id="id-a"),
+        SlideSpec(
+            slide_id="id-break",
+            slide_index=1,
+            slide_type=SlideType.SECTION_BREAK,
+            content=SlideContent(title="Break", subtitle="A real section thesis here."),
+        ),
+    ]
+    interactive = [
+        SlideSpec(
+            slide_id="id-quiz",
+            slide_index=0,
+            slide_type=SlideType.INTERACTIVE_QUIZ_MCQ,
+            content=SlideContent(title="Quiz"),
+        ),
+    ]
+    merged = EditorialPass._merge_slides(content, interactive)
+    assert {"id-a", "id-break", "id-quiz"} <= {s.slide_id for s in merged}
+
+
+def test_splice_sections_preserves_nonfailing_ids_and_replaces_failing() -> None:
+    plan = _stub_plan(2)  # canonical section names "Section 0", "Section 1"
+    content = [
+        _id_slide("Section 0", "Old A", slide_id="old-a"),
+        _id_slide("Section 1", "Keep B", slide_id="keep-b"),
+    ]
+    replacements = [_id_slide("Section 0", "New A", slide_id="new-a")]
+    spliced = _splice_sections(content, replacements, {0}, plan)
+    ids = [s.slide_id for s in spliced]
+    assert "keep-b" in ids  # non-failing section survives untouched
+    assert "new-a" in ids  # failing section replaced by the regenerated slide
+    assert "old-a" not in ids  # the old failing slide's id is gone (fresh id minted)
 
 
 # ---------------------------------------------------------------------------
@@ -2280,3 +2415,313 @@ async def test_deck_mismatch_triggers_one_section_repair() -> None:
     section_names = {s.section_name for s in deck.slides if s.section_name}
     assert "Section 0" in section_names
     assert "Section 1" in section_names  # the dropped section was repaired in
+
+
+# ---------------------------------------------------------------------------
+# Single-slide regeneration (regenerate_slide_content)
+#
+# The keystone of the engine arc: a type-preserving regen of ONE slide that the
+# quality judge and the conversational edit layer drive. These pin the contract —
+# identity/section/overrides/claim-ids inherited from the target, findings
+# surfaced (not silently fixed), and the hard-stop errors — without a real LLM.
+# ---------------------------------------------------------------------------
+
+
+def _deck_with_plan(
+    slides: list[SlideSpec] | None = None,
+    plan: DeckPlan | None = None,
+) -> DeckSpec:
+    """A finished DeckSpec carrying a persisted plan, for single-slide regen tests."""
+
+    plan = plan if plan is not None else _stub_plan(2)
+    if slides is None:
+        slides = [
+            SlideSpec(
+                slide_index=0,
+                slide_type=SlideType.TITLE_HERO,
+                content=SlideContent(title="Cooling that scales"),
+                section_name="Section 0",
+                section_thesis=plan.sections[0].thesis,
+            ),
+            SlideSpec(
+                slide_index=1,
+                slide_type=SlideType.CONTENT_SPLIT,
+                content=SlideContent(title="Direct cooling", body_text="A first point."),
+                section_name="Section 0",
+                section_thesis=plan.sections[0].thesis,
+            ),
+            SlideSpec(
+                slide_index=2,
+                slide_type=SlideType.SUMMARY_TAKEAWAY,
+                content=SlideContent(title="Takeaways", bullets=["One concrete lesson."]),
+                section_name="Section 1",
+                section_thesis=plan.sections[1].thesis,
+            ),
+        ]
+    return DeckSpec(
+        project_id="proj-1",
+        title="Cooling that scales",
+        design=_design(),
+        interview=_interview(),
+        plan=plan,
+        slides=slides,
+    )
+
+
+async def test_regenerate_slide_preserves_type_id_and_section() -> None:
+    deck = _deck_with_plan()
+    target = deck.slides[1]
+    payload = _llm_slides_payload(
+        [
+            {
+                "slide_type": "content_split",
+                "title": "Liquid cooling lifts achievable rack density",
+                "body_text": "Direct-to-chip cooling clears far more heat per rack.",
+            }
+        ]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(
+        deck, target.slide_id, claims=[_claim("Liquid cooling lifts rack density.")]
+    )
+    assert result.passed
+    assert result.slide.slide_id == target.slide_id
+    assert result.slide.slide_type is SlideType.CONTENT_SPLIT
+    assert result.slide.section_name == target.section_name
+    assert result.slide.section_thesis == target.section_thesis
+    assert result.slide.content.title == "Liquid cooling lifts achievable rack density"
+
+
+async def test_regenerate_slide_inherits_source_claim_ids_when_model_omits_them() -> None:
+    # Traceability floor: a regen must not silently strip the target's provenance.
+    deck = _deck_with_plan()
+    target = deck.slides[1].model_copy(update={"source_claim_ids": ["claim-1", "claim-2"]})
+    deck = deck.model_copy(update={"slides": [deck.slides[0], target, deck.slides[2]]})
+    payload = _llm_slides_payload(
+        [{"slide_type": "content_split", "title": "New", "body_text": "x.", "source_claim_ids": []}]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(
+        deck, target.slide_id, claims=[_claim("a grounding claim.")]
+    )
+    assert result.slide.source_claim_ids == ["claim-1", "claim-2"]
+
+
+async def test_regenerate_slide_inherits_per_slide_overrides() -> None:
+    deck = _deck_with_plan()
+    target = deck.slides[1].model_copy(
+        update={"background_override": BackgroundTreatment.DARK, "accent_override": "#FF0000"}
+    )
+    deck = deck.model_copy(update={"slides": [deck.slides[0], target, deck.slides[2]]})
+    payload = _llm_slides_payload(
+        [{"slide_type": "content_split", "title": "New", "body_text": "x."}]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(deck, target.slide_id, claims=[])
+    assert result.slide.background_override is BackgroundTreatment.DARK
+    assert result.slide.accent_override == "#FF0000"
+
+
+async def test_regenerate_slide_flags_off_roster_person() -> None:
+    plan = _stub_plan(2)  # empty figure roster — any named person is off-roster
+    gallery = SlideSpec(
+        slide_index=1,
+        slide_type=SlideType.GALLERY_PEOPLE,
+        content=SlideContent(title="Thinkers"),
+        section_name="Section 0",
+        section_thesis=plan.sections[0].thesis,
+    )
+    deck = _deck_with_plan(
+        slides=[
+            SlideSpec(
+                slide_index=0,
+                slide_type=SlideType.TITLE_HERO,
+                content=SlideContent(title="T"),
+                section_name="Section 0",
+                section_thesis=plan.sections[0].thesis,
+            ),
+            gallery,
+            SlideSpec(
+                slide_index=2,
+                slide_type=SlideType.SUMMARY_TAKEAWAY,
+                content=SlideContent(title="End", bullets=["x."]),
+                section_name="Section 1",
+                section_thesis=plan.sections[1].thesis,
+            ),
+        ],
+        plan=plan,
+    )
+    payload = _llm_slides_payload(
+        [{"slide_type": "gallery_people", "title": "Thinkers", "people": [{"name": "Beethoven"}]}]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(deck, gallery.slide_id, claims=[])
+    assert not result.passed
+    assert any(f.check_id == "D-X1" for f in result.findings)
+
+
+async def test_regenerate_slide_flags_type_change_without_forcing() -> None:
+    deck = _deck_with_plan()
+    target = deck.slides[1]  # content_split
+    payload = _llm_slides_payload(
+        [
+            {
+                "slide_type": "data_emphasis",
+                "title": "Now a stat",
+                "stats": [{"value": "94", "unit": "%", "label": "saved", "highlight": True}],
+            }
+        ]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(deck, target.slide_id, claims=[])
+    assert not result.passed
+    assert any(f.check_id == "R-T1" for f in result.findings)
+    assert result.slide.slide_id == target.slide_id  # identity inherited even on a reject
+
+
+async def test_regenerate_slide_enforces_word_limits() -> None:
+    deck = _deck_with_plan()
+    target = deck.slides[1]
+    long_body = " ".join(["word"] * 300)
+    payload = _llm_slides_payload(
+        [{"slide_type": "content_split", "title": "Trim me", "body_text": long_body}]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(deck, target.slide_id, claims=[])
+    limit = WORD_LIMITS.get(SlideType.CONTENT_SPLIT, 60)
+    assert _count_words_in_content(result.slide.content) <= limit
+
+
+async def test_regenerate_slide_brief_carries_cohesion_neighbors_claims_instruction() -> None:
+    plan = _stub_plan(2)
+    deck = _deck_with_plan(plan=plan)
+    target = deck.slides[1]
+    stub = _StubLLM(
+        [_llm_slides_payload([{"slide_type": "content_split", "title": "x", "body_text": "y."}])]
+    )
+    editorial = _editorial(stub)
+    await editorial.regenerate_slide_content(
+        deck,
+        target.slide_id,
+        instruction="Make it punchier",
+        claims=[_claim("Liquid cooling lifts rack density to 120 kW per rack.")],
+    )
+    system, user = stub.calls[-1]
+    assert "content_split" in system  # the fixed type is pinned in the system prompt
+    assert plan.thesis in user
+    assert plan.image_cohesion_note in user
+    assert "Make it punchier" in user
+    assert "Liquid cooling lifts rack density" in user
+    assert deck.slides[0].content.title in user  # previous-slide title
+    assert deck.slides[2].content.title in user  # next-slide title
+
+
+async def test_regenerate_slide_without_plan_raises() -> None:
+    deck = _deck_with_plan().model_copy(update={"plan": None})
+    editorial = _editorial(_StubLLM([]))
+    with pytest.raises(EditorialSlideRegenError):
+        await editorial.regenerate_slide_content(deck, deck.slides[0].slide_id, claims=[])
+
+
+async def test_regenerate_slide_unknown_id_raises() -> None:
+    deck = _deck_with_plan()
+    editorial = _editorial(_StubLLM([]))
+    with pytest.raises(EditorialSlideRegenError):
+        await editorial.regenerate_slide_content(deck, "no-such-id", claims=[])
+
+
+async def test_regenerate_slide_empty_llm_output_raises() -> None:
+    deck = _deck_with_plan()
+    target = deck.slides[1]
+    editorial = _editorial(_StubLLM(["not json at all", "still not json"]))
+    with pytest.raises(EditorialSlideRegenError):
+        await editorial.regenerate_slide_content(deck, target.slide_id, claims=[])
+
+
+async def test_regenerate_title_hero_keeps_type() -> None:
+    deck = _deck_with_plan()
+    target = deck.slides[0]  # title_hero
+    payload = _llm_slides_payload(
+        [{"slide_type": "title_hero", "title": "A sharper title", "subtitle": "A subtitle"}]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(deck, target.slide_id, claims=[])
+    assert result.passed
+    assert result.slide.slide_type is SlideType.TITLE_HERO
+    assert result.slide.slide_id == target.slide_id
+
+
+# ---------------------------------------------------------------------------
+# Single-slide splice back into the deck (id-keyed) + title propagation
+# ---------------------------------------------------------------------------
+
+
+def test_splice_single_slide_replaces_by_id_preserves_order_and_reindexes() -> None:
+    a = _id_slide("Section 0", "A", slide_id="id-a")
+    b = _id_slide("Section 1", "B", slide_id="id-b")
+    c = _id_slide("Section 1", "C", slide_id="id-c")
+    new_b = _id_slide("Section 1", "B-revised", slide_id="id-b")
+    out = _splice_single_slide([a, b, c], new_b)
+    assert [s.slide_id for s in out] == ["id-a", "id-b", "id-c"]  # order preserved
+    assert out[1].content.title == "B-revised"  # replaced by id
+    assert out[0].content.title == "A" and out[2].content.title == "C"  # neighbours untouched
+    assert [s.slide_index for s in out] == [0, 1, 2]  # reindexed
+
+
+def test_splice_regenerated_title_hero_propagates_title_to_deck() -> None:
+    deck = _deck_with_plan()
+    title_slide = deck.slides[0]  # TITLE_HERO at position 0
+    new_title = title_slide.model_copy(
+        update={"content": SlideContent(title="A much sharper title", subtitle="And a subtitle")}
+    )
+    editorial = _editorial(_StubLLM([]))
+    new_deck = editorial.splice_regenerated_slide(deck, new_title)
+    assert new_deck.title == "A much sharper title"
+    assert new_deck.subtitle == "And a subtitle"
+    assert new_deck.slides[0].content.title == "A much sharper title"
+    assert new_deck.plan is deck.plan  # plan rides along untouched
+
+
+def test_splice_regenerated_non_title_slide_leaves_deck_title() -> None:
+    deck = _deck_with_plan()
+    content_slide = deck.slides[1]  # CONTENT_SPLIT, not the hero
+    new_content = content_slide.model_copy(
+        update={"content": SlideContent(title="A revised body slide")}
+    )
+    editorial = _editorial(_StubLLM([]))
+    new_deck = editorial.splice_regenerated_slide(deck, new_content)
+    assert new_deck.title == deck.title  # unchanged — only the hero drives the deck title
+    assert new_deck.slides[1].content.title == "A revised body slide"
+
+
+async def test_regenerate_slide_produces_null_image_urls_for_re_resolution() -> None:
+    # The regenerated slide must carry NULL image URLs (only HINTS) so the scoped
+    # downstream image re-run resolves exactly its slots — the precondition the
+    # orchestrator's only_slide_ids scoping relies on. A target that ALREADY had
+    # resolved URLs must not carry them forward onto the fresh slide.
+    deck = _deck_with_plan()
+    target = deck.slides[1].model_copy(
+        update={
+            "content": SlideContent(
+                title="Has images",
+                figure_url="https://cdn.example/f.png",
+                background_url="https://cdn.example/b.png",
+            )
+        }
+    )
+    deck = deck.model_copy(update={"slides": [deck.slides[0], target, deck.slides[2]]})
+    payload = _llm_slides_payload(
+        [
+            {
+                "slide_type": "content_split",
+                "title": "A revised, grounded point",
+                "body_text": "Direct cooling clears more heat per rack.",
+                "figure_prompt": "a liquid cold plate on a clean background",
+            }
+        ]
+    )
+    editorial = _editorial(_StubLLM([payload]))
+    result = await editorial.regenerate_slide_content(deck, target.slide_id, claims=[])
+    assert result.slide.content.figure_url is None  # no stale URL carried forward
+    assert result.slide.content.background_url is None
+    assert result.slide.content.figure_prompt is not None  # but the image HINT is present

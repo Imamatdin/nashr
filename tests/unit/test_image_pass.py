@@ -454,3 +454,49 @@ async def test_no_slots_returns_deck_unchanged() -> None:
     result = await image_pass.resolve_deck(deck, storage=storage, project_id="p1", figures=[])
     assert storage.uploaded == {}
     assert result.slides[0].content.background_url is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_deck_only_slide_ids_scopes_to_that_slide() -> None:
+    """Scoped re-resolution (the single-slide regen path) resolves ONLY the named
+    slide's slots and never re-attempts an unfilled slot on an untouched slide —
+    including a title-hero background that abstained on an earlier run."""
+
+    hero = _slide(0, SlideType.TITLE_HERO, SlideContent(title="Supercritical CO2 cooling"))
+    other = _slide(
+        1,
+        SlideType.CONTENT_SPLIT,
+        SlideContent(
+            title="Other", figure_prompt="a gear", figure_subject_type=ImageSubjectType.OBJECT
+        ),
+    )
+    target = _slide(
+        2,
+        SlideType.CONTENT_SPLIT,
+        SlideContent(
+            title="Target", figure_prompt="a turbine", figure_subject_type=ImageSubjectType.OBJECT
+        ),
+    )
+    deck = _deck([hero, other, target])
+    generated = _FakeGenerated(result=_img(b"GEN"))
+    image_pass = ImagePass(
+        portrait_resolver=_FakePortraits(result=None),
+        generated_resolver=generated,
+        max_generated_images=5,
+        http_client_factory=_no_http,
+    )
+
+    result = await image_pass.resolve_deck(
+        deck,
+        storage=_FakeStorage(),
+        project_id="p1",
+        figures=[],
+        only_slide_ids=frozenset({target.slide_id}),
+    )
+
+    # ONLY the target slide's figure was resolved.
+    assert generated.calls == [("a turbine", ImageSubjectType.OBJECT)]
+    assert result.slides[2].content.figure_url is not None
+    # The untouched sibling figure and the abstained hero background are NOT re-attempted.
+    assert result.slides[1].content.figure_url is None
+    assert result.slides[0].content.background_url is None

@@ -229,6 +229,63 @@ def validate_deck_against_plan(slides: list[SlideSpec], plan: DeckPlan) -> PlanV
     return PlanValidationResult(findings=findings)
 
 
+def validate_slide_against_plan(slide: SlideSpec, plan: DeckPlan) -> list[AuditCheckResult]:
+    """Per-slide re-validation for one regenerated slide — the checks sound in isolation.
+
+    The single-slide sibling of :func:`validate_deck_against_plan`, used by the
+    regeneration path. It runs ONLY the checks that are correct against one slide
+    on its own:
+
+    * **D-X1 (no invented figures)** — the slide portrays nobody outside the
+      :attr:`DeckPlan.figures` roster (the Beethoven/Ahn fabrication gate).
+    * **D-X2 (no misplaced people)** — ``content.people`` only on a type that
+      renders it; roster-independent.
+
+    The whole-deck checks are DELIBERATELY OMITTED: D-S1 (section coverage) and
+    D-F1 (figure adherence) both reason over ALL of a section's slides — a single
+    regenerated slide cannot be judged for "the section still covers every
+    required figure", so a regen that drops a required figure is caught by a
+    section-scoped re-check at splice time, not here. Findings are re-pinned to
+    the slide's own ``slide_index`` (the per-check enumerate index would otherwise
+    be 0, the position in the one-element list handed to the deck-level checks).
+    """
+
+    raw = _check_deck_invented_figures([slide], plan) + _check_deck_misplaced_people([slide])
+    return [finding.model_copy(update={"slide_index": slide.slide_index}) for finding in raw]
+
+
+def validate_section_against_plan(
+    slides: list[SlideSpec], plan: DeckPlan, regenerated: SlideSpec
+) -> list[AuditCheckResult]:
+    """Section-scoped re-validation after a single-slide splice (D-S1 + D-F1).
+
+    A regenerated slide keeps its section, so deck-wide coverage is unchanged —
+    but if it was the ONLY slide portraying a required figure and the regen
+    dropped that figure, the section's figure adherence (D-F1) now fails. The
+    whole-deck checks D-S1 (coverage) and D-F1 (figure adherence) are run over
+    the spliced ``slides`` and then SCOPED to the regenerated slide's section: a
+    pre-existing problem in another section is never attributed to this regen.
+    Both checks pin their finding to the section index, so the scope is an exact
+    ``slide_index`` filter. Returns an empty list when the regenerated slide has
+    no resolvable plan section (an unassigned slide covers nothing).
+
+    Caller note (retry loops): the scope is the SECTION, not the regenerated
+    slide, so a figure the plan requires of this section but that belonged on a
+    SIBLING slide — untouched by this regen — also surfaces here. Regenerating
+    THIS slide cannot satisfy a figure required elsewhere in the section, so a
+    judge/edit caller should stop retrying when the finding set does not shrink
+    between attempts rather than loop on a gap this slide structurally cannot fix.
+    """
+
+    section_index = _section_index_of(regenerated, plan)
+    if section_index is None:
+        return []
+    findings = _check_deck_section_coverage(slides, plan) + _check_deck_figure_adherence(
+        slides, plan
+    )
+    return [finding for finding in findings if finding.slide_index == section_index]
+
+
 def critique_deck_adversarially(slides: list[SlideSpec], plan: DeckPlan) -> PlanValidationResult:
     """Phase-3 seam — adversarial deck critic. Not yet implemented.
 
@@ -794,4 +851,6 @@ __all__ = [
     "validate_deck_against_plan",
     "validate_plan",
     "validate_plan_async",
+    "validate_section_against_plan",
+    "validate_slide_against_plan",
 ]

@@ -130,6 +130,7 @@ class ImagePass:
         project_id: str,
         figures: list[SourceFigure],
         max_generated_images: int | None = None,
+        only_slide_ids: frozenset[str] | None = None,
     ) -> DeckSpec:
         """Resolve every unfilled image slot in ``deck`` and write its ``_url``.
 
@@ -139,12 +140,19 @@ class ImagePass:
         ``None`` value falls back to the instance default, preserving the
         single-construction-then-many-calls pattern used by callers that have
         no tier (tests, ad-hoc tools). Returns the same (mutated) deck.
+
+        ``only_slide_ids`` restricts resolution to slides whose ``slide_id`` is in
+        the set; ``None`` (the default) resolves the whole deck. The single-slide
+        regeneration path passes the regenerated slide's id so re-resolution
+        touches ONLY its slots — a slot that legitimately ABSTAINED on the first
+        run (null ``_url``) on another slide is not silently re-attempted, and the
+        budget is spent on the regenerated slide alone.
         """
 
         budget = (
             self._max_generated if max_generated_images is None else max(0, max_generated_images)
         )
-        portrait_tasks, generate_tasks = self._collect(deck, figures)
+        portrait_tasks, generate_tasks = self._collect(deck, figures, only_slide_ids)
         # Sort ascending by priority so the title-hero background (0) wins the
         # first slot, then figures (1) consume the remainder up to the budget
         # — invariant I3: highest-leverage image is never starved by lower-
@@ -196,15 +204,25 @@ class ImagePass:
     # ------------------------------------------------------------ task building
 
     def _collect(
-        self, deck: DeckSpec, figures: list[SourceFigure]
+        self,
+        deck: DeckSpec,
+        figures: list[SourceFigure],
+        only_slide_ids: frozenset[str] | None = None,
     ) -> tuple[list[_ImageTask], list[_ImageTask]]:
-        """Walk the deck and build one task per unfilled image slot."""
+        """Walk the deck and build one task per unfilled image slot.
+
+        When ``only_slide_ids`` is given, slides outside it are skipped entirely —
+        so a scoped re-resolution never re-collects (and re-attempts) an unfilled
+        slot on a slide the caller did not touch.
+        """
 
         design = deck.design
         portraits: list[_ImageTask] = []
         generates: list[_ImageTask] = []
 
         for slide in deck.slides:
+            if only_slide_ids is not None and slide.slide_id not in only_slide_ids:
+                continue
             content = slide.content
             for person in content.people or []:
                 if person.portrait_url is None and person.name:

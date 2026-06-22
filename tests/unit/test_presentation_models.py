@@ -19,6 +19,7 @@ from packages.core.enums import (
     ImageSubjectType,
     Language,
     NarrativeEmphasis,
+    NarrativePhase,
     PresentationMood,
     SlideType,
     SpeakerNotesStyle,
@@ -29,10 +30,12 @@ from packages.core.models.presentation import (
     AuditReport,
     ChartSeriesPoint,
     ColorPalette,
+    DeckPlan,
     DeckSpec,
     DesignDirectionSpec,
     MatchingPair,
     PersonItem,
+    PlannedSection,
     PresentationInterviewAnswers,
     QuizOption,
     QuizQuestion,
@@ -41,6 +44,7 @@ from packages.core.models.presentation import (
     StatItem,
     TableRow,
     TimelineNode,
+    find_slide_by_id,
     new_deck_id,
 )
 
@@ -546,6 +550,118 @@ def test_deck_spec_round_trips() -> None:
     assert again.slide_count == 2
     assert again.interview.language is Language.EN
     assert again.export_formats[1] is ExportFormat.PDF
+
+
+# ---------------------------------------------------------------------------
+# Stable slide identity (slide_id) + persisted plan + find_slide_by_id
+# ---------------------------------------------------------------------------
+
+
+def _plan() -> DeckPlan:
+    return DeckPlan(
+        thesis="The deck makes one specific, concrete argument grounded in the source.",
+        audience_takeaway="The audience leaves able to state the core argument and its support.",
+        sections=[
+            PlannedSection(
+                section_name="Origins",
+                thesis="The movement began as a specific reaction to a concrete cause.",
+                phase=NarrativePhase.HOOK,
+            ),
+            PlannedSection(
+                section_name="Legacy",
+                thesis="Its ideas reshaped institutions that still stand today.",
+                phase=NarrativePhase.CLOSE,
+            ),
+        ],
+        figures=[],
+        image_cohesion_note="A single coherent visual treatment shared across every slide.",
+    )
+
+
+def test_slide_spec_mints_unique_slide_id_by_default() -> None:
+    a = SlideSpec(slide_index=0, slide_type=SlideType.TITLE_HERO, content=SlideContent(title="A"))
+    b = SlideSpec(
+        slide_index=1, slide_type=SlideType.CONTENT_SPLIT, content=SlideContent(title="B")
+    )
+    assert a.slide_id
+    assert b.slide_id
+    assert a.slide_id != b.slide_id
+
+
+def test_slide_spec_slide_id_survives_round_trip() -> None:
+    slide = SlideSpec(
+        slide_index=2, slide_type=SlideType.CONTENT_SPLIT, content=SlideContent(title="x")
+    )
+    restored = SlideSpec.model_validate(slide.model_dump(mode="json"))
+    assert restored.slide_id == slide.slide_id
+
+
+def test_slide_spec_honours_explicit_slide_id() -> None:
+    # The regen path threads a target slide's existing id onto its replacement,
+    # so an explicitly supplied id must win over the default_factory.
+    slide = SlideSpec(
+        slide_id="fixed-id-123",
+        slide_index=0,
+        slide_type=SlideType.TITLE_HERO,
+        content=SlideContent(title="x"),
+    )
+    assert slide.slide_id == "fixed-id-123"
+
+
+def test_deck_spec_plan_defaults_to_none() -> None:
+    deck = DeckSpec(
+        project_id="proj-1",
+        title="A deck",
+        design=_design(),
+        interview=PresentationInterviewAnswers(),
+        slides=[_slide(0)],
+    )
+    assert deck.plan is None
+
+
+def test_deck_spec_persists_and_round_trips_plan() -> None:
+    plan = _plan()
+    deck = DeckSpec(
+        project_id="proj-1",
+        title="A deck",
+        design=_design(),
+        interview=PresentationInterviewAnswers(),
+        plan=plan,
+        slides=[_slide(0)],
+    )
+    restored = DeckSpec.model_validate(deck.model_dump(mode="json"))
+    assert restored.plan is not None
+    assert restored.plan.thesis == plan.thesis
+    assert [s.section_name for s in restored.plan.sections] == ["Origins", "Legacy"]
+    assert restored.plan.image_cohesion_note == plan.image_cohesion_note
+
+
+def test_find_slide_by_id_returns_position_and_slide() -> None:
+    first = _slide(0, SlideType.TITLE_HERO)
+    second = _slide(1, SlideType.CONTENT_SPLIT)
+    deck = DeckSpec(
+        project_id="proj-1",
+        title="A deck",
+        design=_design(),
+        interview=PresentationInterviewAnswers(),
+        slides=[first, second],
+    )
+    found = find_slide_by_id(deck, second.slide_id)
+    assert found is not None
+    position, slide = found
+    assert position == 1
+    assert slide.slide_id == second.slide_id
+
+
+def test_find_slide_by_id_returns_none_when_absent() -> None:
+    deck = DeckSpec(
+        project_id="proj-1",
+        title="A deck",
+        design=_design(),
+        interview=PresentationInterviewAnswers(),
+        slides=[_slide(0)],
+    )
+    assert find_slide_by_id(deck, "no-such-id") is None
 
 
 # ---------------------------------------------------------------------------

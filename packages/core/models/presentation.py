@@ -360,6 +360,15 @@ class SlideSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
+    # The DURABLE identity of a slide, distinct from ``slide_index``. ``slide_index``
+    # is POSITIONAL — ``_reindex`` rewrites it on every splice/merge — so it cannot
+    # address a specific slide across edits. ``slide_id`` is minted once (server-side,
+    # never by the LLM) and survives reindexing and splicing untouched, so a caller
+    # can say "regenerate THIS slide" unambiguously even after the deck is mutated.
+    # The default_factory means every slide carries one even when constructed directly
+    # (emergency deck, interactive wrappers); mirrors ``new_deck_id`` in this module.
+    slide_id: str = Field(default_factory=lambda: str(uuid4()), min_length=1, max_length=64)
+
     slide_index: int = Field(ge=0)
     slide_type: SlideType
     content: SlideContent
@@ -479,6 +488,17 @@ class DeckSpec(BaseModel):
 
     interview: PresentationInterviewAnswers
 
+    # The binding authorship plan the deck was filled from, persisted so a single
+    # slide can be regenerated later with the deck-wide context that otherwise
+    # evaporates when ``generate_deck_spec`` returns: the deck thesis, the figure
+    # roster, ``image_cohesion_note``, and the per-section theses/required figures.
+    # ``DeckSpec.design`` already carries palette/fonts/image_style_prefix; the plan
+    # is the missing half. Optional because the emergency-minimal path and directly
+    # constructed decks (tests) have no plan, and older serialised decks predate the
+    # field. The Node renderer ingests deck.json via a bare ``as DeckSpec`` cast and
+    # never reads this field, so persisting it is wire-safe.
+    plan: DeckPlan | None = None
+
     slides: list[SlideSpec] = Field(min_length=1, max_length=50)
 
     export_formats: list[ExportFormat] = Field(
@@ -547,6 +567,47 @@ class AuditReport(BaseModel):
 def new_deck_id() -> str:
     """Return a fresh deck identifier for use in audit reports and DeckSpec."""
     return str(uuid4())
+
+
+def find_slide_by_id(deck: DeckSpec, slide_id: str) -> tuple[int, SlideSpec] | None:
+    """Locate a slide by its stable ``slide_id``, returning ``(position, slide)``.
+
+    ``position`` is the slide's index in ``deck.slides`` (equal to its
+    ``slide_index`` on a freshly reindexed deck), suitable for an id-keyed
+    splice. Returns ``None`` when no slide carries that id. The lookup is by
+    ``slide_id`` — never ``slide_index`` — because the positional index is
+    rewritten on every mutation and cannot address a slide across edits.
+    """
+
+    for position, slide in enumerate(deck.slides):
+        if slide.slide_id == slide_id:
+            return position, slide
+    return None
+
+
+class SlideRegenResult(BaseModel):
+    """Outcome of regenerating one slide: the new slide plus its re-validation findings.
+
+    The ``slide`` is always present (post word-limit enforcement and the
+    people-clamp), carrying the target's stable ``slide_id`` and section so it
+    splices back in place. ``findings`` are the per-slide checks the regen ran;
+    the caller — the quality judge or the conversational edit layer — reads them
+    to decide whether to accept, retry, or reject. ``passed`` mirrors "zero FAIL
+    findings", the same contract as the deck-vs-plan gate. A FAIL means the
+    regenerated slide fabricated a figure outside the roster (D-X1), changed its
+    fixed type, or produced a hollow section break — it must not ship without a
+    retry. Word-limit overflow is auto-trimmed (as in whole-deck generation), so
+    it is never a finding.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    slide: SlideSpec
+    findings: list[AuditCheckResult] = Field(default_factory=list[AuditCheckResult], max_length=50)
+
+    @property
+    def passed(self) -> bool:
+        return not any(finding.severity is AuditSeverity.FAIL for finding in self.findings)
 
 
 # ---------------------------------------------------------------------------
@@ -708,6 +769,12 @@ class DeckPlan(BaseModel):
     sections: list[PlannedSection] = Field(min_length=2, max_length=8)
     figures: list[PlannedFigure] = Field(default_factory=list[PlannedFigure], max_length=30)
     image_cohesion_note: str = Field(min_length=12, max_length=500)
+
+
+# DeckSpec.plan forward-references DeckPlan, which is defined here (after DeckSpec).
+# Rebuild now that the name is in scope so the model is fully built at import time
+# rather than lazily on first validation.
+DeckSpec.model_rebuild()
 
 
 class PlanValidationResult(BaseModel):

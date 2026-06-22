@@ -46,12 +46,17 @@ from packages.core.enums import (
 from packages.core.models.evidence import EvidenceMatrix, EvidenceMatrixEntry
 from packages.core.models.presentation import (
     ColorPalette,
+    DeckPlan,
     DeckSpec,
     DesignDirectionSpec,
     InterviewQuestion,
+    PersonItem,
+    PlannedFigure,
+    PlannedSection,
     PresentationInterviewAnswers,
     PresentationInterviewQuestions,
     SlideContent,
+    SlideRegenResult,
     SlideSpec,
 )
 from packages.core.models.source import (
@@ -63,6 +68,7 @@ from packages.core.models.source import (
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.presentation.editorial import EditorialPass, EditorialSlideRegenError
 from tests.unit.test_database_client import FakeSupabaseClient
 
 PROJECT_ID = "00000000-0000-0000-0000-000000000aaa"
@@ -767,10 +773,11 @@ async def test_full_pipeline_propagates_editorial_failure() -> None:
 
 
 class _SpyImagePass:
-    """Records the per-call ``max_generated_images`` the orchestrator passes."""
+    """Records the ``max_generated_images`` and ``only_slide_ids`` per call."""
 
     def __init__(self) -> None:
         self.resolve_calls: list[int | None] = []
+        self.scope_calls: list[frozenset[str] | None] = []
 
     async def resolve_deck(
         self,
@@ -780,9 +787,11 @@ class _SpyImagePass:
         project_id: str,
         figures: list[Any],
         max_generated_images: int | None = None,
+        only_slide_ids: frozenset[str] | None = None,
     ) -> DeckSpec:
         del storage, project_id, figures
         self.resolve_calls.append(max_generated_images)
+        self.scope_calls.append(only_slide_ids)
         return deck
 
 
@@ -877,3 +886,232 @@ def test_render_result_by_extension_includes_only_present_paths(tmp_path: Path) 
     mapping = result.by_extension()
     assert set(mapping.keys()) == {"html"}
     assert mapping["html"] == html_path
+
+
+# ---------------------------------------------------------------------------
+# Single-slide regeneration wiring (regenerate_slide)
+#
+# The orchestrator method is thin glue over the editorial regen + splice and the
+# image stage (both tested in depth elsewhere); these pin the WIRING — that it
+# splices, runs the section-scoped re-check, combines findings, re-resolves
+# images on the tier budget, and propagates the typed error unwrapped.
+# ---------------------------------------------------------------------------
+
+
+class _StubRegenEditorial:
+    """Canned content-regen plus the real id-keyed splice, for wiring tests."""
+
+    def __init__(self, result: SlideRegenResult, *, raises: Exception | None = None) -> None:
+        self.result = result
+        self._raises = raises
+        self.regen_calls: list[dict[str, Any]] = []
+        self.splice_calls: list[str] = []
+        # Delegate the splice to the REAL EditorialPass so the wiring test exercises
+        # genuine title propagation (no LLM is needed — splice_regenerated_slide is a
+        # pure deck->deck transform).
+        self._real = EditorialPass()
+
+    async def regenerate_slide_content(
+        self,
+        deck: DeckSpec,
+        slide_id: str,
+        *,
+        instruction: str | None = None,
+        claims: Any,
+    ) -> SlideRegenResult:
+        del deck
+        self.regen_calls.append(
+            {"slide_id": slide_id, "instruction": instruction, "claims": list(claims)}
+        )
+        if self._raises is not None:
+            raise self._raises
+        return self.result
+
+    def splice_regenerated_slide(self, deck: DeckSpec, new_slide: SlideSpec) -> DeckSpec:
+        self.splice_calls.append(new_slide.slide_id)
+        return self._real.splice_regenerated_slide(deck, new_slide)
+
+
+def _regen_deck() -> DeckSpec:
+    plan = DeckPlan(
+        thesis="A clear deck thesis long enough to pass validation.",
+        audience_takeaway="The audience leaves with the core argument.",
+        sections=[
+            PlannedSection(
+                section_name="Origins",
+                thesis="It began as a concrete reaction to a cause.",
+                phase=NarrativePhase.HOOK,
+                figure_names=["Voltaire"],
+            ),
+            PlannedSection(
+                section_name="Legacy",
+                thesis="Its ideas reshaped institutions that still stand.",
+                phase=NarrativePhase.CLOSE,
+            ),
+        ],
+        figures=[PlannedFigure(name="Voltaire", why_in_source="the source names Voltaire")],
+        image_cohesion_note="One cohesive visual voice across every slide.",
+    )
+    slides = [
+        SlideSpec(
+            slide_id="hero",
+            slide_index=0,
+            slide_type=SlideType.TITLE_HERO,
+            content=SlideContent(title="The Enlightenment"),
+            section_name="Origins",
+            section_thesis=plan.sections[0].thesis,
+        ),
+        SlideSpec(
+            slide_id="gallery",
+            slide_index=1,
+            slide_type=SlideType.GALLERY_PEOPLE,
+            content=SlideContent(title="Thinkers", people=[PersonItem(name="Voltaire")]),
+            section_name="Origins",
+            section_thesis=plan.sections[0].thesis,
+        ),
+        SlideSpec(
+            slide_id="end",
+            slide_index=2,
+            slide_type=SlideType.SUMMARY_TAKEAWAY,
+            content=SlideContent(title="Legacy", bullets=["One concrete lesson."]),
+            section_name="Legacy",
+            section_thesis=plan.sections[1].thesis,
+        ),
+    ]
+    return DeckSpec(
+        project_id=PROJECT_ID,
+        title="The Enlightenment",
+        design=_design_spec(),
+        interview=_interview_answers(),
+        plan=plan,
+        slides=slides,
+    )
+
+
+async def test_regenerate_slide_chains_splice_and_image_resolution() -> None:
+    from unittest.mock import MagicMock
+
+    deck = _regen_deck()
+    new_slide = deck.slides[1].model_copy(
+        update={
+            "content": SlideContent(title="Sharper thinkers", people=[PersonItem(name="Voltaire")])
+        }
+    )
+    editorial = _StubRegenEditorial(SlideRegenResult(slide=new_slide, findings=[]))
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    spy = _SpyImagePass()
+    orch, _, _, _ = _build_orch(
+        _StubBot(payloads={}), editorial=cast(Any, editorial), storage=storage_stub, image_pass=spy
+    )
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+
+    new_deck, outcome = await orch.regenerate_slide(
+        deck,
+        "gallery",
+        sources,
+        PROJECT_ID,
+        _noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+        instruction="punchier",
+    )
+
+    assert editorial.regen_calls[0]["slide_id"] == "gallery"
+    assert editorial.regen_calls[0]["instruction"] == "punchier"
+    assert editorial.splice_calls == ["gallery"]
+    assert new_deck.slides[1].content.title == "Sharper thinkers"  # spliced in place
+    assert spy.resolve_calls == [2]  # images re-resolved on the STANDARD tier budget
+    assert spy.scope_calls == [frozenset({"gallery"})]  # scoped to the regenerated slide ONLY
+    assert outcome.passed  # no findings
+
+
+async def test_regenerate_hero_through_orchestrator_updates_deck_title() -> None:
+    from unittest.mock import MagicMock
+
+    deck = _regen_deck()
+    hero = deck.slides[0]  # TITLE_HERO at position 0
+    new_hero = hero.model_copy(
+        update={"content": SlideContent(title="A bolder headline", subtitle="With a subtitle")}
+    )
+    editorial = _StubRegenEditorial(SlideRegenResult(slide=new_hero, findings=[]))
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    orch, _, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        storage=storage_stub,
+        image_pass=_SpyImagePass(),
+    )
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+
+    new_deck, _outcome = await orch.regenerate_slide(
+        deck,
+        "hero",
+        sources,
+        PROJECT_ID,
+        _noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+    )
+
+    # The real splice runs through the orchestrator, so the deck title tracks the hero.
+    assert new_deck.title == "A bolder headline"
+    assert new_deck.subtitle == "With a subtitle"
+    assert new_deck.slides[0].content.title == "A bolder headline"
+
+
+async def test_regenerate_slide_surfaces_section_scoped_dropped_figure() -> None:
+    from unittest.mock import MagicMock
+
+    deck = _regen_deck()
+    # The regenerated gallery drops Voltaire — the Origins section's only portrayal.
+    dropped = deck.slides[1].model_copy(update={"content": SlideContent(title="Empty gallery")})
+    editorial = _StubRegenEditorial(SlideRegenResult(slide=dropped, findings=[]))
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    orch, _, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        storage=storage_stub,
+        image_pass=_SpyImagePass(),
+    )
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+
+    _new_deck, outcome = await orch.regenerate_slide(
+        deck,
+        "gallery",
+        sources,
+        PROJECT_ID,
+        _noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+    )
+
+    assert not outcome.passed
+    assert any(f.check_id == "D-F1" for f in outcome.findings)  # section re-check caught it
+
+
+async def test_regenerate_slide_propagates_editorial_error_unwrapped() -> None:
+    from unittest.mock import MagicMock
+
+    deck = _regen_deck()
+    editorial = _StubRegenEditorial(
+        SlideRegenResult(slide=deck.slides[1]), raises=EditorialSlideRegenError("boom")
+    )
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    orch, _, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        storage=storage_stub,
+        image_pass=_SpyImagePass(),
+    )
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+
+    with pytest.raises(EditorialSlideRegenError):
+        await orch.regenerate_slide(
+            deck,
+            "gallery",
+            sources,
+            PROJECT_ID,
+            _noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
+        )

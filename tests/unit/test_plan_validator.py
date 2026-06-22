@@ -51,6 +51,7 @@ from packages.presentation.plan_validator import (
     validate_deck_against_plan,
     validate_plan,
     validate_plan_async,
+    validate_section_against_plan,
 )
 from packages.presentation.thesis_classifier import ThesisClassifier
 
@@ -512,6 +513,43 @@ def test_deck_section_missing_planned_figure_fails_d_f1() -> None:
     assert len(d_f1) == 2  # one each for Bach and Mozart
     assert any("Bach" in (f.message or "") for f in d_f1)
     assert any("Mozart" in (f.message or "") for f in d_f1)
+
+
+# ---------------------------------------------------------------------------
+# validate_section_against_plan — section-scoped re-check after a regen splice
+# ---------------------------------------------------------------------------
+
+
+def test_section_check_clean_when_required_figure_kept() -> None:
+    deck = _good_deck()
+    regenerated = deck[3]  # Music section timeline, still portrays Bach + Mozart
+    assert validate_section_against_plan(deck, _good_plan(), regenerated) == []
+
+
+def test_section_check_fires_d_f1_when_regen_drops_required_figure() -> None:
+    deck = _good_deck()
+    dropped = _deck_slide(
+        SlideType.TIMELINE, section_name="Music of the period", timeline_portraits=[]
+    )
+    deck[3] = dropped  # the Music section no longer portrays Bach/Mozart
+    findings = validate_section_against_plan(deck, _good_plan(), dropped)
+    assert [f.check_id for f in findings] == ["D-F1", "D-F1"]  # one each, scoped to this section
+    assert any("Bach" in (f.message or "") for f in findings)
+    assert any("Mozart" in (f.message or "") for f in findings)
+
+
+def test_section_check_ignores_problems_in_other_sections() -> None:
+    # A pre-existing coverage gap in ANOTHER section must not be blamed on this regen.
+    deck = [s for s in _good_deck() if s.section_name != "Legacy"]  # Legacy (D-S1) now uncovered
+    regenerated = next(s for s in deck if s.section_name == "Music of the period")
+    findings = validate_section_against_plan(deck, _good_plan(), regenerated)
+    assert findings == []  # the Legacy D-S1 belongs to another section, filtered out
+
+
+def test_section_check_returns_empty_for_unassigned_slide() -> None:
+    deck = _good_deck()
+    orphan = _deck_slide(SlideType.CONTENT_SPLIT, section_name=None, title="Unassigned")
+    assert validate_section_against_plan(deck, _good_plan(), orphan) == []
 
 
 def test_deck_invented_figure_fails_d_x1() -> None:

@@ -77,12 +77,14 @@ from packages.core.models.presentation import (
     QuizQuestion,
     ResourceLink,
     SlideContent,
+    SlideRegenResult,
     SlideSpec,
     StatItem,
     TableRow,
     ThesisVerdict,
     TimelineNode,
     TrueFalseItem,
+    find_slide_by_id,
     new_deck_id,
 )
 from packages.core.models.project import Project, ProjectCreate
@@ -201,6 +203,7 @@ __all__ = [
     "SectionNeedType",
     "SectionSuggestions",
     "SlideContent",
+    "SlideRegenResult",
     "SlideSpec",
     "Source",
     "SourceChunk",
@@ -223,5 +226,6 @@ __all__ = [
     "User",
     "UserCreate",
     "WeaknessProfile",
+    "find_slide_by_id",
     "new_deck_id",
 ]
