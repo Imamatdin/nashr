@@ -39,7 +39,7 @@ from typing import Any, Final, NamedTuple
 
 from pydantic import ValidationError
 
-from packages.core.llm import LLMClient
+from packages.core.gemini import GEMINI_PRO_3_1_MODEL, GeminiClient
 from packages.core.models.presentation import (
     AuditCheckResult,
     DeckPlan,
@@ -67,15 +67,18 @@ from packages.presentation._schema_feedback import (
 logger = logging.getLogger(__name__)
 
 
-SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
-PLANNER_MAX_TOKENS: Final[int] = 6_000
+# Gemini 3.x spends "thoughts" tokens before emitting visible output; the DeckPlan
+# JSON (thesis + up to 8 sections + up to 30 figures) needs headroom above the
+# visible payload so a thinking budget never truncates the plan. Sonnet ran this
+# at 6k with no thinking tokens; the 3.x migration raises it.
+PLANNER_MAX_TOKENS: Final[int] = 12_000
 
 # Bound the chunk text we send to the planner. The editorial pass's
 # content summary is implicitly bounded by ContentAnalysis list caps
 # (200 / 100 / 50 entries); the planner has no such intermediate, so we
-# cap directly in characters. 32_000 characters ≈ 8K Sonnet tokens for
-# the source view alone, leaving room for claims + metadata + the
-# system prompt under Sonnet 4.6's 200K context window with comfort.
+# cap directly in characters. 32_000 characters ≈ 8K tokens for the source view
+# alone, leaving room for claims + metadata + the system prompt well within the
+# planner model's large context window.
 _MAX_CHUNK_CHARS_TOTAL: Final[int] = 32_000
 
 # Per-chunk cap so one outlier chunk cannot starve the rest. 4_000 chars
@@ -102,13 +105,13 @@ class PlannerError(RuntimeError):
 class PlannerPass:
     """Produce a :class:`DeckPlan` from interview answers + parsed source."""
 
-    def __init__(self, llm: LLMClient | None = None) -> None:
-        self._llm = llm
+    def __init__(self, gemini: GeminiClient | None = None) -> None:
+        self._gemini = gemini
 
-    def _get_llm(self) -> LLMClient:
-        if self._llm is None:
-            self._llm = LLMClient()
-        return self._llm
+    def _get_gemini(self) -> GeminiClient:
+        if self._gemini is None:
+            self._gemini = GeminiClient()
+        return self._gemini
 
     async def plan_deck(
         self,
@@ -150,7 +153,7 @@ class PlannerPass:
         return await self._call_with_retry(system, user)
 
     async def _call_with_retry(self, system: str, user: str) -> DeckPlan:
-        """One Sonnet call; on failure, retry ONCE with a failure-specific nudge.
+        """One Gemini call; on failure, retry ONCE with a failure-specific nudge.
 
         The retry is INFORMED, not blind. The two failure modes need different
         corrections, and conflating them is why the first design could not
@@ -171,12 +174,11 @@ class PlannerPass:
         for the reason above — more rolls at temperature 0 do not help.
         """
 
-        first = await self._get_llm().complete(
+        first = await self._get_gemini().complete(
             system=system,
             user=user,
-            model=SONNET_MODEL,
+            model=GEMINI_PRO_3_1_MODEL,
             max_tokens=PLANNER_MAX_TOKENS,
-            cache="5m",
         )
         parsed = _parse_plan(first.content)
         if parsed.plan is not None:
@@ -195,12 +197,11 @@ class PlannerPass:
             )
             retry_user = user + PLANNER_RETRY_SUFFIX
 
-        retry = await self._get_llm().complete(
+        retry = await self._get_gemini().complete(
             system=system,
             user=retry_user,
-            model=SONNET_MODEL,
+            model=GEMINI_PRO_3_1_MODEL,
             max_tokens=PLANNER_MAX_TOKENS,
-            cache="5m",
         )
         parsed = _parse_plan(retry.content)
         if parsed.plan is None:
@@ -433,4 +434,4 @@ def _truncate_at_word(value: str, limit: int) -> str:
     return hard
 
 
-__all__ = ["SONNET_MODEL", "PlannerError", "PlannerPass"]
+__all__ = ["PlannerError", "PlannerPass"]

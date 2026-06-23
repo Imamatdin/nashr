@@ -30,6 +30,7 @@ from packages.core.enums import (
     NarrativeEmphasis,
     NarrativePhase,
 )
+from packages.core.gemini import GEMINI_PRO_3_1_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.presentation import (
     DeckPlan,
@@ -41,14 +42,13 @@ from packages.core.models.source import (
     SourceMetadataExtracted,
 )
 from packages.presentation.planner import (
-    SONNET_MODEL,
     PlannerError,
     PlannerPass,
 )
 
 
-class _StubLLM:
-    """Replays scripted text responses in order."""
+class _StubGemini:
+    """Replays scripted text responses in order (duck-typed GeminiClient)."""
 
     def __init__(self, responses: list[str]) -> None:
         self.responses = list(responses)
@@ -58,10 +58,9 @@ class _StubLLM:
         self,
         system: str,
         user: str,
-        model: str = SONNET_MODEL,
+        model: str = GEMINI_PRO_3_1_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
-        cache: bool | str = False,
     ) -> LLMResponse:
         self.calls.append((system, user))
         if not self.responses:
@@ -137,8 +136,8 @@ def _valid_plan_payload() -> dict[str, Any]:
 
 
 async def test_plan_deck_returns_validated_deck_plan() -> None:
-    stub = _StubLLM([json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     plan = await planner.plan_deck(
         interview=_interview(),
         claims=[_claim("Voltaire defended freedom of conscience.")],
@@ -153,8 +152,8 @@ async def test_plan_deck_returns_validated_deck_plan() -> None:
 async def test_plan_deck_strips_code_fence_around_json() -> None:
     payload = json.dumps(_valid_plan_payload())
     fenced = f"```json\n{payload}\n```"
-    stub = _StubLLM([fenced])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([fenced])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     plan = await planner.plan_deck(
         interview=_interview(),
         claims=[],
@@ -170,8 +169,8 @@ async def test_plan_deck_strips_code_fence_around_json() -> None:
 
 
 async def test_plan_deck_retries_once_on_malformed_json() -> None:
-    stub = _StubLLM(["not json at all", json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini(["not json at all", json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     plan = await planner.plan_deck(
         interview=_interview(),
         claims=[],
@@ -187,8 +186,8 @@ async def test_plan_deck_retries_once_on_malformed_json() -> None:
 async def test_plan_deck_retries_once_on_schema_mismatch() -> None:
     bad_payload = _valid_plan_payload()
     bad_payload["sections"] = [bad_payload["sections"][0]]  # only 1 section
-    stub = _StubLLM([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     plan = await planner.plan_deck(
         interview=_interview(),
         claims=[],
@@ -200,8 +199,8 @@ async def test_plan_deck_retries_once_on_schema_mismatch() -> None:
 
 
 async def test_plan_deck_raises_planner_error_after_two_failures() -> None:
-    stub = _StubLLM(["{", "still not valid"])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini(["{", "still not valid"])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     with pytest.raises(PlannerError):
         await planner.plan_deck(
             interview=_interview(),
@@ -228,8 +227,8 @@ async def test_plan_deck_informed_retry_carries_the_schema_error() -> None:
 
     bad_payload = _valid_plan_payload()
     bad_payload["unexpected_field"] = "the model added a field outside the schema"
-    stub = _StubLLM([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     plan = await planner.plan_deck(
         interview=_interview(),
         claims=[],
@@ -258,8 +257,8 @@ async def test_plan_deck_logs_schema_error_field_paths(
 
     bad_payload = _valid_plan_payload()
     bad_payload["sections"] = [bad_payload["sections"][0]]  # 1 section -> too_short (min 2)
-    stub = _StubLLM([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(bad_payload), json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     with caplog.at_level("WARNING", logger="packages.presentation.planner"):
         plan = await planner.plan_deck(
             interview=_interview(),
@@ -334,8 +333,8 @@ async def test_plan_deck_accepts_people_free_response() -> None:
     payload["figures"] = []
     for section in payload["sections"]:
         section["figure_names"] = []
-    stub = _StubLLM([json.dumps(payload)])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(payload)])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     plan = await planner.plan_deck(
         interview=_interview(),
         claims=[],
@@ -361,8 +360,8 @@ async def test_source_view_contains_chunk_text_verbatim() -> None:
     """
 
     chunk_text = "Bach (1685-1750) hám Mozart (1756-1791) klassikalıq musikanın simvolları."
-    stub = _StubLLM([json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     await planner.plan_deck(
         interview=_interview(),
         claims=[],
@@ -376,8 +375,8 @@ async def test_source_view_contains_chunk_text_verbatim() -> None:
 
 
 async def test_source_view_includes_extracted_claims() -> None:
-    stub = _StubLLM([json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     claim_text = "Voltaire defended freedom of conscience throughout his life."
     await planner.plan_deck(
         interview=_interview(),
@@ -390,8 +389,8 @@ async def test_source_view_includes_extracted_claims() -> None:
 
 
 async def test_source_view_includes_metadata_when_present() -> None:
-    stub = _StubLLM([json.dumps(_valid_plan_payload())])
-    planner = PlannerPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([json.dumps(_valid_plan_payload())])
+    planner = PlannerPass(gemini=stub)  # type: ignore[arg-type]
     metadata = SourceMetadataExtracted(
         title="Ag'artıwshılıq dáwiri",
         authors=["Pedagogika klassi"],

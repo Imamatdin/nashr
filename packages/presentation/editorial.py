@@ -512,10 +512,12 @@ class EditorialPass:
         return self._gemini
 
     def _get_planner(self) -> PlannerPass:
-        # Reuse the configured Sonnet client so planner calls share editorial's
-        # client (and its cost accounting) instead of building a second one.
+        # The planner runs on Gemini 3.1 Pro; reuse editorial's configured Gemini
+        # client so planner calls share the same (Vertex) routing and cost
+        # accounting as the classifier and critic instead of building a second one.
+        # Editorial's own executor keeps its separate Sonnet LLMClient (_get_llm).
         if self._planner is None:
-            self._planner = PlannerPass(llm=self._get_llm())
+            self._planner = PlannerPass(gemini=self._get_gemini())
         return self._planner
 
     def _get_classifier(self) -> ThesisClassifier:
