@@ -2925,3 +2925,74 @@ async def test_content_critic_warn_only_does_not_route() -> None:
 
     assert out[0].slide_id == slide.slide_id  # unchanged
     assert pass_._gemini.critic_calls == 1  # no regen, no re-judge
+
+
+async def test_content_critic_keeps_original_when_regen_fails_then_residual_fires() -> None:
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    # The regen comes back with a DIFFERENT slide type -> R-T1 type-change FAIL ->
+    # regen.passed is False -> the failing regen is NOT spliced, the original
+    # (still-fabricated) slide is kept, and the single re-judge re-flags it.
+    regen = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "content_split",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    pass_ = _editorial(
+        _StubLLM([regen]),
+        critic=[_critic_response([fab]), _critic_response([fab])],
+        plan=plan,
+    )
+
+    # The raise proves the kept original reached the re-judge and tripped the
+    # critic — the failing regen was not silently shipped, nor was the defect
+    # silently swallowed.
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(_interview(), _design(), plan, [slide], claims, "proj")
+    assert any(f.check_id == "C-FB" for f in exc.value.findings)
+    assert pass_._gemini.critic_calls == 2  # initial critique + exactly one re-judge
+
+
+async def test_content_critic_skips_emergency_deck() -> None:
+    plan = _stub_plan()
+    # The exact emergency-fallback shape: 2 slides, TITLE_HERO + SUMMARY_TAKEAWAY,
+    # the sentinel takeaway title, no section metadata.
+    emergency = [
+        SlideSpec(
+            slide_index=0,
+            slide_type=SlideType.TITLE_HERO,
+            content=SlideContent(title="A deck"),
+        ),
+        SlideSpec(
+            slide_index=1,
+            slide_type=SlideType.SUMMARY_TAKEAWAY,
+            content=SlideContent(
+                title="Insufficient source material",
+                bullets=["Add more source material to generate a full deck."],
+            ),
+        ),
+    ]
+    claims = [_claim("Real claims exist, but the executor produced nothing usable.")]
+    pass_ = _editorial(_StubLLM([]), plan=plan)
+
+    out = await pass_._enforce_content_critic(
+        _interview(), _design(), plan, emergency, claims, "proj"
+    )
+
+    assert out is emergency  # returned unchanged
+    assert pass_._gemini.critic_calls == 0  # the emergency guard fired; no critic call

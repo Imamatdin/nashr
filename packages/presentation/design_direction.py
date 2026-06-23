@@ -257,7 +257,7 @@ class _LLMDesignDirection(BaseModel):
 class DesignDirectionPass:
     """Generate a bespoke :class:`DesignDirectionSpec` for one deck.
 
-    The primary path is one Sonnet call that derives a topic-specific
+    The primary path is one Gemini 3.5 Flash call that derives a topic-specific
     palette and typography. When that call fails or yields invalid
     output, the pass falls back to the deterministic six-mood table via
     :meth:`_generate_deterministic`. Stateless apart from the injected
@@ -288,7 +288,7 @@ class DesignDirectionPass:
         """Return the design direction for one deck.
 
         Detects the domain (which seeds both the LLM hint and the fallback
-        mood), resolves the dominant background treatment, then asks Sonnet
+        mood), resolves the dominant background treatment, then asks the model
         for a bespoke palette + typography. The LLM output is validated for
         safe-set fonts (R50) and WCAG AA contrast (R12); any failure — bad
         JSON, a font outside the safe set, or a low-contrast palette — falls
@@ -335,7 +335,7 @@ class DesignDirectionPass:
         user: str,
         treatment: BackgroundTreatment,
     ) -> DesignDirectionSpec | None:
-        """One Sonnet call; on bad/invalid output, retry once with a stricter suffix."""
+        """One Gemini 3.5 Flash call; on bad/invalid output, retry once with a stricter suffix."""
 
         first = await self._get_gemini().complete(
             system=system,

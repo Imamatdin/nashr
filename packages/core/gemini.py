@@ -120,14 +120,14 @@ GenerateContentFn = Callable[..., Awaitable[_GenerateContentResponseLike]]
 def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
     """Return USD cost of one Gemini call from its model name and token usage.
 
-    Falls back to Flash pricing for unknown model strings — cost
-    accounting must never fail a user-visible job, but a misrouted call
-    would still be surfaced via the per-call info log line.
+    Falls back to current-generation Flash pricing for unknown model
+    strings — cost accounting must never fail a user-visible job, but a
+    misrouted call would still be surfaced via the per-call info log line.
     """
 
     rates = GEMINI_COSTS.get(model)
     if rates is None:
-        rates = GEMINI_COSTS[GEMINI_FLASH_MODEL]
+        rates = GEMINI_COSTS[GEMINI_FLASH_3_5_MODEL]
     input_rate, output_rate = rates
     return (input_tokens / 1_000_000.0) * input_rate + (output_tokens / 1_000_000.0) * output_rate
 
@@ -218,7 +218,7 @@ class GeminiClient:
     the live SDK initialization.
     """
 
-    DEFAULT_MODEL: ClassVar[str] = GEMINI_FLASH_MODEL
+    DEFAULT_MODEL: ClassVar[str] = GEMINI_FLASH_3_5_MODEL
 
     def __init__(
         self,
@@ -239,7 +239,7 @@ class GeminiClient:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_MODEL,
+        model: str = GEMINI_FLASH_3_5_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:

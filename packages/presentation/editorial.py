@@ -585,7 +585,7 @@ class EditorialPass:
         )
 
         interactive_slides: list[SlideSpec] = []
-        if interview.include_interactive:
+        if interview.include_interactive and not _is_emergency_deck(content_slides):
             interactive_slides = await self._generate_interactive_slides(
                 content_slides=content_slides,
                 analysis=analysis,
@@ -775,6 +775,23 @@ class EditorialPass:
             regen = await self.regenerate_slide_content(
                 deck, slide_id, instruction=_critic_instruction(findings), claims=claims
             )
+            if not regen.passed:
+                # The regen produced its OWN FAIL (off-roster person, type change,
+                # hollow divider) — shipping it would trade one defect for another,
+                # and SlideRegenResult's contract says a FAIL slide must not ship.
+                # Keep the original slide and do NOT retry; the single re-judge below
+                # re-flags its still-present critic defect, and the residual policy
+                # resolves it (hard-stop if C-FB/C-US, degrade-and-ship otherwise).
+                logger.warning(
+                    "editorial_content_critic_regen_rejected",
+                    extra={
+                        "slide_id": slide_id,
+                        "regen_failures": [
+                            f.check_id for f in regen.findings if f.severity is AuditSeverity.FAIL
+                        ],
+                    },
+                )
+                continue
             deck = self.splice_regenerated_slide(deck, regen.slide)
         corrected = _post_process_repaired(deck.slides)
 
@@ -2094,10 +2111,23 @@ def _is_emergency_deck(slides: list[SlideSpec]) -> bool:
     """True when post-process produced the 2-slide emergency fallback.
 
     The emergency deck means the executor returned nothing usable (an infra
-    failure), not a plan mismatch — so the deck-vs-plan gate is skipped for it.
+    failure), not a plan mismatch — so the deck-vs-plan gate, the content critic,
+    and the interactive pass are all skipped for it. Matched by the fallback's
+    exact SHAPE (two slides, TITLE_HERO then SUMMARY_TAKEAWAY, neither carrying
+    section metadata) PLUS its sentinel takeaway title — not the title alone, so a
+    real deck with a slide that happens to share that title cannot skip the gates.
     """
 
-    return any(s.content.title == _EMERGENCY_TAKEAWAY_TITLE for s in slides)
+    if len(slides) != 2:
+        return False
+    title_hero, takeaway = slides
+    return (
+        title_hero.slide_type is SlideType.TITLE_HERO
+        and takeaway.slide_type is SlideType.SUMMARY_TAKEAWAY
+        and title_hero.section_name is None
+        and takeaway.section_name is None
+        and takeaway.content.title == _EMERGENCY_TAKEAWAY_TITLE
+    )
 
 
 def _is_routable_critic_finding(finding: AuditCheckResult) -> bool:

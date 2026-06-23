@@ -24,6 +24,8 @@ from google.genai import errors as genai_errors
 from pydantic import ValidationError
 
 from packages.core.gemini import (
+    GEMINI_COSTS,
+    GEMINI_FLASH_3_5_MODEL,
     GEMINI_FLASH_INPUT_COST_PER_MTOK,
     GEMINI_FLASH_LITE_INPUT_COST_PER_MTOK,
     GEMINI_FLASH_LITE_OUTPUT_COST_PER_MTOK,
@@ -113,7 +115,7 @@ def test_gemini_response_cost_calculation_pro() -> None:
 
 def test_gemini_response_cost_unknown_model_falls_back_to_flash() -> None:
     cost = gemini_cost_for("gemini-unknown", input_tokens=1_000_000, output_tokens=0)
-    assert cost == pytest.approx(GEMINI_FLASH_INPUT_COST_PER_MTOK)
+    assert cost == pytest.approx(GEMINI_COSTS[GEMINI_FLASH_3_5_MODEL][0])
 
 
 def test_gemini_client_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -209,13 +211,11 @@ async def test_gemini_client_returns_text_and_cost() -> None:
     assert response.content == "hello world"
     assert response.input_tokens == 200
     assert response.output_tokens == 400
-    expected_cost = (
-        200 / 1_000_000 * GEMINI_FLASH_INPUT_COST_PER_MTOK
-        + 400 / 1_000_000 * GEMINI_FLASH_OUTPUT_COST_PER_MTOK
-    )
+    flash_input, flash_output = GEMINI_COSTS[GEMINI_FLASH_3_5_MODEL]
+    expected_cost = 200 / 1_000_000 * flash_input + 400 / 1_000_000 * flash_output
     assert response.estimated_cost_usd == pytest.approx(expected_cost)
     assert len(calls) == 1
-    assert calls[0]["model"] == GEMINI_FLASH_MODEL
+    assert calls[0]["model"] == GEMINI_FLASH_3_5_MODEL  # the GeminiClient default is now 3.5 Flash
     assert calls[0]["contents"] == "usr"
 
 
