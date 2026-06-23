@@ -60,6 +60,7 @@ from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
 from packages.platform.storage import FileStorage
+from packages.presentation.editorial import EditorialContentCriticError
 
 logger = logging.getLogger("nashr.bot.presentation")
 
@@ -424,12 +425,20 @@ async def start_generation(
             package=package,
         )
     except _OrchestratorError as exc:
-        logger.exception(
-            "presentation_generation_failed_step",
-            extra={"project_id": project_id, "step": exc.step},
-        )
+        if _is_content_grounding_failure(exc):
+            logger.warning(
+                "presentation_content_ungrounded",
+                extra={"project_id": project_id},
+            )
+            failure_text = labels.generation_ungrounded_refunded
+        else:
+            logger.exception(
+                "presentation_generation_failed_step",
+                extra={"project_id": project_id, "step": exc.step},
+            )
+            failure_text = labels.generation_failed_at_step.format(step=exc.step)
         with contextlib.suppress(Exception):
-            await progress_msg.edit_text(labels.generation_failed_at_step.format(step=exc.step))
+            await progress_msg.edit_text(failure_text)
         with contextlib.suppress(Exception):
             await db.update_project_status(project_id, "failed")
         await _refund_on_failure(credits, data, project_id)
@@ -522,6 +531,24 @@ async def _refund_on_failure(credits: CreditLedger, data: dict[str, Any], projec
             "presentation_refund_failed",
             extra={"error_type": type(exc).__name__},
         )
+
+
+def _is_content_grounding_failure(exc: _OrchestratorError) -> bool:
+    """True when an orchestration failure is the content critic's hard stop.
+
+    The orchestrator wraps editorial errors as ``_OrchestratorError("editorial",
+    original)``; the critic's hard stop is an :class:`EditorialContentCriticError`.
+    We inspect ``original`` and walk a bounded ``__cause__`` chain so the detection
+    survives an extra wrap layer, then surface an honest "couldn't ground some
+    claims; you've been refunded" message instead of the generic step error.
+    """
+
+    candidates: list[BaseException | None] = [exc.original]
+    cursor: BaseException | None = exc
+    for _ in range(5):
+        cursor = cursor.__cause__ if cursor is not None else None
+        candidates.append(cursor)
+    return any(isinstance(candidate, EditorialContentCriticError) for candidate in candidates)
 
 
 def _package_for_generation(data: dict[str, Any]) -> GenerationPackage:

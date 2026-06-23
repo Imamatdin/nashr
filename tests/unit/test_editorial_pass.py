@@ -55,10 +55,11 @@ from packages.core.models.source import (
     SourceClaimCreate,
     SourceMetadataExtracted,
 )
-from packages.core.prompts import EDITORIAL_SYSTEM
+from packages.core.prompts import CONTENT_CRITIC_SYSTEM, EDITORIAL_SYSTEM
 from packages.presentation.editorial import (
     SONNET_MODEL,
     WORD_LIMITS,
+    EditorialContentCriticError,
     EditorialDeckPlanMismatchError,
     EditorialPass,
     EditorialSlideRegenError,
@@ -105,6 +106,51 @@ class _StubLLM:
             output_tokens=80,
             latency_ms=5,
             estimated_cost_usd=0.0001,
+        )
+
+
+class _StubGemini:
+    """Routes editorial's Gemini calls by prompt so one stub serves both passes.
+
+    The content-critic call shares editorial's Gemini client; it is identified by
+    its system prompt and answered with scripted critic findings — EMPTY by
+    default, so the critic is a no-op unless a test scripts otherwise via the
+    ``critic`` factory arg. Every other call (the interactive pass) is delegated
+    to the scripted interactive stub, preserving the historical ``gemini=``
+    semantics.
+    """
+
+    def __init__(
+        self,
+        *,
+        critic: list[str] | None = None,
+        interactive: _StubLLM | None = None,
+    ) -> None:
+        self._critic = list(critic) if critic is not None else None
+        self._interactive = interactive if interactive is not None else _StubLLM([])
+        self.critic_calls = 0
+
+    async def complete(
+        self,
+        system: str,
+        user: str,
+        model: str = GEMINI_FLASH_MODEL,
+        max_tokens: int = 2000,
+        temperature: float = 0.0,
+    ) -> LLMResponse:
+        if system == CONTENT_CRITIC_SYSTEM:
+            self.critic_calls += 1
+            text = self._critic.pop(0) if self._critic else '{"findings": []}'
+            return LLMResponse(
+                content=text,
+                model=model,
+                input_tokens=10,
+                output_tokens=5,
+                latency_ms=1,
+                estimated_cost_usd=0.0,
+            )
+        return await self._interactive.complete(
+            system, user, model=model, max_tokens=max_tokens, temperature=temperature
         )
 
 
@@ -200,19 +246,24 @@ def _editorial(
     llm: _StubLLM | None = None,
     *,
     gemini: _StubLLM | None = None,
+    critic: list[str] | None = None,
     plan: DeckPlan | list[DeckPlan] | None = None,
     planner: _StubPlanner | None = None,
     classifier: ThesisClassifier | None = None,
 ) -> EditorialPass:
     """EditorialPass wired with stub planner + classifier so generate_deck_spec
     never reaches a real planner/classifier LLM. The default plan is a valid
-    2-section, figure-free plan; pass ``plan`` to override."""
+    2-section, figure-free plan; pass ``plan`` to override.
+
+    The content critic shares editorial's Gemini client; it is stubbed to return
+    NO findings by default (pass ``critic`` to script critic response bodies),
+    while ``gemini`` continues to script the interactive pass."""
 
     if planner is None:
         planner = _StubPlanner(plan if plan is not None else _stub_plan())
     return EditorialPass(
         llm=llm,  # type: ignore[arg-type]
-        gemini=gemini,  # type: ignore[arg-type]
+        gemini=_StubGemini(critic=critic, interactive=gemini),  # type: ignore[arg-type]
         planner=planner,  # type: ignore[arg-type]
         classifier=classifier if classifier is not None else _StubClassifier(),
     )
@@ -2725,3 +2776,152 @@ async def test_regenerate_slide_produces_null_image_urls_for_re_resolution() -> 
     assert result.slide.content.figure_url is None  # no stale URL carried forward
     assert result.slide.content.background_url is None
     assert result.slide.content.figure_prompt is not None  # but the image HINT is present
+
+
+# ---------------------------------------------------------------------------
+# Content critic orchestration: routing, one-round re-judge, residual hard-stop
+# ---------------------------------------------------------------------------
+
+
+def _critic_response(findings: list[dict[str, Any]]) -> str:
+    return json.dumps({"findings": findings})
+
+
+def _fab_finding(handle: int, quote: str, token: str) -> dict[str, Any]:
+    return {
+        "slide_handle": handle,
+        "category": "fabrication",
+        "message": f"{token} is not supported by the source.",
+        "evidence": {"slide_quote": quote, "unsupported_token": token, "second_quote": None},
+    }
+
+
+def _critic_content_slide(title: str, body: str, section_name: str, thesis: str) -> SlideSpec:
+    return SlideSpec(
+        slide_index=0,
+        slide_type=SlideType.CONCEPT_DEFINITION,
+        content=SlideContent(title=title, body_text=body),
+        section_name=section_name,
+        section_thesis=thesis,
+    )
+
+
+async def test_content_critic_routes_fixes_and_preserves_slide_id() -> None:
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    regen = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    pass_ = _editorial(
+        _StubLLM([regen]),
+        critic=[
+            _critic_response(
+                [
+                    _fab_finding(
+                        1, "Water savings reached 94.4 percent in field trials.", "94.4 percent"
+                    )
+                ]
+            ),
+            _critic_response([]),  # re-judge: clean
+        ],
+        plan=plan,
+    )
+
+    out = await pass_._enforce_content_critic(
+        _interview(), _design(), plan, [slide], claims, "proj"
+    )
+
+    assert len(out) == 1
+    assert out[0].slide_id == slide.slide_id  # durable id preserved across regen + splice
+    assert "94.4" not in (out[0].content.body_text or "")  # the fabricated fact is gone
+    assert pass_._gemini.critic_calls == 2  # initial critique + exactly one re-judge
+
+
+async def test_content_critic_residual_fabrication_raises() -> None:
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    # The regen "fails to fix" — it still asserts the fabricated figure.
+    regen = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": "Water savings reached 94.4 percent in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    pass_ = _editorial(
+        _StubLLM([regen]),
+        critic=[_critic_response([fab]), _critic_response([fab])],  # residual survives the re-judge
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(_interview(), _design(), plan, [slide], claims, "proj")
+    assert any(f.check_id == "C-FB" for f in exc.value.findings)
+
+
+async def test_content_critic_warn_only_does_not_route() -> None:
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "The programme has a long documented history of careful testing.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The programme is documented across many years of careful testing work.")]
+    pass_ = _editorial(
+        _StubLLM([]),  # no regen scripted — must not be called
+        critic=[
+            _critic_response(
+                [
+                    {
+                        "slide_handle": 1,
+                        "category": "weak_craft",
+                        "message": "Generic phrasing.",
+                        "evidence": {
+                            "slide_quote": "The programme has a long documented history of careful testing.",
+                            "unsupported_token": None,
+                            "second_quote": None,
+                        },
+                    }
+                ]
+            )
+        ],
+        plan=plan,
+    )
+
+    out = await pass_._enforce_content_critic(
+        _interview(), _design(), plan, [slide], claims, "proj"
+    )
+
+    assert out[0].slide_id == slide.slide_id  # unchanged
+    assert pass_._gemini.critic_calls == 1  # no regen, no re-judge

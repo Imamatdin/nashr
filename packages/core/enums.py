@@ -298,6 +298,39 @@ class AuditSeverity(StrEnum):
     WARN = "warn"
 
 
+class ContentCriticCategory(StrEnum):
+    """The defect class an adversarial content-critic finding reports.
+
+    The critic's output vocabulary. Values are lowercase wire strings (the model
+    emits these); the short ``C-*`` audit ``check_id`` tags that pair with each
+    category, and the routable/hard-stop membership, live as constants in
+    :mod:`packages.presentation.content_critic` — mirroring how the ``D-*``/``P-*``
+    check ids are constants in :mod:`packages.presentation.plan_validator`, not
+    enum values.
+
+    Source-grounded (routable, hard-stop eligible): ``FABRICATION`` (a non-person
+    fact the source does not contain — people are already covered by the
+    deck-vs-plan D-X1 gate) and ``CLAIM_UNSUPPORTED``. Internal-consistency
+    (routable, not hard-stop): ``CHART_ENCODING_WRONG`` and
+    ``TITLE_SUBJECT_MISMATCH``. Emit-only WARN: ``HOLLOW_SLIDE`` (code-detected,
+    not LLM-judged — surfaced for visibility but never auto-regenerated),
+    ``SECTION_OFF_THESIS``, ``PLAN_TYPES_NOT_HONORED``, ``CROSS_SECTION_INCOHERENCE``
+    (a DIAGNOSTIC PROBE — the plan is a flat list of section theses with no
+    inter-section edges, so this has no structural support and exists to measure
+    cohesion-detectability, not to enforce), and ``WEAK_CRAFT`` (cosmetic).
+    """
+
+    FABRICATION = "fabrication"
+    CLAIM_UNSUPPORTED = "claim_unsupported"
+    CHART_ENCODING_WRONG = "chart_encoding_wrong"
+    TITLE_SUBJECT_MISMATCH = "title_subject_mismatch"
+    HOLLOW_SLIDE = "hollow_slide"
+    SECTION_OFF_THESIS = "section_off_thesis"
+    PLAN_TYPES_NOT_HONORED = "plan_types_not_honored"
+    CROSS_SECTION_INCOHERENCE = "cross_section_incoherence"
+    WEAK_CRAFT = "weak_craft"
+
+
 class JobType(StrEnum):
     """Background-job kinds tracked in generation_jobs."""
 

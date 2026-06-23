@@ -113,6 +113,11 @@ from packages.presentation._schema_feedback import (
     loc_path,
     summarise_errors,
 )
+from packages.presentation.content_critic import (
+    HARD_STOP_CHECK_IDS,
+    ROUTABLE_CHECK_IDS,
+    critique_deck_adversarially,
+)
 from packages.presentation.emphasis import EmphasisProvenance, apply_emphasis_fallback
 from packages.presentation.plan_validator import (
     failing_section_indices,
@@ -374,6 +379,26 @@ class EditorialSlideRegenError(EditorialError):
     """
 
 
+class EditorialContentCriticError(EditorialError):
+    """The content critic confirmed a source-grounding defect that survived repair.
+
+    Raised when, after one round of single-slide regeneration, the adversarial
+    content critic still reports a code-confirmed FABRICATION or CLAIM_UNSUPPORTED
+    finding (a verbatim fact-token on a slide that is absent from the full source
+    claims). Shipping a known, logged fabrication is exactly what the
+    source-grounding contract forbids, so this is a hard stop that propagates to
+    the orchestrator and refunds the user. Carries the residual hard-stop findings
+    so the handler can surface an honest "couldn't ground some claims" message.
+    Cosmetic, structural, chart, and title findings never raise this — they are
+    WARN and ship.
+    """
+
+    def __init__(self, findings: list[AuditCheckResult]) -> None:
+        self.findings = findings
+        detail = "; ".join(f"[{f.check_id}] {f.message or ''}" for f in findings) or "(no detail)"
+        super().__init__(f"Deck makes claims the source does not support: {detail}")
+
+
 # ---------------------------------------------------------------------------
 # Parsing schemas for LLM output
 # ---------------------------------------------------------------------------
@@ -547,6 +572,9 @@ class EditorialPass:
         )
         content_slides = self._post_process(raw_slides, interview)
         content_slides = await self._enforce_plan_adherence(interview, arc, plan, content_slides)
+        content_slides = await self._enforce_content_critic(
+            interview, design, plan, content_slides, claims, project_id
+        )
 
         interactive_slides: list[SlideSpec] = []
         if interview.include_interactive:
@@ -690,6 +718,69 @@ class EditorialPass:
         replacements = _materialise_slides(parsed, plan)
         spliced = _splice_sections(content_slides, replacements, failing, plan)
         return _post_process_repaired(spliced)
+
+    async def _enforce_content_critic(
+        self,
+        interview: PresentationInterviewAnswers,
+        design: DesignDirectionSpec,
+        plan: DeckPlan,
+        content_slides: list[SlideSpec],
+        claims: list[SourceClaimCreate],
+        project_id: str,
+    ) -> list[SlideSpec]:
+        """Audit the post-adherence content against the source; route + re-judge once.
+
+        Runs the adversarial content critic (one Gemini 3.1 Pro call) on the content
+        slides BEFORE the interactive pass, so corrected content flows into
+        interactive generation. Routable FAIL findings (fabrication, unsupported,
+        chart/title, hollow) are grouped by durable ``slide_id`` and regenerated one
+        slide each via :meth:`regenerate_slide_content` (which preserves the id),
+        spliced back, then re-judged ONCE. If a code-confirmed fabrication or
+        unsupported claim survives that round, this raises
+        :class:`EditorialContentCriticError` (a hard stop that refunds); every other
+        residual finding is WARN and ships (I5 degrade-and-ship).
+
+        Skipped for the emergency-minimal deck (an infra fallback, not a content
+        defect) and when there are no claims to ground against.
+        """
+
+        if _is_emergency_deck(content_slides) or not claims:
+            return content_slides
+
+        gemini = self._get_gemini()
+        result = await critique_deck_adversarially(
+            content_slides, plan, claims=claims, gemini=gemini, language=interview.language
+        )
+        routable = [f for f in result.failures if _is_routable_critic_finding(f)]
+        if not routable:
+            return content_slides
+
+        logger.warning(
+            "editorial_content_critic_routing",
+            extra={"routable": [f.check_id for f in routable]},
+        )
+        # The regen path operates on a DeckSpec; assemble a throwaway content-only
+        # deck (no interactives yet) to drive the slide_id-preserving regen, then
+        # take its corrected slides back. _assemble_deck is a pure constructor.
+        deck = self._assemble_deck(content_slides, interview, design, project_id, plan)
+        for slide_id, findings in _group_critic_findings_by_slide_id(routable).items():
+            regen = await self.regenerate_slide_content(
+                deck, slide_id, instruction=_critic_instruction(findings), claims=claims
+            )
+            deck = self.splice_regenerated_slide(deck, regen.slide)
+        corrected = _post_process_repaired(deck.slides)
+
+        rejudged = await critique_deck_adversarially(
+            corrected, plan, claims=claims, gemini=gemini, language=interview.language
+        )
+        residual = [f for f in rejudged.failures if f.check_id in HARD_STOP_CHECK_IDS]
+        if residual:
+            logger.warning(
+                "editorial_content_critic_hard_stop",
+                extra={"residual": [f.check_id for f in residual]},
+            )
+            raise EditorialContentCriticError(residual)
+        return corrected
 
     # ------------------------------------------------------------------
     # Single-slide regeneration (judge + conversational edit layer)
@@ -1996,6 +2087,43 @@ def _is_emergency_deck(slides: list[SlideSpec]) -> bool:
     """
 
     return any(s.content.title == _EMERGENCY_TAKEAWAY_TITLE for s in slides)
+
+
+def _is_routable_critic_finding(finding: AuditCheckResult) -> bool:
+    """A critic finding enters single-slide regen only if it pins a slide and FAILs.
+
+    The structural/cosmetic categories are WARN and never in ``ROUTABLE_CHECK_IDS``,
+    so they can never satisfy this and can never trigger a regen.
+    """
+
+    return (
+        finding.check_id in ROUTABLE_CHECK_IDS
+        and finding.slide_id is not None
+        and finding.severity is AuditSeverity.FAIL
+    )
+
+
+def _group_critic_findings_by_slide_id(
+    findings: list[AuditCheckResult],
+) -> dict[str, list[AuditCheckResult]]:
+    """Group routable findings by durable slide_id — one regen per slide."""
+
+    grouped: dict[str, list[AuditCheckResult]] = defaultdict(list)
+    for finding in findings:
+        if finding.slide_id is not None:
+            grouped[finding.slide_id].append(finding)
+    return dict(grouped)
+
+
+def _critic_instruction(findings: list[AuditCheckResult]) -> str:
+    """Build a single-slide regen instruction from one slide's critic findings."""
+
+    defects = "; ".join(f.message for f in findings if f.message) or "a source-grounding defect"
+    return (
+        f"A content critic flagged this slide: {defects}. Fix every flagged defect. "
+        "State only facts grounded in the provided source claims; remove or correct "
+        "anything the source does not support."
+    )
 
 
 def _materialise_slides(parsed: list[_LLMSlide], plan: DeckPlan | None = None) -> list[SlideSpec]:

@@ -470,6 +470,7 @@ export interface AuditCheckResult {
   passed: boolean;
   severity: AuditSeverity;
   slide_index?: number | null;
+  slide_id?: string | null;
   rule_reference?: string | null;
   message?: string | null;
 }

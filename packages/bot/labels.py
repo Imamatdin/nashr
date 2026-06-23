@@ -88,6 +88,7 @@ class BotLabels:
 
     failed_sources_warning: str
     generation_failed_at_step: str
+    generation_ungrounded_refunded: str
 
 
 LABELS_UZ = BotLabels(
@@ -157,6 +158,10 @@ LABELS_UZ = BotLabels(
     generation_failed_at_step=(
         "Xatolik: {step}. Qayta urinib ko'ring yoki qo'llab-quvvatlash xizmatiga murojaat qiling."
     ),
+    generation_ungrounded_refunded=(
+        "Ba'zi da'volarni manbalaringizdan tasdiqlab bo'lmadi, shuning uchun hech narsa "
+        "yuborilmadi va to'lovingiz qaytarildi. Ko'proq manba qo'shib, qayta urinib ko'ring."
+    ),
 )
 
 
@@ -222,6 +227,10 @@ LABELS_RU = BotLabels(
     generation_failed_at_step=(
         "Ошибка на этапе: {step}. Попробуйте снова или обратитесь в поддержку."
     ),
+    generation_ungrounded_refunded=(
+        "Некоторые утверждения не удалось подтвердить вашими источниками, поэтому ничего "
+        "не отправлено, а средства возвращены. Добавьте больше источников и попробуйте снова."
+    ),
 )
 
 
@@ -285,6 +294,10 @@ LABELS_EN = BotLabels(
     no_projects_yet="No projects yet.",
     failed_sources_warning=("⚠️ {count} file(s) could not be processed:\n{details}"),
     generation_failed_at_step=("Error at step: {step}. Please try again or contact support."),
+    generation_ungrounded_refunded=(
+        "Some claims couldn't be grounded in your sources, so nothing was shipped and "
+        "you've been refunded. Add more source material and try again."
+    ),
 )
 
 
@@ -350,6 +363,10 @@ LABELS_KAA = BotLabels(
     failed_sources_warning=("⚠️ {count} fayl qayta islenbedi:\n{details}"),
     generation_failed_at_step=(
         "Qátelik: {step}. Qayta urınıp kóriń yamasa qollap-quwatlawǵa baylanısıń."
+    ),
+    generation_ungrounded_refunded=(
+        "Ba'zi da'walar dereklerińizden tastıyıqlanbadı, sonlıqtan hesh nárse jiberilmedi "
+        "hám tólem qaytarıldı. Kóbirek derek qosıp, qayta urınıp kóriń."
     ),
 )
 

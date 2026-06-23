@@ -540,6 +540,13 @@ class AuditCheckResult(BaseModel):
     passed: bool
     severity: AuditSeverity
     slide_index: int | None = Field(default=None, ge=0)
+    # The durable slide identity a finding pins, distinct from the overloaded
+    # ``slide_index`` (which is variously a section index, a figure index, or a
+    # deck position depending on the check). Set by the content critic so a
+    # routable finding survives ``_reindex`` and addresses one slide
+    # unambiguously across regen/splice. None for the structural D-*/P-* checks
+    # that predate per-slide routing.
+    slide_id: str | None = Field(default=None, max_length=64)
     rule_reference: str | None = Field(default=None, max_length=10)
     message: str | None = Field(default=None, max_length=500)
 

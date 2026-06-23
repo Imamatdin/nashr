@@ -45,6 +45,12 @@ GEMINI_FLASH_MODEL: Final[str] = "gemini-2.5-flash"
 # interactive-pass calls (which stay on 2.5 Flash).
 GEMINI_FLASH_3_5_MODEL: Final[str] = "gemini-3.5-flash"
 
+# Current-generation Pro — the strong-reasoning tier. Opt-in (not the
+# GeminiClient default): pass explicitly as ``model=``. Used by the planner
+# (source-grounded authorship plan) and the content critic (adversarial
+# source-grounding audit). Its cost entry is in GEMINI_COSTS below.
+GEMINI_PRO_3_1_MODEL: Final[str] = "gemini-3.1-pro-preview"
+
 # Per million tokens (input, output)
 GEMINI_COSTS: Final[dict[str, tuple[float, float]]] = {
     "gemini-2.5-flash": (0.50, 3.00),
