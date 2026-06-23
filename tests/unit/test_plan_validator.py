@@ -47,7 +47,6 @@ from packages.core.models.presentation import (
 )
 from packages.core.models.source import SourceClaimCreate
 from packages.presentation.plan_validator import (
-    critique_deck_adversarially,
     validate_deck_against_plan,
     validate_plan,
     validate_plan_async,
@@ -680,15 +679,6 @@ def test_name_match_tolerates_year_suffix() -> None:
     )
     result = validate_deck_against_plan(deck, _good_plan())
     assert result.passed, _failure_ids(result.findings)
-
-
-def test_critique_deck_adversarially_is_noop_not_raising() -> None:
-    """The Phase-3 seam must not raise (it shares a module with the live
-    path) — it returns an empty, passing result until Phase 3 implements it."""
-
-    result = critique_deck_adversarially(_good_deck(), _good_plan())
-    assert result.passed
-    assert result.findings == []
 
 
 # ---------------------------------------------------------------------------

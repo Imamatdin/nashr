@@ -63,8 +63,8 @@ generated slide sequence to confirm it filled the plan — every planned
 section covered (D-S1), every section's planned figures portrayed (D-F1), no
 person outside the roster on any slide but TEAM_CREDITS (D-X1), no ``people``
 field on a slide type that does not render it (D-X2), and a WARN for any slide
-tagged with an unplanned section (D-A1). :func:`critique_deck_adversarially`
-is the Phase-3 seam; it is a no-op (never raises) until Phase 3 lands.
+tagged with an unplanned section (D-A1). The Phase-3 adversarial content critic
+now lives in :mod:`packages.presentation.content_critic`.
 """
 
 from __future__ import annotations
@@ -284,22 +284,6 @@ def validate_section_against_plan(
         slides, plan
     )
     return [finding for finding in findings if finding.slide_index == section_index]
-
-
-def critique_deck_adversarially(slides: list[SlideSpec], plan: DeckPlan) -> PlanValidationResult:
-    """Phase-3 seam — adversarial deck critic. Not yet implemented.
-
-    Phase 3 will add an LLM critic that reads each slide against the plan's
-    section theses and ``why_in_source`` anchors and flags claims the source
-    does not support. Until then this is a NO-OP that returns an empty
-    (passing) result — deliberately NOT a ``NotImplementedError``, because
-    unlike the Phase-1 stub this function shares a module with the live
-    deck-vs-plan path; a raising stub here would be one accidental import away
-    from breaking production. The Phase-2 live path does not call this.
-    """
-
-    del slides, plan
-    return PlanValidationResult(findings=[])
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +830,6 @@ def _normalize(value: str) -> str:
 
 
 __all__ = [
-    "critique_deck_adversarially",
     "failing_section_indices",
     "validate_deck_against_plan",
     "validate_plan",

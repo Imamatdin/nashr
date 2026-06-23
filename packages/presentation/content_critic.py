@@ -70,10 +70,12 @@ from packages.core.text import grounded_in
 logger = logging.getLogger(__name__)
 
 
-# Per-call output budget. Gemini 3.x spends "thoughts" tokens before visible
-# output, so a multi-slide critique needs headroom; mirror the thesis
-# classifier's 8k allowance.
-CRITIC_MAX_TOKENS: Final[int] = 8_000
+# Per-call output budget. Gemini 3.1 Pro spends MORE "thoughts" tokens than Flash
+# before visible output, and the critic's input is large (the full deck plus up to
+# 60 claims), so a thin budget risks truncating the findings JSON — which would
+# silently degrade the critic to a no-op via the unparseable→retry→ship path.
+# Match the planner's Pro budget rather than the classifier's Flash 8k.
+CRITIC_MAX_TOKENS: Final[int] = 12_000
 
 # How many source claims the critic SEES in its prompt. The hard-stop absence
 # check reads the FULL claims list (never this capped pool), so a token beyond
