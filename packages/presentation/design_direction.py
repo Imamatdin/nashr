@@ -4,7 +4,7 @@ The pass is the "creative director" of the pipeline. It maps a deck's
 specific topic onto an aesthetic specification (palette, fonts, image
 style prefix) that the rest of the pipeline treats as immutable.
 
-The palette is produced by a single Sonnet call so every deck gets a
+The palette is produced by a single Gemini 3.5 Flash call so every deck gets a
 *bespoke* colour scheme derived from its subject matter rather than a
 hardcoded table entry (DESIGN-LANGUAGE.md R43: "if the output looks like
 it came from a theme picker, it fails"). The deterministic six-mood table
@@ -36,7 +36,7 @@ from packages.core.enums import (
     BackgroundTreatment,
     PresentationMood,
 )
-from packages.core.llm import LLMClient
+from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, GeminiClient
 from packages.core.models.presentation import (
     ColorPalette,
     DesignDirectionSpec,
@@ -57,14 +57,15 @@ from packages.suggestions.domain_detector import DomainDetector
 
 logger = logging.getLogger(__name__)
 
-SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
-
 # Low enough that re-runs of the same deck stay close, high enough that
 # the model can derive a topic-specific palette instead of collapsing to
 # one canonical answer per domain. The deterministic fallback handles the
 # residual jitter risk.
 DESIGN_TEMPERATURE: Final[float] = 0.4
-DESIGN_MAX_TOKENS: Final[int] = 1_500
+# Gemini 3.5 Flash spends "thoughts" tokens before visible output; the design
+# JSON itself is tiny, but the budget must clear the thinking phase or the spec
+# truncates and the pass falls back. (Sonnet ran this at 1.5k with no thinking.)
+DESIGN_MAX_TOKENS: Final[int] = 8_000
 
 # WCAG AA minimum contrast ratio for normal-size text.
 WCAG_AA_CONTRAST: Final[float] = 4.5
@@ -267,15 +268,15 @@ class DesignDirectionPass:
     def __init__(
         self,
         domain_detector: DomainDetector | None = None,
-        llm: LLMClient | None = None,
+        gemini: GeminiClient | None = None,
     ) -> None:
         self._domain_detector = domain_detector if domain_detector is not None else DomainDetector()
-        self._llm = llm
+        self._gemini = gemini
 
-    def _get_llm(self) -> LLMClient:
-        if self._llm is None:
-            self._llm = LLMClient()
-        return self._llm
+    def _get_gemini(self) -> GeminiClient:
+        if self._gemini is None:
+            self._gemini = GeminiClient()
+        return self._gemini
 
     async def generate(
         self,
@@ -336,24 +337,22 @@ class DesignDirectionPass:
     ) -> DesignDirectionSpec | None:
         """One Sonnet call; on bad/invalid output, retry once with a stricter suffix."""
 
-        first = await self._get_llm().complete(
+        first = await self._get_gemini().complete(
             system=system,
             user=user,
-            model=SONNET_MODEL,
+            model=GEMINI_FLASH_3_5_MODEL,
             max_tokens=DESIGN_MAX_TOKENS,
             temperature=DESIGN_TEMPERATURE,
-            cache="5m",
         )
         spec = _parse_and_validate(first.content, treatment)
         if spec is not None:
             return spec
-        retry = await self._get_llm().complete(
+        retry = await self._get_gemini().complete(
             system=system,
             user=user + DESIGN_DIRECTION_RETRY_SUFFIX,
-            model=SONNET_MODEL,
+            model=GEMINI_FLASH_3_5_MODEL,
             max_tokens=DESIGN_MAX_TOKENS,
             temperature=DESIGN_TEMPERATURE,
-            cache="5m",
         )
         return _parse_and_validate(retry.content, treatment)
 

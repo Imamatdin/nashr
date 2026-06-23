@@ -21,6 +21,7 @@ from packages.core.enums import (
     ClaimType,
     PresentationMood,
 )
+from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.presentation import (
     DesignDirectionSpec,
@@ -29,7 +30,6 @@ from packages.core.models.presentation import (
 from packages.core.models.source import SourceClaimCreate
 from packages.presentation.design_direction import (
     _DEFAULT_PALETTES,
-    SONNET_MODEL,
     DesignDirectionPass,
 )
 
@@ -41,7 +41,7 @@ _HEX_RE = re.compile(r"^#[0-9A-F]{6}$")
 # ---------------------------------------------------------------------------
 
 
-class _StubLLM:
+class _StubGemini:
     """Stand-in returning scripted text responses in order."""
 
     def __init__(self, responses: list[str]) -> None:
@@ -52,10 +52,9 @@ class _StubLLM:
         self,
         system: str,
         user: str,
-        model: str = SONNET_MODEL,
+        model: str = GEMINI_FLASH_3_5_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
-        cache: bool | str = False,
     ) -> LLMResponse:
         self.calls.append((system, user))
         if not self.responses:
@@ -379,8 +378,8 @@ def test_deterministic_palette_contrast_ratio_meets_wcag_aa() -> None:
 @pytest.mark.asyncio
 async def test_generate_uses_bespoke_llm_palette() -> None:
     bespoke_bg = "#0E1A1C"
-    stub = _StubLLM([_design_json(background=bespoke_bg, accent="#FF6A3D")])
-    pass_ = DesignDirectionPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([_design_json(background=bespoke_bg, accent="#FF6A3D")])
+    pass_ = DesignDirectionPass(gemini=stub)  # type: ignore[arg-type]
 
     result = await pass_.generate(
         interview=_interview(),
@@ -405,16 +404,16 @@ async def test_generate_two_topics_same_domain_differ() -> None:
     # Both topics are engineering, so the deterministic table would hand
     # them an IDENTICAL palette. The generative pass must produce different
     # palettes, proving it is no longer a lookup table.
-    stub_a = _StubLLM([_design_json(background="#0E1A1C", accent="#FF6A3D")])
-    stub_b = _StubLLM([_design_json(background="#241026", accent="#C77DFF")])
+    stub_a = _StubGemini([_design_json(background="#0E1A1C", accent="#FF6A3D")])
+    stub_b = _StubGemini([_design_json(background="#241026", accent="#C77DFF")])
 
-    result_a = await DesignDirectionPass(llm=stub_a).generate(  # type: ignore[arg-type]
+    result_a = await DesignDirectionPass(gemini=stub_a).generate(  # type: ignore[arg-type]
         interview=_interview(),
         claims=_engineering_claims(),
         chunks=[],
         source_metadata=[],
     )
-    result_b = await DesignDirectionPass(llm=stub_b).generate(  # type: ignore[arg-type]
+    result_b = await DesignDirectionPass(gemini=stub_b).generate(  # type: ignore[arg-type]
         interview=_interview(),
         claims=_engineering_claims_alt(),
         chunks=[],
@@ -428,8 +427,8 @@ async def test_generate_two_topics_same_domain_differ() -> None:
 @pytest.mark.asyncio
 async def test_generate_retries_then_succeeds() -> None:
     good = _design_json(background="#0E1A1C")
-    stub = _StubLLM(["not json at all", good])
-    pass_ = DesignDirectionPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini(["not json at all", good])
+    pass_ = DesignDirectionPass(gemini=stub)  # type: ignore[arg-type]
 
     result = await pass_.generate(
         interview=_interview(),
@@ -449,8 +448,8 @@ async def test_generate_retries_then_succeeds() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_falls_back_on_invalid_json() -> None:
-    stub = _StubLLM(["this is not json", "still not json"])
-    pass_ = DesignDirectionPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini(["this is not json", "still not json"])
+    pass_ = DesignDirectionPass(gemini=stub)  # type: ignore[arg-type]
 
     result = await pass_.generate(
         interview=_interview(mood_override=PresentationMood.WARM_HISTORICAL),
@@ -476,8 +475,8 @@ async def test_generate_falls_back_on_low_contrast() -> None:
         accent="#777777",
         text_secondary="#808080",
     )
-    stub = _StubLLM([low_contrast, low_contrast])
-    pass_ = DesignDirectionPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([low_contrast, low_contrast])
+    pass_ = DesignDirectionPass(gemini=stub)  # type: ignore[arg-type]
 
     result = await pass_.generate(
         interview=_interview(mood_override=PresentationMood.WARM_HISTORICAL),
@@ -495,8 +494,8 @@ async def test_generate_falls_back_on_low_contrast() -> None:
 @pytest.mark.asyncio
 async def test_generate_falls_back_on_unsafe_font() -> None:
     unsafe = _design_json(heading_font="Comic Sans", body_font="Comic Sans")
-    stub = _StubLLM([unsafe, unsafe])
-    pass_ = DesignDirectionPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([unsafe, unsafe])
+    pass_ = DesignDirectionPass(gemini=stub)  # type: ignore[arg-type]
 
     result = await pass_.generate(
         interview=_interview(mood_override=PresentationMood.BOLD_TECHNICAL),
@@ -512,8 +511,8 @@ async def test_generate_falls_back_on_unsafe_font() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_falls_back_when_llm_raises() -> None:
-    stub = _StubLLM([])  # empty → complete() raises RuntimeError
-    pass_ = DesignDirectionPass(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([])  # empty → complete() raises RuntimeError
+    pass_ = DesignDirectionPass(gemini=stub)  # type: ignore[arg-type]
 
     result = await pass_.generate(
         interview=_interview(mood_override=PresentationMood.NATURAL),

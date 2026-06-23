@@ -59,7 +59,7 @@ from packages.core.enums import (
     NarrativePhase,
     SlideType,
 )
-from packages.core.gemini import GEMINI_FLASH_MODEL, GeminiClient
+from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, GeminiClient
 from packages.core.llm import LLMClient
 from packages.core.models.article import ArticleOutline
 from packages.core.models.evidence import EvidenceMatrix
@@ -133,6 +133,12 @@ logger = logging.getLogger(__name__)
 
 SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
 DEFAULT_PROJECT_ID: Final[str] = "presentation"
+
+# Interactive content runs on Gemini 3.5 Flash, which spends "thoughts" tokens
+# before visible output; the budget must clear the thinking phase plus the
+# quiz/matching JSON or the response truncates and no interactive slides ship.
+# (The pass ran at 3k on 2.5 Flash, which had no thinking tokens.)
+INTERACTIVE_MAX_TOKENS: Final[int] = 8_000
 
 # Per-call timeout for the editorial executor's Sonnet call (and the section
 # repair, which reuses the same helper). The executor runs at 16k max_tokens
@@ -1233,7 +1239,10 @@ class EditorialPass:
         """
 
         first = await self._get_gemini().complete(
-            system=system, user=user, model=GEMINI_FLASH_MODEL, max_tokens=3_000
+            system=system,
+            user=user,
+            model=GEMINI_FLASH_3_5_MODEL,
+            max_tokens=INTERACTIVE_MAX_TOKENS,
         )
         parsed = _parse_interactive(first.content)
         if parsed.content is not None:
@@ -1242,8 +1251,8 @@ class EditorialPass:
         retry = await self._get_gemini().complete(
             system=system,
             user=retry_user,
-            model=GEMINI_FLASH_MODEL,
-            max_tokens=3_000,
+            model=GEMINI_FLASH_3_5_MODEL,
+            max_tokens=INTERACTIVE_MAX_TOKENS,
         )
         return _parse_interactive(retry.content).content
 

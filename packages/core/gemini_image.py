@@ -29,16 +29,17 @@ from google.genai import types as genai_types
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.core.constants import DEFAULT_LLM_MAX_RETRIES, DEFAULT_LLM_TIMEOUT_SECONDS
-from packages.core.gemini import GEMINI_FLASH_MODEL, build_default_genai_client
+from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, build_default_genai_client
 
 logger = logging.getLogger(__name__)
 
-# Vision/captioning runs on the multimodal flash text model; image generation
-# uses a dedicated image model whose id is deployment-configurable.
-GEMINI_VISION_MODEL: Final[str] = GEMINI_FLASH_MODEL
-DEFAULT_IMAGE_MODEL: Final[str] = os.environ.get("NASHR_IMAGE_MODEL", "gemini-2.5-flash-image")
+# Vision/captioning runs on the current-generation multimodal flash text model;
+# image generation uses a dedicated image model whose id is deployment-configurable.
+GEMINI_VISION_MODEL: Final[str] = GEMINI_FLASH_3_5_MODEL
+DEFAULT_IMAGE_MODEL: Final[str] = os.environ.get("NASHR_IMAGE_MODEL", "gemini-3-pro-image")
 
-# Flat per-image cost estimate for logging (SPEC cost table, "Nano Banana").
+# Flat per-image cost estimate for logging only (not billing). Carried over from
+# the prior image model; revisit against gemini-3-pro-image's published price.
 IMAGE_COST_USD: Final[float] = 0.039
 
 # HTTP status codes that must not retry — a bad key is a config fault.

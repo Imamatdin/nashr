@@ -1,8 +1,8 @@
 """Extracts factual claims from chunked source text using the LLM.
 
 This is the first LLM-touching module in the source pipeline; it uses
-:class:`packages.core.llm.LLMClient` for the call itself and the prompt
-constants from :mod:`packages.core.prompts` for the message bodies.
+:class:`packages.core.gemini.GeminiClient` (Gemini 3.5 Flash) for the call
+itself and the prompt constants from :mod:`packages.core.prompts`.
 
 The extractor is deliberately tolerant of bad model output:
 
@@ -13,10 +13,10 @@ The extractor is deliberately tolerant of bad model output:
 * Per-claim validation goes through :class:`SourceClaimCreate`. Items that
   violate the schema (out-of-range length, invalid strength enum) are
   filtered out individually so a single bad claim does not poison the rest.
-* Concurrency is bounded with :data:`CLAIM_BATCH_SIZE`. Anthropic enforces
+* Concurrency is bounded with :data:`CLAIM_BATCH_SIZE`. The provider enforces
   per-key rate limits and the job-cost budget cap from the SPEC means we
-  cannot afford to fan out unbounded — five concurrent calls is the
-  observed sweet spot for Haiku throughput without tripping rate limits.
+  cannot afford to fan out unbounded — five concurrent calls is the observed
+  sweet spot for throughput without tripping rate limits.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from typing import Any, Final
 from pydantic import ValidationError
 
 from packages.core.enums import ClaimStrength, ClaimType
-from packages.core.llm import LLMClient
+from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, GeminiClient
 from packages.core.models.source import (
     SourceChunkCreate,
     SourceClaimCreate,
@@ -48,13 +48,17 @@ CLAIM_BATCH_SIZE: Final[int] = 5
 CLAIM_MIN_TEXT_LENGTH: Final[int] = 10
 CLAIM_MAX_TEXT_LENGTH: Final[int] = 500
 CLAIM_MAX_QUOTE_LENGTH: Final[int] = 500
+# Gemini 3.5 Flash spends "thoughts" tokens before visible output; a chunk can
+# yield a dozen-plus claims, so the budget must clear the thinking phase plus the
+# JSON array or the response truncates and the chunk's claims are lost on retry.
+CLAIM_MAX_TOKENS: Final[int] = 8_000
 
 
 class ClaimExtractor:
     """Extracts :class:`SourceClaimCreate` objects from a stream of chunks."""
 
-    def __init__(self, llm: LLMClient | None = None) -> None:
-        self._llm = llm if llm is not None else LLMClient()
+    def __init__(self, gemini: GeminiClient | None = None) -> None:
+        self._gemini = gemini if gemini is not None else GeminiClient()
 
     async def extract_claims(
         self,
@@ -102,13 +106,23 @@ class ClaimExtractor:
     ) -> list[dict[str, Any]] | None:
         """Call the LLM, retry once on bad JSON, return ``None`` on final failure."""
 
-        first_response = await self._llm.complete(system=system_prompt, user=user_prompt)
+        first_response = await self._gemini.complete(
+            system=system_prompt,
+            user=user_prompt,
+            model=GEMINI_FLASH_3_5_MODEL,
+            max_tokens=CLAIM_MAX_TOKENS,
+        )
         parsed = _try_parse_array(first_response.content)
         if parsed is not None:
             return parsed
 
         retry_prompt = user_prompt + CLAIM_EXTRACTION_RETRY_SUFFIX
-        second_response = await self._llm.complete(system=system_prompt, user=retry_prompt)
+        second_response = await self._gemini.complete(
+            system=system_prompt,
+            user=retry_prompt,
+            model=GEMINI_FLASH_3_5_MODEL,
+            max_tokens=CLAIM_MAX_TOKENS,
+        )
         parsed = _try_parse_array(second_response.content)
         if parsed is not None:
             return parsed

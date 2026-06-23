@@ -32,7 +32,7 @@ from packages.core.enums import (
     PresentationMood,
     SlideType,
 )
-from packages.core.gemini import GEMINI_FLASH_MODEL
+from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
@@ -134,7 +134,7 @@ class _StubGemini:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_MODEL,
+        model: str = GEMINI_FLASH_3_5_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -2351,7 +2351,7 @@ async def test_interactive_uses_gemini_flash_model() -> None:
     async def capture_complete(
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_MODEL,
+        model: str = GEMINI_FLASH_3_5_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -2370,7 +2370,7 @@ async def test_interactive_uses_gemini_flash_model() -> None:
         chunks=[],
         source_metadata=[],
     )
-    assert captured.get("model") == GEMINI_FLASH_MODEL
+    assert captured.get("model") == GEMINI_FLASH_3_5_MODEL
 
 
 # ---------------------------------------------------------------------------

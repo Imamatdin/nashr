@@ -1,10 +1,10 @@
 """Behaviour tests for :class:`ClaimExtractor`.
 
-We mock :class:`LLMClient.complete` to return controlled responses so the
+We mock :class:`GeminiClient.complete` to return controlled responses so the
 tests pin the parsing/validation behaviour exercised on each LLM reply
 shape (well-formed JSON, malformed JSON, oversized claims, invalid
-strength enums, etc.). The Anthropic call itself is covered separately
-in ``test_llm_client.py``.
+strength enums, etc.). The Gemini call itself is covered separately
+in ``test_gemini_client.py``.
 
 Per ``.claude/rules/testing.md`` we mock external LLM APIs but never
 local libraries, so this file uses a minimal in-memory stub of the LLM
@@ -18,6 +18,7 @@ import json
 import pytest
 
 from packages.core.enums import ClaimStrength, ClaimType
+from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.source import SourceChunkCreate, SourceMetadataExtracted
 from packages.workers.source.claim_extractor import (
@@ -26,8 +27,8 @@ from packages.workers.source.claim_extractor import (
 )
 
 
-class _StubLLM:
-    """Stand-in for :class:`LLMClient` that returns scripted responses.
+class _StubGemini:
+    """Duck-typed :class:`GeminiClient` that returns scripted responses.
 
     ``responses`` is a list of strings consumed in order. When exhausted,
     raises ``RuntimeError`` so accidentally over-calling the LLM in a test
@@ -42,7 +43,7 @@ class _StubLLM:
         self,
         system: str,
         user: str,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = GEMINI_FLASH_3_5_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -93,8 +94,8 @@ def _valid_claims_payload() -> str:
 
 @pytest.mark.asyncio
 async def test_extract_claims_parses_valid_json() -> None:
-    stub = _StubLLM([_valid_claims_payload()])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([_valid_claims_payload()])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -106,8 +107,8 @@ async def test_extract_claims_parses_valid_json() -> None:
 
 @pytest.mark.asyncio
 async def test_extract_claims_handles_invalid_json() -> None:
-    stub = _StubLLM(["Here are the claims: [invalid json", "still bad"])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini(["Here are the claims: [invalid json", "still bad"])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -117,8 +118,8 @@ async def test_extract_claims_handles_invalid_json() -> None:
 
 @pytest.mark.asyncio
 async def test_extract_claims_retries_on_bad_json_then_succeeds() -> None:
-    stub = _StubLLM(["Here are the claims: not json", _valid_claims_payload()])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini(["Here are the claims: not json", _valid_claims_payload()])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -144,8 +145,8 @@ async def test_extract_claims_filters_too_short_claims() -> None:
             },
         ]
     )
-    stub = _StubLLM([payload])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -172,8 +173,8 @@ async def test_extract_claims_filters_too_long_claims() -> None:
             },
         ]
     )
-    stub = _StubLLM([payload])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -205,8 +206,8 @@ async def test_extract_claims_validates_strength_enum() -> None:
             },
         ]
     )
-    stub = _StubLLM([payload])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -235,8 +236,8 @@ async def test_extract_claims_invalid_strength_skipped() -> None:
             },
         ]
     )
-    stub = _StubLLM([payload])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -260,8 +261,8 @@ def test_extract_claims_source_context_formatting_sparse() -> None:
 @pytest.mark.asyncio
 async def test_extract_claims_concurrent_batching() -> None:
     payload = _valid_claims_payload()
-    stub = _StubLLM([payload] * 10)
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload] * 10)
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
     chunks = [
         SourceChunkCreate(chunk_index=i, text=f"Chunk {i} text content here.", page=1)
         for i in range(10)
@@ -309,8 +310,8 @@ async def test_extract_claims_parses_claim_type() -> None:
             },
         ]
     )
-    stub = _StubLLM([payload])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -340,8 +341,8 @@ async def test_extract_claims_defaults_missing_claim_type() -> None:
             },
         ]
     )
-    stub = _StubLLM([payload])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
@@ -368,8 +369,8 @@ async def test_extract_claims_defaults_invalid_claim_type() -> None:
             },
         ]
     )
-    stub = _StubLLM([payload])
-    extractor = ClaimExtractor(llm=stub)  # type: ignore[arg-type]
+    stub = _StubGemini([payload])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
 
     claims = await extractor.extract_claims_from_chunk(_chunk(), "ctx")
 
