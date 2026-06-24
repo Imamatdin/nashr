@@ -68,14 +68,6 @@ _SCO2_DECK = _DEBUG_DIR / "build1_sco2_deck.json"
 _LOG_PATH = _DEBUG_DIR / "build1_gate.log"
 
 _PEOPLE_SLIDE_TYPES = frozenset({SlideType.GALLERY_PEOPLE, SlideType.TIMELINE})
-_IMAGE_SLIDE_TYPES = frozenset(
-    {
-        SlideType.TITLE_HERO,
-        SlideType.IMAGE_FULL,
-        SlideType.IMAGE_SPLIT,
-        SlideType.CONCEPT_DEFINITION,
-    }
-)
 
 
 def _configure_logging() -> None:
@@ -145,23 +137,35 @@ def _deck_person_names(deck: DeckSpec) -> dict[int, list[str]]:
 
 
 def _image_slot_summary(deck: DeckSpec) -> tuple[int, int]:
-    """Count resolved vs null image slots across image-bearing slides."""
+    """Count resolved vs pending image slots (generate_deck_spec does not run ImagePass)."""
 
     resolved = 0
-    null_count = 0
+    pending = 0
     for slide in deck.slides:
-        if slide.slide_type not in _IMAGE_SLIDE_TYPES:
-            continue
-        src = slide.content.image_src
-        if src:
-            resolved += 1
-        else:
-            null_count += 1
-        if slide.content.background_image_src:
-            resolved += 1
-        elif slide.slide_type is SlideType.TITLE_HERO:
-            null_count += 1
-    return resolved, null_count
+        content = slide.content
+        for person in content.people or []:
+            if person.name:
+                if person.portrait_url:
+                    resolved += 1
+                else:
+                    pending += 1
+        for node in content.timeline_nodes or []:
+            if node.portrait_prompt:
+                if node.portrait_url:
+                    resolved += 1
+                else:
+                    pending += 1
+        if content.figure_prompt:
+            if content.figure_url:
+                resolved += 1
+            else:
+                pending += 1
+        if slide.slide_type is SlideType.TITLE_HERO:
+            if content.background_url:
+                resolved += 1
+            else:
+                pending += 1
+    return resolved, pending
 
 
 def _interactive_slides(deck: DeckSpec) -> list[str]:
@@ -200,7 +204,9 @@ def _print_deck_summary(label: str, deck: DeckSpec, deck_path: Path) -> None:
         print("  gallery/timeline people roster: (none)")
     print()
     resolved, nulls = _image_slot_summary(deck)
-    print(f"  image slots: resolved={resolved}, null={nulls}")
+    print(
+        f"  image slots (pre-ImagePass): resolved={resolved}, pending={nulls}"
+    )
     interactives = _interactive_slides(deck)
     print(f"  interactive slides ({len(interactives)}):")
     for line in interactives:
