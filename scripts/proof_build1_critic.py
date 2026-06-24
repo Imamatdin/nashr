@@ -325,18 +325,18 @@ async def _amain() -> int:
 
     _DEBUG_DIR.mkdir(exist_ok=True)
     log_file = _LOG_PATH.open("w", encoding="utf-8")
+    real_stdout = sys.stdout
 
     class _Tee(io.TextIOBase):
         def write(self, s: str) -> int:
-            sys.stdout.write(s)
+            real_stdout.write(s)
             log_file.write(s)
             return len(s)
 
         def flush(self) -> None:
-            sys.stdout.flush()
+            real_stdout.flush()
             log_file.flush()
 
-    # Re-wrap stdout for tee (logging already configured on root handler).
     sys.stdout = _Tee()  # type: ignore[assignment]
 
     enlightenment_ok = await _generate_deck(
