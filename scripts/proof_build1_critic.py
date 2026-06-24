@@ -237,7 +237,10 @@ async def _run_planner_roster(
         print(f"  [{label}] planner figure roster ({len(roster)}): {roster}")
         print(f"  [{label}] planner sections ({len(plan.sections)}):")
         for sec in plan.sections:
-            print(f"    - {sec.name}: {len(sec.slides)} planned slides")
+            print(
+                f"    - {sec.section_name}: "
+                f"{len(sec.planned_slide_types)} planned slide types"
+            )
     except (PlannerError, ThesisClassifierError) as exc:
         print(f"  [{label}] planner raised: {type(exc).__name__}: {exc}")
 
@@ -331,6 +334,7 @@ async def _amain() -> int:
         def write(self, s: str) -> int:
             real_stdout.write(s)
             log_file.write(s)
+            log_file.flush()
             return len(s)
 
         def flush(self) -> None:
