@@ -261,8 +261,6 @@ async def _generate_deck(
     if include_interactive:
         interview = interview.model_copy(update={"include_interactive": True})
 
-    print(f"\n>>> Starting {label} — planner roster probe")
-    await _run_planner_roster(label, interview, chunks, claims, metadata)
     print(f"\n>>> Starting {label} — full generate_deck_spec")
 
     editorial = EditorialPass()
