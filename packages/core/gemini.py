@@ -31,6 +31,7 @@ from packages.core.constants import (
     DEFAULT_LLM_MAX_RETRIES,
     DEFAULT_LLM_TIMEOUT_SECONDS,
 )
+from packages.core.gemini_tools import ToolTurnResult
 from packages.core.llm import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -97,14 +98,49 @@ _SAFETY_SETTINGS: Final[list[genai_types.SafetySetting]] = [
 _AUTH_HTTP_CODES: Final[frozenset[int]] = frozenset({401, 403})
 
 
+class GeminiToolCallError(RuntimeError):
+    """A tool-calling turn produced no usable model content.
+
+    Distinct from a transport failure (:class:`google.genai.errors.APIError`):
+    this is a content-level outcome that is not retryable at the transport layer
+    and must be surfaced rather than mistaken for a finished answer. Raised for
+    an empty / blocked candidate (no content to append) and for a DEGRADED
+    terminal turn — one whose ``finish_reason`` is anything other than a clean
+    completion (truncated ``MAX_TOKENS``, ``MALFORMED_FUNCTION_CALL``,
+    ``UNEXPECTED_TOOL_CALL``, or a safety / recitation block) with no function
+    call to run. The caller may catch it and recover (e.g. retry ``MAX_TOKENS``
+    with a larger budget).
+    """
+
+
+# Finish reasons that mark a COMPLETE, usable terminal turn. Everything else the
+# SDK's FinishReason enum can report (MAX_TOKENS, MALFORMED_FUNCTION_CALL,
+# UNEXPECTED_TOOL_CALL, SAFETY/RECITATION/BLOCKLIST/PROHIBITED_CONTENT/SPII,
+# LANGUAGE/OTHER, the IMAGE_* reasons) is a DEGRADED turn. This is an allowlist,
+# not a denylist, so a future/unknown finish reason fails safe (raises) rather
+# than silently passing as a finished answer.
+_CLEAN_FINISH_REASONS: Final[frozenset[genai_types.FinishReason]] = frozenset(
+    {
+        genai_types.FinishReason.STOP,
+        genai_types.FinishReason.FINISH_REASON_UNSPECIFIED,
+    }
+)
+
+
 @runtime_checkable
 class _GenerateContentResponseLike(Protocol):
     """Subset of ``GenerateContentResponse`` we depend on; lets tests inject stubs.
 
-    Both attributes are read-only properties on the SDK's real
-    response model, so we declare them as ``@property`` here to keep
-    Protocol matching covariant. Test fakes can satisfy the protocol
-    with plain attributes of the same types.
+    These are read-only properties on the SDK's real response model, so we
+    declare them as ``@property`` here to keep Protocol matching covariant. Test
+    fakes can satisfy the protocol with plain attributes of the same types.
+
+    The superset spans both call paths: :meth:`GeminiClient.complete` reads
+    ``text`` + ``usage_metadata``; :meth:`GeminiClient.generate_with_tools`
+    reads ``candidates`` (for the model's full Content, signatures intact) +
+    ``function_calls`` + ``usage_metadata``. The real SDK response satisfies all
+    four; the existing ``complete`` test fakes are injected through an
+    ``Awaitable[Any]`` boundary, so broadening the protocol does not disturb them.
     """
 
     @property
@@ -112,6 +148,12 @@ class _GenerateContentResponseLike(Protocol):
 
     @property
     def usage_metadata(self) -> object | None: ...
+
+    @property
+    def candidates(self) -> list[genai_types.Candidate] | None: ...
+
+    @property
+    def function_calls(self) -> list[genai_types.FunctionCall] | None: ...
 
 
 GenerateContentFn = Callable[..., Awaitable[_GenerateContentResponseLike]]
@@ -180,12 +222,18 @@ def build_default_genai_client() -> genai.Client:
 
 
 def _default_generate_content_fn(client: genai.Client) -> GenerateContentFn:
-    """Bind a ``google.genai.Client`` into the injected-fn shape."""
+    """Bind a ``google.genai.Client`` into the injected-fn shape.
+
+    ``contents`` is the SDK's own ``ContentListUnion`` so the one injected fn
+    serves both call paths: :meth:`GeminiClient.complete` passes a ``str`` (a
+    valid member of the union) and :meth:`GeminiClient.generate_with_tools`
+    passes a ``list[Content]`` history.
+    """
 
     async def fn(
         *,
         model: str,
-        contents: str,
+        contents: genai_types.ContentListUnion,
         config: genai_types.GenerateContentConfig,
     ) -> _GenerateContentResponseLike:
         return await client.aio.models.generate_content(
@@ -251,6 +299,62 @@ class GeminiClient:
             temperature=temperature,
             safety_settings=_SAFETY_SETTINGS,
         )
+        response, latency_ms = await self._generate_with_retry(
+            model=model,
+            contents=user,
+            config=config,
+            timeout=self._timeout_seconds,
+        )
+
+        content, input_tokens, output_tokens = _extract_content_and_usage(response)
+        cost = gemini_cost_for(model, input_tokens, output_tokens)
+
+        logger.info(
+            "gemini_call_complete",
+            extra={
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "latency_ms": latency_ms,
+                "estimated_cost_usd": round(cost, 6),
+            },
+        )
+
+        return LLMResponse(
+            content=content,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            estimated_cost_usd=cost,
+        )
+
+    async def _generate_with_retry(
+        self,
+        *,
+        model: str,
+        contents: str | list[genai_types.Content],
+        config: genai_types.GenerateContentConfig,
+        timeout: int,
+    ) -> tuple[_GenerateContentResponseLike, int]:
+        """Run one ``generate_content`` call under the shared retry/timeout policy.
+
+        The single source of truth for the project's Gemini call policy, used by
+        both :meth:`complete` and :meth:`generate_with_tools`: a per-attempt
+        :func:`asyncio.wait_for` timeout, up to ``max_retries`` retries on a
+        transient :class:`~google.genai.errors.APIError` (any HTTP code NOT in
+        :data:`_AUTH_HTTP_CODES`) or :class:`TimeoutError` with 1s/2s exponential
+        backoff, immediate propagation of auth errors (401 / 403), and one
+        ``gemini_call_failed_retrying`` warning per retry. Returns the raw
+        response and the successful attempt's latency; the caller owns success
+        logging, cost accounting, and response parsing.
+
+        A 400 (e.g. a dropped ``thought_signature``) is non-transient but, being
+        neither an auth code nor a timeout, is retried to exhaustion like any
+        other API error — identical to ``complete``'s historical behaviour, kept
+        unchanged here. A future caller that must skip-retry 400 should
+        parameterise the non-retryable code set rather than diverge this loop.
+        """
 
         attempt = 0
         last_error: Exception | None = None
@@ -260,10 +364,10 @@ class GeminiClient:
                 response = await asyncio.wait_for(
                     self._generate_content_fn(
                         model=model,
-                        contents=user,
+                        contents=contents,
                         config=config,
                     ),
-                    timeout=self._timeout_seconds,
+                    timeout=timeout,
                 )
             except TimeoutError as exc:
                 last_error = exc
@@ -304,46 +408,152 @@ class GeminiClient:
                 continue
 
             latency_ms = int((time.perf_counter() - start) * 1000)
-            content, input_tokens, output_tokens = _extract_content_and_usage(response)
-            cost = gemini_cost_for(model, input_tokens, output_tokens)
-
-            logger.info(
-                "gemini_call_complete",
-                extra={
-                    "model": model,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "latency_ms": latency_ms,
-                    "estimated_cost_usd": round(cost, 6),
-                },
-            )
-
-            return LLMResponse(
-                content=content,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                latency_ms=latency_ms,
-                estimated_cost_usd=cost,
-            )
+            return response, latency_ms
 
         assert last_error is not None
         raise last_error
 
+    async def generate_with_tools(
+        self,
+        contents: list[genai_types.Content],
+        tools: list[genai_types.Tool],
+        *,
+        system: str | None = None,
+        model: str = GEMINI_PRO_3_1_MODEL,
+        max_tokens: int = 8192,
+        temperature: float = 0.0,
+        tool_mode: genai_types.FunctionCallingConfigMode = (
+            genai_types.FunctionCallingConfigMode.AUTO
+        ),
+        allowed_function_names: list[str] | None = None,
+        timeout: int | None = None,
+    ) -> ToolTurnResult:
+        """Run ONE manual tool-calling turn against Gemini and parse the result.
 
-def _extract_content_and_usage(
-    response: _GenerateContentResponseLike,
-) -> tuple[str, int, int]:
-    """Pull text and token usage from a ``GenerateContentResponse``-like object.
+        This is a SINGLE-TURN primitive: one ``generate_content`` call in, one
+        :class:`~packages.core.gemini_tools.ToolTurnResult` out. The multi-turn
+        loop — and the human-approval pause that manual function-calling exists
+        to allow — lives in the caller, not here. Function-calling is manual:
+        ``tools`` are declarations only and ``automatic_function_calling`` is
+        explicitly disabled, so the SDK never executes a tool itself; it returns
+        the requested call(s) for the caller to run.
 
-    Defensive against missing ``usage_metadata`` (the SDK returns
-    ``None`` when no token accounting is available) and against
-    responses with no text content — both surface as empty/zero values
-    rather than crashes so cost accounting stays sound.
+        THE APPEND RULE (the caller's responsibility, stated here because getting
+        it wrong silently breaks Gemini 3): when the result
+        :attr:`~packages.core.gemini_tools.ToolTurnResult.wants_tool`, append
+        ``result.model_content`` to ``contents`` **verbatim** — it carries the
+        ``thought_signature`` Gemini 3 requires back on the next request, and
+        hand-reconstructing the turn drops it (→ HTTP 400). Then append
+        :func:`~packages.core.gemini_tools.build_function_responses_content` with
+        one entry per call and invoke this method again.
+
+        THE CONTROL PATH. A returned :class:`ToolTurnResult` is always a USABLE
+        turn — either a tool request or a clean completion::
+
+            try:
+                result = await client.generate_with_tools(history, tools)
+            except GeminiToolCallError:
+                ...  # degraded turn (truncated / malformed / blocked) — handle/retry
+            else:
+                if result.wants_tool:
+                    ...  # run the tool(s), append, loop
+                else:
+                    deliver(result.text)  # a clean STOP completion — the answer
+
+        A DEGRADED terminal turn (a ``finish_reason`` outside
+        :data:`_CLEAN_FINISH_REASONS` — ``MAX_TOKENS``, ``MALFORMED_FUNCTION_CALL``,
+        ``UNEXPECTED_TOOL_CALL``, a safety/recitation block — with no function
+        call) raises :class:`GeminiToolCallError` instead of returning a result
+        whose ``wants_tool`` is falsely ``False``. ``MAX_TOKENS`` raising means a
+        caller that wants to can catch it and retry with a larger ``max_tokens``.
+
+        ``tool_mode`` defaults to ``AUTO`` (the model decides whether to call a
+        tool or answer) — the right default for the brain; the gate may force
+        ``ANY``. ``max_tokens`` defaults high enough for Gemini 3 Pro to think:
+        the ``thought_signature`` is a by-product of thinking, so
+        ``thinking_config`` is deliberately left unset to preserve it. ``timeout``
+        overrides the client default for a single call, for turns with large
+        thinking budgets. Per-call cost and token usage are recorded on the
+        result; the caller sums them across a conversation's turns.
+        """
+
+        effective_timeout = timeout if timeout is not None else self._timeout_seconds
+        function_calling_config = genai_types.FunctionCallingConfig(
+            mode=tool_mode,
+            allowed_function_names=allowed_function_names,
+        )
+        config = genai_types.GenerateContentConfig(
+            system_instruction=system,
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+            safety_settings=_SAFETY_SETTINGS,
+            tools=tools,
+            tool_config=genai_types.ToolConfig(function_calling_config=function_calling_config),
+            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
+        )
+
+        response, latency_ms = await self._generate_with_retry(
+            model=model,
+            contents=contents,
+            config=config,
+            timeout=effective_timeout,
+        )
+
+        model_content, finish_reason = _extract_tool_turn_content(response)
+        function_calls = list(response.function_calls or [])
+        if (
+            not function_calls
+            and finish_reason is not None
+            and finish_reason not in _CLEAN_FINISH_REASONS
+        ):
+            # A terminal turn with no tool call and a degraded finish reason is not
+            # a usable answer. Raise rather than return wants_tool=False, so the
+            # caller's "if not wants_tool: deliver text" path can never ship a
+            # truncated / malformed / blocked turn as a finished answer.
+            raise GeminiToolCallError(
+                f"Gemini ended a terminal turn on a degraded finish_reason="
+                f"{finish_reason.value} (truncated, malformed, or blocked) with no "
+                "function call — not a usable answer; the caller may catch and retry "
+                "(e.g. a larger max_tokens on MAX_TOKENS)."
+            )
+        text = _join_text_parts(model_content)
+        input_tokens, output_tokens = _extract_usage(response)
+        cost = gemini_cost_for(model, input_tokens, output_tokens)
+
+        logger.info(
+            "gemini_call_complete",
+            extra={
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "latency_ms": latency_ms,
+                "estimated_cost_usd": round(cost, 6),
+                "function_calls": len(function_calls),
+                "finish_reason": finish_reason.value if finish_reason is not None else None,
+            },
+        )
+
+        return ToolTurnResult(
+            model_content=model_content,
+            function_calls=function_calls,
+            text=text,
+            finish_reason=finish_reason,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_cost_usd=cost,
+            latency_ms=latency_ms,
+        )
+
+
+def _extract_usage(response: _GenerateContentResponseLike) -> tuple[int, int]:
+    """Pull ``(input_tokens, output_tokens)`` from a response, defensively.
+
+    The SDK returns ``usage_metadata=None`` when no token accounting is
+    available; missing or non-int counts surface as zero rather than crashing,
+    so cost accounting stays sound. Shared by :meth:`GeminiClient.complete` (via
+    :func:`_extract_content_and_usage`) and :meth:`GeminiClient.generate_with_tools`.
     """
-
-    text_attr = getattr(response, "text", None)
-    text = text_attr if isinstance(text_attr, str) else ""
 
     usage = getattr(response, "usage_metadata", None)
     input_tokens = 0
@@ -355,4 +565,73 @@ def _extract_content_and_usage(
             input_tokens = max(0, prompt)
         if isinstance(candidate, int):
             output_tokens = max(0, candidate)
+    return input_tokens, output_tokens
+
+
+def _extract_content_and_usage(
+    response: _GenerateContentResponseLike,
+) -> tuple[str, int, int]:
+    """Pull text and token usage from a ``GenerateContentResponse``-like object.
+
+    Defensive against responses with no text content (surfaces as an empty
+    string) and delegates token accounting to :func:`_extract_usage`. Used only
+    by :meth:`GeminiClient.complete`; the tool path reads parts directly to
+    avoid the SDK's ``.text`` warning on function-call responses.
+    """
+
+    text_attr = getattr(response, "text", None)
+    text = text_attr if isinstance(text_attr, str) else ""
+    input_tokens, output_tokens = _extract_usage(response)
     return text, input_tokens, output_tokens
+
+
+def _extract_tool_turn_content(
+    response: _GenerateContentResponseLike,
+) -> tuple[genai_types.Content, genai_types.FinishReason | None]:
+    """Return the model's full Content and finish reason from a tool-calling turn.
+
+    The Content is read from ``candidates[0]`` verbatim — every part, including
+    each ``thought_signature`` — so the caller can append it without losing the
+    signature Gemini 3 requires on the next request.
+
+    Raises :class:`GeminiToolCallError` when there is no usable content to append
+    — an empty ``candidates`` list, or a candidate whose ``content`` is ``None``
+    or partless (a safety block, recitation halt, or prompt-feedback rejection).
+    That is a NON-transient outcome, so it is surfaced rather than retried or
+    silently treated as an empty completion. ``finish_reason`` is returned (not
+    swallowed) so a degraded-but-non-empty turn — ``MALFORMED_FUNCTION_CALL``,
+    ``MAX_TOKENS`` — reaches the caller intact.
+    """
+
+    candidates = response.candidates
+    if not candidates:
+        raise GeminiToolCallError(
+            "Gemini returned no candidates (likely a safety or prompt block); "
+            "there is no model turn to append."
+        )
+    candidate = candidates[0]
+    content = candidate.content
+    if content is None or not content.parts:
+        reason = candidate.finish_reason
+        reason_label = reason.value if reason is not None else "unknown"
+        raise GeminiToolCallError(
+            "Gemini candidate has no content parts "
+            f"(finish_reason={reason_label}); there is no model turn to append."
+        )
+    return content, candidate.finish_reason
+
+
+def _join_text_parts(content: genai_types.Content) -> str | None:
+    """Concatenate the text of a Content's text parts, or ``None`` if there is none.
+
+    Reads ``part.text`` directly rather than ``response.text`` because the SDK's
+    ``.text`` property emits a warning whenever function-call parts are present
+    (the normal case on a tool turn). Returns ``None`` for a pure function-call
+    turn so the caller can distinguish "the model talked" from "the model only
+    called a tool".
+    """
+
+    texts = [part.text for part in (content.parts or []) if part.text]
+    if not texts:
+        return None
+    return "".join(texts)

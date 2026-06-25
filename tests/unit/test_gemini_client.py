@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 from pydantic import ValidationError
 
 from packages.core.gemini import (
@@ -31,9 +32,11 @@ from packages.core.gemini import (
     GEMINI_FLASH_LITE_OUTPUT_COST_PER_MTOK,
     GEMINI_FLASH_MODEL,
     GEMINI_FLASH_OUTPUT_COST_PER_MTOK,
+    GEMINI_PRO_3_1_MODEL,
     GEMINI_PRO_INPUT_COST_PER_MTOK,
     GEMINI_PRO_OUTPUT_COST_PER_MTOK,
     GeminiClient,
+    GeminiToolCallError,
     gemini_cost_for,
 )
 from packages.core.llm import LLMResponse
@@ -326,3 +329,331 @@ async def test_gemini_client_handles_missing_usage_metadata() -> None:
     assert response.input_tokens == 0
     assert response.output_tokens == 0
     assert response.estimated_cost_usd == pytest.approx(0.0)
+
+
+# --- generate_with_tools (manual tool-calling primitive) ----------------------
+#
+# Fakes mirror the SDK response shape the tool path reads: candidates[0].content
+# (the model's verbatim turn, with thought_signature on parts), the
+# .function_calls convenience list, finish_reason, and usage_metadata. They are
+# injected through a _make_tool_fn boundary typed for the tool-shaped response.
+
+
+class _FakeFunctionCall:
+    def __init__(self, name: str, args: dict[str, Any]) -> None:
+        self.name = name
+        self.args = args
+
+
+class _FakeToolPart:
+    def __init__(
+        self,
+        *,
+        text: str | None = None,
+        function_call: _FakeFunctionCall | None = None,
+        thought_signature: bytes | None = None,
+    ) -> None:
+        self.text = text
+        self.function_call = function_call
+        self.thought_signature = thought_signature
+
+
+class _FakeToolContent:
+    def __init__(self, parts: list[_FakeToolPart], role: str = "model") -> None:
+        self.parts = parts
+        self.role = role
+
+
+class _FakeCandidate:
+    def __init__(
+        self,
+        content: _FakeToolContent | None,
+        finish_reason: genai_types.FinishReason | None = None,
+    ) -> None:
+        self.content = content
+        self.finish_reason = finish_reason
+
+
+class _FakeToolResponse:
+    def __init__(
+        self,
+        *,
+        candidates: list[_FakeCandidate],
+        function_calls: list[_FakeFunctionCall] | None = None,
+        prompt_tokens: int = 0,
+        candidate_tokens: int = 0,
+        text: str | None = None,
+    ) -> None:
+        self.candidates = candidates
+        self.function_calls = function_calls
+        self.usage_metadata: object | None = _FakeUsage(prompt_tokens, candidate_tokens)
+        self.text = text
+
+
+def _make_tool_fn(
+    behaviour: Callable[[], Awaitable[_FakeToolResponse]],
+) -> tuple[Callable[..., Awaitable[_FakeToolResponse]], list[dict[str, Any]]]:
+    """A ``generate_content_fn`` for the tool path.
+
+    Typed for what ``generate_with_tools`` actually exchanges — ``list[Content]``
+    contents in, a tool-shaped response out — unlike the complete() ``_make_fn``
+    (``str`` contents, ``_FakeResponse``).
+    """
+
+    calls: list[dict[str, Any]] = []
+
+    async def fn(
+        *,
+        model: str,
+        contents: str | list[genai_types.Content],
+        config: object,
+    ) -> _FakeToolResponse:
+        calls.append({"model": model, "contents": contents, "config": config})
+        return await behaviour()
+
+    return fn, calls
+
+
+def _tool() -> genai_types.Tool:
+    return genai_types.Tool(
+        function_declarations=[
+            genai_types.FunctionDeclaration(name="get_value", description="Return a value.")
+        ]
+    )
+
+
+def _user_turn() -> list[genai_types.Content]:
+    return [genai_types.Content(role="user", parts=[genai_types.Part(text="hi")])]
+
+
+_STOP = genai_types.FinishReason.STOP
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_returns_function_call() -> None:
+    call = _FakeFunctionCall("get_value", {"key": "answer"})
+    content = _FakeToolContent([_FakeToolPart(function_call=call, thought_signature=b"\x01\x02")])
+    response = _FakeToolResponse(
+        candidates=[_FakeCandidate(content, finish_reason=_STOP)],
+        function_calls=[call],
+        prompt_tokens=100,
+        candidate_tokens=50,
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    result = await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+    assert result.wants_tool is True
+    assert len(result.function_calls) == 1
+    assert result.function_calls[0].name == "get_value"
+    assert result.model_content is content
+    assert result.text is None
+    assert result.input_tokens == 100
+    assert result.output_tokens == 50
+    expected_cost = 100 / 1_000_000 * GEMINI_PRO_INPUT_COST_PER_MTOK + (
+        50 / 1_000_000 * GEMINI_PRO_OUTPUT_COST_PER_MTOK
+    )
+    assert result.estimated_cost_usd == pytest.approx(expected_cost)
+    assert len(calls) == 1
+    assert calls[0]["model"] == GEMINI_PRO_3_1_MODEL  # tool method defaults to Pro
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_returns_text_on_clean_stop() -> None:
+    # A normal STOP completion with no tool call: wants_tool=False, text is the answer.
+    content = _FakeToolContent([_FakeToolPart(text="here is the answer")])
+    response = _FakeToolResponse(
+        candidates=[_FakeCandidate(content, finish_reason=_STOP)],
+        function_calls=None,
+        prompt_tokens=10,
+        candidate_tokens=5,
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, _ = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    result = await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+    assert result.wants_tool is False
+    assert result.function_calls == []
+    assert result.text == "here is the answer"
+    assert result.finish_reason is _STOP
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_raises_on_empty_candidates() -> None:
+    response = _FakeToolResponse(candidates=[], function_calls=None)
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(GeminiToolCallError):
+        await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+    # An empty/blocked response is content-level, not transient — never retried.
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_raises_on_blocked_content() -> None:
+    # No content at all (candidate.content is None) — blocked before any parts.
+    candidate = _FakeCandidate(None, finish_reason=genai_types.FinishReason.SAFETY)
+    response = _FakeToolResponse(candidates=[candidate], function_calls=None)
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(GeminiToolCallError, match="SAFETY"):
+        await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_raises_on_malformed_function_call() -> None:
+    # Degraded TERMINAL turn (content present, no usable call): the PRIMARY control
+    # signal must not lie as wants_tool=False — it must raise. This locks the fix
+    # for the silent-failure Codex caught (a malformed turn shipped as an answer).
+    content = _FakeToolContent([_FakeToolPart(text="partial")])
+    candidate = _FakeCandidate(
+        content, finish_reason=genai_types.FinishReason.MALFORMED_FUNCTION_CALL
+    )
+    response = _FakeToolResponse(
+        candidates=[candidate], function_calls=None, prompt_tokens=1, candidate_tokens=1
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(GeminiToolCallError, match="MALFORMED_FUNCTION_CALL"):
+        await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+    # Degraded content is not transient — surfaced on the first attempt, not retried.
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_raises_on_max_tokens() -> None:
+    # Truncation is degraded: the caller may catch this and retry with more tokens.
+    content = _FakeToolContent([_FakeToolPart(text="truncated half-thought")])
+    candidate = _FakeCandidate(content, finish_reason=genai_types.FinishReason.MAX_TOKENS)
+    response = _FakeToolResponse(candidates=[candidate], function_calls=None)
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, _ = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(GeminiToolCallError, match="MAX_TOKENS"):
+        await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_raises_on_safety_block_with_content() -> None:
+    # A safety block that still emitted parts must also raise (not only the
+    # None-content path) — the finish_reason, not content emptiness, is the signal.
+    content = _FakeToolContent([_FakeToolPart(text="...")])
+    candidate = _FakeCandidate(content, finish_reason=genai_types.FinishReason.SAFETY)
+    response = _FakeToolResponse(candidates=[candidate], function_calls=None)
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, _ = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(GeminiToolCallError, match="SAFETY"):
+        await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_does_not_raise_degraded_when_function_calls_present() -> None:
+    # The degraded raise is gated on having NO function call: a turn that DID
+    # request a tool stays wants_tool=True even on a non-clean finish reason, so
+    # the caller still runs the tool (this proves the fix did not over-raise).
+    call = _FakeFunctionCall("get_value", {"key": "answer"})
+    content = _FakeToolContent([_FakeToolPart(function_call=call, thought_signature=b"\x01")])
+    response = _FakeToolResponse(
+        candidates=[_FakeCandidate(content, finish_reason=genai_types.FinishReason.MAX_TOKENS)],
+        function_calls=[call],
+        prompt_tokens=5,
+        candidate_tokens=5,
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, _ = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    result = await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+    assert result.wants_tool is True
+    assert result.function_calls[0].name == "get_value"
+    assert result.finish_reason is genai_types.FinishReason.MAX_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_retries_on_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"count": 0}
+    call = _FakeFunctionCall("get_value", {})
+    content = _FakeToolContent([_FakeToolPart(function_call=call, thought_signature=b"\x01")])
+    ok = _FakeToolResponse(
+        candidates=[_FakeCandidate(content, finish_reason=_STOP)],
+        function_calls=[call],
+        prompt_tokens=5,
+        candidate_tokens=5,
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        state["count"] += 1
+        if state["count"] == 1:
+            raise _rate_limited()
+        return ok
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("packages.core.gemini.asyncio.sleep", no_sleep)
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    result = await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+    assert result.wants_tool is True
+    assert state["count"] == 2
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_does_not_retry_auth_error() -> None:
+    async def behaviour() -> _FakeToolResponse:
+        raise _permission_denied()
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(genai_errors.ClientError) as excinfo:
+        await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+    assert excinfo.value.code == 403
+    assert len(calls) == 1
