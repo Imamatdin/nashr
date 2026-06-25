@@ -43,7 +43,15 @@ desktop.ini
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 vertex-key.json
 debug/
+
+# Scratch / gate debug (keep working tree readable)
+.tmp*
+.tmp-deck43/
+gate_b_regen*
+**/__diag_tmp.mjs
+supabase/.temp/
