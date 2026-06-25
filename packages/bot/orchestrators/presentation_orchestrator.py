@@ -688,6 +688,30 @@ class PresentationOrchestrator:
     # FULL PIPELINE
     # ====================================================================
 
+    async def _persist_deck(self, deck_spec: DeckSpec, project_id: str) -> None:
+        """Persist the structurally final deck so it survives past delivery.
+
+        Build 2, Stage 0: the brain later loads and edits this DeckSpec, so it
+        must outlive the render that delivers it. Persisted from inside the
+        pipeline because the spec never leaves the orchestrator — the handler
+        receives only :class:`PresentationRenderResult` file paths.
+
+        Best-effort and non-fatal, mirroring :meth:`_register_source`: a
+        persistence failure logs a warning and is swallowed so the deck still
+        renders and delivers. Stage 0 is additive and must not regress the
+        working delivery path. Runs before :meth:`render` so durability does
+        not depend on the renderer subprocess succeeding; ``render`` does not
+        mutate the spec, so persisting first loses nothing.
+        """
+
+        try:
+            await self._db.save_deck(project_id, deck_spec)
+        except Exception as exc:
+            logger.warning(
+                "presentation_deck_persist_failed",
+                extra={"project_id": project_id, "error_type": type(exc).__name__},
+            )
+
     async def run_full_pipeline(
         self,
         file_infos: list[dict[str, object]],
@@ -739,6 +763,7 @@ class PresentationOrchestrator:
         deck_spec = await self.resolve_images(
             deck_spec, sources, project_id, progress, package=package
         )
+        await self._persist_deck(deck_spec, project_id)
         return await self.render(deck_spec, formats, progress, project_id=project_id)
 
 

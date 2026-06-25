@@ -767,6 +767,50 @@ async def test_full_pipeline_propagates_editorial_failure() -> None:
     assert info.value.step == "editorial"
 
 
+async def test_full_pipeline_persists_the_generated_deck() -> None:
+    bot = _StubBot(payloads={"f1": b"pdf"})
+    worker = _StubWorkerRunner(formats_to_succeed=("html",))
+    orch, db, _credits, fake = _build_orch(bot, worker=worker)
+    # save_deck sources the denormalised columns from the project row, so the
+    # persist hook silently no-ops unless a project exists. Seed one whose title
+    # differs from the deck's so provenance is proven end-to-end.
+    fake.seed(
+        "projects",
+        [
+            {
+                "id": PROJECT_ID,
+                "user_id": USER_ID,
+                "type": "presentation",
+                "title": "Seeded project",
+                "language": "uz",
+                "audience": "talaba",
+            }
+        ],
+    )
+
+    await orch.run_full_pipeline(
+        file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
+        project_id=PROJECT_ID,
+        user_id=USER_ID,
+        language="uz",
+        raw_answers=None,
+        requested_formats=[ExportFormat.HTML],
+        progress=_noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+    )
+
+    # The _persist_deck hook fired inside run_full_pipeline: exactly one deck row
+    # holding the pipeline's deck. Deleting the wire-up makes get_deck return
+    # None and fails this test.
+    assert len(fake.tables.get("decks", [])) == 1
+    row = await db.get_deck(PROJECT_ID)
+    assert row is not None
+    restored = DeckSpec.model_validate(row["deck_json"])
+    assert restored.title == "Test deck"  # the generated deck, persisted intact
+    assert restored.slides  # at least one slide round-tripped through deck_json
+    assert row["title"] == "Seeded project"  # denormalised column from project, not deck
+
+
 # ---------------------------------------------------------------------------
 # Tier → image budget wire (invariant I1)
 # ---------------------------------------------------------------------------

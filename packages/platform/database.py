@@ -20,6 +20,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from packages.core.models.presentation import DeckSpec
 from packages.platform.config import PlatformConfig
 from supabase import Client, create_client
 
@@ -312,6 +313,73 @@ class DatabaseClient:
             )
         )
         return cast(list[dict[str, Any]], list(result.data))
+
+    # ------------------------------------------------------------------ decks
+
+    async def save_deck(self, project_id: str, deck_spec: DeckSpec) -> dict[str, Any]:
+        """Persist a generated deck as the project's single current deck.
+
+        Maintains exactly one ``decks`` row per project: the first call
+        inserts, every later call (a regeneration, or a future brain edit)
+        updates the same row in place. The upsert keys on the
+        ``decks_project_id_key`` unique constraint, so "one current deck" is a
+        database invariant rather than a convention a concurrent save could
+        violate; row history is served by the conversation layer, not here.
+
+        The denormalised ``title`` / ``language`` / ``audience`` columns come
+        from the PROJECT row, never the spec. ``DeckSpec.interview.audience``
+        is an ``AudienceType`` (school / undergraduate / …) that does not
+        satisfy the ``decks.audience`` CHECK (talaba / oqituvchi / akademik /
+        biznes), and ``DeckSpec.title`` permits 300 characters against the
+        column's 200; the project row already holds DB-valid values for all
+        three. Only ``deck_json`` is sourced from the spec. ``created_at`` and
+        ``updated_at`` are owned by the column default and the
+        ``trg_decks_updated_at`` trigger respectively, so neither is written.
+
+        Raises :class:`ValueError` if the project does not exist — without it
+        the denormalised columns cannot be filled (audience has no spec-side
+        fallback) and the ``project_id`` foreign key would reject the insert
+        anyway.
+        """
+
+        project = await self.get_project(project_id)
+        if project is None:
+            raise ValueError(f"project {project_id} not found; cannot persist deck")
+        payload: dict[str, Any] = {
+            "project_id": project_id,
+            "title": str(project["title"]),
+            "language": str(project["language"]),
+            "audience": str(project["audience"]),
+            "deck_json": deck_spec.model_dump(mode="json"),
+        }
+        result = await asyncio.to_thread(
+            lambda: self._client.table("decks").upsert(payload, on_conflict="project_id").execute()
+        )
+        return cast(dict[str, Any], result.data[0])
+
+    async def get_deck(self, project_id: str) -> dict[str, Any] | None:
+        """Get the project's current deck row, or ``None`` if none persisted.
+
+        Returns the single deck row maintained by :meth:`save_deck`. The
+        ``order(created_at desc).limit(1)`` is a belt-and-braces tiebreak: the
+        ``decks_project_id_key`` unique constraint guarantees at most one row
+        per project, so the ordering is inert in practice but keeps the read
+        deterministic if a stray duplicate ever predates the constraint.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("decks")
+                .select("*")
+                .eq("project_id", project_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not result.data:
+            return None
+        return cast(dict[str, Any], result.data[0])
 
     # --------------------------------------------------------------- invoices
 

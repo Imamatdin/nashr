@@ -22,6 +22,23 @@ from typing import Any, cast
 
 import pytest
 
+from packages.core.enums import (
+    AudienceType,
+    BackgroundTreatment,
+    NarrativePhase,
+    PresentationMood,
+    SlideType,
+)
+from packages.core.models.presentation import (
+    ColorPalette,
+    DeckPlan,
+    DeckSpec,
+    DesignDirectionSpec,
+    PlannedSection,
+    PresentationInterviewAnswers,
+    SlideContent,
+    SlideSpec,
+)
 from packages.platform.config import PlatformConfig
 from packages.platform.database import (
     DatabaseClient,
@@ -50,6 +67,7 @@ class _FakeQuery:
         self._limit: int | None = None
         self._order: tuple[str, bool] | None = None
         self._select_cols: str = "*"
+        self._on_conflict: str = ""
 
     def select(self, cols: str = "*") -> _FakeQuery:
         self._mode = "select"
@@ -64,6 +82,12 @@ class _FakeQuery:
     def update(self, payload: dict[str, Any]) -> _FakeQuery:
         self._mode = "update"
         self._payload = payload
+        return self
+
+    def upsert(self, payload: dict[str, Any], *, on_conflict: str = "") -> _FakeQuery:
+        self._mode = "upsert"
+        self._payload = payload
+        self._on_conflict = on_conflict
         return self
 
     def eq(self, col: str, val: Any) -> _FakeQuery:
@@ -92,6 +116,7 @@ class _FakeQuery:
             limit=self._limit,
             order=self._order,
             select_cols=self._select_cols,
+            on_conflict=self._on_conflict,
         )
 
 
@@ -125,6 +150,7 @@ class FakeSupabaseClient:
         limit: int | None,
         order: tuple[str, bool] | None,
         select_cols: str,
+        on_conflict: str = "",
     ) -> SimpleNamespace:
         lt_filters = lt_filters or []
         rows = self.tables.setdefault(table, [])
@@ -162,6 +188,24 @@ class FakeSupabaseClient:
                     updated.append(r)
             self.updates.append((table, dict(payload), list(filters)))
             return SimpleNamespace(data=updated)
+        if mode == "upsert":
+            assert payload is not None
+            conflict_col = on_conflict or "id"
+            match = next(
+                (r for r in rows if r.get(conflict_col) == payload.get(conflict_col)),
+                None,
+            )
+            if match is not None:
+                match.update(payload)
+                self.updates.append(
+                    (table, dict(payload), [(conflict_col, payload.get(conflict_col))])
+                )
+                return SimpleNamespace(data=[match])
+            row = dict(payload)
+            row.setdefault("id", str(uuid.uuid4()))
+            rows.append(row)
+            self.inserts.append((table, dict(row)))
+            return SimpleNamespace(data=[row])
         return SimpleNamespace(data=[])
 
 
@@ -540,6 +584,161 @@ async def test_create_generated_file_persists_type() -> None:
     assert row["file_type"] == "docx"
     assert row["storage_path"] == "r2://out/article.docx"
     assert row["file_size"] == 2048
+
+
+# ---------------------------------------------------------------- decks
+
+
+def _make_deck(*, title: str, audience: AudienceType) -> DeckSpec:
+    """Build a minimal but fully valid DeckSpec for persistence tests.
+
+    ``title`` and the interview ``audience`` are parameterised so a test can
+    make them DIFFER from the project row's denormalised values and prove
+    save_deck sources the columns from the project, never the spec.
+    """
+
+    palette = ColorPalette(
+        background="#1A120B",
+        surface="#D4C5A9",
+        text="#F5F0E8",
+        accent="#C4923A",
+        text_secondary="#A89F91",
+    )
+    design = DesignDirectionSpec(
+        mood=PresentationMood.WARM_HISTORICAL,
+        palette=palette,
+        heading_font="Playfair Display",
+        body_font="EB Garamond",
+        image_style_prefix="period oil painting, no text in image, ",
+        background_treatment=BackgroundTreatment.DARK,
+    )
+    plan = DeckPlan(
+        thesis="The deck makes one specific, concrete argument grounded in the source.",
+        audience_takeaway="The audience leaves able to state the core argument and its support.",
+        sections=[
+            PlannedSection(
+                section_name="Origins",
+                thesis="The movement began as a specific reaction to a concrete cause.",
+                phase=NarrativePhase.HOOK,
+            ),
+            PlannedSection(
+                section_name="Legacy",
+                thesis="Its ideas reshaped institutions that still stand today.",
+                phase=NarrativePhase.CLOSE,
+            ),
+        ],
+        image_cohesion_note="A single coherent visual treatment shared across every slide.",
+    )
+    slides = [
+        SlideSpec(
+            slide_index=0,
+            slide_type=SlideType.TITLE_HERO,
+            content=SlideContent(title="Opening"),
+        ),
+        SlideSpec(
+            slide_index=1,
+            slide_type=SlideType.SECTION_BREAK,
+            content=SlideContent(title="A section divider"),
+        ),
+    ]
+    return DeckSpec(
+        project_id="proj-1",
+        title=title,
+        design=design,
+        interview=PresentationInterviewAnswers(audience=audience),
+        plan=plan,
+        slides=slides,
+    )
+
+
+def _seed_project(
+    fake: FakeSupabaseClient,
+    *,
+    project_id: str = "proj-1",
+    title: str = "Project row title",
+    language: str = "uz",
+    audience: str = "talaba",
+) -> None:
+    fake.seed(
+        "projects",
+        [
+            {
+                "id": project_id,
+                "user_id": "u1",
+                "type": "presentation",
+                "title": title,
+                "language": language,
+                "audience": audience,
+            }
+        ],
+    )
+
+
+async def test_save_deck_sources_denormalised_columns_from_project() -> None:
+    db, fake = _make_db()
+    # All THREE denormalised columns are seeded to differ from the deck's own
+    # value, so a regression that reads any of them from the spec fails here.
+    # The deck's language is the uz default, so the project's ru can only come
+    # from the project row; its 300-char title and undergraduate audience would
+    # each violate a decks CHECK if they ever reached a column.
+    _seed_project(fake, title="Project row title", language="ru", audience="talaba")
+    deck = _make_deck(title="A" * 300, audience=AudienceType.UNDERGRADUATE)
+
+    saved = await db.save_deck("proj-1", deck)
+
+    assert saved["project_id"] == "proj-1"
+    assert saved["title"] == "Project row title"  # project, not the 300-char deck title
+    assert saved["language"] == "ru"  # project ru, not the deck's default uz
+    assert saved["audience"] == "talaba"  # NOT "undergraduate" (AudienceType has no DB mapping)
+
+
+async def test_save_deck_round_trips_spec_through_deck_json() -> None:
+    db, fake = _make_db()
+    _seed_project(fake)
+    deck = _make_deck(title="A" * 300, audience=AudienceType.UNDERGRADUATE)
+
+    await db.save_deck("proj-1", deck)
+    row = await db.get_deck("proj-1")
+
+    assert row is not None
+    restored = DeckSpec.model_validate(row["deck_json"])
+    # The spec's own values survive intact inside deck_json, distinct from the
+    # denormalised columns sourced from the project.
+    assert restored == deck
+    assert restored.title == "A" * 300
+    assert restored.interview.audience is AudienceType.UNDERGRADUATE
+    assert restored.plan is not None
+    assert [s.section_name for s in restored.plan.sections] == ["Origins", "Legacy"]
+    assert [s.slide_id for s in restored.slides] == [s.slide_id for s in deck.slides]
+
+
+async def test_save_deck_upserts_one_row_per_project() -> None:
+    db, fake = _make_db()
+    _seed_project(fake)
+
+    await db.save_deck(
+        "proj-1", _make_deck(title="First generation", audience=AudienceType.UNDERGRADUATE)
+    )
+    await db.save_deck(
+        "proj-1", _make_deck(title="Second generation", audience=AudienceType.GRADUATE)
+    )
+
+    # Current-state, not history: the second save updates the same row in place.
+    assert len(fake.tables["decks"]) == 1
+    row = await db.get_deck("proj-1")
+    assert row is not None
+    assert DeckSpec.model_validate(row["deck_json"]).title == "Second generation"
+
+
+async def test_save_deck_raises_when_project_missing() -> None:
+    db, _ = _make_db()
+    with pytest.raises(ValueError):
+        await db.save_deck("ghost", _make_deck(title="x", audience=AudienceType.UNDERGRADUATE))
+
+
+async def test_get_deck_returns_none_when_absent() -> None:
+    db, _ = _make_db()
+    assert await db.get_deck("no-such-project") is None
 
 
 if __name__ == "__main__":
