@@ -592,6 +592,22 @@ def find_slide_by_id(deck: DeckSpec, slide_id: str) -> tuple[int, SlideSpec] | N
     return None
 
 
+class SlideFix(BaseModel):
+    """One slide-level edit request: which slide, and how to change it.
+
+    The unit of work for the brain's fix tool (Build 2). ``slide_id`` addresses a
+    slide by its stable id — never ``slide_index``, which is rewritten on every
+    mutation — and ``instruction`` is the natural-language edit the editorial
+    regeneration pass acts on. A batch of these is applied in order, each
+    regeneration building on the previous one's deck.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    slide_id: str = Field(min_length=1, max_length=64)
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
 class SlideRegenResult(BaseModel):
     """Outcome of regenerating one slide: the new slide plus its re-validation findings.
 

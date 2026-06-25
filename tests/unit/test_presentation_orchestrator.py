@@ -23,6 +23,7 @@ import pytest
 from packages.bot.orchestrators import SourceProcessingResult
 from packages.bot.orchestrators.presentation_orchestrator import (
     TOTAL_STEPS,
+    FixAndRenderResult,
     PresentationOrchestrator,
     PresentationRenderResult,
 )
@@ -56,6 +57,7 @@ from packages.core.models.presentation import (
     PresentationInterviewAnswers,
     PresentationInterviewQuestions,
     SlideContent,
+    SlideFix,
     SlideRegenResult,
     SlideSpec,
 )
@@ -1159,3 +1161,327 @@ async def test_regenerate_slide_propagates_editorial_error_unwrapped() -> None:
             _noop_progress,
             package=GenerationPackage.PRESENTATION_STANDARD,
         )
+
+
+# ---------------------------------------------------------------------------
+# Batch fix-and-render chain (apply_fixes_and_render)
+#
+# The brain's primary fix tool: N slide fixes → regenerate per fix (scoped
+# image each) → persist ONCE → render ONCE → return. These pin the chain
+# contract: per-fix regen accumulation, the persist/render batch invariant,
+# scoped-image accumulation, fail-fast id validation, atomic batch abort, and
+# the best-effort persist that surfaces (not swallows) its failure.
+# ---------------------------------------------------------------------------
+
+
+class _StubBatchRegenEditorial:
+    """Per-slide canned regen (bumps the title) plus the real id-keyed splice.
+
+    Unlike :class:`_StubRegenEditorial` (one canned result for every call), this
+    returns a distinct edit per ``slide_id`` so a multi-fix batch produces a
+    different change on each targeted slide. ``raises_on`` maps a slide_id to an
+    exception so a mid-batch failure (e.g. a content-critic hard stop) can be
+    simulated; the call is still recorded before it raises.
+    """
+
+    def __init__(self, *, raises_on: dict[str, Exception] | None = None) -> None:
+        self.regen_calls: list[dict[str, Any]] = []
+        self.splice_calls: list[str] = []
+        self._raises_on = dict(raises_on or {})
+        self._real = EditorialPass()
+
+    async def regenerate_slide_content(
+        self,
+        deck: DeckSpec,
+        slide_id: str,
+        *,
+        instruction: str | None = None,
+        claims: Any,
+    ) -> SlideRegenResult:
+        del claims
+        self.regen_calls.append({"slide_id": slide_id, "instruction": instruction})
+        if slide_id in self._raises_on:
+            raise self._raises_on[slide_id]
+        target = next(s for s in deck.slides if s.slide_id == slide_id)
+        bumped = target.model_copy(
+            update={
+                "content": target.content.model_copy(
+                    update={"title": f"EDITED {target.content.title}"}
+                )
+            }
+        )
+        return SlideRegenResult(slide=bumped, findings=[])
+
+    def splice_regenerated_slide(self, deck: DeckSpec, new_slide: SlideSpec) -> DeckSpec:
+        self.splice_calls.append(new_slide.slide_id)
+        return self._real.splice_regenerated_slide(deck, new_slide)
+
+
+async def test_apply_fixes_chains_regen_persists_and_renders_once() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    deck = _regen_deck()
+    editorial = _StubBatchRegenEditorial()
+    worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    spy = _SpyImagePass()
+    orch, db, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        worker=worker,
+        storage=storage_stub,
+        image_pass=spy,
+    )
+    save_deck = AsyncMock(return_value={})
+    db.save_deck = save_deck  # spy the single persist (orch uses this same db)
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+    fixes = [
+        SlideFix(slide_id="gallery", instruction="punchier"),
+        SlideFix(slide_id="end", instruction="tighter takeaway"),
+    ]
+    formats = [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
+
+    result = await orch.apply_fixes_and_render(
+        deck,
+        fixes,
+        sources,
+        PROJECT_ID,
+        formats,
+        _noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+    )
+
+    # regenerate_slide ran once per fix, in order
+    assert [c["slide_id"] for c in editorial.regen_calls] == ["gallery", "end"]
+    # persisted ONCE, carrying the final two-edit deck
+    assert save_deck.call_count == 1
+    persisted_project_id, persisted_deck = save_deck.call_args.args
+    assert persisted_project_id == PROJECT_ID
+    assert persisted_deck.slides[1].content.title == "EDITED Thinkers"
+    assert persisted_deck.slides[2].content.title == "EDITED Legacy"
+    # rendered ONCE: a single render pass over both formats (not per-fix)
+    assert len(worker.render_calls) == len(formats)
+    assert len({c["output_dir"] for c in worker.render_calls}) == 1
+    # result carries the fresh render + the per-fix findings (not discarded)
+    assert isinstance(result, FixAndRenderResult)
+    assert result.render.html_path is not None
+    assert result.render.pptx_path is not None
+    assert len(result.fixes) == 2
+    assert result.deck.slides[1].content.title == "EDITED Thinkers"
+
+
+async def test_apply_fixes_scopes_images_per_edited_slide_only() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    deck = _regen_deck()
+    editorial = _StubBatchRegenEditorial()
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    spy = _SpyImagePass()
+    orch, db, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        storage=storage_stub,
+        image_pass=spy,
+    )
+    db.save_deck = AsyncMock(return_value={})
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+    fixes = [
+        SlideFix(slide_id="gallery", instruction="x"),
+        SlideFix(slide_id="end", instruction="y"),
+    ]
+
+    result = await orch.apply_fixes_and_render(
+        deck,
+        fixes,
+        sources,
+        PROJECT_ID,
+        [ExportFormat.HTML],
+        _noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+    )
+
+    # each fix re-resolved images scoped to exactly its slide, in order
+    assert spy.scope_calls == [frozenset({"gallery"}), frozenset({"end"})]
+    assert spy.resolve_calls == [2, 2]  # STANDARD per-slide budget, once per fix
+    # the untouched slide ("hero") keeps its content (slide_index may renumber)
+    assert result.deck.slides[0].slide_id == "hero"
+    assert result.deck.slides[0].content == deck.slides[0].content
+
+
+async def test_apply_fixes_unknown_slide_id_fails_fast_before_spend() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    deck = _regen_deck()
+    editorial = _StubBatchRegenEditorial()
+    worker = _StubWorkerRunner()
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    spy = _SpyImagePass()
+    orch, db, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        worker=worker,
+        storage=storage_stub,
+        image_pass=spy,
+    )
+    save_deck = AsyncMock(return_value={})
+    db.save_deck = save_deck
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+    # "gallery" is valid, but the unknown "nope" must abort the whole batch first.
+    fixes = [
+        SlideFix(slide_id="gallery", instruction="ok"),
+        SlideFix(slide_id="nope", instruction="bad"),
+    ]
+
+    with pytest.raises(ValueError, match="nope"):
+        await orch.apply_fixes_and_render(
+            deck,
+            fixes,
+            sources,
+            PROJECT_ID,
+            [ExportFormat.HTML],
+            _noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
+        )
+
+    assert editorial.regen_calls == []  # no regen ran — validated before any spend
+    assert spy.scope_calls == []  # no image budget consumed
+    assert save_deck.call_count == 0  # nothing persisted
+    assert worker.render_calls == []  # nothing rendered
+
+
+async def test_apply_fixes_empty_batch_raises() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    deck = _regen_deck()
+    editorial = _StubBatchRegenEditorial()
+    worker = _StubWorkerRunner()
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    orch, db, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        worker=worker,
+        storage=storage_stub,
+        image_pass=_SpyImagePass(),
+    )
+    save_deck = AsyncMock(return_value={})
+    db.save_deck = save_deck
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+
+    with pytest.raises(ValueError, match="at least one fix"):
+        await orch.apply_fixes_and_render(
+            deck,
+            [],
+            sources,
+            PROJECT_ID,
+            [ExportFormat.HTML],
+            _noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
+        )
+
+    assert editorial.regen_calls == []
+    assert save_deck.call_count == 0
+    assert worker.render_calls == []
+
+
+async def test_apply_fixes_persist_failure_surfaces_warning_and_still_renders() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    deck = _regen_deck()
+    editorial = _StubBatchRegenEditorial()
+    worker = _StubWorkerRunner(formats_to_succeed=("html",))
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    orch, db, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        worker=worker,
+        storage=storage_stub,
+        image_pass=_SpyImagePass(),
+    )
+    db.save_deck = AsyncMock(side_effect=RuntimeError("db down"))
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+    fixes = [SlideFix(slide_id="gallery", instruction="x")]
+
+    result = await orch.apply_fixes_and_render(
+        deck,
+        fixes,
+        sources,
+        PROJECT_ID,
+        [ExportFormat.HTML],
+        _noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+    )
+
+    # render still produced files despite the persist failure (fix not lost)
+    assert result.render.html_path is not None
+    # the failure is surfaced into warnings, not silently swallowed
+    assert any("persist failed" in w for w in result.render.warnings)
+    assert any("RuntimeError" in w for w in result.render.warnings)
+
+
+async def test_apply_fixes_batch_failure_aborts_before_persist_and_render() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    deck = _regen_deck()
+    # fix #2 ("end") hard-stops after fix #1 ("gallery") already spent its budget.
+    editorial = _StubBatchRegenEditorial(raises_on={"end": EditorialSlideRegenError("ungrounded")})
+    worker = _StubWorkerRunner()
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    orch, db, _, _ = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        worker=worker,
+        storage=storage_stub,
+        image_pass=_SpyImagePass(),
+    )
+    save_deck = AsyncMock(return_value={})
+    db.save_deck = save_deck
+    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
+    fixes = [
+        SlideFix(slide_id="gallery", instruction="ok"),
+        SlideFix(slide_id="end", instruction="boom"),
+    ]
+
+    with pytest.raises(EditorialSlideRegenError):
+        await orch.apply_fixes_and_render(
+            deck,
+            fixes,
+            sources,
+            PROJECT_ID,
+            [ExportFormat.HTML],
+            _noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
+        )
+
+    # fix #1 ran (and #2 was attempted) but the batch did NOT persist or render
+    assert [c["slide_id"] for c in editorial.regen_calls] == ["gallery", "end"]
+    assert save_deck.call_count == 0  # atomic: no half-applied persist
+    assert worker.render_calls == []  # atomic: nothing rendered
+
+
+async def test_restash_outputs_overwrites_cache_with_new_paths(tmp_path: Path) -> None:
+    """The load-bearing UX guarantee for re-delivery: re-stashing after a
+    re-render points the download buttons at the NEW files (overwrite in place),
+    not the stale ones. ``_send_format`` resolves paths only from this cache."""
+
+    from packages.bot.handlers.presentation_flow import _PROJECT_CACHE, _stash_outputs
+
+    project_id = "restash-proj"
+    old_html = tmp_path / "old.html"
+    old_html.write_bytes(b"old")
+    new_html = tmp_path / "new.html"
+    new_html.write_bytes(b"new")
+    try:
+        _stash_outputs(project_id, PresentationRenderResult(html_path=old_html))
+        assert _PROJECT_CACHE[project_id]["files"]["html"] == str(old_html)
+
+        # the edit re-rendered → re-stash the new result over the same slot
+        _stash_outputs(project_id, PresentationRenderResult(html_path=new_html))
+        assert _PROJECT_CACHE[project_id]["files"]["html"] == str(new_html)
+    finally:
+        _PROJECT_CACHE.pop(project_id, None)

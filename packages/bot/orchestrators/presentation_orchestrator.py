@@ -25,7 +25,7 @@ import asyncio
 import logging
 import subprocess
 import tempfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Final, cast
 from uuid import UUID, uuid4
@@ -49,6 +49,7 @@ from packages.core.models.presentation import (
     DeckSpec,
     DesignDirectionSpec,
     PresentationInterviewAnswers,
+    SlideFix,
     SlideRegenResult,
 )
 from packages.platform.credits import CreditLedger, FreeCreditsReason
@@ -113,6 +114,23 @@ class PresentationRenderResult(BaseModel):
         if self.pdf_path is not None:
             out["pdf"] = self.pdf_path
         return out
+
+
+class FixAndRenderResult(BaseModel):
+    """Result of applying a batch of slide fixes and re-rendering once.
+
+    ``deck`` is the edited in-memory deck (every fix spliced in, persisted before
+    render); ``render`` carries the freshly rendered file paths the handler
+    re-delivers (and any best-effort persist/upload warnings); ``fixes`` keeps the
+    per-fix :class:`SlideRegenResult` findings — the brain reads ``.passed`` to
+    decide whether to accept the batch or retry a slide, so they are not discarded.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    deck: DeckSpec
+    render: PresentationRenderResult
+    fixes: list[SlideRegenResult] = Field(default_factory=list[SlideRegenResult])
 
 
 class PresentationOrchestrator:
@@ -548,6 +566,85 @@ class PresentationOrchestrator:
             only_slide_ids=frozenset({result.slide.slide_id}),
         )
         return new_deck, SlideRegenResult(slide=result.slide, findings=findings)
+
+    async def apply_fixes_and_render(
+        self,
+        deck: DeckSpec,
+        fixes: Sequence[SlideFix],
+        sources: SourceProcessingResult,
+        project_id: str,
+        formats: list[ExportFormat],
+        progress: ProgressCallback,
+        *,
+        package: GenerationPackage,
+    ) -> FixAndRenderResult:
+        """Apply a batch of slide fixes, persist once, render once.
+
+        The brain's primary fix tool (Build 2, Stage 3). Each fix re-runs the
+        single-slide :meth:`regenerate_slide` — content regen, id-keyed splice,
+        section-scoped re-check, and a scoped image re-resolution restricted to
+        that slide — accumulating the edits on one deck. The batch persists ONCE
+        (``save_deck`` upsert, replacing the project's current deck row) and
+        renders ONCE; it never persists or renders per fix.
+
+        Persist runs BEFORE render (mirroring :meth:`run_full_pipeline`) so
+        durability does not hinge on the renderer subprocess, but here the chain
+        owns its own ``try/except`` instead of the silent :meth:`_persist_deck`:
+        an edit's persisted deck already exists, so a swallowed failure would
+        leave the DB stale against freshly delivered files. The failure is
+        surfaced into ``render.warnings`` rather than hidden, and render still
+        proceeds so the user's fix is not lost to a transient DB hiccup.
+
+        Batch semantics are ATOMIC: a fix that raises (unknown id, empty LLM
+        output, or a content-critic hard stop) propagates before persist/render,
+        so the persisted deck and the caller's deck are never left half-applied.
+        Image budget already spent on earlier fixes is the accepted cost of a
+        failed attempt. ``slide_id``\\ s are validated up front so a typo in a
+        later fix never burns regen spend on the earlier ones.
+
+        ``formats`` is required (no silent default): the caller passes the same
+        set it originally delivered, because the renderer's output set — not
+        ``deck.export_formats``, which first-gen never writes back — is what the
+        download surface serves.
+        """
+
+        if not fixes:
+            raise ValueError("apply_fixes_and_render requires at least one fix")
+        known_ids = {slide.slide_id for slide in deck.slides}
+        unknown = sorted({fix.slide_id for fix in fixes if fix.slide_id not in known_ids})
+        if unknown:
+            raise ValueError(f"unknown slide_id(s) in fix batch: {', '.join(unknown)}")
+
+        working = deck
+        outcomes: list[SlideRegenResult] = []
+        total = len(fixes)
+        for index, fix in enumerate(fixes, start=1):
+            await progress(f"Applying fix {index}/{total}", index, total)
+            working, outcome = await self.regenerate_slide(
+                working,
+                fix.slide_id,
+                sources,
+                project_id,
+                progress,
+                package=package,
+                instruction=fix.instruction,
+            )
+            outcomes.append(outcome)
+
+        persist_warning: str | None = None
+        try:
+            await self._db.save_deck(project_id, working)
+        except Exception as exc:
+            persist_warning = f"deck persist failed ({type(exc).__name__})"
+            logger.warning(
+                "presentation_edit_persist_failed",
+                extra={"project_id": project_id, "error_type": type(exc).__name__},
+            )
+
+        render_result = await self.render(working, formats, progress, project_id=project_id)
+        if persist_warning is not None:
+            render_result.warnings.append(persist_warning)
+        return FixAndRenderResult(deck=working, render=render_result, fixes=outcomes)
 
     # ====================================================================
     # STEP 7 — render via Node worker
