@@ -1264,6 +1264,89 @@ Codex re-review found the all-regens-fail edge: when a routed regen was REJECTED
 - **NIT:** `gemini.py:41` comment corrected — `GEMINI_FLASH_3_5_MODEL` IS the GeminiClient default (`DEFAULT_MODEL`) and backs the interactive pass; the old "not the default / interactive stays on 2.5" text was false after the 3.x swap.
 - **TESTS:** 2 red-green hard-stop tests added (regen rejected + re-judge unparseable → still raise; regen rejected + re-judge CLEAN → still raise — the divergence proof) plus the emergency false-positive regression (real deck matching the fallback shape IS critiqued) and `llm_verified` contract tests. Red-green verified by temporarily reverting to the pre-fix logic: all three hard-stop tests went red ("DID NOT RAISE"), green after restore. Full suite green: `python -m pytest tests/unit/test_content_critic.py tests/unit/test_editorial_pass.py` = 128 passed.
 
+## BUILD 2 — brain + fix-and-deliver chain (branch `build1-content-critic`)
+
+Build 2 wires the conversational brain onto a persisted deck and makes slide-level fixes reach the
+user (regenerate → render → upload → deliver → persist). Build 1 (content critic hard-stop on
+`build1-content-critic`) is the working invariant gate until Stage 5: fabrication still refunds and
+fails honestly — no scope cut on the critic rewire, it lands with the brain.
+
+**Revised stage order (plan change 2026-06-25):**
+
+| Stage | Status | What |
+|-------|--------|------|
+| **0** | **DONE** `79fd1de` | Deck persistence (`save_deck`/`get_deck`, migration 003 `unique(project_id)`, orchestrator `_persist_deck` hook) |
+| **1** | **DONE** `ff1558e` | Tool-calling transport (`generate_with_tools`, signature-preserving history serialization, `gemini_tools.py`) |
+| **2** | **FOLDED → Stage 5** | Critic findings → brain rewire (see plan change below) |
+| **3** | **NEXT** | Fix-and-deliver chain — orchestrator method chaining `regenerate_slide` → `save_deck` → `render` → handler re-stash/re-deliver |
+| **4** | pending | Bot session surface (conversation FSM, brain entry) |
+| **5** | pending | Wire-in-brain + critic rewire + memory/retrieval |
+
+### Stage 0 — deck persistence — DONE `79fd1de`
+
+- `DatabaseClient.save_deck` / `get_deck` — one `decks` row per project via upsert on
+  `decks_project_id_key` (`supabase/migrations/003_decks_unique_project.sql`).
+- `PresentationOrchestrator._persist_deck` — called from `run_full_pipeline` after
+  `resolve_images`, before `render` (best-effort, non-fatal).
+- **Gate:** `python scripts/gate_build2_stage0.py` — green on droplet. Proves: exactly one row per
+  project; `DeckSpec` round-trips equal through `deck_json`; second `save_deck` updates in place
+  (`created_at` unchanged, `updated_at` advanced).
+
+### Stage 1 — tool-calling transport — DONE `ff1558e`
+
+- `generate_with_tools` — single-turn primitive for Gemini tool calls.
+- Signature-preserving history serialization (`serialize_history` / `deserialize_history`) so
+  `thought_signature` bytes survive store-and-reload.
+- `gemini_tools.py` — tool schema + wiring surface for the brain loop.
+- **Gate:** `python scripts/gate_build2_stage1.py` — live gate passed against real
+  `gemini-3.1-pro-preview`: real 388-byte `thought_signature` survives serialize→reload
+  byte-for-byte; negative control (dropped signature → HTTP 400) proves it is load-bearing.
+- **Codex fix (same commit):** degraded finish reasons no longer masquerade as clean terminal turns —
+  `_CLEAN_FINISH_REASONS={STOP, UNSPECIFIED}` allowlist; anything else raises.
+
+### Plan change — Stage 2 folded into Stage 5 (NOT a scope cut)
+
+**Original Stage 2:** critic findings → brain rewire (structured findings channel from content critic
+to the brain so it can fix instead of refund).
+
+**Decision (2026-06-25):** folded into Stage 5, not built as a separate earlier stage.
+
+**Reason:** the critic-reports-to-brain channel has no consumer until the brain exists (Stage 5), and
+recon proved it cannot be tested in isolation — building it earlier would create an untestable seam
+maintained across stages doing nothing. The current content-critic hard-stop stays as the working
+invariant gate until Stage 5 wires the brain to consume structured findings and fix instead of
+refund. The rewire is the same work as wiring the brain; it lands with Stage 5.
+
+### Stage 3 — fix-and-deliver chain — NEXT
+
+Orchestrator method chaining existing primitives (`regenerate_slide` → `save_deck` → `render` →
+handler `_stash_outputs` / re-deliver). Gate-driven without the brain. Recon complete (2026-06-25):
+primitives exist; gap is wiring + handler re-stash, not new render/upload/delivery subsystems.
+
+### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
+
+Three correctness items for the **unbuilt** web/R2 consumer. None affect the bot delivery path the
+brain drives (Telegram downloads read `_PROJECT_CACHE` local paths). Pick up when the web surface
+build starts.
+
+1. **PUBLIC SHARE LINK** — not implemented (SPEC.md:453 only: `nashr.ai/p/{project_id}`). No
+   route/handler/URL-builder in repo (`packages/web/` is a placeholder). When built: public URL must
+   point at a stable R2 key, not a stale cached artifact, so a brain-driven fix reaches link users
+   (see item 3 for current title-derived key instability).
+
+2. **`generated_files` RE-REGISTRATION UPSERT** — `create_generated_file` is insert-only
+   (`database.py:283-301`); no unique on `(project_id, file_type)`. Re-delivery appends duplicate
+   rows. **Harmless today:** download callbacks read `_PROJECT_CACHE`, not `generated_files` — rows
+   are unread. Needed when a consumer (web surface) queries `generated_files`; then upsert hygiene
+   like decks got in Stage 0.
+
+3. **R2 KEY TIED TO DECK TITLE** — `_upload_rendered` keys R2 objects by
+   `sanitizeFilename(deck.title)` via `FileStorage.generated_key` (`storage.py:227-230`), not a
+   stable per-format name (e.g. `presentation.html`). A title-changing fix (hero regen) uploads to
+   NEW R2 keys and orphans old objects. **Harmless for bot path** (downloads use local cache; R2 is
+   best-effort). When web surface ships: use stable filenames or delete-old-on-overwrite so the
+   public link serves the updated deck.
+
 ## WHEN SCALING — DEFERRED: editorial system-prompt caching (refactor + cache wiring)
 Deferred from the 2026-06-21 prompt-caching work (which wired drafter + planner + design only).
 TRIGGER TO REVISIT: sustained concurrent deck traffic (so cross-deck cache reads actually land
