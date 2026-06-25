@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 
 GEMINI_FLASH_MODEL: Final[str] = "gemini-2.5-flash"
 
-# Current-generation Flash. Opt-in: not the GeminiClient default — pass
-# explicitly as the ``model=`` arg on ``complete()``. Routed through the
-# ThesisClassifier so the planner-validator pass benefits from the
-# stronger multilingual judgment without changing editorial's existing
-# interactive-pass calls (which stay on 2.5 Flash).
+# Current-generation Flash — the GeminiClient DEFAULT model (see ``DEFAULT_MODEL``
+# below and the default ``model=`` on ``complete()``). After the 3.x model swap it
+# backs every Flash-tier pass: thesis classifier (planner-validator), design
+# direction, claim extraction, vision (via gemini_image), and editorial's
+# interactive-content pass — all migrated off 2.5 Flash.
 GEMINI_FLASH_3_5_MODEL: Final[str] = "gemini-3.5-flash"
 
 # Current-generation Pro — the strong-reasoning tier. Opt-in (not the

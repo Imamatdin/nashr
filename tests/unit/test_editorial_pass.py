@@ -1499,7 +1499,9 @@ async def test_repair_that_still_drops_a_planned_figure_raises_not_ships() -> No
         ),
     ]
     with pytest.raises(EditorialDeckPlanMismatchError):
-        await editorial._enforce_plan_adherence(_interview(), _arc(), plan, content)
+        await editorial._enforce_plan_adherence(
+            _interview(), _arc(), plan, content, is_emergency=False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2806,6 +2808,69 @@ def _critic_content_slide(title: str, body: str, section_name: str, thesis: str)
     )
 
 
+def _mixed_claims() -> list[SourceClaimCreate]:
+    """A claim pool that supports NEITHER fabricated token in :func:`_mixed_fab_deck`."""
+
+    return [_claim("The system reduced water and energy consumption during evaluation.")]
+
+
+def _mixed_fab_deck(plan: DeckPlan) -> tuple[list[SlideSpec], _StubLLM, list[dict[str, Any]]]:
+    """Two fabricating slides plus the regens for a MIXED round.
+
+    Slide A is fixable — its regen keeps the type (CONCEPT_DEFINITION) and drops the
+    fabricated figure, so it splices. Slide B is not — its regen changes the type
+    (CONTENT_SPLIT), an R-T1 FAIL that is rejected, so the original is kept. Returns
+    the two slides, a Sonnet stub scripting both regens in iteration order
+    (A then B), and the two first-pass fabrication findings (handles 1 and 2).
+    """
+
+    slide_a = SlideSpec(
+        slide_index=0,
+        slide_type=SlideType.CONCEPT_DEFINITION,
+        content=SlideContent(
+            title="Water", body_text="Water savings reached 94.4 percent in field trials."
+        ),
+        section_name=plan.sections[0].section_name,
+        section_thesis=plan.sections[0].thesis,
+    )
+    slide_b = SlideSpec(
+        slide_index=1,
+        slide_type=SlideType.CONCEPT_DEFINITION,
+        content=SlideContent(
+            title="Energy", body_text="Energy use dropped by 87.3 percent across all zones."
+        ),
+        section_name=plan.sections[1].section_name,
+        section_thesis=plan.sections[1].thesis,
+    )
+    regen_a = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Water",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    regen_b = _llm_slides_payload(
+        [
+            {
+                "slide_index": 1,
+                "section_index": 1,
+                "slide_type": "content_split",
+                "title": "Energy",
+                "body_text": "Energy use improved across the evaluated zones.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab_a = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    fab_b = _fab_finding(2, "Energy use dropped by 87.3 percent across all zones.", "87.3 percent")
+    return [slide_a, slide_b], _StubLLM([regen_a, regen_b]), [fab_a, fab_b]
+
+
 async def test_content_critic_routes_fixes_and_preserves_slide_id() -> None:
     plan = _stub_plan()
     section = plan.sections[0]
@@ -2844,7 +2909,7 @@ async def test_content_critic_routes_fixes_and_preserves_slide_id() -> None:
     )
 
     out = await pass_._enforce_content_critic(
-        _interview(), _design(), plan, [slide], claims, "proj"
+        _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
     )
 
     assert len(out) == 1
@@ -2884,7 +2949,9 @@ async def test_content_critic_residual_fabrication_raises() -> None:
     )
 
     with pytest.raises(EditorialContentCriticError) as exc:
-        await pass_._enforce_content_critic(_interview(), _design(), plan, [slide], claims, "proj")
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
     assert any(f.check_id == "C-FB" for f in exc.value.findings)
 
 
@@ -2920,14 +2987,14 @@ async def test_content_critic_warn_only_does_not_route() -> None:
     )
 
     out = await pass_._enforce_content_critic(
-        _interview(), _design(), plan, [slide], claims, "proj"
+        _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
     )
 
     assert out[0].slide_id == slide.slide_id  # unchanged
     assert pass_._gemini.critic_calls == 1  # no regen, no re-judge
 
 
-async def test_content_critic_keeps_original_when_regen_fails_then_residual_fires() -> None:
+async def test_content_critic_all_regens_rejected_short_circuits_to_hard_stop() -> None:
     plan = _stub_plan()
     section = plan.sections[0]
     slide = _critic_content_slide(
@@ -2938,8 +3005,10 @@ async def test_content_critic_keeps_original_when_regen_fails_then_residual_fire
     )
     claims = [_claim("The system reduced water consumption during the evaluation period.")]
     # The regen comes back with a DIFFERENT slide type -> R-T1 type-change FAIL ->
-    # regen.passed is False -> the failing regen is NOT spliced, the original
-    # (still-fabricated) slide is kept, and the single re-judge re-flags it.
+    # regen.passed is False -> the failing regen is NOT spliced and the original
+    # (still-fabricated) slide is kept. With NO regen accepted, the re-judge could
+    # only re-examine an unchanged slide, so it is SKIPPED entirely: the first-pass
+    # code-confirmed hard-stop carries forward and fires on its own.
     regen = _llm_slides_payload(
         [
             {
@@ -2955,23 +3024,20 @@ async def test_content_critic_keeps_original_when_regen_fails_then_residual_fire
     fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
     pass_ = _editorial(
         _StubLLM([regen]),
-        critic=[_critic_response([fab]), _critic_response([fab])],
+        critic=[_critic_response([fab])],  # only the first pass runs; no re-judge
         plan=plan,
     )
 
-    # The raise proves the kept original reached the re-judge and tripped the
-    # critic — the failing regen was not silently shipped, nor was the defect
-    # silently swallowed.
     with pytest.raises(EditorialContentCriticError) as exc:
-        await pass_._enforce_content_critic(_interview(), _design(), plan, [slide], claims, "proj")
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
     assert any(f.check_id == "C-FB" for f in exc.value.findings)
-    assert pass_._gemini.critic_calls == 2  # initial critique + exactly one re-judge
+    assert pass_._gemini.critic_calls == 1  # short-circuit: no re-judge call
 
 
 async def test_content_critic_skips_emergency_deck() -> None:
     plan = _stub_plan()
-    # The exact emergency-fallback shape: 2 slides, TITLE_HERO + SUMMARY_TAKEAWAY,
-    # the sentinel takeaway title, no section metadata.
     emergency = [
         SlideSpec(
             slide_index=0,
@@ -2991,8 +3057,104 @@ async def test_content_critic_skips_emergency_deck() -> None:
     pass_ = _editorial(_StubLLM([]), plan=plan)
 
     out = await pass_._enforce_content_critic(
-        _interview(), _design(), plan, emergency, claims, "proj"
+        _interview(), _design(), plan, emergency, claims, "proj", is_emergency=True
     )
 
     assert out is emergency  # returned unchanged
-    assert pass_._gemini.critic_calls == 0  # the emergency guard fired; no critic call
+    assert pass_._gemini.critic_calls == 0  # the explicit emergency flag short-circuits
+
+
+async def test_content_critic_runs_on_real_deck_matching_emergency_shape() -> None:
+    """The RISK Codex flagged: a REAL deck whose shape matches the emergency
+    fallback (a synthesized TITLE_HERO + a SUMMARY_TAKEAWAY titled exactly the
+    sentinel, no section metadata) must STILL be critiqued. Emergency status is the
+    explicit origin flag, never inferred from shape — so ``is_emergency=False`` here
+    means every gate runs even though the shape is identical to the fallback's."""
+    plan = _stub_plan()
+    shaped_like_emergency = [
+        SlideSpec(
+            slide_index=0,
+            slide_type=SlideType.TITLE_HERO,
+            content=SlideContent(title="A deck"),
+        ),
+        SlideSpec(
+            slide_index=1,
+            slide_type=SlideType.SUMMARY_TAKEAWAY,
+            content=SlideContent(
+                title="Insufficient source material",
+                bullets=["Add more source material to generate a full deck."],
+            ),
+        ),
+    ]
+    claims = [_claim("The deck has real source claims and a genuine summary slide.")]
+    pass_ = _editorial(_StubLLM([]), plan=plan)  # critic defaults to clean findings
+
+    out = await pass_._enforce_content_critic(
+        _interview(), _design(), plan, shaped_like_emergency, claims, "proj", is_emergency=False
+    )
+
+    # The critic RAN (shape did not skip it); it found nothing -> deck returned as-is.
+    assert pass_._gemini.critic_calls == 1
+    assert out is shaped_like_emergency
+
+
+async def test_content_critic_uncorrected_hard_stop_stands_when_rejudge_clean() -> None:
+    """Divergence from a naive 'trust the re-judge' fix: a first-pass hard-stop on
+    a slide whose regen was REJECTED stands even when the re-judge RAN successfully
+    and returned NO findings. The unchanged slide's deterministic, code-confirmed
+    verdict is not clearable by a stochastic re-judge that merely failed to
+    re-propose it — clearing it would ship the known fabrication."""
+    plan = _stub_plan()
+    slides, llm, (fab_a, fab_b) = _mixed_fab_deck(plan)
+    pass_ = _editorial(
+        llm,
+        # First pass flags both; re-judge runs and returns CLEAN (it does not
+        # re-flag the kept slide B).
+        critic=[_critic_response([fab_a, fab_b]), _critic_response([])],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(),
+            _design(),
+            plan,
+            slides,
+            _mixed_claims(),
+            "proj",
+            is_emergency=False,
+        )
+    # Only the UNCORRECTED slide B stands; A was corrected and the clean re-judge
+    # legitimately cleared it.
+    assert [f.slide_id for f in exc.value.findings] == [slides[1].slide_id]
+    assert all(f.check_id == "C-FB" for f in exc.value.findings)
+    assert pass_._gemini.critic_calls == 2  # first pass + one (clean) re-judge
+
+
+async def test_content_critic_degraded_rejudge_keeps_all_first_pass_hard_stops() -> None:
+    """The originally reported bug: after a mixed regen round, if the re-judge
+    DEGRADES (unparseable after retry, ``llm_verified`` False), absence of a verdict
+    must not clear a known fabrication — EVERY first-pass hard-stop stands, including
+    the one on the corrected slide whose fix could not be re-verified."""
+    plan = _stub_plan()
+    slides, llm, (fab_a, fab_b) = _mixed_fab_deck(plan)
+    pass_ = _editorial(
+        llm,
+        critic=[_critic_response([fab_a, fab_b]), "not valid json", "still not valid json"],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(),
+            _design(),
+            plan,
+            slides,
+            _mixed_claims(),
+            "proj",
+            is_emergency=False,
+        )
+    # Both stand: B (uncorrected) AND A (corrected but the re-judge could not confirm).
+    assert {f.slide_id for f in exc.value.findings} == {slides[0].slide_id, slides[1].slide_id}
+    assert all(f.check_id == "C-FB" for f in exc.value.findings)
+    assert pass_._gemini.critic_calls == 3  # first pass + re-judge attempt + retry

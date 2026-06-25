@@ -167,6 +167,29 @@ class CriticRawFinding(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ContentCritiqueResult(BaseModel):
+    """Outcome of one adversarial critique pass: the grounded findings PLUS
+    whether the LLM critique actually produced a verdict.
+
+    ``llm_verified`` is ``True`` when the critic LLM ran and its output parsed —
+    even if it found nothing, which is a real "clean" verdict — or when there was
+    nothing to audit (no claims or no slides, vacuously clean). It is ``False``
+    ONLY when the model output was unparseable after the retry: in that case the
+    source-grounding findings could not be ESTABLISHED this pass, so a caller must
+    NOT read an empty ``result.failures`` as "verified clean".
+
+    Diverging these two states is the whole point of this type. Collapsing
+    "ran clean, found nothing" into "could not verify" is exactly what let a known
+    fabrication ship when a re-judge degraded: the hard stop read zero failures and
+    cleared a defect it had merely failed to re-examine.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: PlanValidationResult
+    llm_verified: bool
+
+
 async def critique_deck_adversarially(
     slides: list[SlideSpec],
     plan: DeckPlan,
@@ -174,7 +197,7 @@ async def critique_deck_adversarially(
     claims: list[SourceClaimCreate],
     gemini: GeminiClient,
     language: Language = Language.UZ,
-) -> PlanValidationResult:
+) -> ContentCritiqueResult:
     """Audit a generated slide sequence against its plan and source claims.
 
     Runs the code-detected hollow-slide check (no LLM) plus, when ``claims`` are
@@ -183,19 +206,24 @@ async def critique_deck_adversarially(
     map every call, so a re-judge after a splice maps handles against the current
     list.
 
-    Returns the hollow-slide findings alone if the model output is unparseable
-    after one retry: the critic is an additive quality gate over an
-    already-structurally-valid deck, so an unusable critic response degrades to
-    ship — it does not block a deck the model could not audit. (A Gemini API
-    error, by contrast, propagates like every other pipeline call.)
+    Returns a :class:`ContentCritiqueResult` carrying the findings AND whether the
+    LLM critique produced a verdict (``llm_verified``). When the model output is
+    unparseable after one retry, ``llm_verified`` is ``False`` and only the
+    code-detected hollow findings are present: the critic is an additive quality
+    gate, so an unusable response never RAISES here (a Gemini API error, by
+    contrast, propagates like every other pipeline call) — but the caller is told
+    the verdict is absent so it cannot mistake "could not verify" for "clean".
     """
 
     findings: list[AuditCheckResult] = list(_detect_hollow_slides(slides))
 
     raw = await _call_critic_with_retry(slides, plan, claims, gemini, language)
-    if raw:
-        findings.extend(_translate_findings(raw, slides, claims, plan))
-    return PlanValidationResult(findings=findings)
+    if raw is None:
+        return ContentCritiqueResult(
+            result=PlanValidationResult(findings=findings), llm_verified=False
+        )
+    findings.extend(_translate_findings(raw, slides, claims, plan))
+    return ContentCritiqueResult(result=PlanValidationResult(findings=findings), llm_verified=True)
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +706,7 @@ __all__ = [
     "CONTENT_CRITIC_CLAIM_POOL_LIMIT",
     "HARD_STOP_CHECK_IDS",
     "ROUTABLE_CHECK_IDS",
+    "ContentCritiqueResult",
     "CriticEvidence",
     "CriticRawFinding",
     "critique_deck_adversarially",

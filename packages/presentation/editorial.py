@@ -324,10 +324,11 @@ _CLAIM_STRENGTH_RANK: Final[dict[ClaimStrength, int]] = {
     ClaimStrength.WEAK: 1,
 }
 
-# Title carried by the SUMMARY_TAKEAWAY slide in the emergency-minimal deck.
-# Used both to build that deck and to detect it: the deck-vs-plan gate is
-# skipped for the emergency deck (the executor returned nothing usable — an
-# infrastructure failure, not a plan mismatch).
+# Title carried by the SUMMARY_TAKEAWAY slide in the emergency-minimal deck. This
+# is the user-facing message ONLY; whether a deck IS the emergency fallback is
+# tracked by an explicit flag set at its origin (see ``generate_deck_spec``), never
+# inferred from this title or the deck's shape — so a real deck that happens to use
+# this title is still gated normally.
 _EMERGENCY_TAKEAWAY_TITLE: Final[str] = "Insufficient source material"
 
 
@@ -578,14 +579,28 @@ class EditorialPass:
             target_slide_count=target_count,
             language=interview.language,
         )
+        # The emergency-minimal deck is produced ONLY when the executor returned
+        # nothing usable (``raw_slides`` empty). Capture that HERE at its origin and
+        # thread it to every gate, rather than re-inferring it downstream from slide
+        # shape — a real 2-slide deck that happens to match the fallback's shape
+        # must still pass through the plan gate, content critic, and interactive pass.
+        deck_is_emergency = not raw_slides
         content_slides = self._post_process(raw_slides, interview)
-        content_slides = await self._enforce_plan_adherence(interview, arc, plan, content_slides)
+        content_slides = await self._enforce_plan_adherence(
+            interview, arc, plan, content_slides, is_emergency=deck_is_emergency
+        )
         content_slides = await self._enforce_content_critic(
-            interview, design, plan, content_slides, claims, project_id
+            interview,
+            design,
+            plan,
+            content_slides,
+            claims,
+            project_id,
+            is_emergency=deck_is_emergency,
         )
 
         interactive_slides: list[SlideSpec] = []
-        if interview.include_interactive and not _is_emergency_deck(content_slides):
+        if interview.include_interactive and not deck_is_emergency:
             interactive_slides = await self._generate_interactive_slides(
                 content_slides=content_slides,
                 analysis=analysis,
@@ -656,15 +671,19 @@ class EditorialPass:
         arc: NarrativeArc,
         plan: DeckPlan,
         content_slides: list[SlideSpec],
+        *,
+        is_emergency: bool,
     ) -> list[SlideSpec]:
         """Validate the deck against the plan; repair the failing sections ONCE.
 
-        Skipped for the emergency-minimal deck: that path means the executor
-        returned nothing usable (an infra failure), not a plan mismatch, and
-        validating it would spuriously fail section coverage.
+        Skipped for the emergency-minimal deck (``is_emergency``): that path means
+        the executor returned nothing usable (an infra failure), not a plan
+        mismatch, and validating it would spuriously fail section coverage. The
+        flag is set once at the deck's origin in :meth:`generate_deck_spec`, never
+        inferred from slide shape.
         """
 
-        if _is_emergency_deck(content_slides):
+        if is_emergency:
             return content_slides
         result = validate_deck_against_plan(content_slides, plan)
         if result.passed:
@@ -735,34 +754,62 @@ class EditorialPass:
         content_slides: list[SlideSpec],
         claims: list[SourceClaimCreate],
         project_id: str,
+        *,
+        is_emergency: bool,
     ) -> list[SlideSpec]:
         """Audit the post-adherence content against the source; route + re-judge once.
 
         Runs the adversarial content critic (one Gemini 3.1 Pro call) on the content
         slides BEFORE the interactive pass, so corrected content flows into
         interactive generation. Routable FAIL findings (fabrication, unsupported,
-        chart/title, hollow) are grouped by durable ``slide_id`` and regenerated one
-        slide each via :meth:`regenerate_slide_content` (which preserves the id),
-        spliced back, then re-judged ONCE. If a code-confirmed fabrication or
-        unsupported claim survives that round, this raises
-        :class:`EditorialContentCriticError` (a hard stop that refunds); every other
-        residual finding is WARN and ships (I5 degrade-and-ship).
+        chart/title) are grouped by durable ``slide_id`` and regenerated one slide
+        each via :meth:`regenerate_slide_content` (which preserves the id), spliced
+        back, then re-judged ONCE.
 
-        Skipped for the emergency-minimal deck (an infra fallback, not a content
-        defect) and when there are no claims to ground against.
+        The hard stop is per-slide, keyed on what actually changed:
+
+        * a first-pass hard-stop (C-FB / C-US) on a slide whose regen was REJECTED
+          stands unconditionally — that slide is unchanged (word limits are
+          idempotent and already applied before the first pass, so its visible text
+          is identical at re-judge time), so its deterministic, code-confirmed
+          grounding verdict still holds and a fresh, stochastic re-judge is not
+          entitled to clear it. When NO regen was accepted, the re-judge can only
+          re-examine unchanged slides, so it is skipped and the standing findings
+          hard-stop directly (the reproduced all-regens-fail case);
+        * a first-pass hard-stop on a slide that WAS corrected is cleared only if
+          the re-judge SUCCESSFULLY RAN and did not re-flag it. If the re-judge
+          could not produce a verdict (``llm_verified`` is False — degraded /
+          unparseable), every first-pass hard-stop stands: absence of a verdict
+          must never clear a known fabrication.
+
+        A surviving hard-stop raises :class:`EditorialContentCriticError` (a hard
+        stop that refunds); every other residual finding is WARN and ships (I5
+        degrade-and-ship). When the FIRST critique cannot be established, no defect
+        was found to clear, so the deck ships unaudited per I5 (logged).
+
+        Skipped for the emergency-minimal deck (``is_emergency``, an infra fallback
+        rather than a content defect) and when there are no claims to ground against.
         """
 
-        if _is_emergency_deck(content_slides) or not claims:
+        if is_emergency or not claims:
             return content_slides
 
         gemini = self._get_gemini()
-        result = await critique_deck_adversarially(
+        critique = await critique_deck_adversarially(
             content_slides, plan, claims=claims, gemini=gemini, language=interview.language
         )
+        if not critique.llm_verified:
+            # The first critique could not be established (unparseable after retry).
+            # Nothing was FOUND, so there is no known defect to clear — ship per I5.
+            logger.warning("editorial_content_critic_first_pass_unverified")
+            return content_slides
+
+        result = critique.result
         routable = [f for f in result.failures if _is_routable_critic_finding(f)]
         if not routable:
             return content_slides
 
+        first_hard = [f for f in result.failures if f.check_id in HARD_STOP_CHECK_IDS]
         logger.warning(
             "editorial_content_critic_routing",
             extra={"routable": [f.check_id for f in routable]},
@@ -771,6 +818,7 @@ class EditorialPass:
         # deck (no interactives yet) to drive the slide_id-preserving regen, then
         # take its corrected slides back. _assemble_deck is a pure constructor.
         deck = self._assemble_deck(content_slides, interview, design, project_id, plan)
+        corrected_ids: set[str] = set()
         for slide_id, findings in _group_critic_findings_by_slide_id(routable).items():
             regen = await self.regenerate_slide_content(
                 deck, slide_id, instruction=_critic_instruction(findings), claims=claims
@@ -779,9 +827,9 @@ class EditorialPass:
                 # The regen produced its OWN FAIL (off-roster person, type change,
                 # hollow divider) — shipping it would trade one defect for another,
                 # and SlideRegenResult's contract says a FAIL slide must not ship.
-                # Keep the original slide and do NOT retry; the single re-judge below
-                # re-flags its still-present critic defect, and the residual policy
-                # resolves it (hard-stop if C-FB/C-US, degrade-and-ship otherwise).
+                # Keep the original, unchanged slide; its first-pass hard-stop is
+                # carried forward below — the verdict still holds because the slide
+                # did not change.
                 logger.warning(
                     "editorial_content_critic_regen_rejected",
                     extra={
@@ -793,19 +841,49 @@ class EditorialPass:
                 )
                 continue
             deck = self.splice_regenerated_slide(deck, regen.slide)
+            corrected_ids.add(slide_id)
         corrected = _post_process_repaired(deck.slides)
+
+        # A first-pass hard-stop on a slide we could NOT correct stands no matter
+        # what the re-judge later says: the slide is unchanged and was already
+        # code-confirmed to assert a fact the source does not support.
+        uncorrected_hard = [f for f in first_hard if f.slide_id not in corrected_ids]
+
+        if not corrected_ids:
+            # Nothing was spliced, so the re-judge would only re-examine unchanged
+            # slides — skip it entirely and hard-stop on the standing findings.
+            if uncorrected_hard:
+                raise self._content_critic_hard_stop(uncorrected_hard, reason="no_regen_accepted")
+            return corrected
 
         rejudged = await critique_deck_adversarially(
             corrected, plan, claims=claims, gemini=gemini, language=interview.language
         )
-        residual = [f for f in rejudged.failures if f.check_id in HARD_STOP_CHECK_IDS]
+        if rejudged.llm_verified:
+            rejudge_hard = [
+                f for f in rejudged.result.failures if f.check_id in HARD_STOP_CHECK_IDS
+            ]
+            residual = _dedupe_hard_stops(uncorrected_hard + rejudge_hard)
+        else:
+            # The re-judge produced no verdict; absence of a verdict must not clear
+            # a known fabrication, so every first-pass hard-stop stands.
+            residual = first_hard
+
         if residual:
-            logger.warning(
-                "editorial_content_critic_hard_stop",
-                extra={"residual": [f.check_id for f in residual]},
-            )
-            raise EditorialContentCriticError(residual)
+            raise self._content_critic_hard_stop(residual, reason="residual_after_rejudge")
         return corrected
+
+    @staticmethod
+    def _content_critic_hard_stop(
+        residual: list[AuditCheckResult], *, reason: str
+    ) -> EditorialContentCriticError:
+        """Log and build the content-critic hard stop; the caller ``raise``s it."""
+
+        logger.warning(
+            "editorial_content_critic_hard_stop",
+            extra={"residual": [f.check_id for f in residual], "reason": reason},
+        )
+        return EditorialContentCriticError(residual)
 
     # ------------------------------------------------------------------
     # Single-slide regeneration (judge + conversational edit layer)
@@ -2107,29 +2185,6 @@ def _post_process_repaired(slides: list[SlideSpec]) -> list[SlideSpec]:
     return slides
 
 
-def _is_emergency_deck(slides: list[SlideSpec]) -> bool:
-    """True when post-process produced the 2-slide emergency fallback.
-
-    The emergency deck means the executor returned nothing usable (an infra
-    failure), not a plan mismatch — so the deck-vs-plan gate, the content critic,
-    and the interactive pass are all skipped for it. Matched by the fallback's
-    exact SHAPE (two slides, TITLE_HERO then SUMMARY_TAKEAWAY, neither carrying
-    section metadata) PLUS its sentinel takeaway title — not the title alone, so a
-    real deck with a slide that happens to share that title cannot skip the gates.
-    """
-
-    if len(slides) != 2:
-        return False
-    title_hero, takeaway = slides
-    return (
-        title_hero.slide_type is SlideType.TITLE_HERO
-        and takeaway.slide_type is SlideType.SUMMARY_TAKEAWAY
-        and title_hero.section_name is None
-        and takeaway.section_name is None
-        and takeaway.content.title == _EMERGENCY_TAKEAWAY_TITLE
-    )
-
-
 def _is_routable_critic_finding(finding: AuditCheckResult) -> bool:
     """A critic finding enters single-slide regen only if it pins a slide and FAILs.
 
@@ -2154,6 +2209,25 @@ def _group_critic_findings_by_slide_id(
         if finding.slide_id is not None:
             grouped[finding.slide_id].append(finding)
     return dict(grouped)
+
+
+def _dedupe_hard_stops(findings: list[AuditCheckResult]) -> list[AuditCheckResult]:
+    """Drop duplicate hard-stop findings, keyed by ``(slide_id, check_id)``.
+
+    The residual set unions the first-pass findings on UNCORRECTED slides with the
+    re-judge's findings on the corrected deck; an unchanged slide that the re-judge
+    also re-flags would otherwise appear twice.
+    """
+
+    seen: set[tuple[str | None, str]] = set()
+    out: list[AuditCheckResult] = []
+    for finding in findings:
+        key = (finding.slide_id, finding.check_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(finding)
+    return out
 
 
 def _critic_instruction(findings: list[AuditCheckResult]) -> str:

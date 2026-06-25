@@ -321,25 +321,7 @@ async def _amain() -> int:
     vertex_proj = os.environ.get("VERTEX_PROJECT", "(unset)")
     print("Build 1 gate — content critic + Gemini 3.x swap")
     print(f"  VERTEX_PROJECT={vertex_proj}  VERTEX_LOCATION={vertex_loc}")
-    print(f"  log file (tee): {_LOG_PATH}")
     print()
-
-    _DEBUG_DIR.mkdir(exist_ok=True)
-    log_file = _LOG_PATH.open("w", encoding="utf-8")
-    real_stdout = sys.stdout
-
-    class _Tee(io.TextIOBase):
-        def write(self, s: str) -> int:
-            real_stdout.write(s)
-            log_file.write(s)
-            log_file.flush()
-            return len(s)
-
-        def flush(self) -> None:
-            real_stdout.flush()
-            log_file.flush()
-
-    sys.stdout = _Tee()  # type: ignore[assignment]
 
     enlightenment_ok = await _generate_deck(
         "ENLIGHTENMENT",
@@ -354,16 +336,15 @@ async def _amain() -> int:
         deck_path=_SCO2_DECK,
     )
 
-    log_file.close()
-
     print()
     print("=" * 78)
     print("BUILD 1 GATE SUMMARY")
     print("=" * 78)
     print(f"  Enlightenment: {'OK' if enlightenment_ok else 'FAILED'}")
     print(f"  sCO2:          {'OK' if sco2_ok else 'FAILED'}")
+
     print(f"  deck dumps:    {_ENLIGHTENMENT_DECK}, {_SCO2_DECK}")
-    print(f"  full log:      {_LOG_PATH}")
+    print(f"  capture log via host redirect to debug/build1_gate.log")
     print()
     if enlightenment_ok and sco2_ok:
         print("OVERALL: both decks generated end-to-end (no unhandled exception).")

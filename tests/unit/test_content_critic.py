@@ -151,7 +151,9 @@ async def test_grounded_fabrication_with_absent_token_is_fail() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert len(result.failures) == 1
     finding = result.failures[0]
@@ -183,7 +185,9 @@ async def test_off_slide_quote_is_dropped() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     # The quote is not on the slide -> dropped; the slide has a body so no C-HL.
     assert result.findings == []
@@ -213,7 +217,9 @@ async def test_token_present_in_claims_degrades_to_warn() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert result.failures == []
     assert len(result.warnings) == 1
@@ -249,7 +255,9 @@ async def test_absence_check_reads_full_claims_not_capped_pool() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert result.failures == []
     assert any(w.check_id == "C-FB" and w.severity is AuditSeverity.WARN for w in result.warnings)
@@ -282,7 +290,7 @@ async def test_fabrication_token_matching_roster_person_is_dropped() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], plan, claims=claims, gemini=gemini)
+    result = (await critique_deck_adversarially([slide], plan, claims=claims, gemini=gemini)).result
 
     # People are owned by the upstream D-X1 gate; critic fabrication is non-person.
     assert result.findings == []
@@ -316,7 +324,9 @@ async def test_chart_encoding_wrong_with_two_on_slide_quotes_is_fail() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert len(result.failures) == 1
     finding = result.failures[0]
@@ -346,7 +356,9 @@ async def test_structural_finding_is_emit_only_warning() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert result.failures == []
     assert len(result.warnings) == 1
@@ -376,7 +388,9 @@ async def test_cosmetic_finding_does_not_flip_passed() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert result.passed is True
     assert all(w.severity is AuditSeverity.WARN for w in result.warnings)
@@ -407,9 +421,9 @@ async def test_handle_maps_to_durable_slide_id() -> None:
         ]
     )
 
-    result = await critique_deck_adversarially(
-        [first, second], _plan(), claims=claims, gemini=gemini
-    )
+    result = (
+        await critique_deck_adversarially([first, second], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert len(result.failures) == 1
     assert result.failures[0].slide_id == second.slide_id
@@ -429,10 +443,13 @@ async def test_hollow_slide_detected_in_code_without_llm_finding() -> None:
     claims = [_claim("The deck covers a topic with at least one substantive slide here.")]
     gemini = _FakeGemini([_response([])])  # model reports nothing
 
-    result = await critique_deck_adversarially(
+    outcome = await critique_deck_adversarially(
         [hollow, full], _plan(), claims=claims, gemini=gemini
     )
+    result = outcome.result
 
+    # A parsed, empty findings list is a real "clean" verdict, not a degrade.
+    assert outcome.llm_verified is True
     # Hollow slides are emit-only WARN (visibility), never a routable FAIL.
     hollow_findings = [f for f in result.warnings if f.check_id == "C-HL"]
     assert len(hollow_findings) == 1
@@ -445,7 +462,9 @@ async def test_title_hero_only_title_is_not_hollow() -> None:
     claims = [_claim("The deck opens with a title slide and then develops its argument.")]
     gemini = _FakeGemini([_response([])])
 
-    result = await critique_deck_adversarially([title], _plan(), claims=claims, gemini=gemini)
+    result = (
+        await critique_deck_adversarially([title], _plan(), claims=claims, gemini=gemini)
+    ).result
 
     assert result.findings == []
 
@@ -456,10 +475,12 @@ async def test_empty_claims_skips_llm_call() -> None:
     )
     gemini = _FakeGemini([])  # must not be called
 
-    result = await critique_deck_adversarially([slide], _plan(), claims=[], gemini=gemini)
+    outcome = await critique_deck_adversarially([slide], _plan(), claims=[], gemini=gemini)
 
     assert gemini.calls == 0
-    assert result.findings == []
+    # No claims to ground against -> vacuously clean, NOT a degrade.
+    assert outcome.llm_verified is True
+    assert outcome.result.findings == []
 
 
 async def test_unparseable_response_degrades_to_hollow_only() -> None:
@@ -467,10 +488,42 @@ async def test_unparseable_response_degrades_to_hollow_only() -> None:
     claims = [_claim("The deck has at least one source claim to ground against here.")]
     gemini = _FakeGemini(["not json at all", "still not json"])
 
-    result = await critique_deck_adversarially([hollow], _plan(), claims=claims, gemini=gemini)
+    outcome = await critique_deck_adversarially([hollow], _plan(), claims=claims, gemini=gemini)
 
     assert gemini.calls == 2  # first + one retry
-    assert [f.check_id for f in result.findings] == ["C-HL"]
+    # Unparseable after retry: the source-grounding verdict could NOT be
+    # established. The caller must not read these empty failures as "clean".
+    assert outcome.llm_verified is False
+    assert [f.check_id for f in outcome.result.findings] == ["C-HL"]
+
+
+async def test_parseable_finding_is_verified() -> None:
+    """A parsed response that PRODUCES a finding is a real verdict (llm_verified)."""
+    slide = _slide(
+        0,
+        SlideType.CONCEPT_DEFINITION,
+        _content("Background", body_text="The reactor reached 1200 degrees in 1987."),
+    )
+    claims = [_claim("The system operated at elevated temperature during testing.")]
+    gemini = _FakeGemini(
+        [
+            _response(
+                [
+                    _finding(
+                        1,
+                        "fabrication",
+                        slide_quote="The reactor reached 1200 degrees in 1987.",
+                        unsupported_token="1987",
+                    )
+                ]
+            )
+        ]
+    )
+
+    outcome = await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+
+    assert outcome.llm_verified is True
+    assert len(outcome.result.failures) == 1
 
 
 def test_routable_and_hard_stop_check_id_membership() -> None:

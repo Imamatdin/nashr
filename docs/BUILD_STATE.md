@@ -760,8 +760,11 @@ screenshots committed under `docs/screens/`, eyeballed against each row before r
   figure adherence, D-X1 no-invented-figure (all FAIL); D-A1 invented-section (WARN). D-X1 is
   SCOPED to GALLERY_PEOPLE/TIMELINE and EXCLUDES TEAM_CREDITS (deck authors, not source figures).
   `failing_section_indices()` maps findings→sections for the repair. `critique_deck_adversarially()`
-  is the Phase-3 seam — a no-op that NEVER raises (it shares a module with the live path; a
-  raising stub would be one import away from breaking prod, unlike the Phase-1 NotImplementedError).
+  is now the LIVE Phase-3 content critic (was a no-op seam): it returns a `ContentCritiqueResult`
+  (grounded findings + an `llm_verified` flag) and still NEVER raises on LLM error — an unparseable
+  critique degrades to `llm_verified=False` rather than crashing the deck. The hard stop lives one
+  layer up in `_enforce_content_critic`, which raises `EditorialContentCriticError` when a
+  code-confirmed C-FB/C-US survives the route+re-judge round (see the 2026-06-24 entry below).
 - DECISION 1 (section identity = deterministic int join): the executor tags each slide with a
   `section_index` (on the internal `_LLMSlide` DTO ONLY — DeckSpec/SlideSpec/SlideContent
   UNCHANGED); `_materialise_slides` resolves it to the plan's canonical section_name, which the
@@ -1253,6 +1256,14 @@ L2 layout engine Run 3 — merged to main. Gallery centering fixed (1-2 person c
 ## 2026-06-21 — title_hero PPTX seam fix (merged to main)
 Merged `fix/title-hero-pptx-scrim-seam`. `pptx-renderer.ts`: always paint `bg.color` underlay, full-bleed background via `addImage` (not `slide.background.path`), 12-slice gradient scrim (not one hard 70% rect). **Fixed:** bare white right 30% + hard vertical cut on title slide. Slide-13 `chart_data` panel verified byte-identical main vs fix (pre-existing surface rect, not a regression). **KNOWN REMAINING (title slide, cosmetic):** faint vertical hairlines from multi-slice scrim gradient — fade is correct; native OOXML `gradFill` would remove slice seams (queued). **LOGGED (pre-existing, own tasks):** PPTX font embedding (`fontFace` by name only → WPS clips/missing-font); LibreOffice-only render gate misses WPS/Windows viewer deltas.
 
+## 2026-06-24 — content critic: re-judge cannot clear a known fabrication (branch build1-content-critic)
+Codex re-review found the all-regens-fail edge: when a routed regen was REJECTED (original kept) and the re-judge then degraded (unparseable after retry) — OR simply ran and stochastically failed to re-propose the defect — `_enforce_content_critic` read zero hard-stop failures from the re-judge and SHIPPED the original C-FB/C-US fabrication (`critic_calls=3`, no `EditorialContentCriticError`). Root cause: `critique_deck_adversarially` collapsed "ran clean, found nothing" and "could not verify" into the same empty `PlanValidationResult`, and the enforce layer trusted a fresh, stochastic re-judge to RE-confirm a defect on a slide that had not changed.
+- **RETURN CONTRACT (changed):** `critique_deck_adversarially()` now returns `ContentCritiqueResult(result: PlanValidationResult, llm_verified: bool)` — NOT a bare `PlanValidationResult`. It still NEVER raises on LLM error (a Gemini API error still propagates); an unparseable critique after retry degrades to `llm_verified=False` carrying only the code-detected hollow findings. Callers must not read empty `result.failures` as "clean" when `llm_verified` is False. All call sites (editorial.py ×2, test_content_critic.py) updated to read `.result`.
+- **HARD-STOP (per-slide now):** a first-pass C-FB/C-US on a slide whose regen was REJECTED stands unconditionally — the slide is unchanged (word limits are idempotent and already applied before the first pass), so its deterministic, code-confirmed verdict holds and the stochastic re-judge is not entitled to clear it. If NO regen was accepted, the re-judge is SKIPPED entirely (the reproduced case) and the standing findings raise directly. A first-pass hard-stop on a CORRECTED slide is cleared only if the re-judge SUCCESSFULLY RAN (`llm_verified`) and did not re-flag it; a degraded re-judge keeps ALL first-pass hard-stops. (Diverges from the naive "trust the re-judge" patch, which leaves the stochastic-miss hole open — owner-approved.)
+- **EMERGENCY GUARD (RISK fix):** `_is_emergency_deck` shape-inference DELETED. A real 2-slide deck (synthesized TITLE_HERO + a SUMMARY_TAKEAWAY titled exactly the sentinel) matched the fallback shape and skipped ALL gates. Replaced with an explicit origin flag `deck_is_emergency = not raw_slides`, set once in `generate_deck_spec` and threaded (kwarg-only) to `_enforce_plan_adherence`, `_enforce_content_critic`, and the interactive guard. Failure mode of a forgotten flag now fails SAFE (over-audits a fallback) instead of dangerous (skips a real deck).
+- **NIT:** `gemini.py:41` comment corrected — `GEMINI_FLASH_3_5_MODEL` IS the GeminiClient default (`DEFAULT_MODEL`) and backs the interactive pass; the old "not the default / interactive stays on 2.5" text was false after the 3.x swap.
+- **TESTS:** 2 red-green hard-stop tests added (regen rejected + re-judge unparseable → still raise; regen rejected + re-judge CLEAN → still raise — the divergence proof) plus the emergency false-positive regression (real deck matching the fallback shape IS critiqued) and `llm_verified` contract tests. Red-green verified by temporarily reverting to the pre-fix logic: all three hard-stop tests went red ("DID NOT RAISE"), green after restore. Full suite green: `python -m pytest tests/unit/test_content_critic.py tests/unit/test_editorial_pass.py` = 128 passed.
+
 ## WHEN SCALING — DEFERRED: editorial system-prompt caching (refactor + cache wiring)
 Deferred from the 2026-06-21 prompt-caching work (which wired drafter + planner + design only).
 TRIGGER TO REVISIT: sustained concurrent deck traffic (so cross-deck cache reads actually land
@@ -1282,3 +1293,91 @@ decks at temperature 0 BEFORE and AFTER the refactor via the local live harness 
 scripts/gate_a_emphasis_provenance.py) and diff the materialised slides. Equivalent → keep and add
 cache="5m" to the editorial complete() calls (editorial.py:869,880). Any regression → revert the
 refactor ONLY; drafter/planner/design caching is independent and unaffected.
+
+## PLAN OF RECORD — full scope (do not flatten)
+
+This is the un-abbreviated roadmap. Future sessions read it from here so detail is not lost to
+compaction.
+
+### PLANNER PHASES
+
+- **Phase 1** — shipped.
+- **Phase 1.5** — shipped.
+- **Phase 2** — shipped.
+- **Phase 3** — adversarial deck-quality critic/judge with routing authority (the "thinker").
+  Sonnet, NOT Opus (per `llm-integration` rule).
+- **Phase 4** — prompt caching — **DONE** (merged to main @ `d9691b6`, proven live on droplet:
+  drafter sequential cache reads; design `count_tokens` = 1145 > 1024 floor).
+- **Phase 5** — taste as loadable skills.
+
+### PART B — 4 chunks (all remain; do not reduce scope)
+
+#### 1. VISUAL SYSTEM (full sCO₂ aesthetic — three parts; NOT "unlimited images" alone)
+
+**a) Cohesion families**
+
+Five seed families: editorial-engraving, high-contrast-press, sepia-educational, risograph-punk,
+technical-blueprint. Family locked deck-wide (palette, typography, texture, accent); per-slide
+archetype + image strategy vary within family-compatible rules.
+
+**PRINCIPLE:** cohesion and variety are **separate axes** — do not conflate them.
+
+**b) Three image slots — source-as-inspiration, NOT source-as-copy**
+
+Slot existence is **structural** (layout defines it, not a per-image judgment). Abstain is the
+floor for anything not cleanly sourceable. Every image restyled into the deck's visual language;
+never dropped in raw.
+
+- **(i) Portrait** — Wikidata → Commons, identity + license gating (PD / CC0 / CC-BY only;
+  reject CC-BY-SA for ShareAlike contamination). Restyled mechanically into the deck family (SVG
+  filters: stipple, halftone, engraving, duotone). Recognizable features preserved. **NO AI likeness
+  of real people.** Living people abstain by default.
+- **(ii) Object/concept figure** — first-class standalone field (**NOT deferred**), AI-generated.
+- **(iii) Background/atmosphere** — AI-generated.
+
+**c) Per-slide image router + scrim**
+
+Chooses portrait / object-figure / background / none per slide. Image-quota **POLICY by tier** (NOT
+hardcoded caps):
+
+- **Paid** — unlimited subject to quality; batch to cut cost.
+- **Mid** — 5.
+- **Standard** — 1–2 at highest-value slots.
+
+**KILL** the hardcoded per-tier cap currently in `image_pass.py`.
+
+#### 2. GROUNDING / MOAT
+
+Web + website-fetching OCR sourcing — pull and ground on sources fetched from the web/URLs (turn a
+page into usable markdown), not just uploaded files. Depth of grounding is the moat.
+
+#### 3. CONVERSATIONAL EDIT
+
+Iterate a generated deck through chat.
+
+#### 4. FONTS
+
+Real typographic control — decorative/display fonts ("letter styles") keyed to the cohesion family.
+
+### ALSO ON THE LIST (NOT deferred)
+
+- **"Add details" / AI Fill escape hatch** — instruction to add detail / fill a section.
+- **IEEE / article quality improvements.**
+
+### ENGINE ARC (immediate front — sits ahead of the Part B tail)
+
+1. **Terminal-policy fix (urgent, ships first):** audit-fail known to orchestrator; project NOT
+   marked `ready`; honest user message (not "An error occurred" on empty download).
+2. **Intent channel + intake advisor at the front** — the intent layer **extends** the existing
+   interview/mini-app to capture style/format intent alongside existing fact-gathering. Different
+   axes: interview asks "what facts am I missing"; intent asks "what should this look like and do."
+3. **Per-slide generation restructure** — planner emits sections with slide slots; each slide an
+   addressable regenerable unit from a slide brief carrying deck cohesion + neighbor constraints.
+4. **The thinker** — Phase 3 judge (above).
+5. **Unlimited images** — via the quota **policy** above (not a hardcoded cap).
+
+### REMAINING L2 (before L3)
+
+- **Per-locale length budget** — kills language-blind `WORD_LIMITS` at root (design change; its own
+  pass).
+- **Phase 3 judge** — auditor → routing judge (see Phase 3 above).
