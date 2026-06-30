@@ -1278,8 +1278,8 @@ fails honestly — no scope cut on the critic rewire, it lands with the brain.
 | **0** | **DONE** `79fd1de` | Deck persistence (`save_deck`/`get_deck`, migration 003 `unique(project_id)`, orchestrator `_persist_deck` hook) |
 | **1** | **DONE** `ff1558e` | Tool-calling transport (`generate_with_tools`, signature-preserving history serialization, `gemini_tools.py`) |
 | **2** | **FOLDED → Stage 5** | Critic findings → brain rewire (see plan change below) |
-| **3** | **NEXT** | Fix-and-deliver chain — orchestrator method chaining `regenerate_slide` → `save_deck` → `render` → handler re-stash/re-deliver |
-| **4** | pending | Bot session surface (conversation FSM, brain entry) |
+| **3** | **DONE** `45552d5` | Fix-and-deliver chain — `apply_fixes_and_render` (batch fix → persist once → render once → handler re-stash/re-deliver) |
+| **4** | **DONE — pending gate** | Bot session surface — DB-backed brain session, chat loop above the orchestrator, code-side approval gate, per-tier fix counter, delivery-boundary guard |
 | **5** | pending | Wire-in-brain + critic rewire + memory/retrieval |
 
 ### Stage 0 — deck persistence — DONE `79fd1de`
@@ -1317,11 +1317,51 @@ maintained across stages doing nothing. The current content-critic hard-stop sta
 invariant gate until Stage 5 wires the brain to consume structured findings and fix instead of
 refund. The rewire is the same work as wiring the brain; it lands with Stage 5.
 
-### Stage 3 — fix-and-deliver chain — NEXT
+### Stage 3 — fix-and-deliver chain — DONE `45552d5`
 
 Orchestrator method chaining existing primitives (`regenerate_slide` → `save_deck` → `render` →
-handler `_stash_outputs` / re-deliver). Gate-driven without the brain. Recon complete (2026-06-25):
-primitives exist; gap is wiring + handler re-stash, not new render/upload/delivery subsystems.
+handler `_stash_outputs` / re-deliver). Gate-driven without the brain. `apply_fixes_and_render`:
+atomic batch (a raising fix never half-applies), persist once before render once, best-effort
+deck persist surfaced into render warnings.
+
+### Stage 4 — bot session surface — DONE (pending droplet gate), branch `build1-content-critic`
+
+The MACHINERY the Stage 5 brain runs in, driven by a scripted stub (no real brain — that's Stage 5).
+One coherent uncommitted change set:
+
+- **DB-backed session** (`migration 004_brain_sessions.sql`, `packages/bot/sessions/`): one row per
+  project (`unique(project_id)`), recoverable by `project_id` ALONE so no restart orphans it. Holds
+  the serialized tool-calling history (Stage 1 `serialize_history`), the live `SourceProcessingResult`
+  the fix tool re-grounds against (split: light `sources_json` vs heavy write-once `figures_json`,
+  lazy-hydrated only when a fix fires), the deck ref (via `get_deck`), the code-side approval state +
+  durable `pending_action_json`, the per-tier fix counter, and analytics-only spend. `findings_json`
+  reserved for Stage 5.
+- **STEP-0 serialization landmine fixed:** `SourceFigure.data: bytes` needs
+  `ser/val_json_bytes="base64"` (`core/models/source.py`) — pydantic's default utf8 raises on real
+  PNG/JPEG. Proven byte-for-byte (probe, now a permanent test).
+- **Chat loop ABOVE the orchestrator** (`presentation_flow.py`, new `talking_to_brain` state): load
+  session → one stub-driven turn → dispatch the fix tool to `apply_fixes_and_render` (Stage 3,
+  unchanged) → re-stash → persist. Per-project `asyncio.Lock` serializes turns + the approve callback.
+- **Approval gate (code-side, never model-self-granted):** `requires_approval` keys on the chat-loop's
+  `user_initiated` PROVENANCE, never the model's `TurnAction` label or batch size — a real button is
+  the only authorization. `awaiting_approval` state + inline approve/reject.
+- **Per-tier FIX COUNTER (replaced a dollar cap):** `SESSION_FIX_LIMITS` premium 3 / standard 2 /
+  basic 1 (PLACEHOLDER values — real editing-allowance economics are a Stage 5 decision; counter is
+  model-independent so it survives a Sonnet→Gemini editorial-seat migration). An integer the model
+  can't influence; `fixes_used` bumped only after a DELIVERED fix.
+- **Delivery-boundary guard:** count consumed AND success reported IFF the fix produced ≥1 deliverable
+  rendered file. A zero-file render (every format failed; `render()` warns rather than raises) →
+  `RENDER_FAILED`: no count consumed, prior `_PROJECT_CACHE` downloads preserved, no false success.
+- **Tests:** `tests/unit/test_brain_session.py` (session round-trip incl. byte-for-byte figures,
+  restart recovery by project_id, approval provenance, counter limits, failed/zero-file fix doesn't
+  consume, concurrency). **Gate:** `scripts/gate_build2_stage4.py` (apply migration 004 first).
+- **Reviewed across rounds by Codex:** STEP-0, the self-grant gate, the budget→counter swap, and the
+  delivery boundary all closed and confirmed.
+
+**The one live-wiring gap (Stage 5, flagged honestly):** `create_session` is NOT yet called from the
+delivery handler, because `run_full_pipeline` discards its `SourceProcessingResult` and Stage 4 must
+not refactor it. The loop/gate/counter are fully built and tested by driving them directly; surfacing
+sources from the pipeline into the delivery seam is the Stage 5 integration.
 
 ### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
 
@@ -1346,6 +1386,29 @@ build starts.
    NEW R2 keys and orphans old objects. **Harmless for bot path** (downloads use local cache; R2 is
    best-effort). When web surface ships: use stable filenames or delete-old-on-overwrite so the
    public link serves the updated deck.
+
+## FUTURE HARDENING — Stage 3 failure contract (pre-existing; NOT a Stage 4 blocker)
+
+Two pre-existing Stage 3 robustness items, surfaced (not introduced) during the Stage 4 delivery-
+boundary review. Both swallow internal failure rather than raising, so callers cannot distinguish
+success from silent failure. Stage 4 handles the *edit-path* consequence (see delivery-boundary
+guard / `RENDER_FAILED`); the underlying contract is still loose. Bundle as one future task:
+
+1. **`render()` returns a zero-files result** — it records per-format failures as warnings and
+   continues (`presentation_orchestrator.py:721`) rather than raising on TOTAL failure. Exists on
+   BOTH the first-gen path (`run_full_pipeline → render`, its own delivery handling) and the edit
+   path (now caught as `RENDER_FAILED` in `_dispatch_fix`).
+2. **`apply_fixes_and_render` swallows internal `save_deck` failure** — surfaces it into render
+   warnings and returns the working deck (`presentation_orchestrator.py:659`) rather than raising,
+   so a persist failure is invisible to the caller.
+
+**Self-healing double-failure edge (Codex-flagged, do NOT fix in Stage 4):** if (1) the internal
+`save_deck` fails AND (2) render also produces zero files, then `session.deck` (in-memory, advanced)
+and the DB deck (not advanced) disagree — but the next `load_session` reads `get_deck` (the DB
+version), so it self-corrects on reload. Requires two simultaneous failures and is pre-existing.
+
+**Bundle:** "Stage 3 robustness — `render` and `save_deck` swallow internal failures rather than
+raising; harden the failure contract so callers can distinguish success from silent failure."
 
 ## WHEN SCALING — DEFERRED: editorial system-prompt caching (refactor + cache wiring)
 Deferred from the 2026-06-21 prompt-caching work (which wired drafter + planner + design only).
