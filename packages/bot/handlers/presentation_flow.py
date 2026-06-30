@@ -28,20 +28,26 @@ would scatter the conversation across files.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
+from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlencode
 
 from aiogram import Bot, F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from packages.bot.keyboards import (
     main_menu_keyboard,
     payment_provider_keyboard,
+    presentation_approval_keyboard,
+    presentation_chat_keyboard,
     presentation_mini_app_keyboard,
     presentation_output_keyboard,
     tier_keyboard,
@@ -54,8 +60,21 @@ from packages.bot.orchestrators import (
     ProgressCallback,
 )
 from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+from packages.bot.sessions import (
+    ApprovalState,
+    BrainDriver,
+    BrainSession,
+    PendingAction,
+    ScriptedStubDriver,
+    hydrate_figures,
+    load_session,
+    persist_session,
+    requires_approval,
+)
+from packages.bot.sessions.budget import has_fixes_remaining, session_fix_limit
 from packages.bot.states import PresentationStates
 from packages.core.enums import ExportFormat, GenerationPackage
+from packages.core.models.presentation import SlideFix
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
@@ -609,21 +628,32 @@ async def _send_format(
     await callback.answer()
 
 
-@router.callback_query(PresentationStates.reviewing_output, F.data == "download_html")
+# Downloads are served not only at first delivery (reviewing_output) but
+# throughout the editing conversation: a fix re-stashes the new files, so the
+# same buttons must keep working in talking_to_brain (and while a change is
+# parked at awaiting_approval, where the current files are still downloadable).
+_DOWNLOAD_STATES = StateFilter(
+    PresentationStates.reviewing_output,
+    PresentationStates.talking_to_brain,
+    PresentationStates.awaiting_approval,
+)
+
+
+@router.callback_query(_DOWNLOAD_STATES, F.data == "download_html")
 async def send_html(callback: CallbackQuery, state: FSMContext) -> None:
     """Send the rendered HTML artefact."""
 
     await _send_format(callback, state, "html", "")
 
 
-@router.callback_query(PresentationStates.reviewing_output, F.data == "download_pptx")
+@router.callback_query(_DOWNLOAD_STATES, F.data == "download_pptx")
 async def send_pptx(callback: CallbackQuery, state: FSMContext) -> None:
     """Send the rendered PPTX file."""
 
     await _send_format(callback, state, "pptx", "")
 
 
-@router.callback_query(PresentationStates.reviewing_output, F.data == "download_pdf")
+@router.callback_query(_DOWNLOAD_STATES, F.data == "download_pdf")
 async def send_pdf(callback: CallbackQuery, state: FSMContext) -> None:
     """Send the rendered PDF file (if generated)."""
 
@@ -648,9 +678,12 @@ async def regenerate_output(
     await start_generation(callback.message, state, bot, db, credits, storage)
 
 
-@router.callback_query(PresentationStates.reviewing_output, F.data == "done")
+@router.callback_query(
+    StateFilter(PresentationStates.reviewing_output, PresentationStates.talking_to_brain),
+    F.data == "done",
+)
 async def finish(callback: CallbackQuery, state: FSMContext) -> None:
-    """End the flow: clear FSM, drop the cache, show the main menu."""
+    """End the flow (delivery review OR editing chat): clear FSM, drop cache, menu."""
 
     data = await state.get_data()
     lang = _flow_language(data)
@@ -673,4 +706,342 @@ async def cancel(callback: CallbackQuery, state: FSMContext) -> None:
     if isinstance(callback.message, Message):
         await callback.message.edit_text(labels.main_menu, reply_markup=main_menu_keyboard(lang))
     await state.clear()
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Conversational editing loop + approval gate (Build 2, Stage 4)
+# ---------------------------------------------------------------------------
+#
+# After delivery the user edits the deck by talking to the brain (Stage 5). This
+# is the MACHINERY: load the DB-backed session by project_id, run ONE turn (a
+# scripted stub stands in for the brain), dispatch the brain's fix tool to the
+# orchestrator ABOVE the pipeline (apply_fixes_and_render — no run_full_pipeline
+# refactor), gate significant re-deliveries behind a user button, cap cumulative
+# spend, and persist. A per-project lock serializes concurrent turns. The core
+# functions below take no aiogram types so they are unit-testable directly.
+
+# Per-project async locks serialize a session's turns within this process. Like
+# _PROJECT_CACHE they are module-local and restart-wiped — correct for a single
+# instance (an in-flight turn is lost on restart anyway); a multi-instance
+# deployment needs a DB-level lock (SELECT ... FOR UPDATE), the documented
+# follow-on.
+_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _session_lock(project_id: str) -> asyncio.Lock:
+    """Get-or-create the per-project turn lock."""
+
+    lock = _SESSION_LOCKS.get(project_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _SESSION_LOCKS[project_id] = lock
+    return lock
+
+
+def _brain_driver() -> BrainDriver:
+    """The driver for one chat turn.
+
+    Stage 4 returns a scripted stub (an echo when unscripted): the machinery is
+    real and tested, the intelligence is Stage 5, which replaces this factory's
+    body with the real Gemini tool-calling brain. Kept a factory like
+    :func:`_orchestrator` so the Stage 5 swap is one function.
+    """
+
+    return ScriptedStubDriver()
+
+
+async def _noop_progress(step_name: str, step: int, total: int) -> None:
+    """Progress sink for the editing fix-chain; the re-delivery is brief."""
+
+    del step_name, step, total
+
+
+class _ChatOutcome(StrEnum):
+    """What the chat machinery resolved a turn / callback to, for rendering."""
+
+    REPLY = "reply"
+    REDELIVERED = "redelivered"
+    RENDER_FAILED = "render_failed"
+    AWAITING_APPROVAL = "awaiting_approval"
+    FIXES_EXHAUSTED = "fixes_exhausted"
+    DISCARDED = "discarded"
+    NO_SESSION = "no_session"
+
+
+@dataclass
+class _ChatResult:
+    """The machinery's verdict; the handler maps it to FSM state + a reply."""
+
+    outcome: _ChatOutcome
+    reply_text: str | None = None
+    reason: str | None = None
+    slides_changed: int = 0
+    fix_limit: int = 0  # the tier's edit allowance, for the FIXES_EXHAUSTED message
+    warnings: list[str] = field(default_factory=list[str])
+
+
+async def _run_chat_turn(
+    *,
+    driver: BrainDriver,
+    orchestrator: PresentationOrchestrator,
+    db: DatabaseClient,
+    project_id: str,
+    user_text: str,
+    user_initiated: bool,
+) -> _ChatResult:
+    """Run ONE brain turn: load → turn → (reply | gate | fix).
+
+    The session loads light (no figures). A turn ALWAYS runs — even with the fix
+    allowance spent, the user can still chat — so the only cap is the pre-fix
+    counter in :func:`_dispatch_fix`. The turn's cost and updated history are
+    recorded, then the result routes on whether it re-delivers
+    (``bool(outcome.fixes)`` — never the model's label): a plain reply persists
+    and returns; a re-delivery is either gated (:func:`requires_approval`, keyed
+    on ``user_initiated`` provenance) or, when the user's own message authorized
+    it, applied directly.
+    """
+
+    session = await load_session(db, project_id)
+    if session is None:
+        return _ChatResult(_ChatOutcome.NO_SESSION)
+
+    outcome = await driver.run_turn(session, user_text)
+    session.history = outcome.history
+    session.accumulated_cost_usd += outcome.estimated_cost_usd
+
+    if not outcome.fixes:
+        await persist_session(db, session)
+        return _ChatResult(_ChatOutcome.REPLY, reply_text=outcome.reply_text)
+
+    if requires_approval(outcome, user_initiated=user_initiated):
+        session.pending_action = PendingAction(
+            fixes=list(outcome.fixes), reason=outcome.reason or ""
+        )
+        session.approval_state = ApprovalState.AWAITING_APPROVAL
+        await persist_session(db, session)
+        return _ChatResult(_ChatOutcome.AWAITING_APPROVAL, reason=outcome.reason or "")
+
+    return await _dispatch_fix(
+        orchestrator=orchestrator, db=db, session=session, fixes=list(outcome.fixes)
+    )
+
+
+async def _dispatch_fix(
+    *,
+    orchestrator: PresentationOrchestrator,
+    db: DatabaseClient,
+    session: BrainSession,
+    fixes: list[SlideFix],
+) -> _ChatResult:
+    """Fire the orchestrator fix-chain, re-deliver, accumulate spend, persist.
+
+    The single place a fix actually runs — reached by the auto-apply path and the
+    approve callback alike. The pre-fix gate is the fix COUNTER: refuse BEFORE the
+    expensive call if the session's tier allowance is spent. The count is consumed
+    and success reported IFF the fix produced at least one DELIVERABLE rendered
+    file — the delivery boundary. ``apply_fixes_and_render`` can RETURN (no
+    exception) with zero output files because ``render`` records per-format
+    failures as warnings rather than raising; that is a failed fix, not a delivered
+    one, so it must not consume the allowance, must not overwrite the prior good
+    downloads with an empty map, and must not claim success. An exception from the
+    fix chain likewise never reaches the increment. Figures are hydrated here
+    (lazy-loaded only now), the edited deck refreshed from the result (apply
+    persisted it internally, so a held copy would be stale), and the new files
+    re-stashed so the download buttons serve them.
+    """
+
+    if not has_fixes_remaining(session.fixes_used, session.package):
+        session.pending_action = None
+        session.approval_state = ApprovalState.IDLE
+        await persist_session(db, session)
+        return _ChatResult(
+            _ChatOutcome.FIXES_EXHAUSTED, fix_limit=session_fix_limit(session.package)
+        )
+    if session.deck is None:
+        return _ChatResult(_ChatOutcome.NO_SESSION)
+
+    await hydrate_figures(db, session)
+    result = await orchestrator.apply_fixes_and_render(
+        session.deck,
+        fixes,
+        session.sources,
+        session.project_id,
+        session.formats,
+        _noop_progress,
+        package=session.package,
+    )
+    # The edited deck was persisted INSIDE apply_fixes_and_render (so the next fix
+    # builds on it); keep the in-memory copy in sync regardless of render outcome.
+    session.deck = result.deck
+    session.pending_action = None
+    session.approval_state = ApprovalState.IDLE
+
+    if not result.render.by_extension():
+        # DELIVERY BOUNDARY: every render format failed — nothing downloadable.
+        # The fix was NOT delivered: do not consume the allowance, do not stash an
+        # empty map over the prior good paths (the old download buttons keep
+        # working), and do not claim success. The conversation IS persisted so the
+        # next turn sees this attempt. (Note: the deck advanced in the DB while the
+        # user saw a failure — acceptable here because the next fix grounds on the
+        # advanced deck and the allowance is intact; surfacing it is the contract.)
+        await persist_session(db, session)
+        return _ChatResult(_ChatOutcome.RENDER_FAILED, warnings=list(result.render.warnings))
+
+    session.fixes_used += 1  # consume one edit — only on a DELIVERED fix
+    session.accumulated_cost_usd += result.estimated_cost_usd  # analytics, not the cap
+    session.accumulated_image_count += result.image_count
+    _stash_outputs(session.project_id, result.render)
+    await _register_outputs(db, session.project_id, result.render)
+    await persist_session(db, session)
+    return _ChatResult(
+        _ChatOutcome.REDELIVERED,
+        slides_changed=len(fixes),
+        warnings=list(result.render.warnings),
+    )
+
+
+async def _apply_pending(
+    *,
+    orchestrator: PresentationOrchestrator,
+    db: DatabaseClient,
+    project_id: str,
+) -> _ChatResult:
+    """Approve path: fire the parked change. A button — not the model — got here."""
+
+    session = await load_session(db, project_id)
+    if session is None or session.pending_action is None:
+        return _ChatResult(_ChatOutcome.NO_SESSION)
+    return await _dispatch_fix(
+        orchestrator=orchestrator,
+        db=db,
+        session=session,
+        fixes=list(session.pending_action.fixes),
+    )
+
+
+async def _reject_pending(*, db: DatabaseClient, project_id: str) -> _ChatResult:
+    """Reject path: discard the parked change and clear the gate."""
+
+    session = await load_session(db, project_id)
+    if session is None:
+        return _ChatResult(_ChatOutcome.NO_SESSION)
+    session.pending_action = None
+    session.approval_state = ApprovalState.IDLE
+    await persist_session(db, session)
+    return _ChatResult(_ChatOutcome.DISCARDED)
+
+
+async def _render_chat_result(
+    target: Message, lang: str, labels: BotLabels, result: _ChatResult
+) -> None:
+    """Send the user-facing message for a chat result; FSM state is the caller's."""
+
+    if result.outcome is _ChatOutcome.REPLY:
+        await target.answer(result.reply_text or labels.error_generic)
+    elif result.outcome is _ChatOutcome.REDELIVERED:
+        text = labels.edit_applied.format(count=result.slides_changed)
+        await target.answer(text, reply_markup=presentation_chat_keyboard(lang))
+    elif result.outcome is _ChatOutcome.RENDER_FAILED:
+        await target.answer(labels.edit_render_failed)
+    elif result.outcome is _ChatOutcome.AWAITING_APPROVAL:
+        prompt = labels.approval_prompt.format(reason=result.reason or "")
+        await target.answer(prompt, reply_markup=presentation_approval_keyboard(lang))
+    elif result.outcome is _ChatOutcome.FIXES_EXHAUSTED:
+        await target.answer(labels.edit_fixes_exhausted.format(limit=result.fix_limit))
+    elif result.outcome is _ChatOutcome.DISCARDED:
+        await target.answer(labels.change_discarded)
+    else:
+        await target.answer(labels.edit_session_not_found)
+
+
+@router.message(PresentationStates.talking_to_brain, F.text)
+async def chat_turn(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    db: DatabaseClient,
+    credits: CreditLedger,
+    storage: FileStorage | None = None,
+) -> None:
+    """One inbound editing message: load → turn → dispatch/gate → persist → reply."""
+
+    data = await state.get_data()
+    project_id = str(data.get("project_id", ""))
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+    if not project_id:
+        await message.answer(labels.edit_session_not_found)
+        return
+    orchestrator = _orchestrator(bot, db, credits, storage)
+    async with _session_lock(project_id):
+        # A turn in talking_to_brain is triggered by the user's OWN message, so a
+        # re-delivery it asks for is user-authorized (no button). The day the
+        # brain (Stage 5) re-delivers on its own initiative — outside a user edit
+        # request, or proactively — that path must pass user_initiated=False so
+        # requires_approval() gates it; the provenance is set HERE, never by the
+        # model's turn outcome.
+        result = await _run_chat_turn(
+            driver=_brain_driver(),
+            orchestrator=orchestrator,
+            db=db,
+            project_id=project_id,
+            user_text=message.text or "",
+            user_initiated=True,
+        )
+    await _render_chat_result(message, lang, labels, result)
+    if result.outcome is _ChatOutcome.AWAITING_APPROVAL:
+        await state.set_state(PresentationStates.awaiting_approval)
+
+
+@router.message(PresentationStates.awaiting_approval, F.text)
+async def blocked_during_approval(message: Message, state: FSMContext) -> None:
+    """While a change awaits approval, text does NOT run a turn — resolve first."""
+
+    data = await state.get_data()
+    labels = get_bot_labels(_flow_language(data))
+    await message.answer(labels.approval_required_first)
+
+
+@router.callback_query(PresentationStates.awaiting_approval, F.data == "approve_redeliver")
+async def approve_redeliver(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    db: DatabaseClient,
+    credits: CreditLedger,
+    storage: FileStorage | None = None,
+) -> None:
+    """The user authorized the parked change: fire it, re-deliver, resume chatting."""
+
+    data = await state.get_data()
+    project_id = str(data.get("project_id", ""))
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    orchestrator = _orchestrator(bot, db, credits, storage)
+    async with _session_lock(project_id):
+        result = await _apply_pending(orchestrator=orchestrator, db=db, project_id=project_id)
+    await _render_chat_result(callback.message, lang, labels, result)
+    await state.set_state(PresentationStates.talking_to_brain)
+    await callback.answer()
+
+
+@router.callback_query(PresentationStates.awaiting_approval, F.data == "reject_redeliver")
+async def reject_redeliver(callback: CallbackQuery, state: FSMContext, db: DatabaseClient) -> None:
+    """The user declined the parked change: discard it, resume chatting."""
+
+    data = await state.get_data()
+    project_id = str(data.get("project_id", ""))
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    async with _session_lock(project_id):
+        result = await _reject_pending(db=db, project_id=project_id)
+    await _render_chat_result(callback.message, lang, labels, result)
+    await state.set_state(PresentationStates.talking_to_brain)
     await callback.answer()

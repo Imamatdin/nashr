@@ -195,9 +195,16 @@ class SourceFigure(BaseModel):
     figure is captioned (vision) to STEER generation as art direction — the
     bytes are never copied into the deck and the source image is never used
     directly. ``data`` is therefore an input to understanding, not output.
+
+    ``ser_json_bytes`` / ``val_json_bytes`` force base64 for the raw ``data``
+    bytes: a brain session persists the live ``SourceProcessingResult`` to jsonb
+    (the fix tool re-grounds against it), and pydantic's default ``utf8`` mode
+    raises ``UnicodeDecodeError`` on real PNG/JPEG bytes. Base64 makes
+    ``model_dump(mode="json")`` round-trip losslessly through ``model_validate``
+    — the same discipline the genai SDK uses for ``thought_signature``.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", ser_json_bytes="base64", val_json_bytes="base64")
 
     page_number: int = Field(ge=1)
     data: bytes

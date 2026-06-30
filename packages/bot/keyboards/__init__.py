@@ -197,6 +197,50 @@ def presentation_output_keyboard(lang: str) -> InlineKeyboardMarkup:
     )
 
 
+def presentation_chat_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Downloads + done, shown after the brain re-delivers an edit (Stage 4).
+
+    Deliberately OMITS the ``regenerate_output`` button of
+    :func:`presentation_output_keyboard`: regeneration mid-conversation is the
+    brain's job (a fix), not a full pipeline re-run, and that handler is bound to
+    ``reviewing_output`` anyway. ``done`` ends the editing conversation.
+    """
+
+    labels = get_bot_labels(lang)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🌐 HTML", callback_data="download_html"),
+                InlineKeyboardButton(text="📊 PPTX", callback_data="download_pptx"),
+            ],
+            [InlineKeyboardButton(text="📑 PDF", callback_data="download_pdf")],
+            [InlineKeyboardButton(text=labels.done, callback_data="done")],
+        ]
+    )
+
+
+def presentation_approval_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Approve / reject buttons for the brain's code-side approval gate.
+
+    The user pressing approve is the ONLY thing that authorizes a gated
+    re-delivering change — the model can never synthesize this callback, which is
+    what makes the gate code-side rather than model-self-granted (Build 2,
+    Stage 4).
+    """
+
+    labels = get_bot_labels(lang)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=labels.approval_approve, callback_data="approve_redeliver"
+                ),
+                InlineKeyboardButton(text=labels.approval_reject, callback_data="reject_redeliver"),
+            ]
+        ]
+    )
+
+
 def presentation_mini_app_keyboard(lang: str, mini_app_url: str) -> InlineKeyboardMarkup:
     """Button that opens the presentation questionnaire Mini App.
 

@@ -51,6 +51,7 @@ from packages.core.models.presentation import (
     PresentationInterviewAnswers,
     SlideFix,
     SlideRegenResult,
+    SlideSpec,
 )
 from packages.platform.credits import CreditLedger, FreeCreditsReason
 from packages.platform.database import DatabaseClient
@@ -124,6 +125,15 @@ class FixAndRenderResult(BaseModel):
     re-delivers (and any best-effort persist/upload warnings); ``fixes`` keeps the
     per-fix :class:`SlideRegenResult` findings — the brain reads ``.passed`` to
     decide whether to accept the batch or retry a slide, so they are not discarded.
+
+    ``estimated_cost_usd`` and ``image_count`` are the batch totals the brain
+    session records for billing/analytics: the summed editorial-regen LLM spend
+    and the number of paid generated images across all fixes, summed from the
+    per-fix :class:`SlideRegenResult`\\ s. They do NOT gate the session — the edit
+    cap is a per-tier fix counter, not a cost — but the real cost is surfaced
+    rather than discarded. The dollar value of the images
+    (``image_count`` × :data:`IMAGE_COST_USD`) is folded in by the session,
+    keeping LLM and image spend separately attributable.
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
@@ -131,6 +141,8 @@ class FixAndRenderResult(BaseModel):
     deck: DeckSpec
     render: PresentationRenderResult
     fixes: list[SlideRegenResult] = Field(default_factory=list[SlideRegenResult])
+    estimated_cost_usd: float = Field(default=0.0, ge=0.0)
+    image_count: int = Field(default=0, ge=0)
 
 
 class PresentationOrchestrator:
@@ -565,7 +577,21 @@ class PresentationOrchestrator:
             package=package,
             only_slide_ids=frozenset({result.slide.slide_id}),
         )
-        return new_deck, SlideRegenResult(slide=result.slide, findings=findings)
+        # Count the PAID generated slots this regen filled by reading the slide
+        # back out of the resolved deck (the image pass mutates it in place, and
+        # ``result.slide`` may be a pre-resolution copy). Only generated figure /
+        # title-hero background images cost money; Commons portraits are free.
+        resolved = next(
+            (s for s in new_deck.slides if s.slide_id == result.slide.slide_id),
+            result.slide,
+        )
+        image_count = _count_generated_images(resolved)
+        return new_deck, SlideRegenResult(
+            slide=result.slide,
+            findings=findings,
+            estimated_cost_usd=result.estimated_cost_usd,
+            image_count=image_count,
+        )
 
     async def apply_fixes_and_render(
         self,
@@ -644,7 +670,13 @@ class PresentationOrchestrator:
         render_result = await self.render(working, formats, progress, project_id=project_id)
         if persist_warning is not None:
             render_result.warnings.append(persist_warning)
-        return FixAndRenderResult(deck=working, render=render_result, fixes=outcomes)
+        return FixAndRenderResult(
+            deck=working,
+            render=render_result,
+            fixes=outcomes,
+            estimated_cost_usd=sum(o.estimated_cost_usd for o in outcomes),
+            image_count=sum(o.image_count for o in outcomes),
+        )
 
     # ====================================================================
     # STEP 7 — render via Node worker
@@ -997,6 +1029,19 @@ def _attach_output(result: PresentationRenderResult, ext: str, path: Path) -> No
         result.pptx_path = path
     elif ext == "pdf":
         result.pdf_path = path
+
+
+def _count_generated_images(slide: SlideSpec) -> int:
+    """Count the PAID generated image slots filled on a freshly regenerated slide.
+
+    Only the generated figure and the title-hero background go through the paid
+    image model (:data:`IMAGE_COST_USD`); Commons portraits are free. A regen
+    emits the slide with null image URLs and the image pass fills them, so a
+    non-null url on either slot means one paid image was generated this regen.
+    """
+
+    content = slide.content
+    return int(content.figure_url is not None) + int(content.background_url is not None)
 
 
 __all__ = [

@@ -944,7 +944,8 @@ class EditorialPass:
         user = _format_slide_regen_brief(
             deck, plan, target, prev_slide, next_slide, instruction, claims
         )
-        parsed = await self._call_editorial_with_retry(system, user)
+        regen_costs: list[float] = []
+        parsed = await self._call_editorial_with_retry(system, user, cost_sink=regen_costs)
         if not parsed:
             raise EditorialSlideRegenError(
                 f"slide regeneration for id {slide_id!r} returned no usable slide"
@@ -969,7 +970,7 @@ class EditorialPass:
         )
         slide = _enforce_word_limits([slide])[0]
         findings = _collect_slide_regen_findings(slide, target, plan)
-        return SlideRegenResult(slide=slide, findings=findings)
+        return SlideRegenResult(slide=slide, findings=findings, estimated_cost_usd=sum(regen_costs))
 
     def splice_regenerated_slide(self, deck: DeckSpec, new_slide: SlideSpec) -> DeckSpec:
         """Splice a regenerated slide back into the deck by its stable id.
@@ -1171,6 +1172,8 @@ class EditorialPass:
         self,
         system: str,
         user: str,
+        *,
+        cost_sink: list[float] | None = None,
     ) -> list[_LLMSlide]:
         """One Sonnet call; on failure, retry ONCE with a failure-specific nudge.
 
@@ -1190,6 +1193,12 @@ class EditorialPass:
         through here too, so it inherits both the timeout and the informed retry.
         Returns ``[]`` after two failures (the emergency-deck path); we do NOT
         add a second blind retry — at temperature 0 more rolls do not help.
+
+        ``cost_sink`` is an opt-in spend probe: when a list is passed, each
+        underlying ``complete`` call's ``estimated_cost_usd`` is appended, so the
+        single-slide regen path can record the EXACT editorial cost it already
+        computed for the brain session's billing/analytics. Default ``None``
+        leaves the first-gen and section-repair callers untouched.
         """
 
         first = await self._get_llm().complete(
@@ -1199,6 +1208,8 @@ class EditorialPass:
             max_tokens=16_000,
             timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
+        if cost_sink is not None:
+            cost_sink.append(first.estimated_cost_usd)
         parsed = _parse_editorial_response(first.content)
         if parsed.slides is not None:
             return parsed.slides
@@ -1210,6 +1221,8 @@ class EditorialPass:
             max_tokens=16_000,
             timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
+        if cost_sink is not None:
+            cost_sink.append(retry.estimated_cost_usd)
         parsed = _parse_editorial_response(retry.content)
         return parsed.slides if parsed.slides is not None else []
 

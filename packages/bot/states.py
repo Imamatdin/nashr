@@ -49,6 +49,14 @@ class PresentationStates(StatesGroup):
     replaced by a Mini App questionnaire; ``opening_mini_app`` is the
     state while the Mini App button is on screen, and
     ``waiting_for_mini_app`` is set once the user has tapped it.
+
+    After delivery the user enters ``talking_to_brain`` — the conversational
+    editing loop (Build 2, Stage 4). Each inbound message runs one brain turn
+    against the DB-backed session. ``awaiting_approval`` is interleaved into
+    that loop: when a turn proposes a significant re-delivering change, the loop
+    parks here behind inline approve/reject buttons and blocks further turns
+    until the user resolves it. Both states hold ONLY the project_id in FSM data;
+    the session itself lives in the brain_sessions table.
     """
 
     uploading_sources = State()
@@ -59,6 +67,8 @@ class PresentationStates(StatesGroup):
     confirming_payment = State()
     generating = State()
     reviewing_output = State()
+    talking_to_brain = State()
+    awaiting_approval = State()
 
 
 class PaymentStates(StatesGroup):

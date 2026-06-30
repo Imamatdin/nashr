@@ -90,6 +90,19 @@ class BotLabels:
     generation_failed_at_step: str
     generation_ungrounded_refunded: str
 
+    # Conversational editing loop + approval gate (Build 2, Stage 4). The brain's
+    # own replies are produced in the user's language by the model; these are the
+    # bot-chrome strings the machinery emits around it.
+    edit_applied: str  # templated with {count}
+    edit_render_failed: str
+    edit_fixes_exhausted: str  # templated with {limit}
+    edit_session_not_found: str
+    approval_prompt: str  # templated with {reason}
+    approval_approve: str
+    approval_reject: str
+    approval_required_first: str
+    change_discarded: str
+
 
 LABELS_UZ = BotLabels(
     welcome="Nashr platformasiga xush kelibsiz! Til tanlang:",
@@ -162,6 +175,15 @@ LABELS_UZ = BotLabels(
         "Ba'zi da'volarni manbalaringizdan tasdiqlab bo'lmadi, shuning uchun hech narsa "
         "yuborilmadi va to'lovingiz qaytarildi. Ko'proq manba qo'shib, qayta urinib ko'ring."
     ),
+    edit_applied="✅ {count} ta slayd yangilandi. Yuklab oling:",
+    edit_render_failed="Tahrirni tayyorlab bo'lmadi. Qayta urinib ko'ring — tahrirlar saqlanib qoldi.",
+    edit_fixes_exhausted="Bu tarif uchun barcha {limit} ta tahrirdan foydalandingiz.",
+    edit_session_not_found="Faol tahrirlash sessiyasi topilmadi.",
+    approval_prompt="Bu o'zgarishni tasdiqlaysizmi?\n\n{reason}",
+    approval_approve="✅ Tasdiqlash",
+    approval_reject="❌ Bekor qilish",
+    approval_required_first="Avval o'zgarishni tasdiqlang yoki bekor qiling.",
+    change_discarded="O'zgarish bekor qilindi.",
 )
 
 
@@ -231,6 +253,15 @@ LABELS_RU = BotLabels(
         "Некоторые утверждения не удалось подтвердить вашими источниками, поэтому ничего "
         "не отправлено, а средства возвращены. Добавьте больше источников и попробуйте снова."
     ),
+    edit_applied="✅ Обновлено слайдов: {count}. Скачайте:",
+    edit_render_failed="Не удалось подготовить правку. Попробуйте ещё раз — ваши правки сохранены.",
+    edit_fixes_exhausted="Вы использовали все {limit} правок для этого тарифа.",
+    edit_session_not_found="Активная сессия редактирования не найдена.",
+    approval_prompt="Подтвердить это изменение?\n\n{reason}",
+    approval_approve="✅ Подтвердить",
+    approval_reject="❌ Отменить",
+    approval_required_first="Сначала подтвердите или отмените изменение.",
+    change_discarded="Изменение отменено.",
 )
 
 
@@ -298,6 +329,15 @@ LABELS_EN = BotLabels(
         "Some claims couldn't be grounded in your sources, so nothing was shipped and "
         "you've been refunded. Add more source material and try again."
     ),
+    edit_applied="✅ Updated {count} slide(s). Download:",
+    edit_render_failed="The edit couldn't be rendered. Please try again — your edits are kept.",
+    edit_fixes_exhausted="You've used all {limit} edits for this tier.",
+    edit_session_not_found="No active editing session found.",
+    approval_prompt="Approve this change?\n\n{reason}",
+    approval_approve="✅ Approve",
+    approval_reject="❌ Reject",
+    approval_required_first="Please approve or reject the change first.",
+    change_discarded="Change discarded.",
 )
 
 
@@ -368,6 +408,15 @@ LABELS_KAA = BotLabels(
         "Ba'zi da'walar dereklerińizden tastıyıqlanbadı, sonlıqtan hesh nárse jiberilmedi "
         "hám tólem qaytarıldı. Kóbirek derek qosıp, qayta urınıp kóriń."
     ),
+    edit_applied="✅ {count} slayd jańalandı. Júklep alıń:",
+    edit_render_failed="Redaktorlawdı tayarlap bolmadı. Qayta urınıp kóriń — redaktorlawlarıńız saqlandı.",
+    edit_fixes_exhausted="Bul tarif ushın barlıq {limit} redaktorlawdı paydalandıńız.",
+    edit_session_not_found="Aktiv redaktorlaw sessiyası tabılmadı.",
+    approval_prompt="Bul ózgeristi tastıyıqlaysızba?\n\n{reason}",
+    approval_approve="✅ Tastıyıqlaw",
+    approval_reject="❌ Biykarlaw",
+    approval_required_first="Aldın ózgeristi tastıyıqlań yamasa biykarlań.",
+    change_discarded="Ózgeris biykarlandı.",
 )
 
 

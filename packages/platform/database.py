@@ -381,6 +381,117 @@ class DatabaseClient:
             return None
         return cast(dict[str, Any], result.data[0])
 
+    # --------------------------------------------------------- brain sessions
+
+    # The brain editing session (Build 2, Stage 4). One row per project, upserted
+    # on the ``brain_sessions_project_id_key`` unique constraint exactly like
+    # decks, so the session is recoverable from project_id alone. This layer
+    # deals only in JSON-ready values: the bot-side session store owns the
+    # (de)serialization of the history / sources, which reference SDK and bot
+    # types this platform module must not import. ``findings_json`` is omitted
+    # from the payload so a Stage-4 upsert preserves whatever Stage 5 wrote.
+
+    # Every session column EXCEPT the heavy figures_json — the light per-turn read.
+    _SESSION_LIGHT_COLUMNS: str = (
+        "id,project_id,history_json,sources_json,package,formats_json,"
+        "approval_state,pending_action_json,fixes_used,accumulated_cost_usd,"
+        "accumulated_image_count,findings_json,created_at,updated_at"
+    )
+
+    async def save_brain_session(
+        self,
+        project_id: str,
+        *,
+        history_json: list[dict[str, Any]],
+        sources_json: dict[str, Any],
+        package: str,
+        formats_json: list[str],
+        approval_state: str,
+        pending_action_json: dict[str, Any] | None,
+        fixes_used: int,
+        accumulated_cost_usd: float,
+        accumulated_image_count: int,
+        figures_json: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Upsert the project's single brain session and return the saved row.
+
+        The first call inserts, every later turn updates the same row in place
+        (the unique constraint makes "one session per project" a DB invariant).
+        Only the columns passed here are written; ``findings_json`` and the
+        timestamp columns are left to Stage 5 and the DB defaults/trigger.
+
+        ``figures_json`` is WRITE-ONCE: pass the figure list when creating the
+        session, then omit it (``None``) on every per-turn save so the upsert
+        preserves the stored figures rather than wiping them — the source figures
+        never change during editing, only the deck and the conversation do.
+        """
+
+        payload: dict[str, Any] = {
+            "project_id": project_id,
+            "history_json": history_json,
+            "sources_json": sources_json,
+            "package": package,
+            "formats_json": formats_json,
+            "approval_state": approval_state,
+            "pending_action_json": pending_action_json,
+            "fixes_used": fixes_used,
+            "accumulated_cost_usd": accumulated_cost_usd,
+            "accumulated_image_count": accumulated_image_count,
+        }
+        if figures_json is not None:
+            payload["figures_json"] = figures_json
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("brain_sessions")
+                .upsert(payload, on_conflict="project_id")
+                .execute()
+            )
+        )
+        return cast(dict[str, Any], result.data[0])
+
+    async def get_brain_session(self, project_id: str) -> dict[str, Any] | None:
+        """Get the project's brain session row WITHOUT figures, or ``None``.
+
+        The restart-recovery read: keyed on project_id alone. Selects every
+        column except ``figures_json`` so a text-only turn never transfers the
+        megabytes of raster bytes — the fix path fetches those on demand via
+        :meth:`get_brain_session_figures`.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("brain_sessions")
+                .select(self._SESSION_LIGHT_COLUMNS)
+                .eq("project_id", project_id)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not result.data:
+            return None
+        return cast(dict[str, Any], result.data[0])
+
+    async def get_brain_session_figures(self, project_id: str) -> list[dict[str, Any]] | None:
+        """Get just the session's heavy ``figures_json``, or ``None`` if no row.
+
+        The lazy-load half of the split: called only when a fix tool is about to
+        fire, so the bot can hydrate the source figures the regen grounds against.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("brain_sessions")
+                .select("figures_json")
+                .eq("project_id", project_id)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not result.data:
+            return None
+        row = cast(dict[str, Any], result.data[0])
+        return cast(list[dict[str, Any]], row["figures_json"])
+
     # --------------------------------------------------------------- invoices
 
     async def create_invoice(

@@ -57,6 +57,8 @@ def test_presentation_states_exist() -> None:
         "confirming_payment",
         "generating",
         "reviewing_output",
+        "talking_to_brain",
+        "awaiting_approval",
     }
 
 

@@ -627,6 +627,14 @@ class SlideRegenResult(BaseModel):
 
     slide: SlideSpec
     findings: list[AuditCheckResult] = Field(default_factory=list[AuditCheckResult], max_length=50)
+    # Editorial-LLM spend for this one regen (Sonnet + any retry) and the count
+    # of paid generated image slots (figure/background, not free Commons
+    # portraits) it filled. Both default to zero so the quality-judge path that
+    # has no cost interest stays valid; the brain session accumulates them across
+    # a fix batch for billing/analytics (see FixAndRenderResult) — the edit cap
+    # itself is a per-tier fix counter, not a cost.
+    estimated_cost_usd: float = Field(default=0.0, ge=0.0)
+    image_count: int = Field(default=0, ge=0)
 
     @property
     def passed(self) -> bool:
