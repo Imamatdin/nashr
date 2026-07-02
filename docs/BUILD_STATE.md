@@ -1267,9 +1267,9 @@ Codex re-review found the all-regens-fail edge: when a routed regen was REJECTED
 ## BUILD 2 — brain + fix-and-deliver chain (branch `build1-content-critic`)
 
 Build 2 wires the conversational brain onto a persisted deck and makes slide-level fixes reach the
-user (regenerate → render → upload → deliver → persist). Build 1 (content critic hard-stop on
-`build1-content-critic`) is the working invariant gate until Stage 5: fabrication still refunds and
-fails honestly — no scope cut on the critic rewire, it lands with the brain.
+user (regenerate → render → upload → deliver → persist). Build 1 content critic hard-stop is
+preserved as the final authority: Stage 5a inserts brain escalation before it; unfixable fabrication
+still refunds honestly.
 
 **Revised stage order (plan change 2026-06-25):**
 
@@ -1280,7 +1280,8 @@ fails honestly — no scope cut on the critic rewire, it lands with the brain.
 | **2** | **FOLDED → Stage 5** | Critic findings → brain rewire (see plan change below) |
 | **3** | **DONE** `45552d5` | Fix-and-deliver chain — `apply_fixes_and_render` (batch fix → persist once → render once → handler re-stash/re-deliver) |
 | **4** | **DONE — pending gate** | Bot session surface — DB-backed brain session, chat loop above the orchestrator, code-side approval gate, per-tier fix counter, delivery-boundary guard |
-| **5** | pending | Wire-in-brain + critic rewire + memory/retrieval |
+| **5a** | **DONE** (pending gate + Iko prompt fill) | Real Gemini brain — Way 1 critic escalation, Way 2 chat edits, live seam, feed-back history |
+| **5b** | pending | Memory/retrieval, Gemini context caching, proactive suggestions, Iko character prompts |
 
 ### Stage 0 — deck persistence — DONE `79fd1de`
 
@@ -1358,10 +1359,52 @@ One coherent uncommitted change set:
 - **Reviewed across rounds by Codex:** STEP-0, the self-grant gate, the budget→counter swap, and the
   delivery boundary all closed and confirmed.
 
-**The one live-wiring gap (Stage 5, flagged honestly):** `create_session` is NOT yet called from the
-delivery handler, because `run_full_pipeline` discards its `SourceProcessingResult` and Stage 4 must
-not refactor it. The loop/gate/counter are fully built and tested by driving them directly; surfacing
-sources from the pipeline into the delivery seam is the Stage 5 integration.
+### Stage 5a — real brain, live and working — DONE (pending gate + Iko prompt fill)
+
+Stage 5a wires the REAL brain into the Stage 4 machinery on two paths. Editorial seat stays Sonnet
+4.6 (unchanged). Prompt **slots** in `packages/core/brain_prompts.py` are placeholders for
+`BRAIN_STANDARD` / `BRAIN_IDENTITY` / `BRAIN_ORCHESTRATOR` until Iko fills them — do NOT run the live
+gate until those are real text.
+
+- **Shared loop** (`packages/core/brain_loop.py`): `run_brain_loop` over the sole `edit_slides` tool.
+  Fix-exit discipline — the tool is a REQUEST; applying fixes is always the caller's guarded job
+  (Way 2 → `_dispatch_fix`; Way 1 → Sonnet `regenerate_slide_content` + re-critique). Iteration cap
+  `BRAIN_LOOP_MAX_ITERATIONS=6` (runaway backstop).
+- **Way 2 (user edits):** `GeminiBrainDriver` replaces the scripted stub at
+  `_brain_driver()` (`presentation_flow.py`). User taps **Edit with AI** (`reviewing_output` →
+  `talking_to_brain`) or chats in `talking_to_brain`; fixes route through the existing counter /
+  approval / delivery-boundary guards unchanged.
+- **Way 1 (critic escalation):** `_enforce_content_critic` inserts
+  `_attempt_brain_grounding` BEFORE the existing hard-stop (`editorial.py`). Brain fix pass → Sonnet
+  regen → re-critique; `BRAIN_ESCALATION_MAX_ATTEMPTS=1`. Hard-stop still fires if findings survive
+  — worst case is exactly today's refund; no fabrication ships.
+- **Live seam:** `run_full_pipeline` returns `PresentationPipelineResult(render, sources)`;
+  `start_generation` calls `_open_brain_session` → `create_session` after delivery (best-effort;
+  downloads work even if session create fails).
+- **Feed-back seam:** `_append_fix_result` answers every `edit_slides` call part with a
+  `function_response` after dispatch (delivered / exhausted / render-failed / discarded) so the next
+  turn's history is coherent (no dangling call → no Gemini 400).
+- **Tests:** `test_brain_loop.py`, `test_brain_driver.py`, extended `test_brain_session.py` /
+  `test_editorial_pass.py` (Way 1 escalation + hard-stop divergence). **Gate:**
+  `scripts/gate_build2_stage5a.py` — mechanical wiring only; quality is Iko's eyeball after prompts
+  are filled.
+
+**Codex review fixes (closed in 5a):**
+
+1. **`fix_call_count` / `PendingAction.call_count`** — one `function_response` per `edit_slides` call
+   part (multi-call turns answered fully).
+2. **Feed-back seam** — `_append_fix_result` on every dispatch outcome, including approval reject.
+3. **Signed-prefix context** — deck roster + claims injected once on first turn; later deck changes
+   reach the model only via `edit_slides` function_responses (never rewrite signed history).
+4. **Approval gate dangling calls** — parked `edit_slides` calls answered on reject so chat can
+   resume without a 400.
+
+### Stage 5b — deferred (NOT in 5a)
+
+- `BRAIN_RETRIEVAL` / `BRAIN_MEMORY` prompt slots + retrieval tools over sources/history.
+- Gemini `cached_content` wiring for the ~15k static system block.
+- Way 3: brain's unrequested proactive suggestions (`user_initiated=False` path).
+- Iko fills `BRAIN_STANDARD` / `BRAIN_IDENTITY` / `BRAIN_ORCHESTRATOR` (character + standard).
 
 ### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
 
