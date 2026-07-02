@@ -39,8 +39,18 @@ async def create_session(
     The deck is read back from the decks table (``run_full_pipeline`` already
     persisted it), so the decks table stays the single source of truth for the
     deck. The figure bytes are written ONCE here; per-turn saves never touch them.
+
+    INVARIANT — a ``brain_sessions`` row implies a persisted deck: the deck is
+    loaded and verified BEFORE the row is written, so a deck-less session is never
+    created (the pipeline's deck persist is itself best-effort). No deck ⇒ raise ⇒
+    no row, so downstream can treat any session row as backed by a real deck.
     """
 
+    deck = await _load_deck(db, project_id)
+    if deck is None:
+        raise ValueError(
+            f"cannot create a brain session for project {project_id}: no persisted deck"
+        )
     light, figures = serialize_sources(sources)
     await db.save_brain_session(
         project_id,
@@ -55,7 +65,6 @@ async def create_session(
         accumulated_cost_usd=0.0,
         accumulated_image_count=0,
     )
-    deck = await _load_deck(db, project_id)
     return BrainSession(
         project_id=project_id,
         history=[],

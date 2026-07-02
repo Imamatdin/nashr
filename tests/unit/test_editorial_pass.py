@@ -33,6 +33,7 @@ from packages.core.enums import (
     SlideType,
 )
 from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
+from packages.core.gemini_tools import ToolTurnResult
 from packages.core.llm import LLMResponse
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
@@ -74,6 +75,7 @@ from packages.presentation.editorial import (
     _splice_single_slide,
 )
 from packages.presentation.thesis_classifier import ThesisClassifier
+from tests.unit.test_brain_loop import _fix_turn, _reply_turn
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -125,10 +127,13 @@ class _StubGemini:
         *,
         critic: list[str] | None = None,
         interactive: _StubLLM | None = None,
+        brain: list[ToolTurnResult] | None = None,
     ) -> None:
         self._critic = list(critic) if critic is not None else None
         self._interactive = interactive if interactive is not None else _StubLLM([])
+        self._brain = list(brain) if brain is not None else None
         self.critic_calls = 0
+        self.brain_calls = 0
 
     async def complete(
         self,
@@ -152,6 +157,26 @@ class _StubGemini:
         return await self._interactive.complete(
             system, user, model=model, max_tokens=max_tokens, temperature=temperature
         )
+
+    async def generate_with_tools(
+        self,
+        contents: list[Any],
+        tools: list[Any],
+        *,
+        system: str | None = None,
+        max_tokens: int = 8192,
+        tool_mode: Any = None,
+        allowed_function_names: list[str] | None = None,
+        **_: Any,
+    ) -> ToolTurnResult:
+        # The Way 1 brain fix pass shares editorial's Gemini client. Default: a
+        # terminal reply with NO fixes, so the escalation is a no-op and the
+        # existing hard stop fires unchanged unless a test scripts brain fixes.
+        del contents, tools, system, max_tokens, tool_mode, allowed_function_names
+        self.brain_calls += 1
+        if self._brain:
+            return self._brain.pop(0)
+        return _reply_turn("")
 
 
 class _StubPlanner:
@@ -247,6 +272,7 @@ def _editorial(
     *,
     gemini: _StubLLM | None = None,
     critic: list[str] | None = None,
+    brain: list[ToolTurnResult] | None = None,
     plan: DeckPlan | list[DeckPlan] | None = None,
     planner: _StubPlanner | None = None,
     classifier: ThesisClassifier | None = None,
@@ -263,7 +289,7 @@ def _editorial(
         planner = _StubPlanner(plan if plan is not None else _stub_plan())
     return EditorialPass(
         llm=llm,  # type: ignore[arg-type]
-        gemini=_StubGemini(critic=critic, interactive=gemini),  # type: ignore[arg-type]
+        gemini=_StubGemini(critic=critic, interactive=gemini, brain=brain),  # type: ignore[arg-type]
         planner=planner,  # type: ignore[arg-type]
         classifier=classifier if classifier is not None else _StubClassifier(),
     )
@@ -3158,3 +3184,143 @@ async def test_content_critic_degraded_rejudge_keeps_all_first_pass_hard_stops()
     assert {f.slide_id for f in exc.value.findings} == {slides[0].slide_id, slides[1].slide_id}
     assert all(f.check_id == "C-FB" for f in exc.value.findings)
     assert pass_._gemini.critic_calls == 3  # first pass + re-judge attempt + retry
+
+
+async def test_content_critic_brain_escalation_grounds_and_delivers() -> None:
+    """Way 1: the Sonnet regen fails (type change), so nothing splices and the deck
+    would refund. The brain escalation authors a grounding fix, the Sonnet regen this
+    time grounds it, and the re-critique is clean — so the deck delivers, no refund."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    # The existing repair's regen changes type -> FAIL -> not spliced (site 1). The
+    # brain's regen keeps the type and drops the fabricated figure -> passes -> splices.
+    regen_fail = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "content_split",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    regen_grounded = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    pass_ = _editorial(
+        _StubLLM([regen_fail, regen_grounded]),
+        critic=[
+            _critic_response([fab]),
+            _critic_response([]),
+        ],  # first pass flags; re-critique clean
+        brain=[
+            _fix_turn(
+                [
+                    {
+                        "slide_id": slide.slide_id,
+                        "instruction": "Remove the unsupported 94.4 percent figure; state only grounded facts.",
+                    }
+                ]
+            )
+        ],
+        plan=plan,
+    )
+
+    out = await pass_._enforce_content_critic(
+        _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+    )
+
+    assert len(out) == 1
+    assert out[0].slide_id == slide.slide_id  # durable id preserved across the brain regen + splice
+    assert "94.4" not in (out[0].content.body_text or "")  # the fabrication was grounded away
+    assert pass_._gemini.brain_calls == 1  # the brain escalation engaged
+    # Site 1 skipped its own re-judge; the escalation added exactly one re-critique.
+    assert pass_._gemini.critic_calls == 2
+
+
+async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
+    """Way 1 invariant: when the brain's fix ALSO fails to ground the fabrication, the
+    re-critique still flags it and the UNCHANGED hard stop fires. Unfixable fabrication
+    refunds, never ships — the brain strictly reduces refunds, never weakens the gate."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    regen_fail = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "content_split",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    # The brain's regen keeps the type (so it splices) but STILL asserts the fabrication,
+    # so the re-critique re-flags it — the grounding never happened.
+    regen_still_fab = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": "Water savings reached 94.4 percent in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    pass_ = _editorial(
+        _StubLLM([regen_fail, regen_still_fab]),
+        critic=[
+            _critic_response([fab]),
+            _critic_response([fab]),
+        ],  # first pass + re-critique both flag
+        brain=[
+            _fix_turn(
+                [
+                    {
+                        "slide_id": slide.slide_id,
+                        "instruction": "Ground the 94.4 percent claim in the source.",
+                    }
+                ]
+            )
+        ],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
+
+    assert any(f.check_id == "C-FB" for f in exc.value.findings)  # the hard stop still fires
+    assert pass_._gemini.brain_calls == 1  # the brain tried
+    assert pass_._gemini.critic_calls == 2  # first pass + the re-critique that re-flagged the fix

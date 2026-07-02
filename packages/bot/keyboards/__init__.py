@@ -180,10 +180,21 @@ def output_review_keyboard(lang: str) -> InlineKeyboardMarkup:
     )
 
 
-def presentation_output_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """Presentation delivery keyboard: HTML / PPTX on top, PDF below."""
+def presentation_output_keyboard(lang: str, *, can_edit: bool = False) -> InlineKeyboardMarkup:
+    """Presentation delivery keyboard: HTML / PPTX on top, PDF below.
+
+    When ``can_edit`` (a brain editing session was created for this deck), an
+    "Edit with AI" button is added that opens the conversational editor on demand;
+    the download / regenerate / done affordances are preserved either way, so a
+    user who just wants the files is never dropped into a chat loop.
+    """
 
     labels = get_bot_labels(lang)
+    action_row = [InlineKeyboardButton(text=labels.regenerate, callback_data="regenerate_output")]
+    if can_edit:
+        action_row.append(
+            InlineKeyboardButton(text=labels.edit_button, callback_data="edit_with_ai")
+        )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -191,7 +202,7 @@ def presentation_output_keyboard(lang: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📊 PPTX", callback_data="download_pptx"),
             ],
             [InlineKeyboardButton(text="📑 PDF", callback_data="download_pdf")],
-            [InlineKeyboardButton(text=labels.regenerate, callback_data="regenerate_output")],
+            action_row,
             [InlineKeyboardButton(text=labels.done, callback_data="done")],
         ]
     )

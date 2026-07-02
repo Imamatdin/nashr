@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -595,27 +595,32 @@ async def test_premium_allows_three_fixes_then_refuses_the_fourth() -> None:
     assert reloaded.fixes_used == 3
 
 
-async def test_failed_fix_does_not_consume_the_counter() -> None:
-    # A fix that raises (apply_fixes_and_render fails) must NOT burn an edit: the
-    # counter is bumped only after success, so fixes_used stays put.
+async def test_failed_fix_degrades_gracefully_without_consuming_counter() -> None:
+    # A fix that RAISES (apply_fixes_and_render fails: a hallucinated slide_id, an
+    # empty editorial regen) must NOT crash the turn and must NOT burn an edit: it
+    # degrades to a graceful RENDER_FAILED, the counter stays put, and the brain's
+    # edit_slides call is answered with an error so the next turn's history coheres.
     db, _fake, _deck, _sources = await _provision(package=GenerationPackage.PRESENTATION_BASIC)
     driver = ScriptedStubDriver()
     _queue_fix(driver)
     orch = _RaisingOrchestrator()
 
-    with pytest.raises(RuntimeError):
-        await pf._run_chat_turn(
-            driver=driver,
-            orchestrator=orch,
-            db=db,
-            project_id="proj-1",
-            user_text="fix",
-            user_initiated=True,
-        )
+    result = await pf._run_chat_turn(
+        driver=driver,
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="fix",
+        user_initiated=True,
+    )
 
+    assert result.outcome is pf._ChatOutcome.RENDER_FAILED  # graceful, not a crash
     reloaded = await load_session(db, "proj-1")
     assert reloaded is not None
     assert reloaded.fixes_used == 0  # the failed fix consumed nothing
+    response = reloaded.history[-1].parts[0].function_response  # type: ignore[union-attr]
+    assert response is not None
+    assert response.response["error"] == "fix_failed"
 
 
 async def test_zero_file_render_is_a_failed_fix_not_a_delivered_one() -> None:
@@ -710,3 +715,213 @@ def test_chat_keyboard_buttons_all_route_in_talking_to_brain() -> None:
 # resolve in this environment (the handlers themselves are exercised via the
 # core functions above, which take no aiogram types).
 assert Message is not None and CallbackQuery is not None
+
+
+# --------------------------------------------------- feed-result-back seam (5a)
+
+
+async def test_delivered_fix_feeds_result_back_to_history() -> None:
+    # After a delivered fix, the brain's edit_slides call is answered with a
+    # function_response carrying the outcome + updated roster, so the NEXT turn
+    # loads a coherent call → result history (and Gemini does not 400 on a
+    # dangling call before the next user turn).
+    db, _fake, deck, _sources = await _provision()
+    driver = ScriptedStubDriver()
+    driver.queue(
+        StubResponse(
+            action=TurnAction.FIX,
+            fixes=(SlideFix(slide_id="s0", instruction="tighten the title"),),
+        )
+    )
+    orch = _FakeOrchestrator(deck)
+
+    result = await pf._run_chat_turn(
+        driver=driver,
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="fix slide",
+        user_initiated=True,
+    )
+
+    assert result.outcome is pf._ChatOutcome.REDELIVERED
+    reloaded = await load_session(db, "proj-1")
+    assert reloaded is not None
+    last = reloaded.history[-1]
+    assert last.parts is not None
+    response = last.parts[0].function_response
+    assert response is not None
+    assert response.name == "edit_slides"
+    assert response.response["delivered"] is True
+    assert response.response["slides_changed"] == 1
+    roster = response.response["roster"]
+    assert isinstance(roster, list) and len(roster) == len(deck.slides)
+
+
+async def test_render_failed_fix_feeds_error_back_to_history() -> None:
+    # A zero-file render is a FAILED fix: the function_response records the error
+    # (not a delivery) so the brain's next turn knows the edit did not land.
+    db, _fake, deck, _sources = await _provision()
+    driver = ScriptedStubDriver()
+    driver.queue(
+        StubResponse(
+            action=TurnAction.FIX,
+            fixes=(SlideFix(slide_id="s0", instruction="rework the chart"),),
+        )
+    )
+    orch = _FakeOrchestrator(deck, deliver=False)
+
+    result = await pf._run_chat_turn(
+        driver=driver,
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="fix slide",
+        user_initiated=True,
+    )
+
+    assert result.outcome is pf._ChatOutcome.RENDER_FAILED
+    reloaded = await load_session(db, "proj-1")
+    assert reloaded is not None
+    response = reloaded.history[-1].parts[0].function_response  # type: ignore[union-attr]
+    assert response is not None
+    assert response.response["error"] == "render_failed"
+
+
+# ------------------------------------------------ eager session creation (5a)
+
+
+async def test_open_brain_session_true_when_deck_persisted() -> None:
+    db, fake = _make_db()
+    _seed_project(fake)
+    await db.save_deck("proj-1", _make_deck(title="Cooling", audience=AudienceType.UNDERGRADUATE))
+
+    can_edit = await pf._open_brain_session(
+        db, "proj-1", _make_sources(with_figure=False), GenerationPackage.PRESENTATION_STANDARD
+    )
+
+    assert can_edit is True
+    session = await load_session(db, "proj-1")
+    assert session is not None
+    assert session.deck is not None
+
+
+async def test_open_brain_session_false_when_deck_absent() -> None:
+    # The deck persist is best-effort; if it never landed, editing is NOT offered
+    # (the guard returns False) rather than seeding a session that cannot edit.
+    db, fake = _make_db()
+    _seed_project(fake)  # project seeded, but NO deck saved
+
+    can_edit = await pf._open_brain_session(
+        db, "proj-1", _make_sources(with_figure=False), GenerationPackage.PRESENTATION_STANDARD
+    )
+
+    assert can_edit is False
+
+
+async def test_create_session_refuses_without_a_persisted_deck() -> None:
+    # RISK 1 / the deck-implies-row invariant: no deck ⇒ raise ⇒ NO brain_sessions row.
+    db, fake = _make_db()
+    _seed_project(fake)  # project exists, but no deck was ever saved
+
+    with pytest.raises(ValueError):
+        await create_session(
+            db,
+            project_id="proj-1",
+            sources=_make_sources(with_figure=False),
+            package=GenerationPackage.PRESENTATION_STANDARD,
+            formats=_FORMATS,
+        )
+
+    assert await db.get_brain_session("proj-1") is None  # the row was never written
+
+
+# --------------------------------------------- parked-fix coherence + multi-call (5a)
+
+
+async def test_parked_fix_survives_restart_and_routes_to_approval() -> None:
+    # BUG 1: a parked fix leaves its edit_slides call UNANSWERED in persisted history.
+    # No brain turn may run against it (that would resend a dangling call and 400 —
+    # the sharp case is a restart that dropped the FSM pointer). The user is routed
+    # back to the approval decision until approve/reject answers the call.
+    db, _fake, deck, _sources = await _provision()
+    driver = ScriptedStubDriver()
+    driver.queue(
+        StubResponse(
+            action=TurnAction.FIX,
+            fixes=(SlideFix(slide_id="s0", instruction="a big rewrite"),),
+            reason="a significant re-delivery",
+        )
+    )
+    orch = _FakeOrchestrator(deck)
+
+    parked = await pf._run_chat_turn(
+        driver=driver,
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="ok",
+        user_initiated=False,  # model-proposed → parks behind the gate
+    )
+    assert parked.outcome is pf._ChatOutcome.AWAITING_APPROVAL
+
+    # Simulate a restart: drop every in-memory pointer; the DB session survives.
+    pf._PROJECT_CACHE.clear()
+    pf._SESSION_LOCKS.clear()
+
+    class _ExplodingDriver:
+        async def run_turn(self, *_a: Any, **_k: Any) -> Any:
+            raise AssertionError("a brain turn must NOT run while a fix is parked")
+
+    blocked = await pf._run_chat_turn(
+        driver=cast(Any, _ExplodingDriver()),
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="actually change something else",
+        user_initiated=True,
+    )
+    # The guard short-circuited (the exploding driver was never called) and re-presented
+    # the decision instead of running a turn.
+    assert blocked.outcome is pf._ChatOutcome.AWAITING_APPROVAL
+
+    # Approving answers the parked call and clears the gate.
+    approved = await pf._apply_pending(orchestrator=orch, db=db, project_id="proj-1")
+    assert approved.outcome is pf._ChatOutcome.REDELIVERED
+    cleared = await load_session(db, "proj-1")
+    assert cleared is not None
+    assert cleared.pending_action is None
+
+
+async def test_multi_call_fix_answers_every_call_part() -> None:
+    # BUG 2: a turn with TWO edit_slides call parts must be answered with TWO
+    # function_response parts (Gemini requires one per call), else the next turn 400s.
+    db, _fake, deck, _sources = await _provision()
+    driver = ScriptedStubDriver()
+    driver.queue(
+        StubResponse(
+            action=TurnAction.FIX,
+            fixes=(
+                SlideFix(slide_id="s0", instruction="edit one"),
+                SlideFix(slide_id="s1", instruction="edit two"),
+            ),
+            call_count=2,  # this turn stands in for TWO edit_slides call parts
+        )
+    )
+    orch = _FakeOrchestrator(deck)
+
+    result = await pf._run_chat_turn(
+        driver=driver,
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="two edits at once",
+        user_initiated=True,
+    )
+
+    assert result.outcome is pf._ChatOutcome.REDELIVERED
+    reloaded = await load_session(db, "proj-1")
+    assert reloaded is not None
+    responses = [p for p in (reloaded.history[-1].parts or []) if p.function_response is not None]
+    assert len(responses) == 2  # one response part per call part
+    assert all(p.function_response.name == "edit_slides" for p in responses)  # type: ignore[union-attr]

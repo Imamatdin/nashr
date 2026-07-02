@@ -43,8 +43,15 @@ import re
 from collections import defaultdict
 from typing import Any, Final, NamedTuple, cast
 
+from google.genai import types as genai_types
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from packages.core.brain_loop import (
+    EDIT_SLIDES_TOOL_NAME,
+    BrainLoopResult,
+    run_brain_loop,
+)
+from packages.core.brain_prompts import BRAIN_FIX_ONLY_SYSTEM
 from packages.core.enums import (
     PEOPLE_RENDERING_SLIDE_TYPES,
     AudienceType,
@@ -82,6 +89,7 @@ from packages.core.models.presentation import (
     PresentationInterviewAnswers,
     QuizQuestion,
     SlideContent,
+    SlideFix,
     SlideRegenResult,
     SlideSpec,
     StatItem,
@@ -114,6 +122,7 @@ from packages.presentation._schema_feedback import (
     summarise_errors,
 )
 from packages.presentation.content_critic import (
+    CONTENT_CRITIC_CLAIM_POOL_LIMIT,
     HARD_STOP_CHECK_IDS,
     ROUTABLE_CHECK_IDS,
     critique_deck_adversarially,
@@ -133,6 +142,13 @@ logger = logging.getLogger(__name__)
 
 SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
 DEFAULT_PROJECT_ID: Final[str] = "presentation"
+
+# Way 1 brain escalation: how many focused fix passes the brain gets on a
+# would-be-refund deck before the content-critic hard stop fires. One is the
+# recovery bet — each attempt spends a Pro fix pass + Sonnet regens + a re-critique,
+# and a second pass rarely grounds a claim the first could not. The hard stop
+# stays the final authority regardless of this value.
+BRAIN_ESCALATION_MAX_ATTEMPTS: Final[int] = 1
 
 # Interactive content runs on Gemini 3.5 Flash, which spends "thoughts" tokens
 # before visible output; the budget must clear the thinking phase plus the
@@ -850,10 +866,23 @@ class EditorialPass:
         uncorrected_hard = [f for f in first_hard if f.slide_id not in corrected_ids]
 
         if not corrected_ids:
-            # Nothing was spliced, so the re-judge would only re-examine unchanged
-            # slides — skip it entirely and hard-stop on the standing findings.
+            # The Sonnet regen produced nothing usable. Before the hard stop, give
+            # the brain a smarter grounding attempt (Way 1); it splices + re-critiques
+            # internally, so an ungroundable claim simply comes back still-flagged.
             if uncorrected_hard:
-                raise self._content_critic_hard_stop(uncorrected_hard, reason="no_regen_accepted")
+                grounded, surviving = await self._attempt_brain_grounding(
+                    findings=uncorrected_hard,
+                    current_slides=corrected,
+                    interview=interview,
+                    design=design,
+                    plan=plan,
+                    project_id=project_id,
+                    claims=claims,
+                    gemini=gemini,
+                )
+                if surviving:
+                    raise self._content_critic_hard_stop(surviving, reason="no_regen_accepted")
+                return grounded
             return corrected
 
         rejudged = await critique_deck_adversarially(
@@ -870,7 +899,22 @@ class EditorialPass:
             residual = first_hard
 
         if residual:
-            raise self._content_critic_hard_stop(residual, reason="residual_after_rejudge")
+            # The Sonnet regen + re-judge left a standing fabrication. Escalate to
+            # the brain (Way 1) before the hard stop; only a clean re-critique on the
+            # brain-grounded deck may deliver — otherwise the refund fires unchanged.
+            grounded, surviving = await self._attempt_brain_grounding(
+                findings=residual,
+                current_slides=corrected,
+                interview=interview,
+                design=design,
+                plan=plan,
+                project_id=project_id,
+                claims=claims,
+                gemini=gemini,
+            )
+            if surviving:
+                raise self._content_critic_hard_stop(surviving, reason="residual_after_rejudge")
+            return grounded
         return corrected
 
     @staticmethod
@@ -999,6 +1043,144 @@ class EditorialPass:
             subtitle = new_slide.content.subtitle
             update["subtitle"] = subtitle[:300] if subtitle else None
         return deck.model_copy(update=update)
+
+    # ------------------------------------------------------------------
+    # Way 1 - brain escalation (a smarter grounding attempt before the hard stop)
+    # ------------------------------------------------------------------
+
+    async def _attempt_brain_grounding(
+        self,
+        *,
+        findings: list[AuditCheckResult],
+        current_slides: list[SlideSpec],
+        interview: PresentationInterviewAnswers,
+        design: DesignDirectionSpec,
+        plan: DeckPlan,
+        project_id: str,
+        claims: list[SourceClaimCreate],
+        gemini: GeminiClient,
+    ) -> tuple[list[SlideSpec], list[AuditCheckResult]]:
+        """Ground the findings the Sonnet regen could not, before the hard stop.
+
+        Inserted BEFORE the content-critic hard stop, AFTER the existing Sonnet
+        repair has already failed. The brain (Gemini 3.1 Pro) authors grounding
+        instructions for the flagged slides; those are applied by the SAME
+        ``regenerate_slide_content`` the Sonnet repair uses, then the deck is
+        re-critiqued on the FULL slide list. Returns ``(slides, surviving)`` —
+        ``surviving`` empty means grounded (deliver ``slides``); non-empty means
+        the caller raises the UNCHANGED hard stop (refund).
+
+        "No fabrication ships" is preserved exactly: delivery still requires a
+        clean critic verdict on the full deck, and an unverifiable re-critique
+        never clears a known finding. Worst case is today's refund, never worse.
+        """
+
+        slides = current_slides
+        surviving = findings
+        total_cost = 0.0
+        recritiques = 0  # times the critic actually RE-RAN on a brain-fixed deck
+        for _attempt in range(BRAIN_ESCALATION_MAX_ATTEMPTS):
+            loop_result = await self._brain_fix_pass(surviving, slides, claims, gemini)
+            total_cost += loop_result.estimated_cost_usd
+            if not loop_result.fixes:
+                break
+            deck = self._assemble_deck(slides, interview, design, project_id, plan)
+            flagged_ids = {f.slide_id for f in surviving if f.slide_id is not None}
+            deck, applied, regen_cost = await self._apply_brain_fixes(
+                deck, loop_result.fixes, flagged_ids, claims
+            )
+            total_cost += regen_cost
+            if not applied:
+                break
+            slides = _post_process_repaired(deck.slides)
+            rejudged = await critique_deck_adversarially(
+                slides, plan, claims=claims, gemini=gemini, language=interview.language
+            )
+            recritiques += 1
+            if not rejudged.llm_verified:
+                break  # no verdict — a known fabrication must not be cleared by absence
+            surviving = [f for f in rejudged.result.failures if f.check_id in HARD_STOP_CHECK_IDS]
+            if not surviving:
+                break
+        logger.info(
+            "editorial_brain_escalation_complete",
+            extra={
+                "grounded": not surviving,
+                "recritiques": recritiques,
+                "estimated_cost_usd": round(total_cost, 6),
+                "residual": [f.check_id for f in surviving],
+            },
+        )
+        return slides, surviving
+
+    async def _brain_fix_pass(
+        self,
+        findings: list[AuditCheckResult],
+        slides: list[SlideSpec],
+        claims: list[SourceClaimCreate],
+        gemini: GeminiClient,
+    ) -> BrainLoopResult:
+        """One focused fix pass: ask the brain for edit_slides fixes (never apply them)."""
+
+        del self
+        contents = [
+            genai_types.Content(
+                role="user",
+                parts=[genai_types.Part(text=_format_brain_fix_brief(findings, slides, claims))],
+            )
+        ]
+        return await run_brain_loop(
+            gemini,
+            history=contents,
+            system=BRAIN_FIX_ONLY_SYSTEM,
+            tool_mode=genai_types.FunctionCallingConfigMode.ANY,
+            allowed_function_names=[EDIT_SLIDES_TOOL_NAME],
+        )
+
+    async def _apply_brain_fixes(
+        self,
+        deck: DeckSpec,
+        fixes: tuple[SlideFix, ...],
+        flagged_ids: set[str],
+        claims: list[SourceClaimCreate],
+    ) -> tuple[DeckSpec, bool, float]:
+        """Apply the brain's in-scope fixes via Sonnet regen; splice only clean slides.
+
+        A fix targeting a slide the findings did not flag is skipped (the brain
+        must not reach beyond the fabrication it was asked to ground); a regen that
+        produces its OWN FAIL is dropped (trading one defect for another never
+        ships), mirroring the existing Sonnet repair's discipline. Returns the
+        deck, whether anything was spliced, and the Sonnet spend.
+        """
+
+        applied = False
+        cost = 0.0
+        for fix in fixes:
+            if fix.slide_id not in flagged_ids:
+                logger.warning("editorial_brain_fix_out_of_scope", extra={"slide_id": fix.slide_id})
+                continue
+            try:
+                regen = await self.regenerate_slide_content(
+                    deck, fix.slide_id, instruction=fix.instruction, claims=claims
+                )
+            except EditorialSlideRegenError:
+                logger.warning("editorial_brain_regen_error", extra={"slide_id": fix.slide_id})
+                continue
+            cost += regen.estimated_cost_usd
+            if not regen.passed:
+                logger.warning(
+                    "editorial_brain_regen_rejected",
+                    extra={
+                        "slide_id": fix.slide_id,
+                        "failures": [
+                            f.check_id for f in regen.findings if f.severity is AuditSeverity.FAIL
+                        ],
+                    },
+                )
+                continue
+            deck = self.splice_regenerated_slide(deck, regen.slide)
+            applied = True
+        return deck, applied, cost
 
     # ------------------------------------------------------------------
     # Step 1 - deck sizing
@@ -2251,6 +2433,41 @@ def _critic_instruction(findings: list[AuditCheckResult]) -> str:
         f"A content critic flagged this slide: {defects}. Fix every flagged defect. "
         "State only facts grounded in the provided source claims; remove or correct "
         "anything the source does not support."
+    )
+
+
+def _format_brain_fix_brief(
+    findings: list[AuditCheckResult],
+    slides: list[SlideSpec],
+    claims: list[SourceClaimCreate],
+) -> str:
+    """Assemble the Way 1 fix-pass user turn: findings + flagged slides + source claims.
+
+    The brain reads this to author grounding instructions the Sonnet regeneration
+    then applies. Only the slides the findings actually flag are shown, and the
+    claim pool mirrors the critic's cap so the brain grounds against the same
+    evidence the critic will re-judge against.
+    """
+
+    flagged_ids = {f.slide_id for f in findings if f.slide_id is not None}
+    findings_block = "\n".join(
+        f"- [{f.check_id}] slide_id={f.slide_id}: {f.message}" for f in findings
+    )
+    slides_block = "\n\n".join(
+        f"slide_id={slide.slide_id} (type={slide.slide_type.value}):\n"
+        f"{slide.content.model_dump_json(exclude_none=True)}"
+        for slide in slides
+        if slide.slide_id in flagged_ids
+    )
+    pool = claims[:CONTENT_CRITIC_CLAIM_POOL_LIMIT]
+    claims_block = "\n".join(f"- {claim.claim_text}" for claim in pool) or "(no source claims)"
+    return (
+        "GROUNDING FINDINGS (each names a slide whose claims the source does not support):\n"
+        f"{findings_block}\n\n"
+        "FLAGGED SLIDES (current content):\n"
+        f"{slides_block}\n\n"
+        "SOURCE CLAIMS (ground every edit only in these):\n"
+        f"{claims_block}"
     )
 
 

@@ -22,7 +22,7 @@ from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
 from packages.bot.orchestrators.presentation_orchestrator import (
     PresentationOrchestrator,
 )
-from packages.core.enums import ExportFormat
+from packages.core.enums import ExportFormat, GenerationPackage
 from tests.unit.test_presentation_orchestrator import (
     _build_orch,
     _pipeline_result,
@@ -66,9 +66,10 @@ class TestPresentationE2E:
             raw_answers=None,
             requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
             progress=_noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
         )
-        assert result.html_path is not None and result.html_path.exists()
-        assert result.pptx_path is not None and result.pptx_path.exists()
+        assert result.render.html_path is not None and result.render.html_path.exists()
+        assert result.render.pptx_path is not None and result.render.pptx_path.exists()
         # Skip routed through apply_defaults, not apply_answers.
         assert len(interview.apply_defaults_calls) == 1
         assert len(interview.apply_answers_calls) == 0
@@ -95,8 +96,9 @@ class TestPresentationE2E:
             raw_answers={"audience": "talaba"},
             requested_formats=[ExportFormat.HTML],
             progress=_noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
         )
-        assert result.html_path is not None and result.html_path.exists()
+        assert result.render.html_path is not None and result.render.html_path.exists()
         assert len(interview.apply_answers_calls) == 1
         assert len(interview.apply_defaults_calls) == 0
 
@@ -121,10 +123,11 @@ class TestPresentationE2E:
             raw_answers=None,
             requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
             progress=_noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
         )
-        assert result.html_path is None
-        assert result.pptx_path is None
-        assert any("timed out" in w for w in result.warnings)
+        assert result.render.html_path is None
+        assert result.render.pptx_path is None
+        assert any("timed out" in w for w in result.render.warnings)
 
     async def test_presentation_flow_editorial_failure_wraps_step(self) -> None:
         """Editorial pass raising surfaces as _OrchestratorError('editorial')."""
@@ -143,6 +146,7 @@ class TestPresentationE2E:
                 raw_answers=None,
                 requested_formats=[ExportFormat.HTML],
                 progress=_noop_progress,
+                package=GenerationPackage.PRESENTATION_STANDARD,
             )
         assert info.value.step == "editorial"
 
@@ -165,8 +169,9 @@ class TestPresentationE2E:
             raw_answers=None,
             requested_formats=[ExportFormat.HTML],
             progress=_noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
         )
-        assert result.html_path is not None and result.html_path.exists()
+        assert result.render.html_path is not None and result.render.html_path.exists()
 
 
 # Avoid unused-import linter complaints when E2E is off.

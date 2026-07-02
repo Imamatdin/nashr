@@ -15,7 +15,7 @@ from packages.bot.sessions.budget import (
     session_fix_limit,
     session_total_spend_usd,
 )
-from packages.bot.sessions.driver import BrainDriver, ScriptedStubDriver
+from packages.bot.sessions.driver import BrainDriver, GeminiBrainDriver, ScriptedStubDriver
 from packages.bot.sessions.models import (
     ApprovalState,
     BrainSession,
@@ -37,6 +37,7 @@ __all__ = [
     "ApprovalState",
     "BrainDriver",
     "BrainSession",
+    "GeminiBrainDriver",
     "PendingAction",
     "ScriptedStubDriver",
     "TurnAction",

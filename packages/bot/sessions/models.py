@@ -59,6 +59,11 @@ class PendingAction(BaseModel):
 
     fixes: list[SlideFix] = Field(min_length=1, max_length=20)
     reason: str = Field(default="", max_length=2000)
+    # Number of edit_slides CALL parts in the parked model turn (>= 1). The approve
+    # and reject paths must emit exactly this many function_response parts to answer
+    # the parked call fully (Gemini requires one response per call). Defaults to 1
+    # for the common single-call fix.
+    call_count: int = Field(default=1, ge=1)
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,10 @@ class TurnOutcome:
     reply_text: str | None = None
     fixes: tuple[SlideFix, ...] = ()
     reason: str | None = None
+    # Number of edit_slides CALL parts in this turn (>= 1 when ``fixes`` is set, else
+    # 0). Carried so the dispatch layer answers every call part with its own
+    # function_response part — Gemini requires one response per call.
+    fix_call_count: int = 0
 
 
 class BrainSession(BaseModel):

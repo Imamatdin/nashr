@@ -37,7 +37,11 @@ from packages.bot.handlers.presentation_flow import (
     start_generation,
     upload_more,
 )
-from packages.bot.orchestrators.presentation_orchestrator import PresentationRenderResult
+from packages.bot.orchestrators.article_orchestrator import SourceProcessingResult
+from packages.bot.orchestrators.presentation_orchestrator import (
+    PresentationPipelineResult,
+    PresentationRenderResult,
+)
 from packages.bot.states import PresentationStates
 
 # ---------------------------------------------------------------------------
@@ -192,18 +196,24 @@ async def test_choose_tier_basic_and_premium(state: FSMContext) -> None:
 
 
 class _FakeOrchestrator:
-    """Records calls and returns canned render results."""
+    """Records calls and returns a canned pipeline result (render + sources)."""
 
-    def __init__(self, files: PresentationRenderResult, raises: Exception | None = None) -> None:
+    def __init__(
+        self,
+        files: PresentationRenderResult,
+        raises: Exception | None = None,
+        sources: SourceProcessingResult | None = None,
+    ) -> None:
         self._files = files
         self._raises = raises
+        self._sources = sources if sources is not None else SourceProcessingResult()
         self.run_calls: list[dict[str, Any]] = []
 
-    async def run_full_pipeline(self, **kwargs: Any) -> PresentationRenderResult:
+    async def run_full_pipeline(self, **kwargs: Any) -> PresentationPipelineResult:
         self.run_calls.append(kwargs)
         if self._raises is not None:
             raise self._raises
-        return self._files
+        return PresentationPipelineResult(render=self._files, sources=self._sources)
 
 
 async def test_start_generation_caches_outputs_and_advances_state(
@@ -370,3 +380,53 @@ async def test_cancel_clears_state_and_cache(state: FSMContext) -> None:
 
     assert (await state.get_state()) is None
     assert "proj_canc" not in _PROJECT_CACHE
+
+
+# ---------------------------------------------------------------------------
+# edit_with_ai — the opt-in transition into the conversational editor (5a)
+# ---------------------------------------------------------------------------
+
+
+async def test_edit_with_ai_opens_conversational_editor(state: FSMContext) -> None:
+    from packages.bot.sessions import create_session
+    from packages.core.enums import AudienceType, ExportFormat, GenerationPackage
+    from tests.unit.test_database_client import _make_db, _make_deck, _seed_project
+
+    db, fake = _make_db()
+    _seed_project(fake)  # seeds project id "proj-1"
+    await db.save_deck("proj-1", _make_deck(title="X", audience=AudienceType.UNDERGRADUATE))
+    await create_session(
+        db,
+        project_id="proj-1",
+        sources=SourceProcessingResult(),
+        package=GenerationPackage.PRESENTATION_STANDARD,
+        formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+    )
+
+    await state.set_state(PresentationStates.reviewing_output)
+    await state.update_data(language="uz", project_id="proj-1")
+    msg = _make_message_spy()
+    cb = _make_callback_spy(data="edit_with_ai", message=msg)
+
+    await presentation_flow.edit_with_ai(cast(Any, cb), state, cast(Any, db))
+
+    assert (await state.get_state()) == PresentationStates.talking_to_brain.state
+    msg.answer.assert_awaited_once()
+    cb.answer.assert_awaited_once()
+
+
+async def test_edit_with_ai_without_session_stays_and_notifies(state: FSMContext) -> None:
+    from tests.unit.test_database_client import _make_db
+
+    db, _fake = _make_db()  # no session row exists for this project
+    await state.set_state(PresentationStates.reviewing_output)
+    await state.update_data(language="uz", project_id="proj_missing")
+    msg = _make_message_spy()
+    cb = _make_callback_spy(data="edit_with_ai", message=msg)
+
+    await presentation_flow.edit_with_ai(cast(Any, cb), state, cast(Any, db))
+
+    # No session → stay in reviewing_output and surface the not-found notice.
+    assert (await state.get_state()) == PresentationStates.reviewing_output.state
+    msg.answer.assert_awaited_once()
+    cb.answer.assert_awaited_once()

@@ -25,6 +25,7 @@ from packages.bot.orchestrators.presentation_orchestrator import (
     TOTAL_STEPS,
     FixAndRenderResult,
     PresentationOrchestrator,
+    PresentationPipelineResult,
     PresentationRenderResult,
 )
 from packages.core.enums import (
@@ -722,8 +723,10 @@ async def test_full_pipeline_emits_seven_progress_steps() -> None:
         package=GenerationPackage.PRESENTATION_STANDARD,
     )
 
-    assert isinstance(result, PresentationRenderResult)
-    assert result.html_path is not None
+    assert isinstance(result, PresentationPipelineResult)
+    assert isinstance(result.render, PresentationRenderResult)
+    assert result.render.html_path is not None
+    assert result.sources is not None  # the pipeline surfaces its sources for the brain session
     # source → matrix → interview → design → editorial → images → render
     assert seen_steps == [1, 2, 3, 4, 5, 6, 7]
 

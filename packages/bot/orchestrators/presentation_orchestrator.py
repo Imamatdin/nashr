@@ -145,6 +145,22 @@ class FixAndRenderResult(BaseModel):
     image_count: int = Field(default=0, ge=0)
 
 
+class PresentationPipelineResult(BaseModel):
+    """The full first-generation output: the rendered files AND the sources.
+
+    ``run_full_pipeline`` builds a :class:`SourceProcessingResult` and threads it
+    through every stage; Stage 5a surfaces it (rather than discarding it) so the
+    delivery handler can seed the brain editing session with the exact sources
+    first-gen grounded against — no re-parsing of the uploads. ``render`` is the
+    unchanged rendered-files result the delivery path already consumes.
+    """
+
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    render: PresentationRenderResult
+    sources: SourceProcessingResult
+
+
 class PresentationOrchestrator:
     """Orchestrates the presentation generation pipeline end to end.
 
@@ -852,7 +868,7 @@ class PresentationOrchestrator:
         progress: ProgressCallback,
         *,
         package: GenerationPackage,
-    ) -> PresentationRenderResult:
+    ) -> PresentationPipelineResult:
         """Drive the full presentation pipeline end-to-end.
 
         Called *after* payment has been confirmed. The orchestrator
@@ -893,7 +909,8 @@ class PresentationOrchestrator:
             deck_spec, sources, project_id, progress, package=package
         )
         await self._persist_deck(deck_spec, project_id)
-        return await self.render(deck_spec, formats, progress, project_id=project_id)
+        render = await self.render(deck_spec, formats, progress, project_id=project_id)
+        return PresentationPipelineResult(render=render, sources=sources)
 
 
 # ---------------------------------------------------------------------------

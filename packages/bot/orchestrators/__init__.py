@@ -18,12 +18,14 @@ from packages.bot.orchestrators.article_orchestrator import (
 )
 from packages.bot.orchestrators.presentation_orchestrator import (
     PresentationOrchestrator,
+    PresentationPipelineResult,
     PresentationRenderResult,
 )
 
 __all__ = [
     "ArticleOrchestrator",
     "PresentationOrchestrator",
+    "PresentationPipelineResult",
     "PresentationRenderResult",
     "ProgressCallback",
     "SourceProcessingResult",

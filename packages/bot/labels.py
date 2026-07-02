@@ -102,6 +102,8 @@ class BotLabels:
     approval_reject: str
     approval_required_first: str
     change_discarded: str
+    edit_button: str  # the "Edit with AI" delivery button
+    edit_invite: str  # shown on entering the conversational editor
 
 
 LABELS_UZ = BotLabels(
@@ -184,6 +186,8 @@ LABELS_UZ = BotLabels(
     approval_reject="❌ Bekor qilish",
     approval_required_first="Avval o'zgarishni tasdiqlang yoki bekor qiling.",
     change_discarded="O'zgarish bekor qilindi.",
+    edit_button="✏️ AI bilan tahrirlash",
+    edit_invite="Nimani o'zgartirishni yozing — men slaydlarni tahrirlab beraman.",
 )
 
 
@@ -262,6 +266,8 @@ LABELS_RU = BotLabels(
     approval_reject="❌ Отменить",
     approval_required_first="Сначала подтвердите или отмените изменение.",
     change_discarded="Изменение отменено.",
+    edit_button="✏️ Редактировать с ИИ",
+    edit_invite="Напишите, что изменить — я отредактирую слайды.",
 )
 
 
@@ -338,6 +344,8 @@ LABELS_EN = BotLabels(
     approval_reject="❌ Reject",
     approval_required_first="Please approve or reject the change first.",
     change_discarded="Change discarded.",
+    edit_button="✏️ Edit with AI",
+    edit_invite="Tell me what to change — I'll edit the slides for you.",
 )
 
 
@@ -417,6 +425,8 @@ LABELS_KAA = BotLabels(
     approval_reject="❌ Biykarlaw",
     approval_required_first="Aldın ózgeristi tastıyıqlań yamasa biykarlań.",
     change_discarded="Ózgeris biykarlandı.",
+    edit_button="✏️ AI menen redaktorlaw",
+    edit_invite="Neni ózgertiw kerekligin jazıń — men slaydlardı redaktorlap beremen.",
 )
 
 

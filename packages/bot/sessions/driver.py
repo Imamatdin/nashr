@@ -14,13 +14,25 @@ machinery consumes a :class:`TurnOutcome` and never looks inside.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Final, Protocol
 
 from google.genai import types as genai_types
 
 from packages.bot.sessions.models import BrainSession, TurnAction, TurnOutcome
-from packages.core.models.presentation import SlideFix
+from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME, run_brain_loop
+from packages.core.brain_prompts import assemble_brain_system
+from packages.core.gemini import GeminiClient
+from packages.core.models.presentation import DeckSpec, SlideFix
+from packages.core.models.source import SourceClaimCreate
+
+logger = logging.getLogger(__name__)
+
+# The number of source claims the brain sees per session — mirrors the content
+# critic's claim-pool cap. This is a display bound (what the brain reasons over),
+# not the grounding check, which still runs against the full claim list.
+_BRAIN_CLAIM_CONTEXT_LIMIT: Final[int] = 60
 
 
 class BrainDriver(Protocol):
@@ -46,6 +58,10 @@ class StubResponse:
     fixes: tuple[SlideFix, ...] = ()
     reason: str | None = None
     estimated_cost_usd: float = 0.0
+    # How many edit_slides call parts this scripted turn stands in for (>= 1 when it
+    # emits fixes). Lets a test script a multi-call turn so the dispatch layer's
+    # one-response-per-call answering is exercised without a real model.
+    call_count: int = 1
 
 
 @dataclass
@@ -87,7 +103,102 @@ class ScriptedStubDriver:
             reply_text=response.reply_text,
             fixes=response.fixes,
             reason=response.reason,
+            fix_call_count=response.call_count if response.fixes else 0,
         )
 
 
-__all__ = ["BrainDriver", "ScriptedStubDriver", "StubResponse"]
+@dataclass
+class GeminiBrainDriver:
+    """The real conversational brain (Build 2, Stage 5a) — Way 2.
+
+    Drives the shared ``edit_slides`` loop (:func:`packages.core.brain_loop.run_brain_loop`)
+    over the session's deck roster + source claims. Holds ONLY a ``GeminiClient``
+    — never the orchestrator — so a requested fix can leave the turn ONLY as
+    ``TurnOutcome.fixes`` (the fix-exit discipline): applying it is the chat
+    loop's guarded job (counter → approval → delivery boundary), structurally
+    impossible here. The static system block caches; per-session context rides the
+    history once (see :func:`_turn_contents`).
+    """
+
+    gemini: GeminiClient
+    system: str = field(default_factory=assemble_brain_system)
+
+    async def run_turn(self, session: BrainSession, user_text: str) -> TurnOutcome:
+        """Run one turn: answer the user, or REQUEST slide edits (never apply them)."""
+
+        contents = _turn_contents(session, user_text)
+        try:
+            result = await run_brain_loop(
+                self.gemini,
+                history=contents,
+                system=self.system,
+                allowed_function_names=[EDIT_SLIDES_TOOL_NAME],
+            )
+        except Exception:  # a chat turn must never crash the bot — degrade to an apology
+            logger.exception("brain_driver_turn_failed", extra={"project_id": session.project_id})
+            return TurnOutcome(action=TurnAction.REPLY, history=session.history, reply_text=None)
+        if result.kind == "fix":
+            return TurnOutcome(
+                action=TurnAction.FIX,
+                history=result.history,
+                estimated_cost_usd=result.estimated_cost_usd,
+                fixes=result.fixes,
+                fix_call_count=result.tool_call_count,
+            )
+        return TurnOutcome(
+            action=TurnAction.REPLY,
+            history=result.history,
+            estimated_cost_usd=result.estimated_cost_usd,
+            reply_text=result.reply_text,
+        )
+
+
+def _turn_contents(session: BrainSession, user_text: str) -> list[genai_types.Content]:
+    """Build the model contents for this turn (append-only; context injected once).
+
+    First turn (empty history): the deck roster + source claims are folded into
+    the user turn and persisted, so they live in a stable prefix that is never
+    rewritten. Later turns append only the user's message — deck changes reach the
+    model through the ``edit_slides`` function_response, never by mutating the
+    signed prefix (which would risk a Gemini 3 ``thought_signature`` 400).
+    """
+
+    if session.history:
+        user_turn = genai_types.Content(role="user", parts=[genai_types.Part(text=user_text)])
+        return [*session.history, user_turn]
+    opening = f"{_context_block(session)}\n\n---\n\n{user_text}"
+    return [genai_types.Content(role="user", parts=[genai_types.Part(text=opening)])]
+
+
+def _context_block(session: BrainSession) -> str:
+    """Render the once-injected deck roster + source-claims context."""
+
+    return (
+        "DECK ROSTER (address slides by slide_id):\n"
+        f"{_render_roster(session.deck)}\n\n"
+        "SOURCE CLAIMS (ground every edit only in these):\n"
+        f"{_render_claims(session.sources.claims)}"
+    )
+
+
+def _render_roster(deck: DeckSpec | None) -> str:
+    if deck is None or not deck.slides:
+        return "(no slides)"
+    return "\n".join(
+        f"[{slide.slide_index}] slide_id={slide.slide_id} type={slide.slide_type.value} "
+        f"— {slide.content.title}"
+        for slide in deck.slides
+    )
+
+
+def _render_claims(claims: list[SourceClaimCreate]) -> str:
+    if not claims:
+        return "(no source claims)"
+    capped = claims[:_BRAIN_CLAIM_CONTEXT_LIMIT]
+    lines = [f"- {claim.claim_text}" for claim in capped]
+    if len(claims) > _BRAIN_CLAIM_CONTEXT_LIMIT:
+        lines.append(f"... (+{len(claims) - _BRAIN_CLAIM_CONTEXT_LIMIT} more claims omitted)")
+    return "\n".join(lines)
+
+
+__all__ = ["BrainDriver", "GeminiBrainDriver", "ScriptedStubDriver", "StubResponse"]
