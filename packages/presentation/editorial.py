@@ -1075,6 +1075,20 @@ class EditorialPass:
         never clears a known finding. Worst case is today's refund, never worse.
         """
 
+        logger.info(
+            "editorial_brain_escalation_entry",
+            extra={
+                "finding_count": len(findings),
+                "findings": [
+                    {
+                        "check_id": f.check_id,
+                        "slide_id": f.slide_id,
+                        "message": (f.message or "")[:200],
+                    }
+                    for f in findings
+                ],
+            },
+        )
         slides = current_slides
         surviving = findings
         total_cost = 0.0
@@ -1082,10 +1096,24 @@ class EditorialPass:
         for _attempt in range(BRAIN_ESCALATION_MAX_ATTEMPTS):
             loop_result = await self._brain_fix_pass(surviving, slides, claims, gemini)
             total_cost += loop_result.estimated_cost_usd
+            flagged_ids = {f.slide_id for f in surviving if f.slide_id is not None}
+            logger.info(
+                "editorial_brain_escalation_fixes",
+                extra={
+                    "fix_count": len(loop_result.fixes),
+                    "fixes": [
+                        {
+                            "slide_id": fx.slide_id,
+                            "instruction": fx.instruction,
+                            "out_of_scope": fx.slide_id not in flagged_ids,
+                        }
+                        for fx in loop_result.fixes
+                    ],
+                },
+            )
             if not loop_result.fixes:
                 break
             deck = self._assemble_deck(slides, interview, design, project_id, plan)
-            flagged_ids = {f.slide_id for f in surviving if f.slide_id is not None}
             deck, applied, regen_cost = await self._apply_brain_fixes(
                 deck, loop_result.fixes, flagged_ids, claims
             )
@@ -1097,9 +1125,21 @@ class EditorialPass:
                 slides, plan, claims=claims, gemini=gemini, language=interview.language
             )
             recritiques += 1
+            if rejudged.llm_verified:
+                surviving = [
+                    f for f in rejudged.result.failures if f.check_id in HARD_STOP_CHECK_IDS
+                ]
+            logger.info(
+                "editorial_brain_escalation_recritique",
+                extra={
+                    "llm_verified": rejudged.llm_verified,
+                    "surviving_count": len(surviving),
+                    "surviving": [f.check_id for f in surviving],
+                    "estimated_cost_usd": round(total_cost, 6),
+                },
+            )
             if not rejudged.llm_verified:
                 break  # no verdict — a known fabrication must not be cleared by absence
-            surviving = [f for f in rejudged.result.failures if f.check_id in HARD_STOP_CHECK_IDS]
             if not surviving:
                 break
         logger.info(

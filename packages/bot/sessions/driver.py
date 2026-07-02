@@ -137,6 +137,19 @@ class GeminiBrainDriver:
             logger.exception("brain_driver_turn_failed", extra={"project_id": session.project_id})
             return TurnOutcome(action=TurnAction.REPLY, history=session.history, reply_text=None)
         if result.kind == "fix":
+            logger.info(
+                "brain_driver_turn",
+                extra={
+                    "project_id": session.project_id,
+                    "action": TurnAction.FIX.value,
+                    "tool_call_count": result.tool_call_count,
+                    "estimated_cost_usd": round(result.estimated_cost_usd, 6),
+                    "fixes": [
+                        {"slide_id": fx.slide_id, "instruction": fx.instruction}
+                        for fx in result.fixes
+                    ],
+                },
+            )
             return TurnOutcome(
                 action=TurnAction.FIX,
                 history=result.history,
@@ -144,6 +157,16 @@ class GeminiBrainDriver:
                 fixes=result.fixes,
                 fix_call_count=result.tool_call_count,
             )
+        logger.info(
+            "brain_driver_turn",
+            extra={
+                "project_id": session.project_id,
+                "action": TurnAction.REPLY.value,
+                "tool_call_count": 0,
+                "estimated_cost_usd": round(result.estimated_cost_usd, 6),
+                "reply_text": (result.reply_text or "")[:300],
+            },
+        )
         return TurnOutcome(
             action=TurnAction.REPLY,
             history=result.history,
