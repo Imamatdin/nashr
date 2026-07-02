@@ -21,7 +21,7 @@ from typing import Final, Protocol
 from google.genai import types as genai_types
 
 from packages.bot.sessions.models import BrainSession, TurnAction, TurnOutcome
-from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME, run_brain_loop
+from packages.core.brain_loop import run_brain_loop
 from packages.core.brain_prompts import assemble_brain_system
 from packages.core.gemini import GeminiClient
 from packages.core.models.presentation import DeckSpec, SlideFix
@@ -132,7 +132,6 @@ class GeminiBrainDriver:
                 self.gemini,
                 history=contents,
                 system=self.system,
-                allowed_function_names=[EDIT_SLIDES_TOOL_NAME],
             )
         except Exception:  # a chat turn must never crash the bot — degrade to an apology
             logger.exception("brain_driver_turn_failed", extra={"project_id": session.project_id})
