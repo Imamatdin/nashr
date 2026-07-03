@@ -148,7 +148,7 @@ DEFAULT_PROJECT_ID: Final[str] = "presentation"
 # recovery bet — each attempt spends a Pro fix pass + Sonnet regens + a re-critique,
 # and a second pass rarely grounds a claim the first could not. The hard stop
 # stays the final authority regardless of this value.
-BRAIN_ESCALATION_MAX_ATTEMPTS: Final[int] = 1
+BRAIN_ESCALATION_MAX_ATTEMPTS: Final[int] = 2
 
 # Interactive content runs on Gemini 3.5 Flash, which spends "thoughts" tokens
 # before visible output; the budget must clear the thinking phase plus the
@@ -1143,7 +1143,14 @@ class EditorialPass:
                     {
                         "llm_verified": rejudged.llm_verified,
                         "surviving_count": len(surviving),
-                        "surviving": [f.check_id for f in surviving],
+                        "surviving": [
+                            {
+                                "check_id": f.check_id,
+                                "slide_id": f.slide_id,
+                                "message": (f.message or "")[:150],
+                            }
+                            for f in surviving
+                        ],
                         "estimated_cost_usd": round(total_cost, 6),
                     },
                     ensure_ascii=False,
@@ -1161,7 +1168,14 @@ class EditorialPass:
                     "grounded": not surviving,
                     "recritiques": recritiques,
                     "estimated_cost_usd": round(total_cost, 6),
-                    "residual": [f.check_id for f in surviving],
+                    "residual": [
+                        {
+                            "check_id": f.check_id,
+                            "slide_id": f.slide_id,
+                            "message": (f.message or "")[:150],
+                        }
+                        for f in surviving
+                    ],
                 },
                 ensure_ascii=False,
                 default=str,

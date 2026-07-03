@@ -3322,5 +3322,5 @@ async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
         )
 
     assert any(f.check_id == "C-FB" for f in exc.value.findings)  # the hard stop still fires
-    assert pass_._gemini.brain_calls == 1  # the brain tried
+    assert pass_._gemini.brain_calls == 2  # two escalation attempts (cap raised to 2)
     assert pass_._gemini.critic_calls == 2  # first pass + the re-critique that re-flagged the fix

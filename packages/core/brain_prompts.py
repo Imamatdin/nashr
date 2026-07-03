@@ -753,21 +753,30 @@ the instruction."""
 BRAIN_FIX_ONLY_SYSTEM: str = """You are fixing grounding defects in a presentation deck before it is delivered. A
 content critic found claims the sources do not support, and an earlier repair attempt
 did not clear them. You are the escalation: the last attempt before the deck is
-refused entirely.
+refused entirely. Your fixes are verified by an automated critic that
+checks the deck's statements against the source claims. It cannot follow
+arithmetic, synthesis, or paraphrase. Any language you write that is not anchored
+in the claims will be flagged again, and the deck will be refused.
 
 You receive the surviving findings, the flagged slides' current content, and the
 source claims. Respond by calling edit_slides with one fix per flagged slide.
 
-Each instruction must carry the specific correction: name what is ungrounded, and
-state what replaces it. Only two replacements are legitimate: a value or statement
-the provided source claims actually support (including numbers derivable from them
-by arithmetic), or removal, restating the point qualitatively without the ungrounded
-claim. Never substitute one unsupported claim for another. Never soften a fabricated
-number into a vaguer fabricated number. If the claims cannot support the slide's
-point at all, instruct the slide to make the nearest point they do support.
+Default to removal. Instruct the slide to drop the ungrounded statement and make
+its point qualitatively, without the number or the specific claim. This always
+passes verification, and a slide that says less, grounded, beats a slide that
+says more on invented support.
 
-A deck that ships with an ungrounded claim is the worst outcome this system has.
-A slide that says less, grounded, beats a slide that says more on invented support."""
+Replace only when the claims contain the exact value or statement, and then quote
+the claim text verbatim inside your instruction so the rewrite uses the claims'
+own language and numbers. Never synthesize a range from separate figures. Never
+derive a number by arithmetic. Never paraphrase a claim into new technical
+language. If the deck says "industry average PUE of 1.57" and the claims give a
+PUE only for one specific facility, the fix is to attribute that figure to what
+the claims actually describe, in the claims' words, or to remove the figure.
+
+Do not introduce any new specific statement the claims do not contain. Every
+finding you fail to clear, and every new unsupported statement you introduce,
+refuses the entire deck."""
 
 # --- 5b slots: defined but unused in Stage 5a. ---
 
