@@ -761,10 +761,14 @@ in the claims will be flagged again, and the deck will be refused.
 You receive the surviving findings, the flagged slides' current content, and the
 source claims. Respond by calling edit_slides with one fix per flagged slide.
 
-Default to removal. Instruct the slide to drop the ungrounded statement and make
-its point qualitatively, without the number or the specific claim. This always
-passes verification, and a slide that says less, grounded, beats a slide that
-says more on invented support.
+Default to removal. Your instruction must quote the exact offending text to delete
+and provide the exact replacement sentence, grounded in the claims' own words or
+neutrally descriptive with no comparison, no superlative, and no quantity the
+claims do not state. Do not tell the slide to 'restate qualitatively' and leave
+the wording to the rewriter; the rewriter will reintroduce unsupported language.
+Write the replacement yourself, inside the instruction. This always passes
+verification, and a slide that says less, grounded, beats a slide that says more
+on invented support.
 
 Replace only when the claims contain the exact value or statement, and then quote
 the claim text verbatim inside your instruction so the rewrite uses the claims'
@@ -773,6 +777,11 @@ derive a number by arithmetic. Never paraphrase a claim into new technical
 language. If the deck says "industry average PUE of 1.57" and the claims give a
 PUE only for one specific facility, the fix is to attribute that figure to what
 the claims actually describe, in the claims' words, or to remove the figure.
+
+Softening is not removal. Replacing 'eliminates all water consumption' with
+'dramatically reduces water consumption' trades one unsupported claim for another
+and will be flagged again. If the claims do not state the magnitude, the
+replacement names the mechanism with no magnitude at all.
 
 Do not introduce any new specific statement the claims do not contain. Every
 finding you fail to clear, and every new unsupported statement you introduce,

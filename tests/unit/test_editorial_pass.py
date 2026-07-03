@@ -3298,11 +3298,12 @@ async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
     )
     fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
     pass_ = _editorial(
-        _StubLLM([regen_fail, regen_still_fab]),
+        _StubLLM([regen_fail, regen_still_fab, regen_still_fab]),
         critic=[
             _critic_response([fab]),
             _critic_response([fab]),
-        ],  # first pass + re-critique both flag
+            _critic_response([fab]),
+        ],  # first pass + two re-critiques inside escalation (cap 3)
         brain=[
             _fix_turn(
                 [
@@ -3311,7 +3312,15 @@ async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
                         "instruction": "Ground the 94.4 percent claim in the source.",
                     }
                 ]
-            )
+            ),
+            _fix_turn(
+                [
+                    {
+                        "slide_id": slide.slide_id,
+                        "instruction": "Drop the 94.4 percent figure; replace with: Water savings improved during field trials.",
+                    }
+                ]
+            ),
         ],
         plan=plan,
     )
@@ -3322,5 +3331,5 @@ async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
         )
 
     assert any(f.check_id == "C-FB" for f in exc.value.findings)  # the hard stop still fires
-    assert pass_._gemini.brain_calls == 2  # two escalation attempts (cap raised to 2)
-    assert pass_._gemini.critic_calls == 2  # first pass + the re-critique that re-flagged the fix
+    assert pass_._gemini.brain_calls == 3  # three escalation attempts (cap raised to 3)
+    assert pass_._gemini.critic_calls == 3  # first pass + two re-critiques that re-flagged fixes

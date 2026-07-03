@@ -8,8 +8,15 @@ Quick reference for agents and operators. Full first-time setup lives in
 Droplet host alias: **`ssh nashr`** (configured in Iko's `~/.ssh/config` on the
 machine that deploys — `HostName 46.101.150.144`, key `nashr_key`, keepalives).
 
-Agents deploy and run gates only. Do **not** hand-edit droplet state (`docker cp`,
-manual file edits on the server). The droplet must stay reproducible from git.
+Agents deploy and run gates only when explicitly requested. Do **not** hand-edit
+droplet state (`docker cp`, manual file edits on the server). The droplet must
+stay reproducible from git.
+
+**Standing rule for agents:** do not run gates or any other production actions
+beyond the deploy steps explicitly requested in the task. Gate runs create real
+Supabase projects, real LLM spend, and real escalation transcripts; they must
+never run silently. If a gate is needed, flag it in the report and wait for
+confirmation.
 
 ## Routine code deploy
 

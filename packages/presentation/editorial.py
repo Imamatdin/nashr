@@ -148,7 +148,7 @@ DEFAULT_PROJECT_ID: Final[str] = "presentation"
 # recovery bet — each attempt spends a Pro fix pass + Sonnet regens + a re-critique,
 # and a second pass rarely grounds a claim the first could not. The hard stop
 # stays the final authority regardless of this value.
-BRAIN_ESCALATION_MAX_ATTEMPTS: Final[int] = 2
+BRAIN_ESCALATION_MAX_ATTEMPTS: Final[int] = 3
 
 # Interactive content runs on Gemini 3.5 Flash, which spends "thoughts" tokens
 # before visible output; the budget must clear the thinking phase plus the
@@ -1079,6 +1079,7 @@ class EditorialPass:
             "editorial_brain_escalation_entry %s",
             json.dumps(
                 {
+                    "project_id": project_id,
                     "finding_count": len(findings),
                     "findings": [
                         {
@@ -1105,6 +1106,7 @@ class EditorialPass:
                 "editorial_brain_escalation_fixes %s",
                 json.dumps(
                     {
+                        "project_id": project_id,
                         "fix_count": len(loop_result.fixes),
                         "fixes": [
                             {
@@ -1141,6 +1143,7 @@ class EditorialPass:
                 "editorial_brain_escalation_recritique %s",
                 json.dumps(
                     {
+                        "project_id": project_id,
                         "llm_verified": rejudged.llm_verified,
                         "surviving_count": len(surviving),
                         "surviving": [
@@ -1165,6 +1168,7 @@ class EditorialPass:
             "editorial_brain_escalation_complete %s",
             json.dumps(
                 {
+                    "project_id": project_id,
                     "grounded": not surviving,
                     "recritiques": recritiques,
                     "estimated_cost_usd": round(total_cost, 6),
