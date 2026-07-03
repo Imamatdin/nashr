@@ -14,6 +14,7 @@ machinery consumes a :class:`TurnOutcome` and never looks inside.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Final, Protocol
@@ -133,22 +134,40 @@ class GeminiBrainDriver:
                 history=contents,
                 system=self.system,
             )
-        except Exception:  # a chat turn must never crash the bot — degrade to an apology
+        except Exception as exc:  # a chat turn must never crash the bot — degrade to an apology
             logger.exception("brain_driver_turn_failed", extra={"project_id": session.project_id})
+            logger.info(
+                "brain_driver_turn %s",
+                json.dumps(
+                    {
+                        "project_id": session.project_id,
+                        "action": TurnAction.REPLY.value,
+                        "tool_call_count": 0,
+                        "estimated_cost_usd": 0.0,
+                        "error": type(exc).__name__,
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
             return TurnOutcome(action=TurnAction.REPLY, history=session.history, reply_text=None)
         if result.kind == "fix":
             logger.info(
-                "brain_driver_turn",
-                extra={
-                    "project_id": session.project_id,
-                    "action": TurnAction.FIX.value,
-                    "tool_call_count": result.tool_call_count,
-                    "estimated_cost_usd": round(result.estimated_cost_usd, 6),
-                    "fixes": [
-                        {"slide_id": fx.slide_id, "instruction": fx.instruction}
-                        for fx in result.fixes
-                    ],
-                },
+                "brain_driver_turn %s",
+                json.dumps(
+                    {
+                        "project_id": session.project_id,
+                        "action": TurnAction.FIX.value,
+                        "tool_call_count": result.tool_call_count,
+                        "estimated_cost_usd": round(result.estimated_cost_usd, 6),
+                        "fixes": [
+                            {"slide_id": fx.slide_id, "instruction": fx.instruction}
+                            for fx in result.fixes
+                        ],
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
             )
             return TurnOutcome(
                 action=TurnAction.FIX,
@@ -158,14 +177,18 @@ class GeminiBrainDriver:
                 fix_call_count=result.tool_call_count,
             )
         logger.info(
-            "brain_driver_turn",
-            extra={
-                "project_id": session.project_id,
-                "action": TurnAction.REPLY.value,
-                "tool_call_count": 0,
-                "estimated_cost_usd": round(result.estimated_cost_usd, 6),
-                "reply_text": (result.reply_text or "")[:300],
-            },
+            "brain_driver_turn %s",
+            json.dumps(
+                {
+                    "project_id": session.project_id,
+                    "action": TurnAction.REPLY.value,
+                    "tool_call_count": 0,
+                    "estimated_cost_usd": round(result.estimated_cost_usd, 6),
+                    "reply_text": (result.reply_text or "")[:300],
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
         )
         return TurnOutcome(
             action=TurnAction.REPLY,
