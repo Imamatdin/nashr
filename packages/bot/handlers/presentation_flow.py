@@ -42,6 +42,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.utils.chat_action import ChatActionSender
 
 from packages.bot.keyboards import (
     main_menu_keyboard,
@@ -495,6 +496,7 @@ async def start_generation(
     # reviewing_output; the "Edit with AI" button opens the chat loop on demand, so
     # the download / regenerate affordances are preserved and editing is opt-in.
     can_edit = await _open_brain_session(db, project_id, result.sources, package)
+    await state.update_data(can_edit=can_edit)
     keyboard = presentation_output_keyboard(lang, can_edit=can_edit)
     try:
         await progress_msg.edit_text(labels.download_ready, reply_markup=keyboard)
@@ -734,7 +736,12 @@ async def finish(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(PresentationStates.reviewing_output, F.data == "cancel_flow")
 async def cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    """Cancel from the output-review state (the article router covers the rest)."""
+    """Cancel from the output-review state.
+
+    ``cancel_flow`` buttons live only on article keyboards; this catches a stale
+    one pressed here at presentation output review. Any other stale cancel (a
+    different state, or none) is answered by the fallback router.
+    """
 
     data = await state.get_data()
     lang = _flow_language(data)
@@ -782,6 +789,25 @@ async def edit_with_ai(callback: CallbackQuery, state: FSMContext, db: DatabaseC
             labels.edit_invite, reply_markup=presentation_chat_keyboard(lang)
         )
     await callback.answer()
+
+
+@router.message(PresentationStates.reviewing_output)
+async def reviewing_output_nudge(message: Message, state: FSMContext) -> None:
+    """A message typed at output review: editing is a button, not free text.
+
+    No ``F.text`` filter — any message type lands here. When the deck has an
+    editing session, point the user at the "Edit with AI" button; when it does
+    not (session creation failed at delivery), say editing is unavailable rather
+    than telling them to tap a button the keyboard omits. Zero model calls.
+    """
+
+    data = await state.get_data()
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+    can_edit = bool(data.get("can_edit", False))
+    keyboard = presentation_output_keyboard(lang, can_edit=can_edit)
+    text = labels.edit_nudge if can_edit else labels.edit_nudge_unavailable
+    await message.answer(text, reply_markup=keyboard)
 
 
 # ---------------------------------------------------------------------------
@@ -1143,8 +1169,22 @@ async def chat_turn(
     if not project_id:
         await message.answer(labels.edit_session_not_found)
         return
+    if _session_lock(project_id).locked():
+        # A turn is already running for this project. DROP this message with a
+        # notice rather than queue it behind the lock — queued, it would run
+        # minutes later as a stale edit the user has moved on from. They resend.
+        # Accepted edge: a released lock with queued waiters reads locked()==False,
+        # so a message could still queue — but a waiter requires chat_turn and
+        # approve_redeliver to contend, and their FSM states (talking_to_brain vs
+        # awaiting_approval) are mutually exclusive; a turn racing a freshly parked
+        # action is stopped by the pending_action guard in _run_chat_turn.
+        await message.answer(labels.brain_busy)
+        return
     orchestrator = _orchestrator(bot, db, credits, storage)
-    async with _session_lock(project_id):
+    async with (
+        _session_lock(project_id),
+        ChatActionSender.typing(bot=bot, chat_id=message.chat.id),
+    ):
         # A turn in talking_to_brain is triggered by the user's OWN message, so a
         # re-delivery it asks for is user-authorized (no button). The day the
         # brain (Stage 5) re-delivers on its own initiative — outside a user edit
@@ -1162,6 +1202,20 @@ async def chat_turn(
     await _render_chat_result(message, lang, labels, result)
     if result.outcome is _ChatOutcome.AWAITING_APPROVAL:
         await state.set_state(PresentationStates.awaiting_approval)
+
+
+@router.message(PresentationStates.talking_to_brain)
+async def talking_to_brain_non_text(message: Message, state: FSMContext) -> None:
+    """Non-text message while editing: the brain edits from words only.
+
+    Registered AFTER :func:`chat_turn` (which carries ``F.text``), so source order
+    lets text win and this catches everything else — photos, documents, stickers,
+    voice — with a nudge to describe the change in words. Zero model calls.
+    """
+
+    data = await state.get_data()
+    labels = get_bot_labels(_flow_language(data))
+    await message.answer(labels.brain_text_only)
 
 
 @router.message(PresentationStates.awaiting_approval, F.text)
@@ -1192,7 +1246,12 @@ async def approve_redeliver(
         await callback.answer()
         return
     orchestrator = _orchestrator(bot, db, credits, storage)
-    async with _session_lock(project_id):
+    async with (
+        _session_lock(project_id),
+        ChatActionSender.typing(bot=bot, chat_id=callback.message.chat.id),
+    ):
+        # Applying the parked fix runs the fix-chain + a full re-render (minutes):
+        # keep a typing indicator up so the user sees the bot is working.
         result = await _apply_pending(orchestrator=orchestrator, db=db, project_id=project_id)
     await _render_chat_result(callback.message, lang, labels, result)
     await state.set_state(PresentationStates.talking_to_brain)

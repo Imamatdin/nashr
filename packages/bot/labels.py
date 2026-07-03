@@ -104,6 +104,11 @@ class BotLabels:
     change_discarded: str
     edit_button: str  # the "Edit with AI" delivery button
     edit_invite: str  # shown on entering the conversational editor
+    brain_busy: str  # dropped-message notice while a turn is still running
+    stale_button: str  # toast for an expired inline button (fallback router)
+    edit_nudge: str  # reviewing_output: how to reach the editor
+    edit_nudge_unavailable: str  # reviewing_output, no editing session: buttons only
+    brain_text_only: str  # talking_to_brain: non-text message rejected
 
 
 LABELS_UZ = BotLabels(
@@ -188,6 +193,20 @@ LABELS_UZ = BotLabels(
     change_discarded="O'zgarish bekor qilindi.",
     edit_button="✏️ AI bilan tahrirlash",
     edit_invite="Nimani o'zgartirishni yozing — men slaydlarni tahrirlab beraman.",
+    brain_busy=(
+        "⏳ Oldingi so'rovingiz ustida ishlayapman — bu xabar qayta ishlanmadi. "
+        "Javobimdan keyin qayta yuboring."
+    ),
+    stale_button="Bu tugma eskirgan.",
+    edit_nudge=(
+        "Taqdimotni tahrirlash uchun quyidagi “✏️ AI bilan tahrirlash” tugmasini bosing, "
+        "so'ng nimani o'zgartirishni yozing."
+    ),
+    edit_nudge_unavailable=(
+        "Bu taqdimot uchun tahrirlash mavjud emas — yuklab olish yoki qayta yaratish "
+        "uchun quyidagi tugmalardan foydalaning."
+    ),
+    brain_text_only="Bu yerda faqat matn bilan ishlay olaman — o'zgartirishni so'z bilan yozing.",
 )
 
 
@@ -268,6 +287,20 @@ LABELS_RU = BotLabels(
     change_discarded="Изменение отменено.",
     edit_button="✏️ Редактировать с ИИ",
     edit_invite="Напишите, что изменить — я отредактирую слайды.",
+    brain_busy=(
+        "⏳ Ещё работаю над предыдущим запросом — это сообщение не обработано. "
+        "Отправьте его ещё раз после моего ответа."
+    ),
+    stale_button="Эта кнопка устарела.",
+    edit_nudge=(
+        "Чтобы отредактировать презентацию, нажмите «✏️ Редактировать с ИИ» ниже, "
+        "затем напишите, что изменить."
+    ),
+    edit_nudge_unavailable=(
+        "Редактирование недоступно для этой презентации — используйте кнопки ниже, "
+        "чтобы скачать или создать заново."
+    ),
+    brain_text_only="Здесь я работаю только с текстом — опишите изменение словами.",
 )
 
 
@@ -346,6 +379,16 @@ LABELS_EN = BotLabels(
     change_discarded="Change discarded.",
     edit_button="✏️ Edit with AI",
     edit_invite="Tell me what to change — I'll edit the slides for you.",
+    brain_busy=(
+        "⏳ Still working on your previous request — this message was not processed. "
+        "Send it again after I reply."
+    ),
+    stale_button="This button has expired.",
+    edit_nudge=("To edit the deck, tap “✏️ Edit with AI” below, then tell me what to change."),
+    edit_nudge_unavailable=(
+        "Editing isn't available for this deck — use the buttons below to download or regenerate."
+    ),
+    brain_text_only="I can only work with text here — describe the change in words.",
 )
 
 
@@ -427,6 +470,20 @@ LABELS_KAA = BotLabels(
     change_discarded="Ózgeris biykarlandı.",
     edit_button="✏️ AI menen redaktorlaw",
     edit_invite="Neni ózgertiw kerekligin jazıń — men slaydlardı redaktorlap beremen.",
+    brain_busy=(
+        "⏳ Aldınǵı sorawıńız ústinde islep atırman — bul xabar islenbedi. "
+        "Juwabımnan keyin qaytadan jiberiń."
+    ),
+    stale_button="Bul túyme eskirgen.",
+    edit_nudge=(
+        "Prezentaciyanı redaktorlaw ushın tómendegi “✏️ AI menen redaktorlaw” túymesin basıń, "
+        "keyin neni ózgertiwdi jazıń."
+    ),
+    edit_nudge_unavailable=(
+        "Bul prezentaciya ushın redaktorlaw múmkin emes — júklep alıw yamasa qaytadan "
+        "jaratıw ushın tómendegi túymelerden paydalanıń."
+    ),
+    brain_text_only="Bul jerde tek tekst penen isley alaman — ózgerisdi sóz benen jazıń.",
 )
 
 

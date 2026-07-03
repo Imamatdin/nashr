@@ -13,6 +13,8 @@ no Telegram, LLM or subprocess calls happen.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -37,6 +39,7 @@ from packages.bot.handlers.presentation_flow import (
     start_generation,
     upload_more,
 )
+from packages.bot.labels import get_bot_labels
 from packages.bot.orchestrators.article_orchestrator import SourceProcessingResult
 from packages.bot.orchestrators.presentation_orchestrator import (
     PresentationPipelineResult,
@@ -95,6 +98,13 @@ def _clear_project_cache():
     _PROJECT_CACHE.clear()
     yield
     _PROJECT_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_session_locks():
+    presentation_flow._SESSION_LOCKS.clear()
+    yield
+    presentation_flow._SESSION_LOCKS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -430,3 +440,175 @@ async def test_edit_with_ai_without_session_stays_and_notifies(state: FSMContext
     assert (await state.get_state()) == PresentationStates.reviewing_output.state
     msg.answer.assert_awaited_once()
     cb.answer.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# chat_turn — busy guard + typing indicator (P0-1)
+# ---------------------------------------------------------------------------
+
+
+async def test_chat_turn_busy_guard_drops_message(
+    state: FSMContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await state.set_state(PresentationStates.talking_to_brain)
+    await state.update_data(language="en", project_id="p1")
+    run_mock = AsyncMock()
+    monkeypatch.setattr(presentation_flow, "_run_chat_turn", run_mock)
+
+    lock = presentation_flow._session_lock("p1")
+    await lock.acquire()
+    try:
+        msg = _make_message_spy()
+        msg.text = "make the title bigger"
+        await presentation_flow.chat_turn(
+            cast(Any, msg),
+            state,
+            cast(Any, MagicMock()),
+            cast(Any, MagicMock()),
+            cast(Any, MagicMock()),
+        )
+    finally:
+        lock.release()
+
+    msg.answer.assert_awaited_once_with(get_bot_labels("en").brain_busy)
+    run_mock.assert_not_awaited()
+
+
+async def test_chat_turn_shows_typing_indicator(
+    state: FSMContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await state.set_state(PresentationStates.talking_to_brain)
+    await state.update_data(language="en", project_id="p_typing")
+
+    async def _slow_turn(**_kwargs: Any) -> presentation_flow._ChatResult:
+        await asyncio.sleep(0.15)
+        return presentation_flow._ChatResult(
+            presentation_flow._ChatOutcome.REPLY, reply_text="done"
+        )
+
+    monkeypatch.setattr(presentation_flow, "_run_chat_turn", AsyncMock(side_effect=_slow_turn))
+    monkeypatch.setattr(presentation_flow, "_brain_driver", lambda: MagicMock())
+    monkeypatch.setattr(presentation_flow, "_orchestrator", lambda *_a, **_k: MagicMock())
+
+    bot = MagicMock()
+    bot.id = 42
+    bot.send_chat_action = AsyncMock()
+    msg = _make_message_spy()
+    msg.text = "make slide 2 bold"
+    msg.chat = MagicMock()
+    msg.chat.id = 22
+
+    await presentation_flow.chat_turn(
+        cast(Any, msg),
+        state,
+        cast(Any, bot),
+        cast(Any, MagicMock()),
+        cast(Any, MagicMock()),
+    )
+
+    assert bot.send_chat_action.await_count >= 1
+    msg.answer.assert_awaited_once_with("done")
+
+
+# ---------------------------------------------------------------------------
+# reviewing_output nudge + talking_to_brain non-text (P0-3)
+# ---------------------------------------------------------------------------
+
+
+async def test_reviewing_output_nudge_offers_editor_when_editable(state: FSMContext) -> None:
+    await state.set_state(PresentationStates.reviewing_output)
+    await state.update_data(language="en", project_id="p1", can_edit=True)
+    msg = _make_message_spy()
+
+    await presentation_flow.reviewing_output_nudge(cast(Any, msg), state)
+
+    msg.answer.assert_awaited_once()
+    assert msg.answer.await_args.args[0] == get_bot_labels("en").edit_nudge
+    keyboard = msg.answer.await_args.kwargs["reply_markup"]
+    datas = {btn.callback_data for row in keyboard.inline_keyboard for btn in row}
+    assert "edit_with_ai" in datas
+
+
+async def test_reviewing_output_nudge_hides_editor_when_not_editable(state: FSMContext) -> None:
+    await state.set_state(PresentationStates.reviewing_output)
+    await state.update_data(language="en", project_id="p1")  # can_edit absent
+    msg = _make_message_spy()
+
+    await presentation_flow.reviewing_output_nudge(cast(Any, msg), state)
+
+    assert msg.answer.await_args.args[0] == get_bot_labels("en").edit_nudge_unavailable
+    keyboard = msg.answer.await_args.kwargs["reply_markup"]
+    datas = {btn.callback_data for row in keyboard.inline_keyboard for btn in row}
+    assert "edit_with_ai" not in datas
+
+
+async def test_talking_to_brain_rejects_non_text(state: FSMContext) -> None:
+    await state.set_state(PresentationStates.talking_to_brain)
+    await state.update_data(language="en", project_id="p1")
+    msg = _make_message_spy()
+    msg.text = None
+    msg.photo = [_make_photo(file_id="x", file_unique_id="y")]
+
+    await presentation_flow.talking_to_brain_non_text(cast(Any, msg), state)
+
+    msg.answer.assert_awaited_once_with(get_bot_labels("en").brain_text_only)
+
+
+# ---------------------------------------------------------------------------
+# cancel_flow scoping (P0-4) — dispatcher-level routing
+# ---------------------------------------------------------------------------
+
+
+async def test_cancel_flow_in_reviewing_output_hits_presentation_not_article() -> None:
+    """A stale cancel_flow pressed at presentation output review must drop the
+    PRESENTATION cache, not the article flow's (which registers first)."""
+
+    from datetime import datetime
+
+    from aiogram import Bot, Dispatcher
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+    from aiogram.types import CallbackQuery, Chat, Message, Update, User
+
+    from packages.bot.handlers import article_flow
+
+    bot = Bot(token="123456:AAHtest-token-value-goes-here-000000")
+    bot.session = cast(Any, AsyncMock())
+    try:
+        dp = Dispatcher(storage=MemoryStorage())
+        dp.include_router(article_flow.router)
+        dp.include_router(presentation_flow.router)
+
+        chat_id, user_id = 22, 11
+        key = StorageKey(bot_id=bot.id, chat_id=chat_id, user_id=user_id)
+        await dp.storage.set_state(key, PresentationStates.reviewing_output)
+        await dp.storage.set_data(key, {"language": "en", "project_id": "proj-scoped"})
+
+        _PROJECT_CACHE["proj-scoped"] = {"files": {}}
+        article_flow._PROJECT_CACHE["proj-scoped"] = {"matrix": "keep"}
+
+        update = Update(
+            update_id=1,
+            callback_query=CallbackQuery(
+                id="cb1",
+                from_user=User(id=user_id, is_bot=False, first_name="T"),
+                chat_instance="ci",
+                message=Message(
+                    message_id=5,
+                    date=datetime.now(UTC),
+                    chat=Chat(id=chat_id, type="private"),
+                ),
+                data="cancel_flow",
+            ),
+        )
+        await dp.feed_update(bot, update)
+
+        assert "proj-scoped" not in _PROJECT_CACHE
+        assert "proj-scoped" in article_flow._PROJECT_CACHE
+    finally:
+        await bot.session.close()
+        article_flow._PROJECT_CACHE.pop("proj-scoped", None)
+        # aiogram routers are single-attach: detach these shared module-level
+        # singletons so other tests can re-include them (e.g. via create_bot).
+        article_flow.router._parent_router = None
+        presentation_flow.router._parent_router = None

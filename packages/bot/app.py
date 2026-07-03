@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 from packages.bot.handlers import (
     article_flow,
     common,
+    fallback,
     main_menu,
     payment_flow,
     presentation_flow,
@@ -86,6 +87,9 @@ async def create_bot(
     dp.include_router(article_flow.router)
     dp.include_router(presentation_flow.router)
     dp.include_router(payment_flow.router)
+    # Registered LAST: a catch-all that answers any callback no flow matched
+    # (a stale button), clearing the client's loading spinner.
+    dp.include_router(fallback.router)
 
     return bot, dp
 

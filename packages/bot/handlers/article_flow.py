@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -786,9 +787,15 @@ async def finish(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "cancel_flow")
+@router.callback_query(StateFilter(ArticleStates), F.data == "cancel_flow")
 async def cancel(callback: CallbackQuery, state: FSMContext) -> None:
-    """Cancel the active flow from any state."""
+    """Cancel the active ARTICLE flow from any of its states.
+
+    Scoped to :class:`ArticleStates` so it no longer swallows presentation-flow
+    cancels: the article router registers before the presentation router, and an
+    unscoped ``cancel_flow`` handler would match first and pop the WRONG module's
+    project cache.
+    """
 
     data = await state.get_data()
     lang = _flow_language(data)
