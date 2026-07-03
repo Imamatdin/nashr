@@ -1406,6 +1406,56 @@ gate until those are real text.
 - Way 3: brain's unrequested proactive suggestions (`user_initiated=False` path).
 - Iko fills `BRAIN_STANDARD` / `BRAIN_IDENTITY` / `BRAIN_ORCHESTRATOR` (character + standard).
 
+### 2026-07-03 — Phase 0 live-UX fixes (pre-5b consolidation, branch `build1-content-critic`)
+
+Executed against a web-drafted brief whose Phase 0 premises were checked against HEAD + the
+live droplet FIRST (droplet container verified built from `a1310f1`). THREE of the brief's
+claims were dead at HEAD and are recorded here so they are not re-chased: (1a) "Edit with AI
+entry fires a paid brain turn" — FALSE, `edit_with_ai` runs only `load_session` and sends the
+static invite; (1b) "null reply triggers `presentation_chat_files_redelivered`" — that event
+does not exist in the repo; null reply → `labels.error_generic`; (1c) "FSM never reaches
+`talking_to_brain`" — FALSE, entry sets it and `chat_turn` listens on it (run6.log shows a
+live handled Way 2 fix turn). The REAL "Update not handled" cause: `reviewing_output` had no
+message handler at all.
+
+WHAT SHIPPED (5 source files + 2 test files):
+- **P0-1 busy guard + typing** (`presentation_flow.py`): `chat_turn` drops-with-reply
+  (`labels.brain_busy`) when the per-project lock is held — never queues a stale edit;
+  `ChatActionSender.typing` wraps the brain turn AND `approve_redeliver`'s fix-apply.
+  Codex-flagged waiter-queue race ACCEPTED with documented justification (guard comment):
+  chat_turn (`talking_to_brain`) and approve (`awaiting_approval`) are mutually exclusive FSM
+  states, and a turn racing a freshly parked action is stopped by the `pending_action` guard
+  in `_run_chat_turn`.
+- **P0-2 fallback router** (NEW `handlers/fallback.py`, registered LAST in `app.py`): every
+  unmatched callback (stale button) is answered with a toast — spinners never hang. Language:
+  FSM data → stored user profile (`get_user_by_telegram_id`) → uz; DB errors suppressed so
+  the toast always answers (Codex RISK fix).
+- **P0-3 review-screen nudges** (`presentation_flow.py`, `labels.py`): `reviewing_output`
+  message handler nudges to the Edit button (`edit_nudge`) or says editing is unavailable
+  (`edit_nudge_unavailable`, Codex BUG fix — never point at a button the keyboard omits);
+  `can_edit` stashed in FSM data at delivery; `talking_to_brain` non-text handler
+  (`brain_text_only`). Zero model calls on all three.
+- **P0-4 cancel scoping** (`article_flow.py`): stateless `cancel_flow` handler was shadowing
+  presentation-flow cancels (article router registers first) and popping the WRONG module's
+  `_PROJECT_CACHE`; now scoped `StateFilter(ArticleStates)`. The presentation `cancel` at
+  reviewing_output (previously dead code — article's always won) is now live.
+- **Labels ×5** (`brain_busy`, `stale_button`, `edit_nudge`, `edit_nudge_unavailable`,
+  `brain_text_only`) in all four packs (uz/ru/en/kaa).
+
+VERIFIED locally: `python -m pytest tests/` full suite green (1483 passed / 32 skipped; +11
+new behavior tests vs the pre-Phase-0 baseline 1472/32, incl. a dispatcher-level `feed_update`
+regression proving article-cancel no longer swallows presentation cancels, red pre-fix);
+ruff check + format clean on all changed files (the 3 pre-existing SIM105 in payment_flow.py
+untouched); pyright 0/0/0. Codex adversarial review round 1: 1 BUG + 2 RISK (all closed or
+accepted-with-argument above) + clean bill on router order, cancel orphaning, ChatActionSender
+semantics (aiogram 3.28.2), test realness; round 2 re-review on the amendment recorded in the
+gate report.
+
+NOT verified locally (Iko's live probes gate DONE): real Telegram typing indicator, toast
+behavior, busy-drop UX, and the full Way 2 edit loop live. NOTE for the deploy check: the
+container will still report `(unhealthy)` — the polling-mode healthcheck is a Phase 1 item
+(nothing binds :8080; Dockerfile curl probe cannot pass by construction).
+
 ### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
 
 Three correctness items for the **unbuilt** web/R2 consumer. None affect the bot delivery path the
