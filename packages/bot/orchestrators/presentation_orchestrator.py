@@ -22,6 +22,7 @@ would fragment a single coherent operation.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 import tempfile
@@ -577,13 +578,17 @@ class PresentationOrchestrator:
             )
         passed = not any(f.severity is AuditSeverity.FAIL for f in findings)
         logger.info(
-            "presentation_slide_regenerated",
-            extra={
-                "slide_id": slide_id,
-                "passed": passed,
-                "findings": len(findings),
-                "image_budget": image_budget_for_package(package),
-            },
+            "presentation_slide_regenerated %s",
+            json.dumps(
+                {
+                    "slide_id": slide_id,
+                    "passed": passed,
+                    "findings": len(findings),
+                    "image_budget": image_budget_for_package(package),
+                },
+                ensure_ascii=False,
+                default=str,
+            ),
         )
 
         await progress("Resolving slide image", 2, 2)
