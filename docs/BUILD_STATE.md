@@ -1637,9 +1637,10 @@ Project `9330c308-6e78-4a73-8ed0-6aa2d8f790b2`.
 
 **Mechanism (logs):** instruction layer substituted 44% not 40%; fix-turn handler
 drops brain voice (`brain_loop.py:246`, `presentation_flow.py:1138-1140`). **Not**
-mechanism 3 (downstream regen correction). **Brain-track pause** until
-substitute-and-announce UX fix (+ optional prompt paragraph Monday) — **not** a
-refuse-only identity rewrite.
+mechanism 3 (downstream regen correction). **Transparency fix shipped** (`2ed7cb9`,
+deployed `f87a41a`): fix-turn parallel model text now surfaces before the
+`edit_applied` label. Prompt paragraphs (substitute-and-announce) remain Monday
+drafts. Slide 11 forensic: verdict **(a)** — 44% in `speaker_notes` only.
 
 ### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
 
