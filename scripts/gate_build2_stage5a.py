@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import json
 import logging
 import random
 import sys
@@ -96,27 +97,45 @@ _PLANTED_FABRICATION = (
 )
 
 
-class _EscalationWatcher(logging.Handler):
-    """Captures the editorial ``brain_escalation_complete`` log WITH its evidence.
+_COMPLETE_PREFIX = "editorial_brain_escalation_complete "
+_RECRITIQUE_PREFIX = "editorial_brain_escalation_recritique "
+_UNION_PREFIX = "editorial_critique_union "
 
-    ``recritiques`` is the real proof point: it is > 0 only when the critic actually
-    RE-RAN on a brain-fixed deck. The completion line fires even when the escalation
-    broke early (no fix produced/applied), so asserting on the line alone is vacuous —
-    the gate asserts on ``recritiques`` instead.
+
+def _parse_editorial_json_log(message: str, prefix: str) -> dict[str, Any] | None:
+    """Parse ``logger.info("event %s", json.dumps(...))`` payloads from editorial."""
+
+    if not message.startswith(prefix):
+        return None
+    try:
+        parsed = json.loads(message[len(prefix) :])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+class _EscalationWatcher(logging.Handler):
+    """Captures escalation logs emitted as JSON suffixes on the message line.
+
+    Product code logs via ``logger.info("event %s", json.dumps({...}))``
+    (editorial.py:1217-1236) — not ``extra=`` — so watchers must parse the
+    message, not ``getattr(record, "recritiques")``.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        self.records: list[dict[str, Any]] = []
+        self.completions: list[dict[str, Any]] = []
+        self.recritiques: list[dict[str, Any]] = []
+        self.unions: list[dict[str, Any]] = []
 
     def emit(self, record: logging.LogRecord) -> None:
-        if record.getMessage() == "editorial_brain_escalation_complete":
-            self.records.append(
-                {
-                    "grounded": getattr(record, "grounded", None),
-                    "recritiques": getattr(record, "recritiques", 0),
-                }
-            )
+        message = record.getMessage()
+        if completion := _parse_editorial_json_log(message, _COMPLETE_PREFIX):
+            self.completions.append(completion)
+        elif recritique := _parse_editorial_json_log(message, _RECRITIQUE_PREFIX):
+            self.recritiques.append(recritique)
+        elif union := _parse_editorial_json_log(message, _UNION_PREFIX):
+            self.unions.append(union)
 
 
 def _edit_function_call(content: Any) -> Any:
@@ -249,11 +268,33 @@ async def _run_gate(
     finally:
         editorial_logger.removeHandler(watcher)
 
-    recritiques = watcher.records[-1]["recritiques"] if watcher.records else 0
+    recritique_count = watcher.completions[-1].get("recritiques", 0) if watcher.completions else 0
     reporter.check(
         "brain escalation RE-RAN the critic on the brain-fixed deck",
-        recritiques >= 1,
-        f"recritiques={recritiques} (0 ⇒ brain produced/applied no fix; re-critique never ran)",
+        recritique_count >= 1,
+        f"recritiques={recritique_count} (0 ⇒ brain produced/applied no fix; re-critique never ran)",
+    )
+    reporter.check(
+        "escalation recritique log emitted",
+        len(watcher.recritiques) >= 1,
+        f"recritique_logs={len(watcher.recritiques)}",
+    )
+    reporter.check(
+        "recritique was llm_verified",
+        any(entry.get("llm_verified") for entry in watcher.recritiques),
+        f"llm_verified={[e.get('llm_verified') for e in watcher.recritiques]}",
+    )
+    reporter.check(
+        "union-of-2 critic ran during escalation",
+        len(watcher.unions) >= 1,
+        f"union_logs={len(watcher.unions)}",
+    )
+    reporter.check(
+        "both critic passes verified in union",
+        any(
+            entry.get("pass1_verified") and entry.get("pass2_verified") for entry in watcher.unions
+        ),
+        f"pass_verified={[(u.get('pass1_verified'), u.get('pass2_verified')) for u in watcher.unions]}",
     )
     # The invariant: delivery requires a clean re-critique. Grounded → would deliver;
     # otherwise the (unchanged) hard stop fires and the deck refunds. Never ships dirty.

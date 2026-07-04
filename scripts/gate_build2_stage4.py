@@ -104,6 +104,20 @@ _PACKAGE = GenerationPackage.PRESENTATION_PREMIUM
 _FORMATS = [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
 
 
+def _fix_function_response_delivered(content: Any) -> bool:
+    """True when a turn answers ``edit_slides`` with a successful delivery."""
+
+    for part in content.parts or []:
+        if part.function_response is None:
+            continue
+        if part.function_response.name != "edit_slides":
+            continue
+        response = part.function_response.response
+        if isinstance(response, dict) and response.get("delivered") is True:
+            return True
+    return False
+
+
 async def _run_gate(
     db: DatabaseClient,
     project_id: str,
@@ -162,7 +176,22 @@ async def _run_gate(
     reporter.check("download cache refreshed", "files" in _PROJECT_CACHE.get(project_id, {}))
     s1 = await load_session(db, project_id)
     assert s1 is not None
-    reporter.check("history persisted (user+model)", len(s1.history) == 2)
+    # Post-5a feed-back seam: user turn + model turn + one function_response per
+    # edit_slides call (presentation_flow.py:_append_fix_result → persist).
+    reporter.check(
+        "history persisted (user+model+fix_response)",
+        len(s1.history) == 3,
+        f"len={len(s1.history)}",
+    )
+    reporter.check(
+        "user turn in history",
+        s1.history[0].role == "user" and any(p.text for p in (s1.history[0].parts or [])),
+    )
+    reporter.check("model turn in history", s1.history[1].role == "model")
+    reporter.check(
+        "fix outcome fed back to history",
+        _fix_function_response_delivered(s1.history[-1]),
+    )
     reporter.check(
         "real editing spend accumulated",
         s1.accumulated_cost_usd > 0.0,
