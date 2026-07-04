@@ -477,7 +477,7 @@ def _gate_source_grounded(
     # FULL claim set. A present token (or a paraphrase the model disliked)
     # degrades to WARN — never a false refund.
     severity = AuditSeverity.WARN if _token_present_in_claims(token, claims) else AuditSeverity.FAIL
-    return _make_finding(category, severity, slide, finding.message)
+    return _make_finding(category, severity, slide, _message_carrying_token(finding.message, token))
 
 
 def _gate_internal_consistency(
@@ -538,6 +538,24 @@ def _matches_roster_person(token: str, plan: DeckPlan) -> bool:
         if grounded_in(token, figure.name) or grounded_in(figure.name, token):
             return True
     return False
+
+
+def _message_carrying_token(message: str, token: str) -> str:
+    """Suffix the grounding token verbatim onto a source-grounded message.
+
+    The token is the finding's true discriminator — two fabrications on one slide
+    can share a generic critic message — and downstream identity (the verification
+    union's dedupe key in ``editorial._critic_finding_union_key``) reads only the
+    message, which is also what the regen instruction and the brain's
+    verbatim-or-remove brief quote. The suffix is UNCONDITIONAL: a containment
+    check would let a short token hide inside a longer one already in the message
+    ("1987" inside "1987-1991") and collapse two distinct defects. The base
+    message is trimmed so the suffix always fits the 500-char cap
+    ``_make_finding`` enforces.
+    """
+
+    suffix = f' [unsupported: "{token}"]'
+    return message[: 500 - len(suffix)] + suffix
 
 
 def _make_finding(

@@ -28,6 +28,7 @@ from packages.core.models.source import SourceClaimCreate
 from packages.presentation.content_critic import (
     HARD_STOP_CHECK_IDS,
     ROUTABLE_CHECK_IDS,
+    _message_carrying_token,
     critique_deck_adversarially,
 )
 
@@ -532,3 +533,68 @@ def test_routable_and_hard_stop_check_id_membership() -> None:
     # Hollow is emit-only WARN: code-detected for visibility, never routed.
     assert "C-HL" not in ROUTABLE_CHECK_IDS
     assert "C-HL" not in HARD_STOP_CHECK_IDS
+
+
+def test_message_carrying_token_always_appends_token() -> None:
+    appended = _message_carrying_token("Generic defect.", "73.8 bar")
+    assert appended.endswith('[unsupported: "73.8 bar"]')
+    assert appended.startswith("Generic defect.")
+    capped = _message_carrying_token("x" * 500, "1987")
+    assert len(capped) <= 500
+    assert capped.endswith('[unsupported: "1987"]')
+    # The append is UNCONDITIONAL: a containment check would let a short token
+    # hide inside a longer one already in the message and collapse two distinct
+    # defects in the verification union.
+    shared = "The range 1987-1991 is not supported by the source."
+    short = _message_carrying_token(shared, "1987")
+    long = _message_carrying_token(shared, "1987-1991")
+    assert short != long
+    assert short.endswith('[unsupported: "1987"]')
+    assert long.endswith('[unsupported: "1987-1991"]')
+
+
+async def test_two_generic_message_fabrications_on_one_slide_stay_distinct() -> None:
+    """The grounding token is a finding's true discriminator: two same-slide
+    fabrications sharing one generic model message must yield DISTINCT finding
+    messages (each carrying its token), so the verification union — whose dedupe
+    key reads only the message — cannot collapse them into one."""
+
+    slide = _slide(
+        0,
+        SlideType.CONCEPT_DEFINITION,
+        _content("Background", body_text="The reactor reached 1200 degrees in 1987."),
+    )
+    claims = [_claim("The system operated at elevated temperature during testing.")]
+    generic = "Slide asserts a value the source does not support."
+    gemini = _FakeGemini(
+        [
+            _response(
+                [
+                    _finding(
+                        1,
+                        "fabrication",
+                        slide_quote="The reactor reached 1200 degrees in 1987.",
+                        unsupported_token="1200 degrees",
+                        message=generic,
+                    ),
+                    _finding(
+                        1,
+                        "fabrication",
+                        slide_quote="The reactor reached 1200 degrees in 1987.",
+                        unsupported_token="1987",
+                        message=generic,
+                    ),
+                ]
+            )
+        ]
+    )
+
+    result = (
+        await critique_deck_adversarially([slide], _plan(), claims=claims, gemini=gemini)
+    ).result
+
+    assert len(result.failures) == 2
+    messages = {f.message for f in result.failures}
+    assert len(messages) == 2
+    assert any("1200 degrees" in m for m in messages)
+    assert any("1987" in m for m in messages)

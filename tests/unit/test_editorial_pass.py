@@ -65,6 +65,8 @@ from packages.presentation.editorial import (
     EditorialPass,
     EditorialSlideRegenError,
     _count_words_in_content,
+    _critic_finding_union_key,
+    _critique_unioned,
     _insert_breathing_after_data,
     _LLMSlide,
     _materialise_slides,
@@ -73,6 +75,7 @@ from packages.presentation.editorial import (
     _reindex,
     _splice_sections,
     _splice_single_slide,
+    _union_critic_findings,
 )
 from packages.presentation.thesis_classifier import ThesisClassifier
 from tests.unit.test_brain_loop import _fix_turn, _reply_turn
@@ -2929,7 +2932,8 @@ async def test_content_critic_routes_fixes_and_preserves_slide_id() -> None:
                     )
                 ]
             ),
-            _critic_response([]),  # re-judge: clean
+            _critic_response([]),  # union re-judge, pass 1: clean
+            _critic_response([]),  # union re-judge, pass 2: clean
         ],
         plan=plan,
     )
@@ -2941,7 +2945,8 @@ async def test_content_critic_routes_fixes_and_preserves_slide_id() -> None:
     assert len(out) == 1
     assert out[0].slide_id == slide.slide_id  # durable id preserved across regen + splice
     assert "94.4" not in (out[0].content.body_text or "")  # the fabricated fact is gone
-    assert pass_._gemini.critic_calls == 2  # initial critique + exactly one re-judge
+    # first discovery critique + a two-pass UNION re-judge (a clean deck requires BOTH clean).
+    assert pass_._gemini.critic_calls == 3
 
 
 async def test_content_critic_residual_fabrication_raises() -> None:
@@ -2970,7 +2975,14 @@ async def test_content_critic_residual_fabrication_raises() -> None:
     fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
     pass_ = _editorial(
         _StubLLM([regen]),
-        critic=[_critic_response([fab]), _critic_response([fab])],  # residual survives the re-judge
+        # first discovery + a two-pass union re-judge (both re-flag) + the escalation-
+        # entry extra pass — the fabrication survives every pass, so the hard stop fires.
+        critic=[
+            _critic_response([fab]),
+            _critic_response([fab]),
+            _critic_response([fab]),
+            _critic_response([fab]),
+        ],
         plan=plan,
     )
 
@@ -2979,6 +2991,7 @@ async def test_content_critic_residual_fabrication_raises() -> None:
             _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
         )
     assert any(f.check_id == "C-FB" for f in exc.value.findings)
+    assert pass_._gemini.critic_calls == 4  # first + union re-judge (2) + escalation-entry extra
 
 
 async def test_content_critic_warn_only_does_not_route() -> None:
@@ -3050,7 +3063,10 @@ async def test_content_critic_all_regens_rejected_short_circuits_to_hard_stop() 
     fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
     pass_ = _editorial(
         _StubLLM([regen]),
-        critic=[_critic_response([fab])],  # only the first pass runs; no re-judge
+        # First discovery pass, then the escalation-entry extra pass — the union-of-two
+        # for this unchanged state. No site-3 re-judge (no regen accepted) and no
+        # re-critique loop (the brain has no fixes), so the standing hard stop fires.
+        critic=[_critic_response([fab]), _critic_response([fab])],
         plan=plan,
     )
 
@@ -3059,7 +3075,7 @@ async def test_content_critic_all_regens_rejected_short_circuits_to_hard_stop() 
             _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
         )
     assert any(f.check_id == "C-FB" for f in exc.value.findings)
-    assert pass_._gemini.critic_calls == 1  # short-circuit: no re-judge call
+    assert pass_._gemini.critic_calls == 2  # first discovery + escalation-entry extra
 
 
 async def test_content_critic_skips_emergency_deck() -> None:
@@ -3134,9 +3150,15 @@ async def test_content_critic_uncorrected_hard_stop_stands_when_rejudge_clean() 
     slides, llm, (fab_a, fab_b) = _mixed_fab_deck(plan)
     pass_ = _editorial(
         llm,
-        # First pass flags both; re-judge runs and returns CLEAN (it does not
-        # re-flag the kept slide B).
-        critic=[_critic_response([fab_a, fab_b]), _critic_response([])],
+        # First pass flags both; the two-pass UNION re-judge is clean (it does not
+        # re-flag corrected A), and the escalation-entry extra pass is clean too — so
+        # only the UNCORRECTED slide B's standing hard stop survives.
+        critic=[
+            _critic_response([fab_a, fab_b]),
+            _critic_response([]),
+            _critic_response([]),
+            _critic_response([]),
+        ],
         plan=plan,
     )
 
@@ -3150,11 +3172,11 @@ async def test_content_critic_uncorrected_hard_stop_stands_when_rejudge_clean() 
             "proj",
             is_emergency=False,
         )
-    # Only the UNCORRECTED slide B stands; A was corrected and the clean re-judge
+    # Only the UNCORRECTED slide B stands; A was corrected and the clean union re-judge
     # legitimately cleared it.
     assert [f.slide_id for f in exc.value.findings] == [slides[1].slide_id]
     assert all(f.check_id == "C-FB" for f in exc.value.findings)
-    assert pass_._gemini.critic_calls == 2  # first pass + one (clean) re-judge
+    assert pass_._gemini.critic_calls == 4  # first + union re-judge (2) + escalation-entry extra
 
 
 async def test_content_critic_degraded_rejudge_keeps_all_first_pass_hard_stops() -> None:
@@ -3166,7 +3188,18 @@ async def test_content_critic_degraded_rejudge_keeps_all_first_pass_hard_stops()
     slides, llm, (fab_a, fab_b) = _mixed_fab_deck(plan)
     pass_ = _editorial(
         llm,
-        critic=[_critic_response([fab_a, fab_b]), "not valid json", "still not valid json"],
+        # First pass flags both. The two-pass UNION re-judge DEGRADES: its first pass
+        # is unparseable after a retry (2 calls), its second pass is clean (1 call), so
+        # the union is unverified — absence of a verdict must not clear a known
+        # fabrication, so EVERY first-pass hard stop stands. The escalation-entry extra
+        # pass is clean and adds nothing (the incoming set is already established).
+        critic=[
+            _critic_response([fab_a, fab_b]),
+            "not valid json",
+            "still not valid json",
+            _critic_response([]),
+            _critic_response([]),
+        ],
         plan=plan,
     )
 
@@ -3180,10 +3213,11 @@ async def test_content_critic_degraded_rejudge_keeps_all_first_pass_hard_stops()
             "proj",
             is_emergency=False,
         )
-    # Both stand: B (uncorrected) AND A (corrected but the re-judge could not confirm).
+    # Both stand: B (uncorrected) AND A (corrected but the union re-judge could not confirm).
     assert {f.slide_id for f in exc.value.findings} == {slides[0].slide_id, slides[1].slide_id}
     assert all(f.check_id == "C-FB" for f in exc.value.findings)
-    assert pass_._gemini.critic_calls == 3  # first pass + re-judge attempt + retry
+    # first + union re-judge (one degraded pass = attempt+retry, one clean pass) + entry extra.
+    assert pass_._gemini.critic_calls == 5
 
 
 async def test_content_critic_brain_escalation_grounds_and_delivers() -> None:
@@ -3228,10 +3262,14 @@ async def test_content_critic_brain_escalation_grounds_and_delivers() -> None:
     fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
     pass_ = _editorial(
         _StubLLM([regen_fail, regen_grounded]),
+        # first discovery flags; the escalation-entry extra re-flags the still-unchanged
+        # slide; then the two-pass union re-critique on the brain-grounded deck is clean.
         critic=[
             _critic_response([fab]),
+            _critic_response([fab]),
             _critic_response([]),
-        ],  # first pass flags; re-critique clean
+            _critic_response([]),
+        ],
         brain=[
             _fix_turn(
                 [
@@ -3253,8 +3291,8 @@ async def test_content_critic_brain_escalation_grounds_and_delivers() -> None:
     assert out[0].slide_id == slide.slide_id  # durable id preserved across the brain regen + splice
     assert "94.4" not in (out[0].content.body_text or "")  # the fabrication was grounded away
     assert pass_._gemini.brain_calls == 1  # the brain escalation engaged
-    # Site 1 skipped its own re-judge; the escalation added exactly one re-critique.
-    assert pass_._gemini.critic_calls == 2
+    # first discovery + escalation-entry extra + a two-pass union re-critique.
+    assert pass_._gemini.critic_calls == 4
 
 
 async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
@@ -3300,10 +3338,13 @@ async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
     pass_ = _editorial(
         _StubLLM([regen_fail, regen_still_fab, regen_still_fab]),
         critic=[
-            _critic_response([fab]),
-            _critic_response([fab]),
-            _critic_response([fab]),
-        ],  # first pass + two re-critiques inside escalation (cap 3)
+            _critic_response([fab]),  # first discovery pass
+            _critic_response([fab]),  # escalation-entry extra pass
+            _critic_response([fab]),  # escalation loop 1: union re-critique, pass 1
+            _critic_response([fab]),  # escalation loop 1: union re-critique, pass 2
+            _critic_response([fab]),  # escalation loop 2: union re-critique, pass 1
+            _critic_response([fab]),  # escalation loop 2: union re-critique, pass 2
+        ],
         brain=[
             _fix_turn(
                 [
@@ -3332,4 +3373,570 @@ async def test_content_critic_brain_escalation_fails_still_hard_stops() -> None:
 
     assert any(f.check_id == "C-FB" for f in exc.value.findings)  # the hard stop still fires
     assert pass_._gemini.brain_calls == 3  # three escalation attempts (cap raised to 3)
-    assert pass_._gemini.critic_calls == 3  # first pass + two re-critiques that re-flagged fixes
+    # first + escalation-entry extra + two union re-critiques inside the loop (2 passes each).
+    assert pass_._gemini.critic_calls == 6
+
+
+# ---------------------------------------------------------------------------
+# Union-of-two verification critique (helpers + the four wired sites)
+#
+# Every VERIFICATION critique is a union of two independent passes on the SAME
+# deck state, because the adversarial critic samples defects per pass. These pin
+# the pure union helpers and the four sites (main re-judge, escalation entry +
+# re-critique) so a single clean sample can never be mistaken for a clean deck.
+# ---------------------------------------------------------------------------
+
+
+def _audit_finding(
+    check_id: str,
+    *,
+    slide_id: str | None = None,
+    message: str | None = None,
+    severity: AuditSeverity = AuditSeverity.FAIL,
+) -> AuditCheckResult:
+    return AuditCheckResult(
+        check_id=check_id,
+        check_name=f"content_critic.{check_id}",
+        passed=False,
+        severity=severity,
+        slide_id=slide_id,
+        message=message,
+    )
+
+
+def test_critic_finding_union_key_folds_case_and_whitespace() -> None:
+    f1 = _audit_finding("C-FB", slide_id="s1", message="94.4  Not  Supported")
+    f2 = _audit_finding("C-FB", slide_id="s1", message="94.4 not supported")
+    # Case and collapsed whitespace fold to the same identity.
+    assert _critic_finding_union_key(f1) == _critic_finding_union_key(f2)
+    # A DIFFERENT message on the same (slide_id, check_id) is a distinct key — two
+    # fabricated numbers on one slide must both be able to survive the union.
+    f3 = _audit_finding("C-FB", slide_id="s1", message="1987 not supported")
+    assert _critic_finding_union_key(f1) != _critic_finding_union_key(f3)
+    # Severity is IN the key: code derives it from the evidence, so the SAME
+    # (check_id, slide_id, message) can arrive WARN in one pass and FAIL in another.
+    # Keying without severity would let the pass-1 WARN shadow the pass-2 FAIL.
+    warn = _audit_finding(
+        "C-FB", slide_id="s1", message="94.4 not supported", severity=AuditSeverity.WARN
+    )
+    fail = _audit_finding(
+        "C-FB", slide_id="s1", message="94.4 not supported", severity=AuditSeverity.FAIL
+    )
+    assert _critic_finding_union_key(warn) != _critic_finding_union_key(fail)
+    # A None message normalizes to "" and never raises; the key carries the severity.
+    f4 = _audit_finding("C-FB", slide_id="s1", message=None)
+    assert _critic_finding_union_key(f4) == ("C-FB", "s1", "", AuditSeverity.FAIL)
+
+
+def test_union_critic_findings_dedupes_and_preserves_order() -> None:
+    a = _audit_finding("C-FB", slide_id="s1", message="94.4 is not supported by the source.")
+    b = _audit_finding("C-US", slide_id="s2", message="Second finding.")
+    first = [a, b]
+    # dup_a differs from a ONLY by case + whitespace -> collapses (dropped).
+    dup_a = _audit_finding("C-FB", slide_id="s1", message="94.4   IS not supported by the SOURCE.")
+    # diff_msg shares (slide_id, check_id) with a but a DIFFERENT message -> survives.
+    diff_msg = _audit_finding("C-FB", slide_id="s1", message="1987 is not supported by the source.")
+    novel = _audit_finding("C-FB", slide_id="s3", message="Third finding.")
+
+    out = _union_critic_findings(first, [dup_a, diff_msg, novel])
+
+    # All of first in order, then second's not-already-seen in order.
+    assert out == [a, b, diff_msg, novel]
+    assert dup_a not in out  # the case/whitespace duplicate was folded away
+
+
+async def test_critique_unioned_unions_a_finding_only_the_second_pass_saw() -> None:
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    # Pass 1 clean, pass 2 flags the fabrication. A single clean sample would ship it.
+    gemini = _StubGemini(critic=[_critic_response([]), _critic_response([fab])])
+
+    outcome = await _critique_unioned(
+        [slide], plan, claims=claims, gemini=gemini, language=Language.UZ, project_id="proj"
+    )
+
+    assert gemini.critic_calls == 2  # two independent passes, one Gemini call each
+    assert outcome.llm_verified is True  # both passes produced a verdict
+    assert [f.check_id for f in outcome.result.failures] == ["C-FB"]
+    assert outcome.result.passed is False  # a defect only ONE pass saw still blocks
+
+
+@pytest.mark.parametrize("degrade_first", [True, False])
+async def test_critique_unioned_is_unverified_when_either_pass_degrades(
+    degrade_first: bool,
+) -> None:
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    # A degraded pass is unparseable across both the initial call and its retry.
+    degraded = ["not valid json", "still not valid json"]
+    clean = _critic_response([])
+    critic = [*degraded, clean] if degrade_first else [clean, *degraded]
+    gemini = _StubGemini(critic=critic)
+
+    outcome = await _critique_unioned(
+        [slide], plan, claims=claims, gemini=gemini, language=Language.UZ, project_id="proj"
+    )
+
+    # llm_verified requires BOTH passes to verify; one degrade -> the union is unverified,
+    # so the caller must not read empty failures as clean.
+    assert outcome.llm_verified is False
+    assert gemini.critic_calls == 3  # degraded pass consumed 2 (initial + retry), clean pass 1
+
+
+async def test_content_critic_rejudge_union_one_pass_flags_still_escalates() -> None:
+    """Site 3: the union re-judge blocks when EITHER pass re-flags the corrected slide.
+    A defect only one sampled pass caught still triggers escalation and, with no brain
+    fix available, the hard stop — a single clean re-judge sample is not 'clean'."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    # The regen splices (keeps type) but still asserts the fabrication.
+    regen = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": "Water savings reached 94.4 percent in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    pass_ = _editorial(
+        _StubLLM([regen]),
+        # discovery flags; the union re-judge is ONE clean pass + ONE flagging pass ->
+        # union NOT clean; the escalation-entry extra is clean (incoming already has fab).
+        critic=[
+            _critic_response([fab]),
+            _critic_response([]),
+            _critic_response([fab]),
+            _critic_response([]),
+        ],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
+    assert any(f.check_id == "C-FB" for f in exc.value.findings)
+    assert pass_._gemini.brain_calls == 1  # escalation was entered (not shipped)
+    assert pass_._gemini.critic_calls == 4  # first + union re-judge (2) + escalation-entry extra
+
+
+@pytest.mark.parametrize("degrade_first", [True, False])
+async def test_content_critic_rejudge_union_unverified_keeps_first_pass_hard_stop(
+    degrade_first: bool,
+) -> None:
+    """Site 3: if EITHER union re-judge pass degrades, the union is unverified and the
+    first-pass hard stop on the corrected slide stands — absence of a verdict never
+    clears a known fabrication, whichever pass could not be established."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    # The regen GROUNDS the slide (drops 94.4) and splices; only an unverified re-judge
+    # keeps the first-pass hard stop alive on the corrected slide.
+    regen = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    clean = _critic_response([])
+    degraded = ["not valid json", "still not valid json"]
+    union = [*degraded, clean] if degrade_first else [clean, *degraded]
+    pass_ = _editorial(
+        _StubLLM([regen]),
+        critic=[_critic_response([fab]), *union, clean],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
+    assert [f.slide_id for f in exc.value.findings] == [slide.slide_id]
+    assert exc.value.findings[0].check_id == "C-FB"
+    assert pass_._gemini.critic_calls == 5  # first + union (degrade 2 + clean 1) + entry extra
+
+
+async def test_escalation_site2_union_one_pass_flags_does_not_ground() -> None:
+    """Site 2: a brain fix is applied, then the union re-critique has ONE clean pass and
+    ONE that still flags — surviving is non-empty, so the loop does NOT terminate as
+    grounded. Grounding requires a clean UNION, not a single clean sample."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    regen_fail = _llm_slides_payload(  # site-3 Sonnet repair changes type -> rejected
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "content_split",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    regen_still_fab = _llm_slides_payload(  # brain regen keeps type but still fabricates
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": "Water savings reached 94.4 percent in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    pass_ = _editorial(
+        _StubLLM([regen_fail, regen_still_fab]),
+        critic=[
+            _critic_response([fab]),  # first discovery
+            _critic_response([fab]),  # escalation-entry extra
+            _critic_response([]),  # loop 1 union re-critique, pass 1: CLEAN
+            _critic_response([fab]),  # loop 1 union re-critique, pass 2: still flags
+        ],
+        brain=[
+            _fix_turn([{"slide_id": slide.slide_id, "instruction": "Ground the 94.4 figure."}]),
+        ],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
+    assert any(f.check_id == "C-FB" for f in exc.value.findings)
+    # One clean sample did not ground it; loop 2 has no brain fix -> break -> hard stop.
+    assert pass_._gemini.brain_calls == 2  # loop 1 (fix) + loop 2 (no fix -> break)
+    assert pass_._gemini.critic_calls == 4  # first + entry extra + one union re-critique (2)
+
+
+async def test_escalation_entry_extra_pass_adds_missed_finding_to_brief() -> None:
+    """Site 1: the escalation-entry extra pass catches a hard stop the discovery pass
+    SAMPLED past (on a different slide) and unions it into the set the brain must fix,
+    so the hard stop carries BOTH findings — the incoming one and the newly caught one."""
+    plan = _stub_plan()
+    slide_a = _critic_content_slide(
+        "Water",
+        "Water savings reached 94.4 percent in field trials.",
+        plan.sections[0].section_name,
+        plan.sections[0].thesis,
+    )
+    slide_b = SlideSpec(
+        slide_index=1,
+        slide_type=SlideType.CONCEPT_DEFINITION,
+        content=SlideContent(
+            title="Energy", body_text="Energy use dropped by 87.3 percent across all zones."
+        ),
+        section_name=plan.sections[1].section_name,
+        section_thesis=plan.sections[1].thesis,
+    )
+    claims = [_claim("The system reduced water and energy consumption during evaluation.")]
+    # A's site-3 repair changes type -> rejected -> no regen accepted -> escalation.
+    regen_a_fail = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "content_split",
+                "title": "Water",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab_a = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    fab_b = _fab_finding(2, "Energy use dropped by 87.3 percent across all zones.", "87.3 percent")
+    pass_ = _editorial(
+        _StubLLM([regen_a_fail]),
+        # discovery flags ONLY A (samples past B); the entry extra catches BOTH.
+        critic=[_critic_response([fab_a]), _critic_response([fab_a, fab_b])],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide_a, slide_b], claims, "proj", is_emergency=False
+        )
+    # Both A (incoming) and B (added by the entry extra) reach the hard stop / brain brief.
+    assert {f.slide_id for f in exc.value.findings} == {slide_a.slide_id, slide_b.slide_id}
+    assert all(f.check_id == "C-FB" for f in exc.value.findings)
+    assert pass_._gemini.critic_calls == 2  # discovery + one escalation-entry extra
+
+
+async def test_escalation_entry_extra_pass_unverified_keeps_incoming_unchanged() -> None:
+    """Site 1: an UNVERIFIED entry extra pass must not block escalation nor alter the
+    incoming set — those findings are already code-confirmed. It adds nothing and the
+    hard stop carries exactly the incoming finding."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    regen_fail = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "content_split",
+                "title": "Findings",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    pass_ = _editorial(
+        _StubLLM([regen_fail]),
+        # discovery flags fab; the entry extra is unparseable after retry (unverified).
+        critic=[_critic_response([fab]), "not valid json", "still not valid json"],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
+    assert [f.slide_id for f in exc.value.findings] == [slide.slide_id]
+    assert exc.value.findings[0].check_id == "C-FB"
+    assert pass_._gemini.critic_calls == 3  # discovery + entry extra (unparseable + retry)
+
+
+# ---------------------------------------------------------------------------
+# Hard-stop-path fixes (adversarial review): severity in the union key, and the
+# site-3 residual as an add-only union in BOTH the verified and unverified branch.
+# ---------------------------------------------------------------------------
+
+
+async def test_critique_unioned_warn_pass_does_not_shadow_fail_pass() -> None:
+    """BUG-1: severity is CODE-derived from the evidence, so two independent passes can
+    emit the SAME (check_id, slide_id, message) at different severities. The union key
+    carries severity, so a pass-1 WARN never shadows a pass-2 FAIL — the union's
+    ``.failures`` keeps the FAIL that routing / the hard stop must see."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent and energy fell 87.3 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    # 94.4 IS grounded in a claim (its finding degrades to WARN); 87.3 is NOT (stays FAIL).
+    claims = [_claim("Independent trials confirmed water savings of 94.4 percent.")]
+    quote = "Water savings reached 94.4 percent and energy fell 87.3 percent in field trials."
+    message = "The reported percentage is not grounded in the cited source."
+    warn_side = {
+        "slide_handle": 1,
+        "category": "fabrication",
+        "message": message,
+        "evidence": {
+            "slide_quote": quote,
+            "unsupported_token": "94.4 percent",
+            "second_quote": None,
+        },
+    }
+    fail_side = {
+        "slide_handle": 1,
+        "category": "fabrication",
+        "message": message,  # SAME message, so the union key differs ONLY by severity
+        "evidence": {
+            "slide_quote": quote,
+            "unsupported_token": "87.3 percent",
+            "second_quote": None,
+        },
+    }
+    gemini = _StubGemini(critic=[_critic_response([warn_side]), _critic_response([fail_side])])
+
+    outcome = await _critique_unioned(
+        [slide], plan, claims=claims, gemini=gemini, language=Language.UZ, project_id="proj"
+    )
+
+    assert gemini.critic_calls == 2
+    assert outcome.llm_verified is True
+    # The FAIL survives — the pass-1 WARN sharing (check_id, slide_id, message) did not
+    # shadow it, so the deck does NOT read as clean.
+    assert [f.severity for f in outcome.result.failures] == [AuditSeverity.FAIL]
+    assert outcome.result.passed is False
+    # Both copies are retained: proof the WARN was not collapsed onto the FAIL.
+    fb = [f for f in outcome.result.findings if f.check_id == "C-FB"]
+    assert {f.severity for f in fb} == {AuditSeverity.WARN, AuditSeverity.FAIL}
+
+
+async def test_content_critic_rejudge_union_two_same_slide_fabrications_both_survive() -> None:
+    """BUG-2 (site 3): the re-judge UNION returns two DIFFERENT-message C-FB findings on
+    ONE corrected slide (each pass sampled a different fabrication). The residual must be
+    an add-only union, not a (slide_id, check_id) dedupe — BOTH must reach the escalation
+    brief / hard-stop payload."""
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+    # The Sonnet repair splices (keeps type) but the new body carries TWO fabricated
+    # numbers, so the two adversarial re-judge passes each catch a different one.
+    two_fab_body = (
+        "Water savings reached 94.4 percent and energy fell 87.3 percent in field trials."
+    )
+    regen = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Findings",
+                "body_text": two_fab_body,
+                "narrative_role": "core",
+            }
+        ]
+    )
+    disc = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    rejudge_94 = _fab_finding(1, two_fab_body, "94.4 percent")
+    rejudge_87 = _fab_finding(1, two_fab_body, "87.3 percent")
+    pass_ = _editorial(
+        _StubLLM([regen]),
+        # discovery flags 94.4; the union re-judge pass 1 catches 94.4, pass 2 catches
+        # 87.3 (different messages, same slide); the escalation-entry extra is clean.
+        critic=[
+            _critic_response([disc]),
+            _critic_response([rejudge_94]),
+            _critic_response([rejudge_87]),
+            _critic_response([]),
+        ],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide], claims, "proj", is_emergency=False
+        )
+    same_slide = [f for f in exc.value.findings if f.slide_id == slide.slide_id]
+    assert len(same_slide) == 2  # add-only union kept BOTH; a dedupe would collapse to 1
+    assert {f.check_id for f in same_slide} == {"C-FB"}
+    messages = {" ".join((f.message or "").split()).lower() for f in same_slide}
+    assert len(messages) == 2
+    # Each message carries its own token verbatim (the unconditional suffix that
+    # makes the message a valid union discriminator).
+    assert any('[unsupported: "94.4 percent"]' in m for m in messages)
+    assert any('[unsupported: "87.3 percent"]' in m for m in messages)
+    assert pass_._gemini.critic_calls == 4  # discovery + union re-judge (2) + entry extra
+
+
+async def test_content_critic_rejudge_union_unverified_keeps_verified_half_discovery() -> None:
+    """BUG-3 (site 3): when the re-judge UNION is unverified (one pass degraded), the
+    else-branch must still carry the VERIFIED half's discoveries. A NEW hard stop B the
+    verified pass found on the corrected deck must not be discarded alongside the standing
+    first-pass hard stop A."""
+    plan = _stub_plan()
+    slide_a = _critic_content_slide(
+        "Water",
+        "Water savings reached 94.4 percent in field trials.",
+        plan.sections[0].section_name,
+        plan.sections[0].thesis,
+    )
+    slide_b = SlideSpec(
+        slide_index=1,
+        slide_type=SlideType.CONCEPT_DEFINITION,
+        content=SlideContent(
+            title="Energy", body_text="Energy use dropped by 87.3 percent across all zones."
+        ),
+        section_name=plan.sections[1].section_name,
+        section_thesis=plan.sections[1].thesis,
+    )
+    claims = [_claim("The system reduced water and energy consumption during evaluation.")]
+    # A is flagged by discovery and its regen GROUNDS it (drops 94.4) -> A is corrected.
+    regen_a = _llm_slides_payload(
+        [
+            {
+                "slide_index": 0,
+                "section_index": 0,
+                "slide_type": "concept_definition",
+                "title": "Water",
+                "body_text": "Water savings improved notably in field trials.",
+                "narrative_role": "core",
+            }
+        ]
+    )
+    fab_a = _fab_finding(1, "Water savings reached 94.4 percent in field trials.", "94.4 percent")
+    fab_b = _fab_finding(2, "Energy use dropped by 87.3 percent across all zones.", "87.3 percent")
+    pass_ = _editorial(
+        _StubLLM([regen_a]),
+        # discovery flags ONLY A. The union re-judge: pass 1 DEGRADES (unparseable + retry),
+        # pass 2 VERIFIES and catches a NEW hard stop B on the still-fabricating slide. The
+        # union is unverified -> A stands (absence never clears) AND B is carried in. The
+        # escalation-entry extra is clean (the incoming set is already established).
+        critic=[
+            _critic_response([fab_a]),
+            "not valid json",
+            "still not valid json",
+            _critic_response([fab_b]),
+            _critic_response([]),
+        ],
+        plan=plan,
+    )
+
+    with pytest.raises(EditorialContentCriticError) as exc:
+        await pass_._enforce_content_critic(
+            _interview(), _design(), plan, [slide_a, slide_b], claims, "proj", is_emergency=False
+        )
+    # BOTH: A (first-pass stop that the unverified re-judge could not clear) AND B (the
+    # verified half's new discovery). The old else-branch dropped B.
+    assert {f.slide_id for f in exc.value.findings} == {slide_a.slide_id, slide_b.slide_id}
+    assert all(f.check_id == "C-FB" for f in exc.value.findings)
+    assert (
+        pass_._gemini.critic_calls == 5
+    )  # discovery + union (degrade 2 + verified 1) + entry extra

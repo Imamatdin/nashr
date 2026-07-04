@@ -37,6 +37,7 @@ class body stays readable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -86,6 +87,7 @@ from packages.core.models.presentation import (
     MatchingPair,
     NarrativeArc,
     PersonItem,
+    PlanValidationResult,
     PresentationInterviewAnswers,
     QuizQuestion,
     SlideContent,
@@ -125,6 +127,7 @@ from packages.presentation.content_critic import (
     CONTENT_CRITIC_CLAIM_POOL_LIMIT,
     HARD_STOP_CHECK_IDS,
     ROUTABLE_CHECK_IDS,
+    ContentCritiqueResult,
     critique_deck_adversarially,
 )
 from packages.presentation.emphasis import EmphasisProvenance, apply_emphasis_fallback
@@ -780,7 +783,9 @@ class EditorialPass:
         interactive generation. Routable FAIL findings (fabrication, unsupported,
         chart/title) are grouped by durable ``slide_id`` and regenerated one slide
         each via :meth:`regenerate_slide_content` (which preserves the id), spliced
-        back, then re-judged ONCE.
+        back, then re-judged by a UNION of two independent critique passes on the
+        same corrected deck — the adversarial critic samples defects per pass, so one
+        clean pass is weak evidence of a clean deck.
 
         The hard stop is per-slide, keyed on what actually changed:
 
@@ -885,18 +890,29 @@ class EditorialPass:
                 return grounded
             return corrected
 
-        rejudged = await critique_deck_adversarially(
-            corrected, plan, claims=claims, gemini=gemini, language=interview.language
+        rejudged = await _critique_unioned(
+            corrected,
+            plan,
+            claims=claims,
+            gemini=gemini,
+            language=interview.language,
+            project_id=project_id,
         )
+        rejudge_hard = [f for f in rejudged.result.failures if f.check_id in HARD_STOP_CHECK_IDS]
         if rejudged.llm_verified:
-            rejudge_hard = [
-                f for f in rejudged.result.failures if f.check_id in HARD_STOP_CHECK_IDS
-            ]
-            residual = _dedupe_hard_stops(uncorrected_hard + rejudge_hard)
+            # The re-judge RAN: a corrected slide it did not re-flag is genuinely
+            # cleared. UNION (never dedupe) the still-uncorrectable first-pass stops
+            # with the re-judge's — two DIFFERENT fabrications the union preserved on
+            # one slide must both reach the brief, so the merge is add-only, not a
+            # (slide_id, check_id) collapse.
+            residual = _union_critic_findings(uncorrected_hard, rejudge_hard)
         else:
-            # The re-judge produced no verdict; absence of a verdict must not clear
-            # a known fabrication, so every first-pass hard-stop stands.
-            residual = first_hard
+            # No full verdict: absence must not CLEAR anything, so every first-pass
+            # hard-stop stands — AND the discoveries the VERIFIED half of the union DID
+            # make on the corrected deck must not be discarded. The merge is add-only in
+            # both branches. (Under a degraded-degraded union rejudge_hard carries only
+            # deterministic code-detected findings, so this merge is safe there too.)
+            residual = _union_critic_findings(first_hard, rejudge_hard)
 
         if residual:
             # The Sonnet regen + re-judge left a standing fabrication. Escalate to
@@ -1066,21 +1082,50 @@ class EditorialPass:
         repair has already failed. The brain (Gemini 3.1 Pro) authors grounding
         instructions for the flagged slides; those are applied by the SAME
         ``regenerate_slide_content`` the Sonnet repair uses, then the deck is
-        re-critiqued on the FULL slide list. Returns ``(slides, surviving)`` —
+        re-critiqued on the FULL slide list by a UNION of two independent passes (the
+        critic samples defects per pass); on entry, one extra pass unions with the
+        incoming findings so this deck state also gets a union of two.
+        Returns ``(slides, surviving)`` —
         ``surviving`` empty means grounded (deliver ``slides``); non-empty means
         the caller raises the UNCHANGED hard stop (refund).
 
         "No fabrication ships" is preserved exactly: delivery still requires a
         clean critic verdict on the full deck, and an unverifiable re-critique
         never clears a known finding. Worst case is today's refund, never worse.
+
+        Accepted edge (pre-existing): a preserve-prior finding carried in from a
+        DEGRADED verification describes the PRE-repair slide state, so a brain
+        instruction written against text the slide no longer carries may be
+        ineffective — tolerated because delivery still requires a clean UNION on the
+        CURRENT deck state, so the fail-safe is at worst today's refund.
         """
 
+        # The incoming ``findings`` are already ONE code-confirmed critique of this
+        # exact deck state, so a single extra independent pass here gives the
+        # union-of-two this state is entitled to (the critic samples defects per
+        # pass). A VERIFIED extra pass unions its hard-stops in; an UNVERIFIED one is
+        # ignored — absence of a verdict must never block escalation, and the
+        # incoming findings are already established. The union only ADDS, so this can
+        # never clear a known finding.
+        entry_extra = await critique_deck_adversarially(
+            current_slides, plan, claims=claims, gemini=gemini, language=interview.language
+        )
+        entry_union_added = 0
+        if entry_extra.llm_verified:
+            extra_hard = [
+                f for f in entry_extra.result.failures if f.check_id in HARD_STOP_CHECK_IDS
+            ]
+            unioned = _union_critic_findings(findings, extra_hard)
+            entry_union_added = len(unioned) - len(findings)
+            findings = unioned
         logger.info(
             "editorial_brain_escalation_entry %s",
             json.dumps(
                 {
                     "project_id": project_id,
                     "finding_count": len(findings),
+                    "entry_extra_verified": entry_extra.llm_verified,
+                    "entry_union_added": entry_union_added,
                     "findings": [
                         {
                             "check_id": f.check_id,
@@ -1131,8 +1176,13 @@ class EditorialPass:
             if not applied:
                 break
             slides = _post_process_repaired(deck.slides)
-            rejudged = await critique_deck_adversarially(
-                slides, plan, claims=claims, gemini=gemini, language=interview.language
+            rejudged = await _critique_unioned(
+                slides,
+                plan,
+                claims=claims,
+                gemini=gemini,
+                language=interview.language,
+                project_id=project_id,
             )
             recritiques += 1
             if rejudged.llm_verified:
@@ -2480,23 +2530,111 @@ def _group_critic_findings_by_slide_id(
     return dict(grouped)
 
 
-def _dedupe_hard_stops(findings: list[AuditCheckResult]) -> list[AuditCheckResult]:
-    """Drop duplicate hard-stop findings, keyed by ``(slide_id, check_id)``.
+def _critic_finding_union_key(
+    finding: AuditCheckResult,
+) -> tuple[str, str | None, str, AuditSeverity]:
+    """Identity of a critic finding for the union: (check_id, slide_id, normalized
+    message, severity).
 
-    The residual set unions the first-pass findings on UNCORRECTED slides with the
-    re-judge's findings on the corrected deck; an unchanged slide that the re-judge
-    also re-flags would otherwise appear twice.
+    The message is IN the key on purpose: two DIFFERENT fabricated numbers on one
+    slide share ``(slide_id, C-FB)`` and must both survive the union, so only a
+    finding identical modulo letter case and collapsed whitespace collapses. The
+    message is a valid discriminator ONLY because the critic guarantees the
+    grounding token appears verbatim in every source-grounded message
+    (``content_critic._message_carrying_token``) — two same-slide fabrications
+    with one generic model message still differ by their embedded tokens. Do not
+    remove that guarantee without re-keying this union.
+
+    Severity is IN the key because CODE derives it from the evidence (a fabrication
+    token absent from the claims FAILs; a present token or bare paraphrase WARNs),
+    so two independent passes can emit the SAME (check_id, slide_id, message) at
+    DIFFERENT severities. Without severity in the key a pass-1 WARN would shadow a
+    pass-2 FAIL — a hard-stop escape; with it both copies survive and ``.failures``
+    still isolates the FAIL for routing / the hard stop.
     """
 
-    seen: set[tuple[str | None, str]] = set()
-    out: list[AuditCheckResult] = []
-    for finding in findings:
-        key = (finding.slide_id, finding.check_id)
+    normalized = " ".join((finding.message or "").split()).lower()
+    return (finding.check_id, finding.slide_id, normalized, finding.severity)
+
+
+def _union_critic_findings(
+    first: list[AuditCheckResult], second: list[AuditCheckResult]
+) -> list[AuditCheckResult]:
+    """Order-preserving union of two critic passes over the SAME deck state.
+
+    All of ``first`` in order, then every finding in ``second`` whose union key was
+    not already present. NEVER call across different deck states: a fix changes
+    slide text, so a finding from an earlier state would instruct an edit against
+    text the later slide no longer carries.
+    """
+
+    seen: set[tuple[str, str | None, str, AuditSeverity]] = {
+        _critic_finding_union_key(f) for f in first
+    }
+    out: list[AuditCheckResult] = list(first)
+    for finding in second:
+        key = _critic_finding_union_key(finding)
         if key in seen:
             continue
         seen.add(key)
         out.append(finding)
     return out
+
+
+async def _critique_unioned(
+    slides: list[SlideSpec],
+    plan: DeckPlan,
+    *,
+    claims: list[SourceClaimCreate],
+    gemini: GeminiClient,
+    language: Language,
+    project_id: str,
+) -> ContentCritiqueResult:
+    """Critique one deck state TWICE independently and union the findings.
+
+    Every VERIFICATION critique runs two independent adversarial passes against the
+    SAME ``slides`` and unions their findings, because the critic SAMPLES defects
+    per pass: verified re-critiques of one live deck returned largely disjoint
+    finding sets, and a fabrication present from generation surfaced only on a later
+    pass. One clean pass is therefore weak evidence of a clean deck. ``llm_verified``
+    is ``True`` only when BOTH passes produced a verdict; if either degraded, the
+    union is unverified and the caller's preserve-prior discipline applies unchanged.
+
+    Calls the module-level ``critique_deck_adversarially`` name so a test seam that
+    stubs the critic — at the shared Gemini client (by system prompt) or by patching
+    the name — intercepts both internal passes. The two passes run concurrently;
+    ``asyncio.gather`` propagates the first exception, so a Gemini API error still
+    propagates exactly as a single critique's would today.
+    """
+
+    first, second = await asyncio.gather(
+        critique_deck_adversarially(slides, plan, claims=claims, gemini=gemini, language=language),
+        critique_deck_adversarially(slides, plan, claims=claims, gemini=gemini, language=language),
+    )
+    union_result = PlanValidationResult(
+        findings=_union_critic_findings(first.result.findings, second.result.findings)
+    )
+    pass1_failures = len(first.result.failures)
+    union_failures = len(union_result.failures)
+    logger.info(
+        "editorial_critique_union %s",
+        json.dumps(
+            {
+                "project_id": project_id,
+                "pass1_failures": pass1_failures,
+                "pass2_failures": len(second.result.failures),
+                "union_failures": union_failures,
+                "pass2_new": union_failures - pass1_failures,
+                "pass1_verified": first.llm_verified,
+                "pass2_verified": second.llm_verified,
+            },
+            ensure_ascii=False,
+            default=str,
+        ),
+    )
+    return ContentCritiqueResult(
+        result=union_result, llm_verified=first.llm_verified and second.llm_verified
+    )
 
 
 def _critic_instruction(findings: list[AuditCheckResult]) -> str:
