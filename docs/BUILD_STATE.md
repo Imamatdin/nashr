@@ -1523,6 +1523,74 @@ vs invented specifics; the `editorial_critique_union` log feeds this going forwa
 because a deploy restart wiped MemoryStorage FSM, orphaning every delivered deck's Edit button;
 `brain_sessions` survives by design, only the FSM re-entry path is missing.
 
+### 2026-07-04 — PHASE 1: audit + consolidation (branch `build1-content-critic`)
+
+Executed after the human's Phase 0 sign-off (Way 2 verified live end-to-end; the union hotfix
+converted a would-be refund into a delivery on a paid run — 4 hard findings at escalation
+entry, 5 after fix batch 1, 0/0 under double verification after batch 2, delivered).
+
+WHAT SHIPPED:
+- **Stage 3 failure contract** (`presentation_orchestrator.py`): `run_full_pipeline` raises
+  `_OrchestratorError("render")` when a render yields ZERO files (was: `download_ready`
+  announced over an empty download map) — rides the existing handler catch (honest
+  step-named message, status `failed`, refund; new handler test pins the refund fires).
+  `apply_fixes_and_render` raises `_OrchestratorError("persist_deck")` BEFORE render on a
+  `save_deck` failure (was: warn-and-render, which delivered files a stale DB deck didn't
+  reflect — the next `load_session` would silently resurrect the pre-fix deck). Partial
+  render success (≥1 file) still returns; `render()`'s per-format degrade unchanged. The
+  edit-path exception route verified: one `function_response` per parked call appended
+  BEFORE session persist, allowance not consumed. Both tests that pinned the old contract
+  rewritten (incl. the RUN_E2E_TESTS-gated one — updated by code-read, not executed locally).
+- **Polling healthcheck** (`middleware/liveness.py` NEW, `app.py`, `Dockerfile`,
+  `docker-compose.yml`, `scripts/healthcheck.py` NEW): a Bot SESSION middleware touches a
+  liveness file after every successful Telegram API call (`getUpdates` fires each long-poll
+  cycle, so mtime proves live Telegram connectivity, not just a running process); Docker
+  HEALTHCHECK swapped from the dead `curl :8080/health` (unhealthy-by-construction in
+  polling mode) to a file-age probe with `--start-period=60s`; dead `8080:8080` compose
+  mapping removed. Container must report HEALTHY after next deploy.
+- **Caching observability, NO wiring** (`gemini.py`, `scripts/probe_gemini_cache.py` NEW):
+  `_extract_usage` → `_TokenUsage` NamedTuple incl. `cached_input_tokens`
+  (`cached_content_token_count`, defensively read; a SUBSET of input tokens — cost still
+  bills full input, discount is 5b); both `gemini_call_complete` log sites carry it — every
+  brain/critic call now shows whether implicit caching is already firing. The probe script
+  (env-gated, gate-run on the droplet) creates an explicit cache with system_instruction +
+  tools on `gemini-3.1-pro-preview`, runs one generation against it, prints usage, deletes
+  the cache. Production `cached_content` wiring remains 5b scope.
+- **Brain prompt: preservation scope** (`brain_prompts.py`, Iko-supplied text verbatim):
+  BRAIN_TOOL_DESCRIPTIONS instruction-quality section now requires additive requests to pin
+  what stays ("add an image" ≠ license to rewrite the title) — closes the live Way 2
+  rewritten-title defect; the regen executor already proved 11/11 on exact-text instructions.
+- **Hygiene**: stale docstrings corrected (`brain_prompts.py` "placeholders" claim;
+  `sessions/store.py` closed wiring-gap NOTE); F541 in `proof_build1_critic.py`; logs
+  archived to gitignored `logs/`; `.gitignore` gains `*.log`/`logs/`/generalized zip; the
+  nine brain-prompt source docs extracted from `files (6).zip` into `docs/prompts/` and
+  committed (the brain's character sources now live in the repo, not a zip + chat session).
+  Fix counters (3/2/1): already documented as placeholders — closed, no change.
+
+EDITORIAL-GROUNDING FINDING (analysis only, EDITORIAL_SYSTEM untouched — decision is Iko's):
+message-level classification of every extractable critic finding (4 of the 7 sCO2 runs
+survive at finding level; container rebuilds discarded the rest): ~21% TRUE-domain-knowledge
+-not-in-source, ~50% invented specifics (43pp hard hallucinations: fabricated URLs, counts,
+"superfluid", 0.80-vs-0.56 MW; 7pp benign/derivable), **~29% CRITIC FALSE POSITIVES — text
+verbatim in the paper** (turbine, `47(6), 647-661` reference details, density/viscosity,
+Table-1 values) flagged because `_token_present_in_claims` grounds ONLY against the thin
+claim list, never chunks/tables/references (`content_critic.py:528-532`, code-verified).
+The headline "fabricated journal issue number" from the refunded run is in this class —
+verbatim at `sco2_source_fixture.py:207`. Consequence: at least two ungrounded/refund
+outcomes were partly driven by source-faithful text. Hardening EDITORIAL_SYSTEM addresses
+only ~1/5 of the leak; the two bigger levers are generation-side invented specifics and the
+critic's claim-coverage gap (a hard-stop semantic change — flagged for Iko, NOT built).
+Union observables (1 run): pass2_new/union ≈ 0.22 — the second pass earns ~1-in-5 net-new
+hard findings; `editorial_critique_union` + `cached_input_tokens` logging now accumulate
+per-run data.
+
+VERIFIED locally: full suite green (counts in commit); ruff clean repo-wide except the 3
+documented pre-existing payment_flow SIM105s; pyright 0/0/0 incl. both new scripts; LF.
+Consolidated Codex review recorded in the gate report. NOT verified locally: real Docker
+healthcheck transition + probe script live behavior (droplet gate), the RUN_E2E-gated test.
+DEPLOY HELD by design: a container rebuild wipes MemoryStorage FSM and would orphan the
+live probe session — deploy fires on Iko's probe-done signal, then stage4+stage5a gates.
+
 ### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
 
 Three correctness items for the **unbuilt** web/R2 consumer. None affect the bot delivery path the
