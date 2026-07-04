@@ -925,3 +925,48 @@ async def test_multi_call_fix_answers_every_call_part() -> None:
     responses = [p for p in (reloaded.history[-1].parts or []) if p.function_response is not None]
     assert len(responses) == 2  # one response part per call part
     assert all(p.function_response.name == "edit_slides" for p in responses)  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_redelivered_renders_reply_text_before_label() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from packages.bot.labels import get_bot_labels
+
+    msg = MagicMock(spec=Message)
+    msg.answer = AsyncMock(return_value=msg)
+    labels = get_bot_labels("en")
+    await pf._render_chat_result(
+        msg,
+        "en",
+        labels,
+        pf._ChatResult(
+            pf._ChatOutcome.REDELIVERED,
+            slides_changed=1,
+            reply_text="Heads up — your source says 44%, not 40%.",
+        ),
+    )
+    sent = msg.answer.await_args.args[0]
+    assert "Heads up — your source says 44%, not 40%." in sent
+    assert "Updated 1 slide(s)" in sent
+    assert sent.index("Heads up") < sent.index("Updated 1 slide(s)")
+
+
+@pytest.mark.asyncio
+async def test_redelivered_without_reply_text_stays_label_only() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from packages.bot.labels import get_bot_labels
+
+    msg = MagicMock(spec=Message)
+    msg.answer = AsyncMock(return_value=msg)
+    labels = get_bot_labels("en")
+    await pf._render_chat_result(
+        msg,
+        "en",
+        labels,
+        pf._ChatResult(pf._ChatOutcome.REDELIVERED, slides_changed=2),
+    )
+    sent = msg.answer.await_args.args[0]
+    assert sent == "✅ Updated 2 slide(s). Download:"
+

@@ -160,6 +160,7 @@ class GeminiBrainDriver:
                         "action": TurnAction.FIX.value,
                         "tool_call_count": result.tool_call_count,
                         "estimated_cost_usd": round(result.estimated_cost_usd, 6),
+                        "reply_text": (result.reply_text or "")[:300],
                         "fixes": [
                             {"slide_id": fx.slide_id, "instruction": fx.instruction}
                             for fx in result.fixes
@@ -173,6 +174,7 @@ class GeminiBrainDriver:
                 action=TurnAction.FIX,
                 history=result.history,
                 estimated_cost_usd=result.estimated_cost_usd,
+                reply_text=result.reply_text,
                 fixes=result.fixes,
                 fix_call_count=result.tool_call_count,
             )

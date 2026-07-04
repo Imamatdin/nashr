@@ -243,7 +243,9 @@ async def run_brain_loop(
             logger.warning("brain_loop_bad_tool_args", extra={"error": str(exc)})
             continue
         call_count = sum(1 for c in result.function_calls if c.name == EDIT_SLIDES_TOOL_NAME)
-        return BrainLoopResult("fix", fixes, None, working, total_cost, tool_call_count=call_count)
+        return BrainLoopResult(
+            "fix", fixes, result.text, working, total_cost, tool_call_count=call_count
+        )
     logger.warning("brain_loop_max_iterations_reached", extra={"max_iterations": max_iterations})
     return BrainLoopResult("reply", (), None, working, total_cost)
 

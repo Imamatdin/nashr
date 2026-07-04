@@ -941,6 +941,7 @@ async def _run_chat_turn(
         session=session,
         fixes=list(outcome.fixes),
         call_count=outcome.fix_call_count,
+        reply_text=outcome.reply_text,
     )
 
 
@@ -979,6 +980,7 @@ async def _dispatch_fix(
     session: BrainSession,
     fixes: list[SlideFix],
     call_count: int,
+    reply_text: str | None = None,
 ) -> _ChatResult:
     """Fire the orchestrator fix-chain, re-deliver, accumulate spend, persist.
 
@@ -1089,6 +1091,7 @@ async def _dispatch_fix(
         _ChatOutcome.REDELIVERED,
         slides_changed=len(fixes),
         warnings=list(result.render.warnings),
+        reply_text=reply_text,
     )
 
 
@@ -1136,7 +1139,8 @@ async def _render_chat_result(
     if result.outcome is _ChatOutcome.REPLY:
         await target.answer(result.reply_text or labels.error_generic)
     elif result.outcome is _ChatOutcome.REDELIVERED:
-        text = labels.edit_applied.format(count=result.slides_changed)
+        label = labels.edit_applied.format(count=result.slides_changed)
+        text = f"{result.reply_text}\n\n{label}" if result.reply_text else label
         await target.answer(text, reply_markup=presentation_chat_keyboard(lang))
     elif result.outcome is _ChatOutcome.RENDER_FAILED:
         await target.answer(labels.edit_render_failed)

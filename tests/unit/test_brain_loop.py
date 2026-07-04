@@ -28,13 +28,19 @@ _STOP = genai_types.FinishReason.STOP
 _ANY = genai_types.FunctionCallingConfigMode.ANY
 
 
-def _fix_turn(fixes: list[dict[str, object]], *, cost: float = 0.001) -> ToolTurnResult:
+def _fix_turn(
+    fixes: list[dict[str, object]], *, cost: float = 0.001, text: str | None = None
+) -> ToolTurnResult:
     call = genai_types.FunctionCall(name="edit_slides", args={"fixes": fixes})
-    content = genai_types.Content(role="model", parts=[genai_types.Part(function_call=call)])
+    parts: list[genai_types.Part] = []
+    if text:
+        parts.append(genai_types.Part(text=text))
+    parts.append(genai_types.Part(function_call=call))
+    content = genai_types.Content(role="model", parts=parts)
     return ToolTurnResult(
         model_content=content,
         function_calls=[call],
-        text=None,
+        text=text,
         finish_reason=_STOP,
         model="fake",
         input_tokens=1,
@@ -136,6 +142,32 @@ async def test_fix_call_exits_loop_with_parsed_fixes() -> None:
     assert result.history[-1].parts[0].function_call is not None
     assert result.estimated_cost_usd == pytest.approx(0.001)
     assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_fix_call_carries_parallel_text_when_model_emits_it() -> None:
+    client = _QueueClient(
+        [
+            _fix_turn(
+                [{"slide_id": "slide_02", "instruction": "use 44% not 40%"}],
+                text="Heads up — your source says 44%, so I used that.",
+            )
+        ]
+    )
+
+    result = await run_brain_loop(
+        client,  # type: ignore[arg-type]
+        history=_user_history(),
+        system="sys",
+        tool_mode=_ANY,
+        allowed_function_names=["edit_slides"],
+    )
+
+    assert result.kind == "fix"
+    assert result.reply_text == "Heads up — your source says 44%, so I used that."
+    # History still carries the verbatim model turn (text + function_call intact).
+    assert result.history[-1].parts is not None
+    assert len(result.history[-1].parts) == 2
 
 
 @pytest.mark.asyncio
