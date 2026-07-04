@@ -1456,6 +1456,73 @@ behavior, busy-drop UX, and the full Way 2 edit loop live. NOTE for the deploy c
 container will still report `(unhealthy)` — the polling-mode healthcheck is a Phase 1 item
 (nothing binds :8080; Dockerfile curl probe cannot pass by construction).
 
+### 2026-07-04 — HOTFIX: union-of-2 critique verification (pre-Phase-1, branch `build1-content-critic`)
+
+WHY (live evidence, project `bd5c0c6c`): the adversarial critic SAMPLES findings per pass —
+three verified re-critiques returned largely disjoint sets; a citation fabrication present
+from generation surfaced only on pass 3. The escalation brain went 11/11 on instructed fixes
+(prompt is DONE, stop tuning it) and the run still refunded correctly, because each clean-pass
+check sampled new findings. Consequence: "one clean pass" was weak evidence for BOTH the
+escalation termination AND the main flow's ship decision (the six-in-seven decks that never
+escalate). The fix targets discovery, not the brain.
+
+WHAT SHIPPED (editorial.py + test_editorial_pass.py only):
+- `_critique_unioned` — two independent `critique_deck_adversarially` passes run concurrently
+  against the SAME deck state, findings unioned (dedupe key `check_id + slide_id + normalized
+  message` — message in the key so two different fabrications on one slide both survive);
+  `llm_verified` True only when BOTH passes verified; logs `editorial_critique_union` with
+  pass1/pass2/union failure counts + `pass2_new` (the sampling-rate observable feeding the
+  Phase 1 editorial-grounding finding).
+- Wired at EXACTLY three sites: (1) escalation entry — one extra pass unions ADD-ONLY into the
+  incoming (state-consistent) findings, an unverified extra is ignored; (2) each escalation
+  re-critique; (3) the main flow's re-judge (the ship decision). First-pass discovery critique
+  stays single (repairs follow it anyway). Never unions across deck states.
+- UNCHANGED: `BRAIN_ESCALATION_MAX_ATTEMPTS=3`, the hard stop as final authority, all prompt
+  text, EDITORIAL_SYSTEM. Unverified-either-pass → the existing preserve-prior discipline.
+
+COST DELTA (arithmetic): clean first pass (common case) +0 calls / $0.00; generation with
+accepted repairs +1 critique call; fully escalated generation +4 critique calls (entry +1,
+3 re-critiques +1 each) ≈ +$0.12–0.32 at observed Gemini critique rates. Cap unchanged.
+
+VERIFIED locally: full suite green (counts in commit); ruff + format clean on both changed
+files (LF); pyright 0/0/0. 11 new tests pin the union contract (union dedupe; one-clean +
+one-flagging → NOT clean; either-unverified → prior findings stand at every site; escalation
+termination requires a clean UNION; entry extra pass reaches the brain brief; unverified entry
+extra leaves incoming unchanged). 8 existing scripted-critic tests updated from the old
+"one critique per verification" pin to the union call pattern — no behavioral assertion
+weakened. Codex adversarial review round 1 (mandated scope: no finding seen by either pass
+escapes the hard stop; unverified handling cannot clear known findings) found THREE real BUGs,
+all fixed + regression-tested: (1) severity was absent from the union key — a pass-1 WARN
+could shadow an identical-message pass-2 FAIL (hard-stop escape); severity now in the key;
+(2) site 3's residual still ran through the old `(slide_id, check_id)`-keyed
+`_dedupe_hard_stops`, collapsing two different same-slide fabrications the union had
+preserved; residual now merges via `_union_critic_findings` and `_dedupe_hard_stops` is
+DELETED; (3) site 3's unverified branch discarded discoveries made by the VERIFIED half of a
+partially-degraded union; it now unions `first_hard` WITH the rejudge's hard stops (add-only
+both branches). Round 2 confirmed 1+3 closed and sharpened 2: the TRUE discriminator
+(`evidence.unsupported_token`) was discarded before `AuditCheckResult`, so two same-slide
+fabrications sharing one GENERIC model message still collapsed — fixed by
+`_message_carrying_token` in content_critic.py (`_gate_source_grounded` now guarantees the
+token appears verbatim in every source-grounded message, trimmed to the 500-char cap; the
+union key docstring documents the dependency). Round 3 confirmed the class closed for generic
+messages and caught the last residual: containment-checked appending let a short token hide
+inside a longer one already in the message ("1987" inside "1987-1991") — fixed by making the
+suffix UNCONDITIONAL (every source-grounded message ends with `[unsupported: "<token>"]`;
+distinct tokens now always yield distinct union keys; round 3 had already verified the append
+branch itself collision-free, and no downstream consumer parses the message format). Known
+accepted edge (documented
+in `_attempt_brain_grounding`): preserve-prior findings from a degraded verification describe
+the pre-repair state; a brain instruction against changed text may be ineffective — tolerated
+because delivery still requires a clean union on the CURRENT state (worst case refund).
+
+PHASE 1 GAINS A FINDING (do NOT touch EDITORIAL_SYSTEM until decided): quantify from the seven
+sCO2 run transcripts what fraction of critic findings are true-domain-knowledge-not-in-source
+vs invented specifics; the `editorial_critique_union` log feeds this going forward.
+
+5b PRIORITY BUMP (from the live probes): session re-entry after restart — the P0-2 toast fired
+because a deploy restart wiped MemoryStorage FSM, orphaning every delivered deck's Edit button;
+`brain_sessions` survives by design, only the FSM re-entry path is missing.
+
 ### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
 
 Three correctness items for the **unbuilt** web/R2 consumer. None affect the bot delivery path the
