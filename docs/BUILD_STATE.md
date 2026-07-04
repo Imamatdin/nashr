@@ -1591,6 +1591,41 @@ healthcheck transition + probe script live behavior (droplet gate), the RUN_E2E-
 DEPLOY HELD by design: a container rebuild wipes MemoryStorage FSM and would orphan the
 live probe session — deploy fires on Iko's probe-done signal, then stage4+stage5a gates.
 
+### 2026-07-04 — Phase 1 deploy + gate triage (branch `build1-content-critic`)
+
+**Deploy:** pushed `7111769`→`f2184d0`→`7dc8cd3`; droplet @ `7dc8cd3`; bot **`Up (healthy)`**
+(first time — polling healthcheck). Cache probe (`scripts/probe_gemini_cache.py`): **PASS** —
+explicit `cached_content` + tools on `gemini-3.1-pro-preview`; **10,660 cached tokens** on the
+brain system+tools block → D5 wiring approved.
+
+**First gate run (pre-triage):** Stage 4 **FAIL** 1 check; Stage 5a **FAIL** 1 check. Both were
+**gate-script bugs**, not product regressions:
+
+1. **Stage 4 `history persisted (user+model)`** — **GATE WRONG.** Gate asserted
+   `len(history)==2` (`gate_build2_stage4.py:165`, pre-5a contract). Product correctly appends a
+   third turn via `_append_fix_result` after `_dispatch_fix` (`presentation_flow.py:1078-1087`,
+   `gemini_tools.py:113-133` role=`user` function_response). Stage 5a gate already asserted this
+   seam (`gate_build2_stage5a.py:203-208`). **Fix:** gate only (`db48bcb`) — now asserts
+   user+model+fix_response (len=3, `delivered=True`).
+
+2. **Stage 5a `recritiques=0`** — **GATE WRONG.** `_EscalationWatcher` matched
+   `getMessage()=="editorial_brain_escalation_complete"` and read `getattr(record,"recritiques")`
+   (`gate_build2_stage5a.py:113-117`), but product logs via
+   `logger.info("editorial_brain_escalation_complete %s", json.dumps({...}))`
+   (`editorial.py:1217-1236`) — same Python-formatter trap fixed in `9133074`. Container logs
+   showed `recritiques: 3`, ~$0.51 escalation spend; watcher captured zero. **Fix:** gate only
+   (`db48bcb`) — parse JSON suffix; strengthen with union-of-2 observables
+   (`editorial_critique_union`, `editorial_brain_escalation_recritique`).
+
+**Re-gate after `db48bcb` (2026-07-04, droplet):**
+- `gate_build2_stage4.py`: **PASS** (all checks incl. history user+model+fix_response); session
+  editing spend **$0.0560**; fixes used 3.
+- `gate_build2_stage5a.py`: **PASS** (Way 2 + Way 1); recritiques=3; union logs=3;
+  pass1_verified+pass2_verified on all unions; escalation ~$0.515; Way 2 edit cost ~$0.0601.
+
+**Phase 1 status:** deployed, container healthy, droplet gates green. Probe transcripts for
+`docs/probes/2026-07-04.md` pending Iko paste (floor/bait/exhaustion sequence).
+
 ### DEFERRED TO WEB SURFACE (locked — not skipped; bot path unaffected)
 
 Three correctness items for the **unbuilt** web/R2 consumer. None affect the bot delivery path the
