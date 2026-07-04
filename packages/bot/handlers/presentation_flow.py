@@ -75,12 +75,13 @@ from packages.bot.sessions import (
     requires_approval,
 )
 from packages.bot.sessions.budget import has_fixes_remaining, session_fix_limit
+from packages.bot.sessions.roster_format import render_roster_payload
 from packages.bot.states import PresentationStates
 from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
 from packages.core.enums import ExportFormat, GenerationPackage
 from packages.core.gemini import GeminiClient
 from packages.core.gemini_tools import FunctionResult, build_function_responses_content
-from packages.core.models.presentation import DeckSpec, SlideFix
+from packages.core.models.presentation import SlideFix
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
@@ -945,17 +946,6 @@ async def _run_chat_turn(
     )
 
 
-def _deck_roster(deck: DeckSpec | None) -> list[dict[str, object]]:
-    """A compact roster the brain reads to see the deck AFTER a delivered fix."""
-
-    if deck is None:
-        return []
-    return [
-        {"slide_id": s.slide_id, "slide_type": s.slide_type.value, "title": s.content.title}
-        for s in deck.slides
-    ]
-
-
 def _append_fix_result(session: BrainSession, response: dict[str, object], *, count: int) -> None:
     """Answer the brain's ``edit_slides`` call(s) with the fix's real outcome.
 
@@ -1082,7 +1072,7 @@ async def _dispatch_fix(
         {
             "delivered": True,
             "slides_changed": len(fixes),
-            "roster": _deck_roster(session.deck),
+            "roster": render_roster_payload(session.deck),
         },
         count=call_count,
     )

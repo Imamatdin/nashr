@@ -4,7 +4,9 @@
 design notes for the next build slice, not implemented.
 
 Probe evidence backing these drafts: `docs/probes/2026-07-04.md` (slide 11
-44% → `speaker_notes`; slide 5 caption → `content.caption` still `null`).
+44% → `speaker_notes` verdict **(a)**; caption turn — correct targeting, subtitle
+adaptation on captionless type; placement paragraph still relevant for field-choice
+announcement, not numeric resolution).
 
 ---
 

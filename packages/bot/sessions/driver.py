@@ -22,10 +22,11 @@ from typing import Final, Protocol
 from google.genai import types as genai_types
 
 from packages.bot.sessions.models import BrainSession, TurnAction, TurnOutcome
+from packages.bot.sessions.roster_format import render_roster_text
 from packages.core.brain_loop import run_brain_loop
 from packages.core.brain_prompts import assemble_brain_system
 from packages.core.gemini import GeminiClient
-from packages.core.models.presentation import DeckSpec, SlideFix
+from packages.core.models.presentation import SlideFix
 from packages.core.models.source import SourceClaimCreate
 
 logger = logging.getLogger(__name__)
@@ -222,19 +223,9 @@ def _context_block(session: BrainSession) -> str:
 
     return (
         "DECK ROSTER (address slides by slide_id):\n"
-        f"{_render_roster(session.deck)}\n\n"
+        f"{render_roster_text(session.deck)}\n\n"
         "SOURCE CLAIMS (ground every edit only in these):\n"
         f"{_render_claims(session.sources.claims)}"
-    )
-
-
-def _render_roster(deck: DeckSpec | None) -> str:
-    if deck is None or not deck.slides:
-        return "(no slides)"
-    return "\n".join(
-        f"[{slide.slide_index}] slide_id={slide.slide_id} type={slide.slide_type.value} "
-        f"— {slide.content.title}"
-        for slide in deck.slides
     )
 
 
