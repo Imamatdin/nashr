@@ -7,12 +7,11 @@ sources via the split serializer) and assembles the session from its row plus th
 deck. Persistence keys on ``project_id`` alone, so recovery after a restart is a
 single lookup — no restart can orphan a session.
 
-NOTE — the live wiring gap: ``run_full_pipeline`` discards the
-``SourceProcessingResult`` it builds, and Stage 4 must not refactor it, so
-:func:`create_session` takes the live sources from its caller. Wiring session
-creation into the real end-of-generation delivery handler (which needs the
-pipeline to surface its sources) is the one deferred integration; Stage 4's
-machinery is driven directly by the gate and tests.
+The wiring gap this module was built against is CLOSED (Stage 5a):
+``run_full_pipeline`` returns its sources via ``PresentationPipelineResult`` and
+the delivery handler seeds the session through ``_open_brain_session``
+(``presentation_flow.start_generation``); :func:`create_session` still takes the
+live sources from its caller by design.
 """
 
 from __future__ import annotations

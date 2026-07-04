@@ -13,12 +13,12 @@ Two system blocks are assembled from these constants:
   user turn.
 
 Slot ownership. ``BRAIN_STANDARD`` / ``BRAIN_IDENTITY`` / ``BRAIN_ORCHESTRATOR``
-are the brain's CHARACTER and STANDARD — Iko's external design artifacts; the
-placeholders below are deliberately NOT real prompt text and must be replaced.
+are the brain's CHARACTER and STANDARD — Iko's external design artifacts, FILLED
+with real text since ``50374cf`` (source documents live in ``docs/prompts/``).
 ``BRAIN_TOOL_DESCRIPTIONS`` and ``BRAIN_FIX_ONLY_SYSTEM`` carry functional
-operational defaults (mechanical grounding directives, not character) so Way 1
-grounds and Way 2 routes correctly before Iko's polish; refine, don't rewrite.
-``BRAIN_RETRIEVAL`` / ``BRAIN_MEMORY`` are 5b slots — defined but unused in 5a.
+operational defaults (mechanical grounding directives, not character); refine,
+don't rewrite. ``BRAIN_RETRIEVAL`` / ``BRAIN_MEMORY`` are 5b slots — still
+placeholders, unused in 5a; Iko's drafts for them also live in ``docs/prompts/``.
 
 Follows the module-level ``str`` constant convention of :mod:`packages.core.prompts`.
 """
@@ -746,7 +746,16 @@ The instruction is where your judgment goes. A bare "regenerate this slide" repr
 the original mistake. The instruction carries the specific correction: what is wrong,
 what the grounded value or content is, and what to do if it cannot be grounded (drop
 the claim, state the point qualitatively). The quality of the fix is the quality of
-the instruction."""
+the instruction.
+
+When the user asks for a targeted change, the instruction must scope what stays.
+An additive request ("add an image", "add a stat") means everything else is
+preserved: state it explicitly, either "preserve all existing text verbatim" or
+by quoting the exact title and body that must remain unchanged. The regenerator
+rebuilds the slide from your instruction; anything you do not pin, it may
+rewrite. A user who asked for an image and got a new title did not get what
+they asked for, even if the new title is better. Rewrite beyond the request
+only when the user asked for a rewrite."""
 
 # --- Operational defaults (mechanical, not character): refine, don't rewrite. ---
 

@@ -121,8 +121,9 @@ class FixAndRenderResult(BaseModel):
     """Result of applying a batch of slide fixes and re-rendering once.
 
     ``deck`` is the edited in-memory deck (every fix spliced in, persisted before
-    render); ``render`` carries the freshly rendered file paths the handler
-    re-delivers (and any best-effort persist/upload warnings); ``fixes`` keeps the
+    render — a persist failure aborts before render, so a returned result always
+    reflects a saved deck); ``render`` carries the freshly rendered file paths the
+    handler re-delivers (and any best-effort upload warnings); ``fixes`` keeps the
     per-fix :class:`SlideRegenResult` findings — the brain reads ``.passed`` to
     decide whether to accept the batch or retry a slide, so they are not discarded.
 
@@ -632,10 +633,13 @@ class PresentationOrchestrator:
         Persist runs BEFORE render (mirroring :meth:`run_full_pipeline`) so
         durability does not hinge on the renderer subprocess, but here the chain
         owns its own ``try/except`` instead of the silent :meth:`_persist_deck`:
-        an edit's persisted deck already exists, so a swallowed failure would
-        leave the DB stale against freshly delivered files. The failure is
-        surfaced into ``render.warnings`` rather than hidden, and render still
-        proceeds so the user's fix is not lost to a transient DB hiccup.
+        an edit's persisted deck already exists, so a ``save_deck`` failure raises
+        :class:`_OrchestratorError` (step ``persist_deck``) and ABORTS before render
+        rather than being swallowed. Rendering past a failed persist would deliver
+        files a stale DB deck cannot reflect — the next ``load_session`` resurrects
+        the pre-fix deck and silently loses the delivered fix; failing here keeps the
+        DB and the delivered files consistent (the edit-path caller degrades this
+        raise gracefully, exactly as it already guards a fix-chain error).
 
         Batch semantics are ATOMIC: a fix that raises (unknown id, empty LLM
         output, or a content-critic hard stop) propagates before persist/render,
@@ -673,19 +677,16 @@ class PresentationOrchestrator:
             )
             outcomes.append(outcome)
 
-        persist_warning: str | None = None
         try:
             await self._db.save_deck(project_id, working)
         except Exception as exc:
-            persist_warning = f"deck persist failed ({type(exc).__name__})"
             logger.warning(
                 "presentation_edit_persist_failed",
                 extra={"project_id": project_id, "error_type": type(exc).__name__},
             )
+            raise _OrchestratorError("persist_deck", exc) from exc
 
         render_result = await self.render(working, formats, progress, project_id=project_id)
-        if persist_warning is not None:
-            render_result.warnings.append(persist_warning)
         return FixAndRenderResult(
             deck=working,
             render=render_result,
@@ -910,6 +911,16 @@ class PresentationOrchestrator:
         )
         await self._persist_deck(deck_spec, project_id)
         render = await self.render(deck_spec, formats, progress, project_id=project_id)
+        # render() degrades each format to a warning, so a total failure returns
+        # normally with zero files — the delivery handler would then announce success
+        # with nothing to download. Fail the job so the handler refunds; partial
+        # success (>=1 file) still returns, preserving render()'s degrade semantics.
+        if not render.by_extension():
+            detail = "; ".join(render.warnings) or "no renderer output"
+            raise _OrchestratorError(
+                "render",
+                RuntimeError(f"render produced no deliverable files — {detail}"),
+            )
         return PresentationPipelineResult(render=render, sources=sources)
 
 

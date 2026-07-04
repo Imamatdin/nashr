@@ -772,6 +772,51 @@ async def test_full_pipeline_propagates_editorial_failure() -> None:
     assert info.value.step == "editorial"
 
 
+async def test_full_pipeline_raises_when_render_produces_no_files() -> None:
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
+    bot = _StubBot(payloads={"f1": b"pdf"})
+    # No format succeeds → every render call degrades to a warning → zero files.
+    worker = _StubWorkerRunner(formats_to_succeed=())
+    orch, _, _, _ = _build_orch(bot, worker=worker)
+
+    with pytest.raises(_OrchestratorError) as info:
+        await orch.run_full_pipeline(
+            file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
+            project_id=PROJECT_ID,
+            user_id=USER_ID,
+            language="uz",
+            raw_answers=None,
+            requested_formats=[ExportFormat.HTML],
+            progress=_noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
+        )
+    assert info.value.step == "render"
+    assert "deliverable" in str(info.value.original)
+
+
+async def test_full_pipeline_partial_render_does_not_raise() -> None:
+    bot = _StubBot(payloads={"f1": b"pdf"})
+    # HTML lands, PPTX fails → one deliverable file → the job still succeeds.
+    worker = _StubWorkerRunner(formats_to_succeed=("html",))
+    orch, _, _, _ = _build_orch(bot, worker=worker)
+
+    result = await orch.run_full_pipeline(
+        file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
+        project_id=PROJECT_ID,
+        user_id=USER_ID,
+        language="uz",
+        raw_answers=None,
+        requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+        progress=_noop_progress,
+        package=GenerationPackage.PRESENTATION_STANDARD,
+    )
+
+    assert result.render.html_path is not None
+    assert result.render.pptx_path is None  # the failed format is absent, not fatal
+    assert any("pptx" in w for w in result.render.warnings)
+
+
 async def test_full_pipeline_persists_the_generated_deck() -> None:
     bot = _StubBot(payloads={"f1": b"pdf"})
     worker = _StubWorkerRunner(formats_to_succeed=("html",))
@@ -1390,8 +1435,10 @@ async def test_apply_fixes_empty_batch_raises() -> None:
     assert worker.render_calls == []
 
 
-async def test_apply_fixes_persist_failure_surfaces_warning_and_still_renders() -> None:
+async def test_apply_fixes_persist_failure_raises_and_skips_render() -> None:
     from unittest.mock import AsyncMock, MagicMock
+
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
 
     deck = _regen_deck()
     editorial = _StubBatchRegenEditorial()
@@ -1405,25 +1452,32 @@ async def test_apply_fixes_persist_failure_surfaces_warning_and_still_renders() 
         storage=storage_stub,
         image_pass=_SpyImagePass(),
     )
-    db.save_deck = AsyncMock(side_effect=RuntimeError("db down"))
+    save_deck = AsyncMock(side_effect=RuntimeError("db down"))
+    db.save_deck = save_deck
     sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
     fixes = [SlideFix(slide_id="gallery", instruction="x")]
 
-    result = await orch.apply_fixes_and_render(
-        deck,
-        fixes,
-        sources,
-        PROJECT_ID,
-        [ExportFormat.HTML],
-        _noop_progress,
-        package=GenerationPackage.PRESENTATION_STANDARD,
-    )
+    with pytest.raises(_OrchestratorError) as info:
+        await orch.apply_fixes_and_render(
+            deck,
+            fixes,
+            sources,
+            PROJECT_ID,
+            [ExportFormat.HTML],
+            _noop_progress,
+            package=GenerationPackage.PRESENTATION_STANDARD,
+        )
 
-    # render still produced files despite the persist failure (fix not lost)
-    assert result.render.html_path is not None
-    # the failure is surfaced into warnings, not silently swallowed
-    assert any("persist failed" in w for w in result.render.warnings)
-    assert any("RuntimeError" in w for w in result.render.warnings)
+    # A persist failure aborts the batch: delivering files a stale DB deck cannot
+    # reflect would let the next load_session resurrect the pre-fix deck.
+    assert info.value.step == "persist_deck"
+    assert isinstance(info.value.original, RuntimeError)
+    assert "db down" in str(info.value.original)
+    assert save_deck.call_count == 1  # the single batch persist was attempted once
+    # render was NOT invoked after the persist failure: ensure_built (top of render)
+    # never ran and no format was handed to the worker.
+    assert worker.ensure_calls == 0
+    assert worker.render_calls == []
 
 
 async def test_apply_fixes_batch_failure_aborts_before_persist_and_render() -> None:

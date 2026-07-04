@@ -17,7 +17,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # System dependencies:
-#   - curl       : healthcheck + Node install
+#   - curl       : Node install (NodeSource setup script)
 #   - poppler    : PyMuPDF helpers / PDF rasterisation
 #   - tesseract  : OCR fallback for scanned PDFs (uz + ru language packs)
 #   - libreoffice-writer : DOCX -> PDF in the article pipeline
@@ -66,7 +66,11 @@ RUN cd packages/presentation-worker && npm run build
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -fsS http://localhost:8080/health || exit 1
+# The probe assumes POLLING mode (the compose file overrides CMD to drop
+# --webhook): getUpdates refreshes the liveness file every long-poll cycle. A
+# bare-image webhook deployment can sit idle with no outbound API calls and
+# would read as stale — give such a deployment an HTTP probe instead.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["python", "scripts/healthcheck.py"]
 
 CMD ["python", "-m", "packages.bot.run", "--webhook"]

@@ -16,6 +16,7 @@ the contract that the rest of the system relies on:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -37,6 +38,7 @@ from packages.core.gemini import (
     GEMINI_PRO_OUTPUT_COST_PER_MTOK,
     GeminiClient,
     GeminiToolCallError,
+    _extract_usage,
     gemini_cost_for,
 )
 from packages.core.llm import LLMResponse
@@ -48,10 +50,49 @@ class _FakeUsage:
         self.candidates_token_count = candidates
 
 
+class _FakeUsageCached:
+    """Usage metadata that carries ``cached_content_token_count`` (int or None).
+
+    ``_FakeUsage`` omits the attribute entirely (the absent path); this stub sets
+    it explicitly so tests exercise the present-int and present-None branches of
+    :func:`_extract_usage`.
+    """
+
+    def __init__(self, prompt: int, candidates: int, cached: int | None) -> None:
+        self.prompt_token_count = prompt
+        self.candidates_token_count = candidates
+        self.cached_content_token_count = cached
+
+
+class _UsageResponse:
+    """Minimal response satisfying ``_GenerateContentResponseLike`` for usage tests.
+
+    ``_extract_usage`` reads only ``usage_metadata``; the other protocol members
+    are ``None`` so the stub still structurally matches the protocol (whose
+    docstring permits plain attributes) and pyright accepts it as the argument.
+    """
+
+    def __init__(self, usage: object | None) -> None:
+        self.text: str | None = None
+        self.usage_metadata: object | None = usage
+        self.candidates: list[genai_types.Candidate] | None = None
+        self.function_calls: list[genai_types.FunctionCall] | None = None
+
+
 class _FakeResponse:
-    def __init__(self, text: str, prompt_tokens: int, candidate_tokens: int) -> None:
+    def __init__(
+        self,
+        text: str,
+        prompt_tokens: int,
+        candidate_tokens: int,
+        cached_tokens: int | None = None,
+    ) -> None:
         self.text: str | None = text
-        self.usage_metadata: object | None = _FakeUsage(prompt_tokens, candidate_tokens)
+        self.usage_metadata: object | None = (
+            _FakeUsage(prompt_tokens, candidate_tokens)
+            if cached_tokens is None
+            else _FakeUsageCached(prompt_tokens, candidate_tokens, cached_tokens)
+        )
 
 
 def _make_fn(
@@ -119,6 +160,43 @@ def test_gemini_response_cost_calculation_pro() -> None:
 def test_gemini_response_cost_unknown_model_falls_back_to_flash() -> None:
     cost = gemini_cost_for("gemini-unknown", input_tokens=1_000_000, output_tokens=0)
     assert cost == pytest.approx(GEMINI_COSTS[GEMINI_FLASH_3_5_MODEL][0])
+
+
+# --- _extract_usage: token accounting incl. cached_content_token_count --------
+
+
+def test_extract_usage_reads_cached_content_token_count() -> None:
+    usage = _FakeUsageCached(prompt=120, candidates=40, cached=90)
+    result = _extract_usage(_UsageResponse(usage))
+    assert result.input_tokens == 120
+    assert result.output_tokens == 40
+    assert result.cached_input_tokens == 90
+
+
+def test_extract_usage_cached_absent_defaults_to_zero() -> None:
+    # A usage object that never sets cached_content_token_count (getattr default 0).
+    result = _extract_usage(_UsageResponse(_FakeUsage(prompt=50, candidates=10)))
+    assert result == (50, 10, 0)
+
+
+def test_extract_usage_cached_none_defaults_to_zero() -> None:
+    # Attribute present but None (SDK Optional field unset) → 0, not a crash.
+    usage = _FakeUsageCached(prompt=50, candidates=10, cached=None)
+    result = _extract_usage(_UsageResponse(usage))
+    assert result.cached_input_tokens == 0
+    assert result.input_tokens == 50
+    assert result.output_tokens == 10
+
+
+def test_extract_usage_clamps_negative_cached_to_zero() -> None:
+    usage = _FakeUsageCached(prompt=10, candidates=5, cached=-3)
+    result = _extract_usage(_UsageResponse(usage))
+    assert result.cached_input_tokens == 0
+
+
+def test_extract_usage_no_usage_metadata_is_all_zero() -> None:
+    result = _extract_usage(_UsageResponse(None))
+    assert result == (0, 0, 0)
 
 
 def test_gemini_client_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,6 +409,23 @@ async def test_gemini_client_handles_missing_usage_metadata() -> None:
     assert response.estimated_cost_usd == pytest.approx(0.0)
 
 
+@pytest.mark.asyncio
+async def test_complete_logs_cached_input_tokens(caplog: pytest.LogCaptureFixture) -> None:
+    async def behaviour() -> _FakeResponse:
+        return _FakeResponse("hi", prompt_tokens=300, candidate_tokens=20, cached_tokens=210)
+
+    fn, _ = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with caplog.at_level(logging.INFO, logger="packages.core.gemini"):
+        await client.complete(system="sys", user="usr")
+
+    records = [r for r in caplog.records if r.getMessage() == "gemini_call_complete"]
+    assert len(records) == 1
+    assert records[0].__dict__["cached_input_tokens"] == 210
+    assert records[0].__dict__["input_tokens"] == 300
+
+
 # --- generate_with_tools (manual tool-calling primitive) ----------------------
 #
 # Fakes mirror the SDK response shape the tool path reads: candidates[0].content
@@ -382,11 +477,16 @@ class _FakeToolResponse:
         function_calls: list[_FakeFunctionCall] | None = None,
         prompt_tokens: int = 0,
         candidate_tokens: int = 0,
+        cached_tokens: int | None = None,
         text: str | None = None,
     ) -> None:
         self.candidates = candidates
         self.function_calls = function_calls
-        self.usage_metadata: object | None = _FakeUsage(prompt_tokens, candidate_tokens)
+        self.usage_metadata: object | None = (
+            _FakeUsage(prompt_tokens, candidate_tokens)
+            if cached_tokens is None
+            else _FakeUsageCached(prompt_tokens, candidate_tokens, cached_tokens)
+        )
         self.text = text
 
 
@@ -657,3 +757,32 @@ async def test_generate_with_tools_does_not_retry_auth_error() -> None:
 
     assert excinfo.value.code == 403
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_logs_cached_input_tokens(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    call = _FakeFunctionCall("get_value", {"key": "answer"})
+    content = _FakeToolContent([_FakeToolPart(function_call=call, thought_signature=b"\x01")])
+    response = _FakeToolResponse(
+        candidates=[_FakeCandidate(content, finish_reason=_STOP)],
+        function_calls=[call],
+        prompt_tokens=500,
+        candidate_tokens=30,
+        cached_tokens=420,
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, _ = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with caplog.at_level(logging.INFO, logger="packages.core.gemini"):
+        await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
+
+    records = [r for r in caplog.records if r.getMessage() == "gemini_call_complete"]
+    assert len(records) == 1
+    assert records[0].__dict__["cached_input_tokens"] == 420
+    assert records[0].__dict__["input_tokens"] == 500

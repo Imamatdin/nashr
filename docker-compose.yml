@@ -15,8 +15,9 @@ services:
     container_name: nashr-bot
     command: ["python", "-m", "packages.bot.run"]
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # No published ports: the bot runs in polling mode (the command above
+    # drops --webhook), so nothing binds :8080. Liveness is probed by the
+    # Docker HEALTHCHECK running scripts/healthcheck.py, not over HTTP.
     environment:
       # --- Telegram ---
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}

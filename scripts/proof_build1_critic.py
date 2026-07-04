@@ -76,9 +76,7 @@ def _configure_logging() -> None:
     root = logging.getLogger()
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root.addHandler(handler)
     root.setLevel(logging.INFO)
     for name in (
@@ -127,9 +125,7 @@ def _deck_person_names(deck: DeckSpec) -> dict[int, list[str]]:
             names.extend(p.name for p in slide.content.people)
         if slide.content.timeline_nodes:
             names.extend(
-                n.portrait_prompt
-                for n in slide.content.timeline_nodes
-                if n.portrait_prompt
+                n.portrait_prompt for n in slide.content.timeline_nodes if n.portrait_prompt
             )
         if names:
             by_slide[slide.slide_index] = names
@@ -197,16 +193,12 @@ def _print_deck_summary(label: str, deck: DeckSpec, deck_path: Path) -> None:
         print("  gallery/timeline people roster:")
         for idx, names in sorted(people_by_slide.items()):
             slide = deck.slides[idx]
-            print(
-                f"    slide {idx} ({slide.slide_type.value}): {names}"
-            )
+            print(f"    slide {idx} ({slide.slide_type.value}): {names}")
     else:
         print("  gallery/timeline people roster: (none)")
     print()
     resolved, nulls = _image_slot_summary(deck)
-    print(
-        f"  image slots (pre-ImagePass): resolved={resolved}, pending={nulls}"
-    )
+    print(f"  image slots (pre-ImagePass): resolved={resolved}, pending={nulls}")
     interactives = _interactive_slides(deck)
     print(f"  interactive slides ({len(interactives)}):")
     for line in interactives:
@@ -216,8 +208,7 @@ def _print_deck_summary(label: str, deck: DeckSpec, deck_path: Path) -> None:
     for slide in deck.slides:
         section = f" <{slide.section_name}>" if slide.section_name else ""
         print(
-            f"   {slide.slide_index:>2}. {slide.slide_type.value}{section}: "
-            f"{slide.content.title}"
+            f"   {slide.slide_index:>2}. {slide.slide_type.value}{section}: {slide.content.title}"
         )
     print()
 
@@ -237,10 +228,7 @@ async def _run_planner_roster(
         print(f"  [{label}] planner figure roster ({len(roster)}): {roster}")
         print(f"  [{label}] planner sections ({len(plan.sections)}):")
         for sec in plan.sections:
-            print(
-                f"    - {sec.section_name}: "
-                f"{len(sec.planned_slide_types)} planned slide types"
-            )
+            print(f"    - {sec.section_name}: {len(sec.planned_slide_types)} planned slide types")
     except (PlannerError, ThesisClassifierError) as exc:
         print(f"  [{label}] planner raised: {type(exc).__name__}: {exc}")
 
@@ -312,9 +300,7 @@ async def _amain() -> int:
         or os.environ.get("GOOGLE_API_KEY")
         or os.environ.get("GEMINI_API_KEY")
     ):
-        print(
-            "Set VERTEX_PROJECT (Vertex AI + ADC) — or GOOGLE_API_KEY / GEMINI_API_KEY."
-        )
+        print("Set VERTEX_PROJECT (Vertex AI + ADC) — or GOOGLE_API_KEY / GEMINI_API_KEY.")
         return 2
 
     vertex_loc = os.environ.get("VERTEX_LOCATION", "global")
@@ -344,7 +330,7 @@ async def _amain() -> int:
     print(f"  sCO2:          {'OK' if sco2_ok else 'FAILED'}")
 
     print(f"  deck dumps:    {_ENLIGHTENMENT_DECK}, {_SCO2_DECK}")
-    print(f"  capture log via host redirect to debug/build1_gate.log")
+    print("  capture log via host redirect to debug/build1_gate.log")
     print()
     if enlightenment_ok and sco2_ok:
         print("OVERALL: both decks generated end-to-end (no unhandled exception).")

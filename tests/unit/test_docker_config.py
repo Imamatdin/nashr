@@ -100,12 +100,16 @@ def test_docker_compose_bot_depends_on_redis() -> None:
         assert "redis" in cast(list[str], depends)
 
 
-def test_docker_compose_bot_exposes_8080() -> None:
+def test_docker_compose_bot_has_no_published_ports() -> None:
+    """The dead 8080 host mapping was removed; polling binds nothing.
+
+    Liveness is probed by the Docker HEALTHCHECK (``scripts/healthcheck.py``),
+    not an HTTP port. Publishing 8080 served no purpose in polling mode and
+    left the container perpetually unhealthy under the old curl-based check.
+    """
     services = cast(dict[str, Any], _load_compose()["services"])
     bot = cast(dict[str, Any], services["bot"])
-    ports = bot.get("ports")
-    assert isinstance(ports, list)
-    assert any("8080" in str(item) for item in ports)
+    assert "ports" not in bot
 
 
 def test_docker_compose_redis_healthcheck_present() -> None:
@@ -167,4 +171,4 @@ def test_dockerfile_exposes_8080() -> None:
 def test_dockerfile_has_healthcheck() -> None:
     text = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "HEALTHCHECK" in text
-    assert "/health" in text
+    assert "scripts/healthcheck.py" in text

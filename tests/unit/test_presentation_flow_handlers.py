@@ -313,6 +313,58 @@ async def test_start_generation_refunds_on_failure(
     assert (await state.get_state()) is None
 
 
+async def test_start_generation_refunds_on_orchestrator_render_failure(
+    state: FSMContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zero-file render surfaces as ``_OrchestratorError(step='render')``: the
+    handler refunds, marks the project failed, and shows the STEP-named message
+    (the ``_OrchestratorError`` branch) rather than the generic crash text."""
+
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
+    await state.set_state(PresentationStates.confirming_payment)
+    await state.update_data(
+        language="uz",
+        project_id="proj_render_fail",
+        user_id="user_x",
+        sources=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
+        tier="presentation_basic",
+    )
+
+    err = _OrchestratorError(
+        "render", RuntimeError("render produced no deliverable files — html: boom")
+    )
+    fake = _FakeOrchestrator(PresentationRenderResult(), raises=err)
+
+    def _factory(_bot: Any, _db: Any, _credits: Any, **_kwargs: Any) -> Any:
+        return fake
+
+    monkeypatch.setattr(presentation_flow, "_orchestrator", _factory)
+
+    db_spy = MagicMock()
+    db_spy.update_project_status = AsyncMock()
+    credits_spy = MagicMock()
+    credits_spy.refund = AsyncMock()
+
+    target = _make_message_spy()
+    await start_generation(
+        cast(Any, target),
+        state,
+        cast(Any, MagicMock()),
+        cast(Any, db_spy),
+        cast(Any, credits_spy),
+    )
+
+    db_spy.update_project_status.assert_awaited_with("proj_render_fail", "failed")
+    credits_spy.refund.assert_awaited_once()
+    assert credits_spy.refund.await_args.kwargs["amount_uzs"] == 5_000  # basic price
+    labels = get_bot_labels("uz")
+    target.edit_text.assert_awaited_once_with(
+        labels.generation_failed_at_step.format(step="render")
+    )
+    assert (await state.get_state()) is None
+
+
 # ---------------------------------------------------------------------------
 # File delivery — HTML / PPTX / PDF
 # ---------------------------------------------------------------------------

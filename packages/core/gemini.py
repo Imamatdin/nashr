@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import ClassVar, Final, Protocol, runtime_checkable
+from typing import ClassVar, Final, NamedTuple, Protocol, runtime_checkable
 
 import google.genai as genai
 from google.genai import errors as genai_errors
@@ -306,7 +306,9 @@ class GeminiClient:
             timeout=self._timeout_seconds,
         )
 
-        content, input_tokens, output_tokens = _extract_content_and_usage(response)
+        content, input_tokens, output_tokens, cached_input_tokens = _extract_content_and_usage(
+            response
+        )
         cost = gemini_cost_for(model, input_tokens, output_tokens)
 
         logger.info(
@@ -315,6 +317,7 @@ class GeminiClient:
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cached_input_tokens": cached_input_tokens,
                 "latency_ms": latency_ms,
                 "estimated_cost_usd": round(cost, 6),
             },
@@ -517,7 +520,7 @@ class GeminiClient:
                 "(e.g. a larger max_tokens on MAX_TOKENS)."
             )
         text = _join_text_parts(model_content)
-        input_tokens, output_tokens = _extract_usage(response)
+        input_tokens, output_tokens, cached_input_tokens = _extract_usage(response)
         cost = gemini_cost_for(model, input_tokens, output_tokens)
 
         logger.info(
@@ -526,6 +529,7 @@ class GeminiClient:
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cached_input_tokens": cached_input_tokens,
                 "latency_ms": latency_ms,
                 "estimated_cost_usd": round(cost, 6),
                 "function_calls": len(function_calls),
@@ -546,43 +550,67 @@ class GeminiClient:
         )
 
 
-def _extract_usage(response: _GenerateContentResponseLike) -> tuple[int, int]:
-    """Pull ``(input_tokens, output_tokens)`` from a response, defensively.
+class _TokenUsage(NamedTuple):
+    """Token accounting pulled from one response's ``usage_metadata``.
+
+    ``cached_input_tokens`` is the portion of ``input_tokens`` served from a
+    context cache (Gemini's ``cached_content_token_count``): an implicit-cache
+    hit on a repeated prefix, or an explicit ``cached_content`` handle. It is a
+    SUBSET of ``input_tokens``, surfaced for cache-hit observability only — cost
+    accounting still bills the full ``input_tokens`` (a cache-aware discount is
+    deferred to 5b). Zero when the SDK reports no cached tokens.
+    """
+
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+
+
+def _extract_usage(response: _GenerateContentResponseLike) -> _TokenUsage:
+    """Pull token accounting from a response, defensively.
 
     The SDK returns ``usage_metadata=None`` when no token accounting is
     available; missing or non-int counts surface as zero rather than crashing,
-    so cost accounting stays sound. Shared by :meth:`GeminiClient.complete` (via
-    :func:`_extract_content_and_usage`) and :meth:`GeminiClient.generate_with_tools`.
+    so cost accounting stays sound. ``cached_content_token_count`` is read the
+    same defensive way and reported as ``cached_input_tokens`` — a subset of
+    ``input_tokens`` for cache-hit observability, not a separate charge. Shared
+    by :meth:`GeminiClient.complete` (via :func:`_extract_content_and_usage`) and
+    :meth:`GeminiClient.generate_with_tools`.
     """
 
     usage = getattr(response, "usage_metadata", None)
     input_tokens = 0
     output_tokens = 0
+    cached_input_tokens = 0
     if usage is not None:
         prompt = getattr(usage, "prompt_token_count", 0)
         candidate = getattr(usage, "candidates_token_count", 0)
+        cached = getattr(usage, "cached_content_token_count", 0)
         if isinstance(prompt, int):
             input_tokens = max(0, prompt)
         if isinstance(candidate, int):
             output_tokens = max(0, candidate)
-    return input_tokens, output_tokens
+        if isinstance(cached, int):
+            cached_input_tokens = max(0, cached)
+    return _TokenUsage(input_tokens, output_tokens, cached_input_tokens)
 
 
 def _extract_content_and_usage(
     response: _GenerateContentResponseLike,
-) -> tuple[str, int, int]:
+) -> tuple[str, int, int, int]:
     """Pull text and token usage from a ``GenerateContentResponse``-like object.
 
     Defensive against responses with no text content (surfaces as an empty
-    string) and delegates token accounting to :func:`_extract_usage`. Used only
-    by :meth:`GeminiClient.complete`; the tool path reads parts directly to
-    avoid the SDK's ``.text`` warning on function-call responses.
+    string) and delegates token accounting to :func:`_extract_usage`. Returns
+    ``(text, input_tokens, output_tokens, cached_input_tokens)``. Used only by
+    :meth:`GeminiClient.complete`; the tool path reads parts directly to avoid
+    the SDK's ``.text`` warning on function-call responses.
     """
 
     text_attr = getattr(response, "text", None)
     text = text_attr if isinstance(text_attr, str) else ""
-    input_tokens, output_tokens = _extract_usage(response)
-    return text, input_tokens, output_tokens
+    usage = _extract_usage(response)
+    return text, usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
 
 
 def _extract_tool_turn_content(

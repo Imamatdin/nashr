@@ -29,7 +29,11 @@ from packages.bot.handlers import (
     presentation_flow,
     registration,
 )
-from packages.bot.middleware import InputValidationMiddleware, RateLimitMiddleware
+from packages.bot.middleware import (
+    InputValidationMiddleware,
+    LivenessMiddleware,
+    RateLimitMiddleware,
+)
 from packages.bot.webhooks.payment_webhooks import register_payment_webhooks
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
@@ -60,6 +64,13 @@ async def create_bot(
         token=config.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+    # Bot-session middleware: touches a liveness file after each successful
+    # Telegram API call. In polling mode getUpdates flows through the session
+    # every long-poll cycle, so the file's mtime proves live connectivity for
+    # the Docker healthcheck (scripts/healthcheck.py). Registered on the Bot so
+    # both polling and webhook modes carry it.
+    bot.session.middleware(LivenessMiddleware())
 
     fsm_storage = MemoryStorage()
     dp = Dispatcher(storage=fsm_storage)

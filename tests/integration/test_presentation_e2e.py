@@ -102,12 +102,14 @@ class TestPresentationE2E:
         assert len(interview.apply_answers_calls) == 1
         assert len(interview.apply_defaults_calls) == 0
 
-    async def test_presentation_flow_render_failure_returns_warnings(self) -> None:
-        """Subprocess timeout on every format yields warnings + no files.
+    async def test_presentation_flow_total_render_failure_raises(self) -> None:
+        """Every requested format failing yields zero files → the pipeline raises.
 
-        The orchestrator continues past per-format failures (other
-        formats still attempted); we assert the warning text mentions
-        the format and the final result has no successful paths.
+        HTML and PPTX both time out and PDF is not requested, so the render
+        produces no deliverable files. Under the hardened Stage 3 contract that is
+        an ``_OrchestratorError(step='render')`` — the delivery handler must never
+        announce ``download_ready`` with nothing to download. (Partial success —
+        one format landing — still returns; that path is pinned in the unit suite.)
         """
 
         bot = _StubBot(payloads={"f1": b"%PDF"})
@@ -115,19 +117,20 @@ class TestPresentationE2E:
         worker = _StubWorkerRunner(timeout_on=("html", "pptx"))
         orch, _db, _credits, _fake = _build_orch(bot, pipeline=pipeline, worker=worker)
 
-        result = await orch.run_full_pipeline(
-            file_infos=[{"file_id": "f1", "filename": "deck.pdf", "file_type": "pdf"}],
-            project_id=PROJECT_ID,
-            user_id=USER_ID,
-            language="uz",
-            raw_answers=None,
-            requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
-            progress=_noop_progress,
-            package=GenerationPackage.PRESENTATION_STANDARD,
-        )
-        assert result.render.html_path is None
-        assert result.render.pptx_path is None
-        assert any("timed out" in w for w in result.render.warnings)
+        with pytest.raises(_OrchestratorError) as info:
+            await orch.run_full_pipeline(
+                file_infos=[{"file_id": "f1", "filename": "deck.pdf", "file_type": "pdf"}],
+                project_id=PROJECT_ID,
+                user_id=USER_ID,
+                language="uz",
+                raw_answers=None,
+                requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+                progress=_noop_progress,
+                package=GenerationPackage.PRESENTATION_STANDARD,
+            )
+        assert info.value.step == "render"
+        # the joined per-format warnings ride into the cause message
+        assert "timed out" in str(info.value.original)
 
     async def test_presentation_flow_editorial_failure_wraps_step(self) -> None:
         """Editorial pass raising surfaces as _OrchestratorError('editorial')."""
