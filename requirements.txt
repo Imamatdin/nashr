@@ -7,6 +7,10 @@ httpx==0.28.1
 
 # --- LLM clients ---
 anthropic==0.84.0
+# google-auth backs anthropic.lib.vertex (AsyncAnthropicVertex ADC auth). It arrives
+# transitively via google-genai today; pinned explicitly because the Claude-on-Vertex
+# transport is a production import, not an optional extra.
+google-auth==2.52.0
 google-genai==2.0.1
 
 # --- Telegram bot ---

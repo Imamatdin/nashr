@@ -43,10 +43,12 @@ services:
 
       # --- LLM API keys ---
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_TRANSPORT: ${LLM_TRANSPORT:-vertex}
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY}
       GOOGLE_APPLICATION_CREDENTIALS: /app/vertex-key.json
       VERTEX_PROJECT: nashr-prod
+      VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
 
       # --- Redis ---
       REDIS_URL: redis://redis:6379

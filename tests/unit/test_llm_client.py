@@ -39,6 +39,9 @@ from packages.core.llm import (
     SONNET_OUTPUT_COST_PER_MTOK,
     LLMClient,
     LLMResponse,
+    build_default_anthropic_client,
+    resolve_llm_transport,
+    vertex_model_id,
 )
 
 
@@ -363,3 +366,143 @@ async def test_llm_client_does_not_swallow_authentication_error() -> None:
         await client.complete(system="sys", user="usr")
 
     assert fake.messages.calls == 1
+
+
+def test_resolve_llm_transport_defaults_to_vertex(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_TRANSPORT", raising=False)
+    assert resolve_llm_transport() == "vertex"
+
+
+def test_resolve_llm_transport_rejects_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_TRANSPORT", "openai")
+    with pytest.raises(ValueError, match="LLM_TRANSPORT"):
+        resolve_llm_transport()
+
+
+def test_build_default_client_uses_vertex(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_TRANSPORT", "vertex")
+    monkeypatch.setenv("VERTEX_PROJECT", "nashr-prod")
+    monkeypatch.setenv("VERTEX_LOCATION", "global")
+    created: list[dict[str, str]] = []
+
+    class _FakeVertex:
+        def __init__(self, *, project_id: str, region: str) -> None:
+            created.append({"project_id": project_id, "region": region})
+
+    monkeypatch.setattr("packages.core.llm.AsyncAnthropicVertex", _FakeVertex)
+    build_default_anthropic_client()
+    assert created == [{"project_id": "nashr-prod", "region": "global"}]
+
+
+def test_build_default_client_requires_vertex_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_TRANSPORT", "vertex")
+    monkeypatch.delenv("VERTEX_PROJECT", raising=False)
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+    with pytest.raises(RuntimeError, match="VERTEX_PROJECT"):
+        build_default_anthropic_client()
+
+
+def test_build_default_client_uses_anthropic_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_TRANSPORT", "anthropic")
+    created: list[object] = []
+
+    class _FakeAnthropic:
+        def __init__(self) -> None:
+            created.append(self)
+
+    monkeypatch.setattr("packages.core.llm.AsyncAnthropic", _FakeAnthropic)
+    build_default_anthropic_client()
+    assert len(created) == 1
+
+
+def test_llm_client_freezes_transport_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_TRANSPORT", "vertex")
+    monkeypatch.setenv("VERTEX_PROJECT", "nashr-prod")
+    monkeypatch.setenv("VERTEX_LOCATION", "global")
+
+    class _FakeVertex:
+        def __init__(self, *, project_id: str, region: str) -> None:
+            self.project_id = project_id
+            self.region = region
+
+    monkeypatch.setattr("packages.core.llm.AsyncAnthropicVertex", _FakeVertex)
+    client = LLMClient()
+    assert client.transport == "vertex"
+    monkeypatch.setenv("LLM_TRANSPORT", "anthropic")
+    assert client.transport == "vertex"
+
+
+@pytest.mark.asyncio
+async def test_bare_construction_is_safe_without_vertex_env_but_first_call_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (Codex HIGH / drafter-suite breakage): SectionDrafter() and other
+    # construct-but-may-never-call paths must not crash on a box without Vertex env.
+    # The SDK client builds lazily; the first real call still fails with the
+    # explicit VERTEX_PROJECT message.
+    monkeypatch.delenv("LLM_TRANSPORT", raising=False)
+    monkeypatch.delenv("VERTEX_PROJECT", raising=False)
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+    client = LLMClient()  # must not raise
+    assert client.transport == "vertex"
+    with pytest.raises(RuntimeError, match="VERTEX_PROJECT"):
+        await client.complete(system="sys", user="usr")
+
+
+def test_vertex_model_id_translates_known_dated_direct_api_ids() -> None:
+    assert vertex_model_id("claude-haiku-4-5-20251001") == "claude-haiku-4-5@20251001"
+
+
+def test_vertex_model_id_passes_everything_else_through_unchanged() -> None:
+    # Allowlist semantics (Codex round-2 RISK): unknown dated strings must NOT be
+    # date-flipped into ids the Vertex endpoint never listed — they pass through and
+    # fail loudly at the API as the id the caller actually asked for.
+    assert vertex_model_id("claude-sonnet-4-6") == "claude-sonnet-4-6"
+    assert vertex_model_id("claude-sonnet-4-6-20250514") == "claude-sonnet-4-6-20250514"
+    assert vertex_model_id("claude-haiku-4-5@20251001") == "claude-haiku-4-5@20251001"
+    assert vertex_model_id("gemini-3-flash") == "gemini-3-flash"
+
+
+@pytest.mark.asyncio
+async def test_complete_translates_default_haiku_model_on_vertex_transport() -> None:
+    # Regression (Codex HIGH): callers that omit model= get DEFAULT_HAIKU_MODEL in
+    # direct-API dated form; Vertex addresses Haiku 4.5 as claude-haiku-4-5@20251001.
+    # Without translation every default-model call 404s under LLM_TRANSPORT=vertex.
+    async def behaviour() -> Message:
+        return _make_message("ok")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    client = LLMClient(client=fake, transport="vertex")  # type: ignore[arg-type]
+    response = await client.complete(system="sys", user="usr")
+    assert fake.messages.last_kwargs["model"] == "claude-haiku-4-5@20251001"
+    assert response.model == "claude-haiku-4-5@20251001"
+
+
+@pytest.mark.asyncio
+async def test_complete_leaves_model_untouched_on_injected_transport() -> None:
+    async def behaviour() -> Message:
+        return _make_message("ok")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    client = LLMClient(client=fake)  # type: ignore[arg-type]
+    assert client.transport == "injected"
+    await client.complete(system="sys", user="usr")
+    assert fake.messages.last_kwargs["model"] == DEFAULT_HAIKU_MODEL
+
+
+@pytest.mark.asyncio
+async def test_complete_propagates_unexpected_exception_without_retry() -> None:
+    # A non-Anthropic failure (e.g. google-auth DefaultCredentialsError under the
+    # vertex transport) must surface immediately — not be retried as transient.
+    calls = 0
+
+    async def behaviour() -> Message:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("ADC misconfigured")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    client = LLMClient(client=fake, transport="vertex")  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="ADC misconfigured"):
+        await client.complete(system="sys", user="usr")
+    assert calls == 1

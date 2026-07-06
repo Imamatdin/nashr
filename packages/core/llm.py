@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import ClassVar, Final, Literal, NamedTuple
 
 from anthropic import APIError, AsyncAnthropic, AuthenticationError, RateLimitError
+from anthropic.lib.vertex import AsyncAnthropicVertex
 from anthropic.types import (
     CacheControlEphemeralParam,
     MessageParam,
@@ -56,6 +58,38 @@ OPUS_INPUT_COST_PER_MTOK: float = 15.0  # UNCONFIRMED — see note above
 OPUS_OUTPUT_COST_PER_MTOK: float = 75.0  # UNCONFIRMED — see note above
 
 DEFAULT_HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
+
+# Vertex partner-model ID for Sonnet 4.6 (alias form — no @date suffix). Confirmed
+# against Google Cloud partner-model docs and Anthropic Vertex integration guide.
+DEFAULT_VERTEX_SONNET_MODEL: str = "claude-sonnet-4-6"
+
+LLMTransport = Literal["vertex", "anthropic"]
+ResolvedLLMTransport = Literal["vertex", "anthropic", "injected"]
+
+
+# Explicit direct-API → Vertex partner-model id pairs, from the Anthropic
+# Claude-on-Vertex model table. Alias ids ("claude-sonnet-4-6") are identical on both
+# transports and need no entry. Deliberately an ALLOWLIST, not a generic date-suffix
+# rewrite: rewriting unknown ids can mint strings the Vertex endpoint never listed,
+# turning one 404 into a subtler one. Unknown ids pass through and fail loudly at the
+# API with the id the caller actually asked for.
+_VERTEX_MODEL_IDS: Final[dict[str, str]] = {
+    DEFAULT_HAIKU_MODEL: "claude-haiku-4-5@20251001",
+}
+
+
+def vertex_model_id(model: str) -> str:
+    """Translate a known direct-API Claude model id to its Vertex partner-model form.
+
+    Applied once at the :meth:`LLMClient.complete` chokepoint so callers keep passing
+    the direct-API ids they always have; ids outside the allowlist are returned
+    unchanged.
+    """
+
+    return _VERTEX_MODEL_IDS.get(model, model)
+
+
+type AnthropicAsyncClient = AsyncAnthropic | AsyncAnthropicVertex
 
 # Cache pricing multipliers vs. the base input price, per the Anthropic prompt-caching docs
 # (verified 2026-06-21): a 5-minute cache write costs 1.25x, a 1-hour cache write 2.0x, and a
@@ -94,6 +128,64 @@ def _rates_for(model: str) -> _Rates:
         if family in lower:
             return _MODEL_RATES[family]
     return _MODEL_RATES["haiku"]
+
+
+def resolve_llm_transport() -> LLMTransport:
+    """Return the configured Claude transport (frozen for the lifetime of one :class:`LLMClient`)."""
+
+    raw = os.environ.get("LLM_TRANSPORT", "vertex").strip().lower()
+    if raw == "vertex":
+        return "vertex"
+    if raw == "anthropic":
+        return "anthropic"
+    raise ValueError(f"Invalid LLM_TRANSPORT={raw!r}; expected 'vertex' (default) or 'anthropic'.")
+
+
+def build_default_anthropic_client(
+    *, transport: LLMTransport | None = None
+) -> AnthropicAsyncClient:
+    """Construct the async Claude client for the configured transport.
+
+    * **vertex** (default) — :class:`~anthropic.lib.vertex.AsyncAnthropicVertex`
+      against ``VERTEX_PROJECT`` (or ``ANTHROPIC_VERTEX_PROJECT_ID``) and
+      ``VERTEX_CLAUDE_REGION`` / ``VERTEX_LOCATION`` (default ``global``).
+      Auth uses the same ADC / service-account chain as Gemini
+      (``GOOGLE_APPLICATION_CREDENTIALS`` on the worker host).
+    * **anthropic** — direct :class:`~anthropic.AsyncAnthropic` API using
+      ``ANTHROPIC_API_KEY``. Fallback when Vertex quota or IAM blocks a job.
+    """
+
+    chosen = transport or resolve_llm_transport()
+    if chosen == "anthropic":
+        logger.info("llm client using Anthropic API (direct)")
+        return AsyncAnthropic()
+    project_id = os.environ.get("VERTEX_PROJECT") or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+    if not project_id:
+        raise RuntimeError(
+            "LLM_TRANSPORT=vertex requires VERTEX_PROJECT (or ANTHROPIC_VERTEX_PROJECT_ID) "
+            "so Claude partner-model calls bill against GCP."
+        )
+    region = (
+        os.environ.get("VERTEX_CLAUDE_REGION")
+        or os.environ.get("VERTEX_LOCATION")
+        or os.environ.get("CLOUD_ML_REGION")
+        or "global"
+    )
+    if region != "global":
+        # Regional/multi-region Vertex endpoints carry a ~10% pricing premium over
+        # global; the cost constants above model global rates only, so estimated
+        # per-call cost will undercount on this endpoint.
+        logger.warning(
+            "vertex region %s is non-global; estimated_cost_usd uses global rates "
+            "and undercounts the ~10%% regional premium",
+            region,
+        )
+    logger.info(
+        "llm client using AnthropicVertex (project=%s, region=%s)",
+        project_id,
+        region,
+    )
+    return AsyncAnthropicVertex(project_id=project_id, region=region)
 
 
 def cached_system_block(text: str, ttl: CacheTTL = "5m") -> TextBlockParam:
@@ -183,23 +275,49 @@ class LLMResponse(BaseModel):
 
 
 class LLMClient:
-    """Async Anthropic wrapper enforcing the project's LLM-integration rules.
+    """Async Claude wrapper enforcing the project's LLM-integration rules.
 
-    The client is intentionally small: it owns one ``AsyncAnthropic``
-    instance, exposes a single :meth:`complete` method, and lets workers
-    layer their own JSON parsing, validation, and prompt-construction logic
-    on top.
+    The client owns one :class:`~anthropic.AsyncAnthropic` or
+    :class:`~anthropic.lib.vertex.AsyncAnthropicVertex` instance (selected
+    once at construction from ``LLM_TRANSPORT``), exposes a single
+    :meth:`complete` method, and lets workers layer JSON parsing and prompt
+    construction on top.
     """
 
     def __init__(
         self,
-        client: AsyncAnthropic | None = None,
+        client: AnthropicAsyncClient | None = None,
         timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS,
         max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+        *,
+        transport: ResolvedLLMTransport | None = None,
     ) -> None:
-        self._client = client if client is not None else AsyncAnthropic()
+        if client is not None:
+            self._client: AnthropicAsyncClient | None = client
+            self._transport: ResolvedLLMTransport = transport or "injected"
+        else:
+            # Transport is resolved (env read once) and FROZEN here; the SDK client
+            # itself is built lazily on first use so merely constructing an LLMClient
+            # on a box without Vertex env (unit tests, article drafter defaults,
+            # import-time construction) cannot crash. The first real Claude call
+            # still fails fast with the explicit VERTEX_PROJECT message.
+            self._transport = resolve_llm_transport()
+            self._client = None
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
+
+    @property
+    def transport(self) -> ResolvedLLMTransport:
+        """Transport frozen at construction — never flips mid-run."""
+
+        return self._transport
+
+    def _ensure_client(self) -> AnthropicAsyncClient:
+        if self._client is None:
+            if self._transport == "injected":
+                raise RuntimeError("injected transport requires a client at construction")
+            self._client = build_default_anthropic_client(transport=self._transport)
+        return self._client
 
     async def complete(
         self,
@@ -227,6 +345,10 @@ class LLMClient:
         since a single-shot call pays the cache-write premium for no later read.
         """
 
+        if self._transport == "vertex":
+            # Vertex addresses partner models by "@"-versioned ids; translate here so
+            # every downstream use of ``model`` (API call, cost, logs, response) agrees.
+            model = vertex_model_id(model)
         effective_timeout = timeout if timeout is not None else self._timeout_seconds
         system_param: str | list[TextBlockParam]
         if cache is False:
@@ -234,6 +356,7 @@ class LLMClient:
         else:
             ttl: CacheTTL = "5m" if cache is True else cache
             system_param = [cached_system_block(system, ttl=ttl)]
+        llm_client = self._ensure_client()
         attempt = 0
         last_error: Exception | None = None
         while attempt <= self._max_retries:
@@ -241,7 +364,7 @@ class LLMClient:
             try:
                 messages: list[MessageParam] = [{"role": "user", "content": user}]
                 message = await asyncio.wait_for(
-                    self._client.messages.create(
+                    llm_client.messages.create(
                         model=model,
                         max_tokens=max_tokens,
                         temperature=temperature,
