@@ -23,9 +23,10 @@ from google.genai import types as genai_types
 
 from packages.bot.sessions.models import BrainSession, TurnAction, TurnOutcome
 from packages.bot.sessions.roster_format import render_roster_text
-from packages.core.brain_loop import run_brain_loop
+from packages.core.brain_loop import build_edit_slides_tool, run_brain_loop
 from packages.core.brain_prompts import assemble_brain_system
 from packages.core.gemini import GeminiClient
+from packages.core.gemini_cache import BrainContextCache, brain_cache_enabled
 from packages.core.models.presentation import SlideFix
 from packages.core.models.source import SourceClaimCreate
 
@@ -109,6 +110,24 @@ class ScriptedStubDriver:
         )
 
 
+# Process-wide cache instance (5B-Q5b). One explicit Gemini cache serves every
+# Way 2 turn and session in this process; created on first enabled driver
+# construction and pinned to that driver's system block. A driver constructed
+# with a DIFFERENT system gets the shared instance too — BrainContextCache's
+# pinned-system mismatch check makes that a safe bypass, never a wrong cache.
+_brain_context_cache_singleton: BrainContextCache | None = None
+
+
+def _shared_brain_context_cache(system: str) -> BrainContextCache:
+    global _brain_context_cache_singleton
+    if _brain_context_cache_singleton is None:
+        _brain_context_cache_singleton = BrainContextCache(
+            system=system,
+            tools=[build_edit_slides_tool()],
+        )
+    return _brain_context_cache_singleton
+
+
 @dataclass
 class GeminiBrainDriver:
     """The real conversational brain (Build 2, Stage 5a) — Way 2.
@@ -124,6 +143,17 @@ class GeminiBrainDriver:
 
     gemini: GeminiClient
     system: str = field(default_factory=assemble_brain_system)
+    context_cache: BrainContextCache | None = None
+
+    def __post_init__(self) -> None:
+        # 5B-Q5b: cache the static system+tools block across turns and sessions
+        # (the block is identical for every Way 2 session). The chat loop builds a
+        # FRESH driver per user message (_brain_driver in presentation_flow), so
+        # the cache must be PROCESS-WIDE — a per-driver cache would be created and
+        # consumed once per turn, costing more than no cache (Codex finding).
+        # Env-gated OFF by default until the live gate records a real cache read.
+        if self.context_cache is None and brain_cache_enabled():
+            self.context_cache = _shared_brain_context_cache(self.system)
 
     async def run_turn(self, session: BrainSession, user_text: str) -> TurnOutcome:
         """Run one turn: answer the user, or REQUEST slide edits (never apply them)."""
@@ -134,6 +164,7 @@ class GeminiBrainDriver:
                 self.gemini,
                 history=contents,
                 system=self.system,
+                context_cache=self.context_cache,
             )
         except Exception as exc:  # a chat turn must never crash the bot — degrade to an apology
             logger.exception("brain_driver_turn_failed", extra={"project_id": session.project_id})

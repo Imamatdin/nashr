@@ -165,6 +165,14 @@ def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
     Falls back to current-generation Flash pricing for unknown model
     strings — cost accounting must never fail a user-visible job, but a
     misrouted call would still be surfaced via the per-call info log line.
+
+    CACHING CAVEAT (5B-Q5b): ``prompt_token_count`` INCLUDES cached tokens, and
+    this estimate bills them all at the FULL input rate. Real spend under
+    explicit context caching is LOWER (cache reads are discounted; storage is
+    billed separately and unmodeled here). Deliberately conservative: the
+    estimate is a ceiling, so budget caps keyed on it can only over-protect.
+    Modeling the discount needs the confirmed Gemini 3.x cache rates — verify
+    against GCP billing at the live gate before adding them.
     """
 
     rates = GEMINI_COSTS.get(model)
@@ -430,6 +438,7 @@ class GeminiClient:
         ),
         allowed_function_names: list[str] | None = None,
         timeout: int | None = None,
+        cached_content: str | None = None,
     ) -> ToolTurnResult:
         """Run ONE manual tool-calling turn against Gemini and parse the result.
 
@@ -478,22 +487,52 @@ class GeminiClient:
         overrides the client default for a single call, for turns with large
         thinking budgets. Per-call cost and token usage are recorded on the
         result; the caller sums them across a conversation's turns.
+
+        ``cached_content`` (5B-Q5b) names an explicit Gemini context cache that
+        already carries the system block AND the tool declarations —
+        ``cached_content`` is mutually exclusive with per-request
+        ``system_instruction``/``tools``/``tool_config``, so a cached call sends
+        none of them and the ``system``/``tools`` arguments serve only the
+        fallback path. Consequently a cache handle can only ride the DEFAULT tool
+        config (``AUTO``, no allowlist); a caller demanding ``ANY`` or an
+        allowlist gets the full uncached request instead — dropping the caller's
+        tool constraint to save tokens would be trading correctness for cost, so
+        the bypass is logged and the constraint kept.
         """
 
         effective_timeout = timeout if timeout is not None else self._timeout_seconds
-        function_calling_config = genai_types.FunctionCallingConfig(
-            mode=tool_mode,
-            allowed_function_names=allowed_function_names,
-        )
-        config = genai_types.GenerateContentConfig(
-            system_instruction=system,
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-            safety_settings=_SAFETY_SETTINGS,
-            tools=tools,
-            tool_config=genai_types.ToolConfig(function_calling_config=function_calling_config),
-            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
-        )
+        use_cache = cached_content is not None
+        if use_cache and (
+            tool_mode != genai_types.FunctionCallingConfigMode.AUTO
+            or allowed_function_names is not None
+        ):
+            logger.warning(
+                "gemini_cache_bypassed_nondefault_tool_config",
+                extra={"tool_mode": str(tool_mode)},
+            )
+            use_cache = False
+        if use_cache:
+            config = genai_types.GenerateContentConfig(
+                cached_content=cached_content,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+                safety_settings=_SAFETY_SETTINGS,
+                automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
+            )
+        else:
+            function_calling_config = genai_types.FunctionCallingConfig(
+                mode=tool_mode,
+                allowed_function_names=allowed_function_names,
+            )
+            config = genai_types.GenerateContentConfig(
+                system_instruction=system,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+                safety_settings=_SAFETY_SETTINGS,
+                tools=tools,
+                tool_config=genai_types.ToolConfig(function_calling_config=function_calling_config),
+                automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
+            )
 
         response, latency_ms = await self._generate_with_retry(
             model=model,

@@ -27,10 +27,12 @@ import logging
 from dataclasses import dataclass
 from typing import Final, Literal, cast
 
+from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 from pydantic import ValidationError
 
 from packages.core.gemini import GeminiClient, GeminiToolCallError
+from packages.core.gemini_cache import BrainContextCache
 from packages.core.gemini_tools import (
     FunctionResult,
     build_function_responses_content,
@@ -201,6 +203,7 @@ async def run_brain_loop(
     max_iterations: int = BRAIN_LOOP_MAX_ITERATIONS,
     max_tokens: int = _BRAIN_LOOP_MAX_TOKENS,
     retry_max_tokens: int = _BRAIN_LOOP_RETRY_MAX_TOKENS,
+    context_cache: BrainContextCache | None = None,
 ) -> BrainLoopResult:
     """Drive the ``edit_slides`` tool loop and return on the first fix or reply.
 
@@ -209,13 +212,35 @@ async def run_brain_loop(
     turn, and degrades to a ``kind="reply"`` (``reply_text=None``) if a turn stays
     degraded after a larger-budget retry or the iteration cap is hit. Never
     applies a fix, never hangs. ``history`` is copied, not mutated.
+
+    ``context_cache`` (5B-Q5b) supplies an explicit ``cached_content`` handle for
+    the static system+tools block on EVERY iteration — each loop turn is a fresh
+    ``generate_content`` call, so without it the ~10.6k-token block re-bills
+    uncached per iteration. A ``None`` handle (cache disabled, failed, or
+    system-mismatch) degrades to the uncached request; the cache is a cost
+    optimisation, never a correctness dependency.
     """
 
     tool = build_edit_slides_tool()
     working = list(history)
     total_cost = 0.0
     budget = max_tokens
-    for _iteration in range(max_iterations):
+    cache_bypassed = False
+    attempts = 0
+    while attempts < max_iterations:
+        attempts += 1
+        cached_handle: str | None = None
+        if (
+            context_cache is not None
+            and not cache_bypassed
+            # Mirrors generate_with_tools' bypass condition (panel finding): a
+            # non-default tool config cannot ride a cached call, so fetching a
+            # handle here would only mislabel a genuinely-uncached failure as
+            # a stale-cache one in the except branch below.
+            and tool_mode == genai_types.FunctionCallingConfigMode.AUTO
+            and allowed_function_names is None
+        ):
+            cached_handle = await context_cache.handle_for(system)
         try:
             result = await gemini.generate_with_tools(
                 working,
@@ -224,7 +249,28 @@ async def run_brain_loop(
                 tool_mode=tool_mode,
                 allowed_function_names=allowed_function_names,
                 max_tokens=budget,
+                cached_content=cached_handle,
             )
+        except (genai_errors.APIError, TimeoutError):
+            # TimeoutError included (panel finding): a cached call that times out
+            # where the uncached one would succeed must degrade to cost, not to a
+            # user-visible failed turn.
+            if cached_handle is None or context_cache is None:
+                raise
+            # A CACHED call failed at the API layer — likeliest a server-side
+            # eviction inside the client TTL window. The cache is a cost
+            # optimisation, never a correctness dependency: invalidate it and
+            # finish THIS loop uncached instead of surfacing a failed turn.
+            # A genuine API fault re-raises on the uncached retry. The give-back
+            # (attempts -= 1) means the fallback never eats a model-turn budget —
+            # a stale handle at max_iterations=1 still gets its uncached retry —
+            # and cannot loop: with cache_bypassed set, the next failure has
+            # cached_handle=None and re-raises.
+            context_cache.invalidate()
+            cache_bypassed = True
+            attempts -= 1
+            logger.warning("brain_loop_cached_call_failed_retrying_uncached")
+            continue
         except GeminiToolCallError:
             if budget < retry_max_tokens:
                 budget = retry_max_tokens

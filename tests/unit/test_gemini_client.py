@@ -786,3 +786,80 @@ async def test_generate_with_tools_logs_cached_input_tokens(
     assert len(records) == 1
     assert records[0].__dict__["cached_input_tokens"] == 420
     assert records[0].__dict__["input_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_cached_content_omits_system_tools_and_tool_config() -> None:
+    # cached_content is mutually exclusive with per-request system_instruction/
+    # tools/tool_config — the cache already carries them. Sending both 400s.
+    call = _FakeFunctionCall("get_value", {"key": "answer"})
+    content = _FakeToolContent([_FakeToolPart(function_call=call, thought_signature=b"\x01")])
+    response = _FakeToolResponse(
+        candidates=[_FakeCandidate(content, finish_reason=_STOP)],
+        function_calls=[call],
+        prompt_tokens=100,
+        candidate_tokens=50,
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    result = await client.generate_with_tools(
+        contents=_user_turn(),
+        tools=[_tool()],
+        system="brain rules",
+        cached_content="cachedContents/abc",
+    )
+
+    assert result.wants_tool is True
+    config = calls[0]["config"]
+    assert config.cached_content == "cachedContents/abc"
+    assert config.system_instruction is None
+    assert config.tools is None
+    assert config.tool_config is None
+    assert config.automatic_function_calling is not None
+    assert config.automatic_function_calling.disable is True
+
+
+@pytest.mark.asyncio
+async def test_generate_with_tools_bypasses_cache_for_nondefault_tool_config(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A forced tool mode / allowlist cannot ride a cached call (tool_config is
+    # excluded); the caller's constraint wins over the token saving.
+    call = _FakeFunctionCall("get_value", {"key": "answer"})
+    content = _FakeToolContent([_FakeToolPart(function_call=call, thought_signature=b"\x01")])
+    response = _FakeToolResponse(
+        candidates=[_FakeCandidate(content, finish_reason=_STOP)],
+        function_calls=[call],
+        prompt_tokens=100,
+        candidate_tokens=50,
+    )
+
+    async def behaviour() -> _FakeToolResponse:
+        return response
+
+    fn, calls = _make_tool_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with caplog.at_level(logging.WARNING, logger="packages.core.gemini"):
+        await client.generate_with_tools(
+            contents=_user_turn(),
+            tools=[_tool()],
+            system="brain rules",
+            tool_mode=genai_types.FunctionCallingConfigMode.ANY,
+            allowed_function_names=["get_value"],
+            cached_content="cachedContents/abc",
+        )
+
+    config = calls[0]["config"]
+    assert config.cached_content is None
+    assert config.system_instruction == "brain rules"
+    assert config.tools is not None
+    assert config.tool_config is not None
+    assert any(
+        r.getMessage() == "gemini_cache_bypassed_nondefault_tool_config" for r in caplog.records
+    )

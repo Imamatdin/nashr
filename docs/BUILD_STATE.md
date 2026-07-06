@@ -1806,3 +1806,32 @@ Real typographic control — decorative/display fonts ("letter styles") keyed to
 - **Per-locale length budget** — kills language-blind `WORD_LIMITS` at root (design change; its own
   pass).
 - **Phase 3 judge** — auditor → routing judge (see Phase 3 above).
+
+## 2026-07-07 — 5B-Q5b WIRED: explicit Gemini context cache for the Way 2 brain (branch build1-content-critic)
+
+SUPERSEDES the 2026-07-04 "Caching observability, NO wiring … remains 5b scope" line —
+production wiring now EXISTS, env-gated. `packages/core/gemini_cache.py` (NEW):
+BrainContextCache over `assemble_brain_system()`+`build_edit_slides_tool()`, TTL 3600s
+with 120s client-side margin, 30s create timeout, create-failure disables for process
+lifetime (re-checked under the lock), PROCESS-WIDE singleton in sessions/driver.py (a
+per-driver cache would be created+consumed once per message — worse than uncached).
+`generate_with_tools(cached_content=)` omits system/tools/tool_config on cached calls
+(API mutual exclusion); non-default tool config (Way 1 forced-ANY) bypasses — Way 1 stays
+uncached by design. `run_brain_loop(context_cache=)`: cached-call APIError/TimeoutError
+invalidates and retries uncached WITHOUT consuming an iteration; cache failure is a cost
+regression, never a user-visible failed turn. Cost note: `gemini_cost_for` bills cached
+tokens at FULL input rate — a deliberate conservative ceiling until confirmed cache rates
+come from GCP billing. Env: `GEMINI_BRAIN_CACHE` default OFF in code, ON in compose.
+
+REVIEWED: Codex rounds 1-2 (quota died before round 3) + a 5-lens Codex panel
+(correctness/security/contracts/concurrency/spec — reports in the session scratchpad);
+all 6 panel findings fixed and test-pinned (in-lock failure re-check, create timeout,
+timeout fallback, non-default-tool-config handle skip, log suffix not full cache name,
+this BUILD_STATE correction). NOT VERIFIED (VM gate, P0): a live cached call —
+`cached_input_tokens > 0` on a Way 2 turn is the gate observable.
+
+ALSO ON THIS BRANCH, SAME SESSION (parked for their own panel reviews, see
+docs/AUTORUN_2026-07-06.md): Vertex Claude transport COMMITTED 6ab511a (LLM_TRANSPORT,
+lazy client, vertex_model_id allowlist); migration 005/005b WRITTEN not applied;
+identity preflight script WRITTEN not run; packages/api auth surface + packages/web
+skeleton BUILT, suite 1589 green at time of writing.

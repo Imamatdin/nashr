@@ -342,3 +342,231 @@ def test_build_edit_slides_tool_shape() -> None:
     assert tool.function_declarations is not None
     assert len(tool.function_declarations) == 1
     assert tool.function_declarations[0].name == "edit_slides"
+
+
+class _CacheRecordingClient(_QueueClient):
+    """Extends the queue fake to record the cached_content kwarg per call."""
+
+    def __init__(self, outcomes: Sequence[ToolTurnResult | Exception]) -> None:
+        super().__init__(outcomes)
+        self.cached_handles: list[str | None] = []
+
+    async def generate_with_tools(  # type: ignore[override]
+        self,
+        contents: list[genai_types.Content],
+        tools: list[genai_types.Tool],
+        *,
+        cached_content: str | None = None,
+        **kwargs: object,
+    ) -> ToolTurnResult:
+        self.cached_handles.append(cached_content)
+        return await super().generate_with_tools(contents, tools, **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_loop_threads_context_cache_handle_into_every_iteration() -> None:
+    from packages.core.gemini_cache import BrainContextCache
+
+    async def create_fn(**_: object) -> str:
+        return "cachedContents/loop-test"
+
+    cache = BrainContextCache(
+        system="sys",
+        tools=[build_edit_slides_tool()],
+        enabled=True,
+        create_cache_fn=create_fn,  # type: ignore[arg-type]
+    )
+    client = _CacheRecordingClient(
+        [_fix_turn([{"slide_id": "slide_02", "instruction": "fix the stat"}])]
+    )
+
+    result = await run_brain_loop(
+        client,  # type: ignore[arg-type]
+        history=_user_history(),
+        system="sys",
+        context_cache=cache,
+    )
+
+    assert result.kind == "fix"
+    assert client.cached_handles == ["cachedContents/loop-test"]
+
+
+@pytest.mark.asyncio
+async def test_loop_without_cache_passes_none_handle() -> None:
+    client = _CacheRecordingClient(
+        [_fix_turn([{"slide_id": "slide_02", "instruction": "fix the stat"}])]
+    )
+
+    await run_brain_loop(
+        client,  # type: ignore[arg-type]
+        history=_user_history(),
+        system="sys",
+    )
+
+    assert client.cached_handles == [None]
+
+
+@pytest.mark.asyncio
+async def test_stale_cached_handle_invalidates_and_retries_uncached() -> None:
+    # Server-side eviction inside the client TTL window: the cached call raises
+    # an APIError. The loop must invalidate the cache and finish uncached —
+    # cache failure is a cost regression, never a user-visible failed turn.
+    from google.genai import errors as genai_errors
+
+    from packages.core.gemini_cache import BrainContextCache
+
+    async def create_fn(**_: object) -> str:
+        return "cachedContents/stale"
+
+    cache = BrainContextCache(
+        system="sys",
+        tools=[build_edit_slides_tool()],
+        enabled=True,
+        create_cache_fn=create_fn,  # type: ignore[arg-type]
+    )
+    client = _CacheRecordingClient(
+        [
+            genai_errors.ClientError(
+                403, {"error": {"status": "PERMISSION_DENIED", "message": "cache gone"}}
+            ),
+            _fix_turn([{"slide_id": "slide_02", "instruction": "fix the stat"}]),
+        ]
+    )
+
+    result = await run_brain_loop(
+        client,  # type: ignore[arg-type]
+        history=_user_history(),
+        system="sys",
+        context_cache=cache,
+    )
+
+    assert result.kind == "fix"
+    # First call rode the (stale) handle; the retry went uncached.
+    assert client.cached_handles == ["cachedContents/stale", None]
+
+
+@pytest.mark.asyncio
+async def test_uncached_api_error_still_propagates() -> None:
+    from google.genai import errors as genai_errors
+
+    client = _CacheRecordingClient(
+        [
+            genai_errors.ServerError(
+                503, {"error": {"status": "UNAVAILABLE", "message": "overloaded"}}
+            )
+        ]
+    )
+
+    with pytest.raises(genai_errors.APIError):
+        await run_brain_loop(
+            client,  # type: ignore[arg-type]
+            history=_user_history(),
+            system="sys",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stale_handle_fallback_does_not_consume_an_iteration() -> None:
+    # Codex round-2 BUG: with max_iterations=1 a stale cached handle must STILL
+    # get its uncached retry — the transport fallback is not a model turn.
+    from google.genai import errors as genai_errors
+
+    from packages.core.gemini_cache import BrainContextCache
+
+    async def create_fn(**_: object) -> str:
+        return "cachedContents/stale"
+
+    cache = BrainContextCache(
+        system="sys",
+        tools=[build_edit_slides_tool()],
+        enabled=True,
+        create_cache_fn=create_fn,  # type: ignore[arg-type]
+    )
+    client = _CacheRecordingClient(
+        [
+            genai_errors.ClientError(
+                403, {"error": {"status": "PERMISSION_DENIED", "message": "cache gone"}}
+            ),
+            _fix_turn([{"slide_id": "slide_02", "instruction": "fix the stat"}]),
+        ]
+    )
+
+    result = await run_brain_loop(
+        client,  # type: ignore[arg-type]
+        history=_user_history(),
+        system="sys",
+        context_cache=cache,
+        max_iterations=1,
+    )
+
+    assert result.kind == "fix"
+    assert client.cached_handles == ["cachedContents/stale", None]
+
+
+@pytest.mark.asyncio
+async def test_cached_call_timeout_also_falls_back_uncached() -> None:
+    # Panel finding: only APIError fell back; a cached-call TimeoutError became
+    # a user-visible failed turn instead of a cost-only degradation.
+    from packages.core.gemini_cache import BrainContextCache
+
+    async def create_fn(**_: object) -> str:
+        return "cachedContents/slow"
+
+    cache = BrainContextCache(
+        system="sys",
+        tools=[build_edit_slides_tool()],
+        enabled=True,
+        create_cache_fn=create_fn,  # type: ignore[arg-type]
+    )
+    client = _CacheRecordingClient(
+        [
+            TimeoutError("cached call timed out"),
+            _fix_turn([{"slide_id": "slide_02", "instruction": "fix"}]),
+        ]
+    )
+
+    result = await run_brain_loop(
+        client,  # type: ignore[arg-type]
+        history=_user_history(),
+        system="sys",
+        context_cache=cache,
+        max_iterations=1,
+    )
+
+    assert result.kind == "fix"
+    assert client.cached_handles == ["cachedContents/slow", None]
+
+
+@pytest.mark.asyncio
+async def test_nondefault_tool_config_never_fetches_a_cache_handle() -> None:
+    # Panel finding: generate_with_tools bypasses the cache for non-default tool
+    # configs, so the loop must not fetch a handle there — otherwise an APIError
+    # on the genuinely-uncached call is mislabeled as a stale-cache failure.
+    from packages.core.gemini_cache import BrainContextCache
+
+    calls = 0
+
+    async def create_fn(**_: object) -> str:
+        nonlocal calls
+        calls += 1
+        return "cachedContents/never-used"
+
+    cache = BrainContextCache(
+        system="sys",
+        tools=[build_edit_slides_tool()],
+        enabled=True,
+        create_cache_fn=create_fn,  # type: ignore[arg-type]
+    )
+    client = _CacheRecordingClient([_fix_turn([{"slide_id": "slide_02", "instruction": "fix"}])])
+
+    await run_brain_loop(
+        client,  # type: ignore[arg-type]
+        history=_user_history(),
+        system="sys",
+        tool_mode=_ANY,
+        allowed_function_names=["edit_slides"],
+        context_cache=cache,
+    )
+
+    assert client.cached_handles == [None]
+    assert calls == 0

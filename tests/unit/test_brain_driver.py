@@ -164,3 +164,37 @@ async def test_turn_failure_degrades_to_reply() -> None:
     assert outcome.reply_text is None
     # A failed turn leaves no trace — history is unchanged so the user can retry.
     assert outcome.history == session.history
+
+
+def test_driver_builds_context_cache_when_env_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from packages.core.gemini_cache import BRAIN_CACHE_ENV, BrainContextCache
+
+    monkeypatch.setenv(BRAIN_CACHE_ENV, "1")
+    driver = GeminiBrainDriver(gemini=_FakeGemini([]))  # type: ignore[arg-type]
+    assert isinstance(driver.context_cache, BrainContextCache)
+    assert driver.context_cache.enabled is True
+
+
+def test_driver_skips_context_cache_when_env_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from packages.core.gemini_cache import BRAIN_CACHE_ENV
+
+    monkeypatch.delenv(BRAIN_CACHE_ENV, raising=False)
+    driver = GeminiBrainDriver(gemini=_FakeGemini([]))  # type: ignore[arg-type]
+    assert driver.context_cache is None
+
+
+def test_context_cache_is_process_wide_across_driver_constructions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The chat loop builds a FRESH driver per user message; a per-driver cache
+    # would be created and consumed once per turn — costing MORE than uncached
+    # (Codex finding). The cache must be one shared process-wide instance.
+    import packages.bot.sessions.driver as driver_module
+    from packages.core.gemini_cache import BRAIN_CACHE_ENV
+
+    monkeypatch.setenv(BRAIN_CACHE_ENV, "1")
+    monkeypatch.setattr(driver_module, "_brain_context_cache_singleton", None)
+    first = GeminiBrainDriver(gemini=_FakeGemini([]))  # type: ignore[arg-type]
+    second = GeminiBrainDriver(gemini=_FakeGemini([]))  # type: ignore[arg-type]
+    assert first.context_cache is not None
+    assert first.context_cache is second.context_cache
