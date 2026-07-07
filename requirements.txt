@@ -17,6 +17,10 @@ google-genai==2.0.1
 aiogram==3.28.2
 aiohttp==3.13.3
 
+# --- Web API (packages/api) ---
+fastapi==0.115.14
+uvicorn[standard]==0.40.0
+
 # --- Database ---
 supabase==2.30.0
 

@@ -58,6 +58,14 @@ class PlatformConfig:
     webhook_port: int = 8080
     dev_mode: bool = False
     admin_telegram_ids: tuple[int, ...] = field(default_factory=tuple)
+    # --- web platform (packages/api) ---
+    supabase_anon_key: str = ""
+    # The project's legacy shared HS256 JWT secret — identity Path A mints
+    # session JWTs with it. Empty ⇒ the auth surface refuses to mint (fail
+    # closed) rather than falling back to an insecure default.
+    supabase_jwt_secret: str = ""
+    app_jwt_ttl_seconds: int = 3600
+    web_cors_origins: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_env(cls) -> PlatformConfig:
@@ -90,6 +98,10 @@ class PlatformConfig:
             webhook_port=_parse_port(os.environ.get("WEBHOOK_PORT", "8080")),
             dev_mode=dev_mode,
             admin_telegram_ids=admin_ids,
+            supabase_anon_key=os.environ.get("SUPABASE_ANON_KEY", ""),
+            supabase_jwt_secret=os.environ.get("SUPABASE_JWT_SECRET", ""),
+            app_jwt_ttl_seconds=_parse_ttl(os.environ.get("APP_JWT_TTL_SECONDS", "3600")),
+            web_cors_origins=_parse_origins(os.environ.get("WEB_CORS_ORIGINS", "")),
         )
 
 
@@ -103,3 +115,30 @@ def _parse_port(raw: str) -> int:
     if port < 1 or port > 65535:
         return 8080
     return port
+
+
+def _parse_ttl(raw: str) -> int:
+    """Parse a session-TTL string in seconds, falling back to one hour."""
+
+    try:
+        ttl = int(raw)
+    except ValueError:
+        return 3600
+    if ttl < 60 or ttl > 86_400:
+        return 3600
+    return ttl
+
+
+def _parse_origins(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated CORS origin allowlist; blanks and wildcards dropped.
+
+    The web contract is an explicit allowlist — a ``*`` entry is dropped (panel
+    finding) so a stray ``WEB_CORS_ORIGINS=*`` cannot open bearer-auth endpoints
+    to every origin. An empty result means CORS middleware is not installed.
+    """
+
+    return tuple(
+        origin
+        for piece in raw.split(",")
+        if (origin := piece.strip().rstrip("/")) and origin != "*"
+    )

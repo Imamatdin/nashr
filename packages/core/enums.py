@@ -547,3 +547,10 @@ class GenerationPackage(StrEnum):
     ARTICLE_STANDARD = "article_standard"
     RESEARCH_PACKAGE = "research_package"
     BUNDLE_ARTICLE_PRESENTATION = "bundle_article_presentation"
+
+
+class IdentityProvider(StrEnum):
+    """External login identity providers mapped onto users.id (migration 005)."""
+
+    TELEGRAM = "telegram"
+    EMAIL = "email"
