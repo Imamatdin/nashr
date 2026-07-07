@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.env.local
+next-env.d.ts
+*.tsbuildinfo
+
+# Re-include (root .gitignore ignores .env.* — panel finding: the example was
+# silently unstageable, breaking the documented NEXT_PUBLIC_* env contract).
+!.env.local.example
