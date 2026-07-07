@@ -84,9 +84,67 @@ services:
     networks:
       - nashr-net
 
+  # Web backend (packages/api). Same image as the bot; runs the FastAPI app.
+  # NOT published directly — Caddy terminates TLS and reverse-proxies to it over
+  # the internal network. Env is intentionally the privileged set (this is the
+  # trusted tier); the Vercel-hosted web app holds only the anon key.
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nashr-api
+    command: ["python", "-m", "packages.api.run"]
+    restart: unless-stopped
+    environment:
+      # P1-required secrets use ${VAR:?} so a missing one FAILS `compose up`
+      # rather than booting a broken public auth service (review finding).
+      # --- Telegram (initData HMAC on the Mini App door) ---
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN}
+      NASHR_ENV: ${NASHR_ENV:-production}
+
+      # --- Supabase (service key = privileged writes; anon key + jwt secret
+      #     drive the identity doors and RLS-scoped sessions) ---
+      SUPABASE_URL: ${SUPABASE_URL:?set SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:?set SUPABASE_SERVICE_KEY}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?set SUPABASE_ANON_KEY}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:?set SUPABASE_JWT_SECRET}
+
+      # --- Web API surface. The internal port is fixed at 8090 (Caddy proxies
+      #     api:8090); it is deliberately NOT a knob so the two can't drift. ---
+      APP_JWT_TTL_SECONDS: ${APP_JWT_TTL_SECONDS:-3600}
+      WEB_CORS_ORIGINS: ${WEB_CORS_ORIGINS:-}
+    # No vertex-key.json mount / LLM env: the P1 auth routes make no model call,
+    # so the auth tier carries no Google credential (least privilege). The LLM
+    # env + mount are added back when P4 runs web chat turns through this service.
+    networks:
+      - nashr-net
+
+  # TLS terminator + reverse proxy. Auto-provisions a Let's Encrypt cert for
+  # $API_DOMAIN (needs the A record pointed at this host and :80/:443 open).
+  # Containerized (not host-Caddy) so the whole stack stays host-portable.
+  caddy:
+    image: caddy:2-alpine
+    container_name: nashr-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:-api.nashr.com.uz}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    networks:
+      - nashr-net
+
 volumes:
   nashr-temp:
   redis-data:
+  caddy-data:
+  caddy-config:
 
 networks:
   nashr-net:

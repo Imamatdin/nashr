@@ -1,0 +1,8 @@
+# Nashr reverse proxy. $API_DOMAIN comes from the compose environment
+# (default api.nashr.com.uz). Caddy fetches + renews a Let's Encrypt cert
+# automatically once the domain's A record points at this host and ports
+# 80/443 are reachable. The FastAPI app listens on :8090 inside the network.
+{$API_DOMAIN:api.nashr.com.uz} {
+	encode gzip
+	reverse_proxy api:8090
+}
