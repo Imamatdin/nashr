@@ -1870,3 +1870,37 @@ Suite at commit time: 1609 passed, 1 known flake (test_resolution_runs_in_parall
 timing-sensitive, passes standalone; untouched by this diff). ruff + format + pyright
 clean on changed files. NOT VERIFIED live: class-B recovery under real DSQ throttling
 (VM observable: gemini_call_throttled_retrying then a successful pass on the same job).
+
+## 2026-08-03 — P0 GATE CLOSED (branch build1-content-critic @ 87574f0)
+
+Host: GCE nashr-vm (e2-medium, europe-west3-b, project nashr-prod, trial credits),
+compose stack live (nashr-bot / nashr-api / nashr-redis / nashr-caddy), bot resurrected
+@ 87574f0. VM burn ~\$30/mo est. — OPEN: confirm vs Billing.
+
+Editorial transport: Anthropic DIRECT (LLM_TRANSPORT=anthropic). Vertex-Claude transport
+BUILT + proven to the quota wall (429 named quota; auth/routing correct); parked behind
+Google's partner-model usage-history gate (paid acct since May 15, still 0-to-0).
+Re-check ~2026-08-17 as Gemini spend accrues.
+
+\$/deck (2-source heavy run, full escalation, no cache): editorial \$0.37 (60k in / 13k
+out, Anthropic console) + Gemini \$0.81 (98 gemini_call_complete payloads in the 15:00Z
+run cluster, summed estimated_cost_usd from docker logs — the telemetry landed by
+4409e72; conservative ceiling, cached tokens billed at full input rate) = **\$1.18**.
+A separate 5-call warm-up cluster at 14:00Z (\$0.03) excluded.
+
+Proven live this run:
+- 429 class-split backoff: BOTH tiers hit capacity 429s and recovered on attempt 1 —
+  `gemini_call_throttled_retrying {"model": "gemini-3.5-flash", "attempt": 1, ...}` and
+  the same for gemini-3.1-pro-preview (delay 8.1-8.6s of backoff 10s, full jitter).
+- Per-call telemetry in message strings (103 gemini_call_complete payloads visible today).
+- 7.7MB multi-file ingestion; OCR graceful degrade (page-27 timeout); honest-failure
+  contract (3/3 this month); delivered deck at quality bar with critic-precision
+  correction visible in notes (30.9782).
+
+LOGGED DEFECTS: (1) repair-path scaffolding leaks into speaker_notes (SOURCE GROUNDING /
+CONTINUITY blocks) — prompt-layer fix, next prompt session; (2) per-page OCR timeout
+budget on large PDFs; (3) cached_input_tokens=0 EXPECTED here (cache scope = Way 2
+sessions) — cache-read evidence still owed at P4 gate.
+
+OPEN HUMAN ITEMS: Anthropic balance \$5.11 (top-up decision); escalation attempts 3→4
+(live data: 5→4→2→1 hit the cap one short); key rotations post-P1.
