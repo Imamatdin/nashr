@@ -21,6 +21,7 @@ WORKDIR /app
 #   - poppler    : PyMuPDF helpers / PDF rasterisation
 #   - tesseract  : OCR fallback for scanned PDFs (uz + ru language packs)
 #   - libreoffice-writer : DOCX -> PDF in the article pipeline
+#   - postgresql-client  : pg_dump/pg_restore/psql for the nightly backup service
 #   - ca-certificates    : TLS to Supabase / R2 / LLM providers
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -32,6 +33,7 @@ RUN apt-get update \
         tesseract-ocr-rus \
         libreoffice-writer \
         libreoffice-impress \
+        postgresql-client \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*

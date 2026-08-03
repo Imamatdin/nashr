@@ -119,6 +119,63 @@ services:
     networks:
       - nashr-net
 
+  # Generation-jobs worker (P2): claims queued rows from generation_jobs,
+  # runs the full pipeline, heartbeats, reaps zombies. Same image as the bot
+  # (full pipeline toolchain: node worker, Chromium, LibreOffice, fonts).
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nashr-worker
+    command: ["python", "scripts/worker_run_job.py", "--loop"]
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      NASHR_ENV: ${NASHR_ENV:-production}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
+      R2_SECRET_KEY: ${R2_SECRET_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-nashr-files}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_TRANSPORT: ${LLM_TRANSPORT:-vertex}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_BRAIN_CACHE: ${GEMINI_BRAIN_CACHE:-1}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/vertex-key.json
+      VERTEX_PROJECT: nashr-prod
+      VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
+    volumes:
+      - nashr-temp:/tmp/nashr
+      - ./debug:/app/debug
+      - ./vertex-key.json:/app/vertex-key.json:ro
+    networks:
+      - nashr-net
+
+  # Nightly pg_dump -> R2 backups/ (14-day retention). Same image (has
+  # postgresql-client + boto3). SUPABASE_DB_URL is the DIRECT Postgres
+  # connection string, not the REST URL.
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nashr-backup
+    command: ["python", "scripts/backup_db.py", "--loop"]
+    restart: unless-stopped
+    environment:
+      NASHR_ENV: ${NASHR_ENV:-production}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      SUPABASE_DB_URL: ${SUPABASE_DB_URL:?set SUPABASE_DB_URL for backups}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
+      R2_SECRET_KEY: ${R2_SECRET_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-nashr-files}
+    networks:
+      - nashr-net
+
   # TLS terminator + reverse proxy. Auto-provisions a Let's Encrypt cert for
   # $API_DOMAIN (needs the A record pointed at this host and :80/:443 open).
   # Containerized (not host-Caddy) so the whole stack stays host-portable.
