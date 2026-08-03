@@ -23,6 +23,7 @@ instead of scattered across the article, presentation, and source workers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -418,18 +419,22 @@ class LLMClient:
                 cache_write_1h_input_tokens=write_1h,
             )
 
+            # Payload in the message string, not extra: the docker log
+            # formatter drops extra, hiding token/cost telemetry.
             logger.info(
-                "llm_call_complete",
-                extra={
-                    "model": model,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_read_input_tokens": cache_read,
-                    "cache_creation_input_tokens": cache_creation,
-                    "total_prompt_tokens": input_tokens + cache_read + cache_creation,
-                    "latency_ms": latency_ms,
-                    "estimated_cost_usd": round(cost, 6),
-                },
+                "llm_call_complete %s",
+                json.dumps(
+                    {
+                        "model": model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": cache_creation,
+                        "total_prompt_tokens": input_tokens + cache_read + cache_creation,
+                        "latency_ms": latency_ms,
+                        "estimated_cost_usd": round(cost, 6),
+                    }
+                ),
             )
 
             return LLMResponse(

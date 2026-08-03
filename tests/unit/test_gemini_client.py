@@ -542,10 +542,11 @@ async def test_complete_logs_cached_input_tokens(caplog: pytest.LogCaptureFixtur
     with caplog.at_level(logging.INFO, logger="packages.core.gemini"):
         await client.complete(system="sys", user="usr")
 
-    records = [r for r in caplog.records if r.getMessage() == "gemini_call_complete"]
+    records = [r for r in caplog.records if r.getMessage().startswith("gemini_call_complete ")]
     assert len(records) == 1
-    assert records[0].__dict__["cached_input_tokens"] == 210
-    assert records[0].__dict__["input_tokens"] == 300
+    payload = json.loads(records[0].getMessage().removeprefix("gemini_call_complete "))
+    assert payload["cached_input_tokens"] == 210
+    assert payload["input_tokens"] == 300
 
 
 # --- generate_with_tools (manual tool-calling primitive) ----------------------
@@ -904,10 +905,11 @@ async def test_generate_with_tools_logs_cached_input_tokens(
     with caplog.at_level(logging.INFO, logger="packages.core.gemini"):
         await client.generate_with_tools(contents=_user_turn(), tools=[_tool()])
 
-    records = [r for r in caplog.records if r.getMessage() == "gemini_call_complete"]
+    records = [r for r in caplog.records if r.getMessage().startswith("gemini_call_complete ")]
     assert len(records) == 1
-    assert records[0].__dict__["cached_input_tokens"] == 420
-    assert records[0].__dict__["input_tokens"] == 500
+    payload = json.loads(records[0].getMessage().removeprefix("gemini_call_complete "))
+    assert payload["cached_input_tokens"] == 420
+    assert payload["input_tokens"] == 500
 
 
 @pytest.mark.asyncio

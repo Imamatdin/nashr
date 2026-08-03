@@ -351,16 +351,20 @@ class GeminiClient:
         )
         cost = gemini_cost_for(model, input_tokens, output_tokens)
 
+        # Payload in the message string, not extra: the docker log formatter
+        # drops extra, and cached_input_tokens is P0 gate evidence.
         logger.info(
-            "gemini_call_complete",
-            extra={
-                "model": model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cached_input_tokens": cached_input_tokens,
-                "latency_ms": latency_ms,
-                "estimated_cost_usd": round(cost, 6),
-            },
+            "gemini_call_complete %s",
+            json.dumps(
+                {
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "latency_ms": latency_ms,
+                    "estimated_cost_usd": round(cost, 6),
+                }
+            ),
         )
 
         return LLMResponse(
@@ -643,17 +647,19 @@ class GeminiClient:
         cost = gemini_cost_for(model, input_tokens, output_tokens)
 
         logger.info(
-            "gemini_call_complete",
-            extra={
-                "model": model,
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cached_input_tokens": cached_input_tokens,
-                "latency_ms": latency_ms,
-                "estimated_cost_usd": round(cost, 6),
-                "function_calls": len(function_calls),
-                "finish_reason": finish_reason.value if finish_reason is not None else None,
-            },
+            "gemini_call_complete %s",
+            json.dumps(
+                {
+                    "model": model,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "latency_ms": latency_ms,
+                    "estimated_cost_usd": round(cost, 6),
+                    "function_calls": len(function_calls),
+                    "finish_reason": finish_reason.value if finish_reason is not None else None,
+                }
+            ),
         )
 
         return ToolTurnResult(

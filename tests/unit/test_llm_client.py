@@ -19,6 +19,7 @@ We do not exercise real network calls; that's an integration concern.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -281,12 +282,12 @@ async def test_llm_call_complete_logs_cache_fields(caplog: pytest.LogCaptureFixt
     caplog.set_level(logging.INFO, logger="packages.core.llm")
     await client.complete(system="rules", user="task", cache="5m")
 
-    records = [r for r in caplog.records if r.message == "llm_call_complete"]
+    records = [r for r in caplog.records if r.getMessage().startswith("llm_call_complete ")]
     assert len(records) == 1
-    record = records[0]
-    assert record.cache_read_input_tokens == 50
-    assert record.cache_creation_input_tokens == 10
-    assert record.total_prompt_tokens == 5 + 50 + 10
+    payload = json.loads(records[0].getMessage().removeprefix("llm_call_complete "))
+    assert payload["cache_read_input_tokens"] == 50
+    assert payload["cache_creation_input_tokens"] == 10
+    assert payload["total_prompt_tokens"] == 5 + 50 + 10
 
 
 @pytest.mark.asyncio
