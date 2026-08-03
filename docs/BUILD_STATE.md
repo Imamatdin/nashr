@@ -1835,3 +1835,38 @@ docs/AUTORUN_2026-07-06.md): Vertex Claude transport COMMITTED 6ab511a (LLM_TRAN
 lazy client, vertex_model_id allowlist); migration 005/005b WRITTEN not applied;
 identity preflight script WRITTEN not run; packages/api auth surface + packages/web
 skeleton BUILT, suite 1589 green at time of writing.
+
+## 2026-08-03 — Vertex 429 resilience + per-call telemetry (branch build1-content-critic)
+
+Three items, one per commit, driven by live-run evidence of two distinct 429 classes on
+gemini-3.1-pro-preview (12:07 run died on nameless RESOURCE_EXHAUSTED after 3 retries;
+12:37 run survived the same policy by luck).
+
+1. **429-aware backoff** (57cbca8, `packages/core/gemini.py` `_generate_with_retry`):
+   class A = 429 whose message names a quota metric (`_is_quota_metric_429`: substring
+   match on "quota metric" / "quota_metric" / "quota exceeded") → fail fast, like auth.
+   Class B = nameless RESOURCE_EXHAUSTED (dynamic shared quota capacity throttle) →
+   exponential backoff with full jitter, base 10s, cap 120s, pre-jitter budget 480s
+   (deterministically 6 retries), on a counter that does NOT consume max_retries.
+   Timeouts/5xx keep the 1s/2s policy. Every retry logs attempt/delay/error class in the
+   message string.
+2. **Sequential union passes** (5970497, `packages/presentation/editorial.py`
+   `_critique_unioned`): the two adversarial critique passes now run sequentially instead
+   of asyncio.gather — a concurrent burst of two large Pro calls is exactly the DSQ
+   throttle shape. Union CONTRACT unchanged (dedupe key, llm_verified both-or-nothing,
+   add-only discipline, editorial_critique_union fields); new test pins non-overlap.
+3. **Per-call log payloads** (4409e72, `packages/core/gemini.py` + `llm.py`):
+   gemini_call_complete / llm_call_complete now embed the telemetry dict via json.dumps
+   in the message string (9133074 pattern) — cached_input_tokens explicitly included as
+   the P0 GEMINI_BRAIN_CACHE gate observable in docker logs.
+
+Adversarial review: architect seat (Codex auth lapsed); package in `review/`
+(resilience.diff, resilience_tests.py, NOTES.md). Approved, no code changes required.
+Accepted notes: (a) per-minute quota 429s now fail fast instead of retrying — old 1s/2s
+retries could not survive a per-minute window anyway; (b) union critique latency is now
+two sequential Pro calls instead of one gathered burst.
+
+Suite at commit time: 1609 passed, 1 known flake (test_resolution_runs_in_parallel,
+timing-sensitive, passes standalone; untouched by this diff). ruff + format + pyright
+clean on changed files. NOT VERIFIED live: class-B recovery under real DSQ throttling
+(VM observable: gemini_call_throttled_retrying then a successful pass on the same job).
