@@ -256,7 +256,13 @@ class PresentationOrchestrator:
 
         filename = str(info.get("filename") or "upload.bin")
         try:
-            file_bytes = await self._download_telegram_file(str(info.get("file_id") or ""))
+            storage_key = str(info.get("storage_key") or "")
+            if storage_key:
+                # Queue jobs (P2): the web surface already uploaded the source
+                # to R2; fetch by key instead of through Telegram.
+                file_bytes = await self._download_stored_source(storage_key)
+            else:
+                file_bytes = await self._download_telegram_file(str(info.get("file_id") or ""))
         except Exception as exc:
             logger.warning(
                 "presentation_source_download_failed",
@@ -298,6 +304,13 @@ class PresentationOrchestrator:
             project_id=project_id,
             reason=FreeCreditsReason.SOURCE_UPLOAD,
         )
+
+    async def _download_stored_source(self, storage_key: str) -> bytes:
+        """Fetch an already-uploaded source from R2 (web/queue path)."""
+
+        if self._storage is None:
+            raise RuntimeError("storage not configured; cannot fetch stored source")
+        return await self._storage.get_bytes(storage_key)
 
     async def _download_telegram_file(self, file_id: str) -> bytes:
         """Download a Telegram file; raise on transport errors."""
@@ -825,15 +838,45 @@ class PresentationOrchestrator:
             return
         for ext, path in result.by_extension().items():
             try:
-                key_namespace = project_id if project_id else path.stem
-                key = FileStorage.generated_key(key_namespace, path.name)
+                if project_id:
+                    # Stable per-format key (migration 007): a regenerated or
+                    # brain-fixed deck OVERWRITES in place, so share links and
+                    # web downloads never point at an orphaned title-named key.
+                    key = FileStorage.stable_generated_key(project_id, ext)
+                else:
+                    key = FileStorage.generated_key(path.stem, path.name)
                 await storage.upload(path, key)
+                if project_id:
+                    await self._register_generated_file(project_id, ext, key, path)
             except Exception as exc:
                 result.warnings.append(f"{ext}: upload failed ({type(exc).__name__})")
                 logger.warning(
                     "presentation_storage_upload_failed",
                     extra={"format": ext, "error_type": type(exc).__name__},
                 )
+
+    async def _register_generated_file(
+        self,
+        project_id: str,
+        ext: str,
+        key: str,
+        path: Path,
+    ) -> None:
+        """Upsert the project's generated_files row for one format (best-effort).
+
+        Keys on (project_id, file_type), so re-delivery refreshes the row
+        instead of appending duplicates — the web surface reads these rows.
+        A DB failure never blocks delivery; the local files still flow.
+        """
+
+        try:
+            size = int(path.stat().st_size)
+            await self._db.upsert_generated_file(project_id, ext, key, size)
+        except Exception as exc:
+            logger.warning(
+                "presentation_generated_file_register_failed",
+                extra={"format": ext, "error_type": type(exc).__name__},
+            )
 
     # ====================================================================
     # FULL PIPELINE

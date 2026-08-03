@@ -14,9 +14,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from packages.api.routes.auth import router as auth_router
+from packages.api.routes.jobs import router as jobs_router
 from packages.api.services.identity import IdentityService
 from packages.platform.config import PlatformConfig
+from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.platform.jobs import JobQueue
+from packages.platform.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +29,9 @@ def create_app(
     config: PlatformConfig | None = None,
     db: DatabaseClient | None = None,
     identity_service: IdentityService | None = None,
+    credits: CreditLedger | None = None,
+    job_queue: JobQueue | None = None,
+    rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     """Build the API app; tests inject config/db/service, production uses env."""
 
@@ -35,11 +42,19 @@ def create_app(
         if identity_service is not None
         else IdentityService(resolved_config, resolved_db)
     )
+    resolved_credits = (
+        credits
+        if credits is not None
+        else CreditLedger(resolved_db, dev_mode=resolved_config.dev_mode)
+    )
 
     app = FastAPI(title="Nashr API", docs_url=None, redoc_url=None)
     app.state.config = resolved_config
     app.state.db = resolved_db
     app.state.identity_service = resolved_identity
+    app.state.credits = resolved_credits
+    app.state.job_queue = job_queue if job_queue is not None else JobQueue(resolved_db)
+    app.state.rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter(resolved_db)
 
     if resolved_config.web_cors_origins:
         app.add_middleware(
@@ -50,6 +65,7 @@ def create_app(
         )
 
     app.include_router(auth_router)
+    app.include_router(jobs_router)
     app.add_api_route("/health", _health, methods=["GET"])
 
     return app

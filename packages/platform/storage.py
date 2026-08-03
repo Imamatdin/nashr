@@ -229,6 +229,17 @@ class FileStorage:
 
         return f"generated/{project_id}/{_sanitize_filename(filename)}"
 
+    @staticmethod
+    def stable_generated_key(project_id: str, ext: str) -> str:
+        """Stable per-format output key: ``generated/{project_id}/presentation.{ext}``.
+
+        Deliberately NOT title-derived: regenerations and brain fixes
+        overwrite the same object, so share links and ``generated_files``
+        rows stay valid across edits (migration 007).
+        """
+
+        return f"generated/{project_id}/presentation.{ext.lstrip('.')}"
+
     # ============================================================ local fallback
 
     @property

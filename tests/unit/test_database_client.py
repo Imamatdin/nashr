@@ -190,15 +190,20 @@ class FakeSupabaseClient:
             return SimpleNamespace(data=updated)
         if mode == "upsert":
             assert payload is not None
-            conflict_col = on_conflict or "id"
+            conflict_cols = (on_conflict or "id").split(",")
             match = next(
-                (r for r in rows if r.get(conflict_col) == payload.get(conflict_col)),
+                (
+                    r
+                    for r in rows
+                    if all(r.get(c) == payload.get(c) for c in conflict_cols)
+                    and any(payload.get(c) is not None for c in conflict_cols)
+                ),
                 None,
             )
             if match is not None:
                 match.update(payload)
                 self.updates.append(
-                    (table, dict(payload), [(conflict_col, payload.get(conflict_col))])
+                    (table, dict(payload), [(c, payload.get(c)) for c in conflict_cols])
                 )
                 return SimpleNamespace(data=[match])
             row = dict(payload)

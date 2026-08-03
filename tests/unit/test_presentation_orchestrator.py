@@ -639,6 +639,66 @@ async def test_render_uploads_to_storage_with_project_id_namespace() -> None:
         assert key.startswith(f"generated/{PROJECT_ID}/")
 
 
+async def test_render_uploads_use_stable_per_format_keys_and_upsert_registration() -> None:
+    """P2 stable keys: uploads land on generated/{pid}/presentation.{ext} and the
+    generated_files row is upserted per (project, format) — never title-derived,
+    never appended as duplicates."""
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bot = _StubBot()
+    worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
+
+    storage_stub = MagicMock()
+    storage_stub.available = True
+    storage_stub.upload = AsyncMock(return_value="")
+
+    orch, _, _, fake = _build_orch(bot, worker=worker, storage=storage_stub)
+
+    await orch.render(
+        _deck_spec(),
+        [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+        _noop_progress,
+        project_id=PROJECT_ID,
+    )
+
+    keys = sorted(call.args[1] for call in storage_stub.upload.await_args_list)
+    assert keys == [
+        f"generated/{PROJECT_ID}/presentation.html",
+        f"generated/{PROJECT_ID}/presentation.pptx",
+    ]
+    rows = fake.tables.get("generated_files", [])
+    assert {r["file_type"] for r in rows} == {"html", "pptx"}
+    for row in rows:
+        assert row["storage_path"] == f"generated/{PROJECT_ID}/presentation.{row['file_type']}"
+        assert row["project_id"] == PROJECT_ID
+        assert row["file_size"] > 0
+
+
+async def test_process_sources_fetches_from_storage_when_key_present() -> None:
+    """P2 queue path: a source carrying storage_key is fetched from R2, not Telegram."""
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bot = _StubBot()
+    pipeline = _StubSourcePipeline([_pipeline_result(), _pipeline_result()])
+    storage_stub = MagicMock()
+    storage_stub.available = True
+    storage_stub.get_bytes = AsyncMock(return_value=b"%PDF-1.4 stored bytes")
+
+    orch, _db, _credits, _fake = _build_orch(bot, pipeline=pipeline, storage=storage_stub)
+
+    file_infos: list[dict[str, object]] = [
+        {"storage_key": f"sources/{PROJECT_ID}/web.pdf", "filename": "web.pdf"},
+        {"file_id": "f1", "filename": "tg.pdf", "file_size": 100, "file_type": "pdf"},
+    ]
+    result = await orch.process_sources(file_infos, PROJECT_ID, USER_ID, _noop_progress)
+
+    storage_stub.get_bytes.assert_awaited_once_with(f"sources/{PROJECT_ID}/web.pdf")
+    assert bot.downloaded == ["f1"]
+    assert len(result.claims) == 2
+
+
 async def test_render_records_timeout_as_warning_and_continues() -> None:
     bot = _StubBot()
     worker = _StubWorkerRunner(

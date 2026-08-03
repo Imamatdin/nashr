@@ -662,6 +662,38 @@ class DatabaseClient:
             )
         )
 
+    # ------------------------------------------------------ generated upsert
+
+    async def upsert_generated_file(
+        self,
+        project_id: str,
+        file_type: str,
+        storage_path: str,
+        file_size: int,
+    ) -> dict[str, Any]:
+        """Register (or refresh) the project's single output row per format.
+
+        Keys on the migration-007 ``uq_generated_files_project_type`` unique
+        constraint, mirroring the stable R2 key layout
+        ``generated/{project_id}/presentation.{ext}`` that overwrites in
+        place — re-delivery updates the row instead of appending duplicates.
+        """
+
+        payload: dict[str, Any] = {
+            "project_id": project_id,
+            "file_type": file_type,
+            "storage_path": storage_path,
+            "file_size": file_size,
+        }
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("generated_files")
+                .upsert(payload, on_conflict="project_id,file_type")
+                .execute()
+            )
+        )
+        return cast(dict[str, Any], result.data[0])
+
     # ---------------------------------------------------------- raw queries
 
     def _query(self, table: str) -> Any:
@@ -674,3 +706,13 @@ class DatabaseClient:
         """
 
         return self._client.table(table)
+
+    def rpc(self, fn: str, params: dict[str, Any]) -> Any:
+        """Call a Postgres function via PostgREST (synchronous; callers thread it).
+
+        Used by the job queue (``claim_next_job`` / ``heartbeat_job`` /
+        ``reap_stale_jobs``) and the rate limiter (``consume_rate_limit``) —
+        operations that must be a single atomic statement server-side.
+        """
+
+        return self._client.rpc(fn, params).execute()
