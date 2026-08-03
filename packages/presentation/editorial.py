@@ -37,7 +37,6 @@ class body stays readable.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -2602,14 +2601,18 @@ async def _critique_unioned(
 
     Calls the module-level ``critique_deck_adversarially`` name so a test seam that
     stubs the critic — at the shared Gemini client (by system prompt) or by patching
-    the name — intercepts both internal passes. The two passes run concurrently;
-    ``asyncio.gather`` propagates the first exception, so a Gemini API error still
-    propagates exactly as a single critique's would today.
+    the name — intercepts both internal passes. The two passes run SEQUENTIALLY, not
+    gathered: a concurrent burst of two large Pro calls is exactly the shape Vertex
+    dynamic shared quota throttles (nameless 429s on gemini-3.1-pro-preview). A
+    Gemini API error from either pass still propagates exactly as a single
+    critique's would today.
     """
 
-    first, second = await asyncio.gather(
-        critique_deck_adversarially(slides, plan, claims=claims, gemini=gemini, language=language),
-        critique_deck_adversarially(slides, plan, claims=claims, gemini=gemini, language=language),
+    first = await critique_deck_adversarially(
+        slides, plan, claims=claims, gemini=gemini, language=language
+    )
+    second = await critique_deck_adversarially(
+        slides, plan, claims=claims, gemini=gemini, language=language
     )
     union_result = PlanValidationResult(
         findings=_union_critic_findings(first.result.findings, second.result.findings)

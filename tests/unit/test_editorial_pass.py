@@ -8,6 +8,7 @@ are tested without any stubs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -3467,6 +3468,47 @@ async def test_critique_unioned_unions_a_finding_only_the_second_pass_saw() -> N
     assert outcome.llm_verified is True  # both passes produced a verdict
     assert [f.check_id for f in outcome.result.failures] == ["C-FB"]
     assert outcome.result.passed is False  # a defect only ONE pass saw still blocks
+
+
+async def test_critique_unioned_runs_the_two_passes_sequentially(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two union passes must NOT run concurrently: a simultaneous burst of two
+    large Pro calls is exactly the shape Vertex dynamic shared quota throttles."""
+
+    from packages.core.models.presentation import PlanValidationResult
+    from packages.presentation.content_critic import ContentCritiqueResult
+
+    plan = _stub_plan()
+    section = plan.sections[0]
+    slide = _critic_content_slide(
+        "Findings",
+        "Water savings reached 94.4 percent in field trials.",
+        section.section_name,
+        section.thesis,
+    )
+    claims = [_claim("The system reduced water consumption during the evaluation period.")]
+
+    in_flight = {"now": 0, "max": 0}
+
+    async def fake_critique(*_args: object, **_kwargs: object) -> ContentCritiqueResult:
+        in_flight["now"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["now"])
+        await asyncio.sleep(0)  # yield so a gathered sibling WOULD overlap here
+        in_flight["now"] -= 1
+        return ContentCritiqueResult(result=PlanValidationResult(findings=[]), llm_verified=True)
+
+    monkeypatch.setattr(
+        "packages.presentation.editorial.critique_deck_adversarially", fake_critique
+    )
+    gemini = _StubGemini(critic=[])
+
+    outcome = await _critique_unioned(
+        [slide], plan, claims=claims, gemini=gemini, language=Language.UZ, project_id="proj"
+    )
+
+    assert outcome.llm_verified is True
+    assert in_flight["max"] == 1  # pass 2 never started while pass 1 was in flight
 
 
 @pytest.mark.parametrize("degrade_first", [True, False])
