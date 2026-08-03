@@ -18,6 +18,7 @@ record the identity mapping, mint the Path A session JWT):
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Protocol
 from uuid import UUID
@@ -103,9 +104,11 @@ class IdentityService:
                 if user is None:
                     raise
             else:
+                # Audit events embed their payload in the message string (the
+                # 4409e72 pattern) so docker logs carry the fields verbatim.
                 logger.info(
-                    "identity_telegram_user_created",
-                    extra={"telegram_id": payload.telegram_id},
+                    "identity_telegram_user_created %s",
+                    json.dumps({"telegram_id": payload.telegram_id}),
                 )
         user_id = UUID(str(user["id"]))
         await self._store.upsert_identity(IdentityProvider.TELEGRAM, external_id, user_id)
@@ -151,9 +154,12 @@ class IdentityService:
         winner_id = UUID(str(winner.user_id))
         if winner_id != user_id:
             await self._store.delete_user(user_id)
-            logger.info("identity_email_orphan_reclaimed", extra={"orphan": str(user_id)})
+            logger.info(
+                "identity_email_orphan_reclaimed %s",
+                json.dumps({"orphan": str(user_id), "winner": str(winner_id)}),
+            )
             return winner_id
-        logger.info("identity_email_user_created", extra={"user_id": str(user_id)})
+        logger.info("identity_email_user_created %s", json.dumps({"user_id": str(user_id)}))
         return user_id
 
     async def _fetch_gotrue_user(self, access_token: str) -> tuple[str, UUID]:
@@ -210,8 +216,8 @@ class IdentityService:
             # validated initData proves the telegram account. Fold the orphan in.
             await self._store.merge_users(current_user_id, other_user_id)
             logger.info(
-                "identity_users_merged",
-                extra={"canonical": str(current_user_id), "orphan": str(other_user_id)},
+                "identity_users_merged %s",
+                json.dumps({"canonical": str(current_user_id), "orphan": str(other_user_id)}),
             )
             merged = True
         else:

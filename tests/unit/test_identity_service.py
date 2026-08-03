@@ -285,6 +285,30 @@ class TestIdentityServiceLink:
         assert merged is False
         assert store.merges == []
 
+    @pytest.mark.asyncio
+    async def test_merge_audit_event_embeds_json_payload_in_message(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # F1 (4409e72 pattern): the audit payload must live IN the message
+        # string so docker logs carry the fields verbatim, not in extra=.
+        import json as _json
+
+        store, db = _FakeStore(), _FakeDb()
+        other = uuid4()
+        await store.upsert_identity(IdentityProvider.TELEGRAM, "777000111", other)
+        service = IdentityService(_config(), db, store)  # type: ignore[arg-type]
+        me = uuid4()
+
+        with caplog.at_level("INFO", logger="packages.api.services.identity"):
+            await service.link_telegram(me, _payload())
+
+        merged_msgs = [
+            r.getMessage() for r in caplog.records if "identity_users_merged" in r.getMessage()
+        ]
+        assert len(merged_msgs) == 1
+        payload = _json.loads(merged_msgs[0].split(" ", 1)[1])
+        assert payload == {"canonical": str(me), "orphan": str(other)}
+
 
 class TestTokenHardening:
     def test_raw_supabase_style_token_without_issuer_is_rejected(self) -> None:
