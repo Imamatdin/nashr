@@ -17,8 +17,10 @@ without monkeypatching module-level state or constructing a live
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import random
 import time
 from collections.abc import Awaitable, Callable
 from typing import ClassVar, Final, NamedTuple, Protocol, runtime_checkable
@@ -96,6 +98,36 @@ _SAFETY_SETTINGS: Final[list[genai_types.SafetySetting]] = [
 # HTTP status codes the SDK surfaces via APIError.code. Auth errors must
 # not retry — a bad key is a configuration fault, not a transient one.
 _AUTH_HTTP_CODES: Final[frozenset[int]] = frozenset({401, 403})
+
+# Backoff policy for CAPACITY 429s (Vertex dynamic shared quota throttling on
+# preview models): exponential with full jitter, distinct from the 1s/2s
+# transient policy because DSQ throttling on gemini-3.1-pro-preview has been
+# observed to persist for minutes — a 3-attempt/3s policy is pure luck against
+# it. The budget is accounted on the PRE-jitter backoff series (10, 20, 40, 80,
+# 120, 120, ... capped), not wall clock, so the retry count is deterministic:
+# the series is cut when it would exceed ~8 minutes (six retries today).
+_THROTTLE_BACKOFF_BASE_SECONDS: Final[float] = 10.0
+_THROTTLE_BACKOFF_CAP_SECONDS: Final[float] = 120.0
+_THROTTLE_BACKOFF_BUDGET_SECONDS: Final[float] = 480.0
+
+# Substrings that mark a 429 as a QUOTA exhaustion (class A) rather than
+# capacity throttling (class B). Vertex quota errors name the exceeded metric
+# ("Quota exceeded for quota metric '...'"); DSQ capacity errors are nameless
+# ("Resource exhausted. Please try again later."). Matching on the metric
+# wording keeps quota 429s terminal — retrying a hard quota is pure waste.
+_QUOTA_METRIC_MARKERS: Final[tuple[str, ...]] = ("quota metric", "quota_metric", "quota exceeded")
+
+
+def _is_quota_metric_429(exc: genai_errors.APIError) -> bool:
+    """True when a 429 names a quota metric — terminal, must fail fast.
+
+    False for the nameless RESOURCE_EXHAUSTED capacity form, which is the
+    retryable dynamic-shared-quota throttle. Only meaningful for ``code == 429``;
+    callers gate on the code first.
+    """
+
+    message = str(getattr(exc, "message", None) or exc).lower()
+    return any(marker in message for marker in _QUOTA_METRIC_MARKERS)
 
 
 class GeminiToolCallError(RuntimeError):
@@ -360,6 +392,16 @@ class GeminiClient:
         response and the successful attempt's latency; the caller owns success
         logging, cost accounting, and response parsing.
 
+        429s are split into two classes by message content. A quota 429 that
+        NAMES a metric (:func:`_is_quota_metric_429`) is terminal and propagates
+        immediately, like an auth error. A nameless capacity 429 (Vertex dynamic
+        shared quota throttling) retries on its OWN policy — exponential backoff
+        with full jitter, base 10s, cap 120s, pre-jitter budget ~8 minutes — on a
+        separate counter that does not consume ``max_retries``. Timeouts and
+        non-429 API errors keep the 1s/2s policy unchanged. Every retry logs the
+        attempt number, delay, and error class in the message string (the docker
+        log formatter drops ``extra`` payloads).
+
         A 400 (e.g. a dropped ``thought_signature``) is non-transient but, being
         neither an auth code nor a timeout, is retried to exhaustion like any
         other API error — identical to ``complete``'s historical behaviour, kept
@@ -368,8 +410,10 @@ class GeminiClient:
         """
 
         attempt = 0
+        throttle_attempt = 0
+        throttle_backoff_spent = 0.0
         last_error: Exception | None = None
-        while attempt <= self._max_retries:
+        while True:
             start = time.perf_counter()
             try:
                 response = await asyncio.wait_for(
@@ -387,33 +431,69 @@ class GeminiClient:
                     break
                 backoff = 2 ** (attempt - 1)
                 logger.warning(
-                    "gemini_call_failed_retrying",
-                    extra={
-                        "model": model,
-                        "attempt": attempt,
-                        "backoff_seconds": backoff,
-                        "error_type": type(exc).__name__,
-                    },
+                    "gemini_call_failed_retrying %s",
+                    json.dumps(
+                        {
+                            "model": model,
+                            "attempt": attempt,
+                            "backoff_seconds": backoff,
+                            "error_class": "timeout",
+                            "error_type": type(exc).__name__,
+                        }
+                    ),
                 )
                 await asyncio.sleep(backoff)
                 continue
             except genai_errors.APIError as exc:
                 if exc.code in _AUTH_HTTP_CODES:
                     raise
+                if exc.code == 429:
+                    if _is_quota_metric_429(exc):
+                        # Class A: a named quota metric is exhausted — terminal.
+                        raise
+                    # Class B: capacity throttling (dynamic shared quota).
+                    last_error = exc
+                    throttle_attempt += 1
+                    backoff = min(
+                        _THROTTLE_BACKOFF_CAP_SECONDS,
+                        _THROTTLE_BACKOFF_BASE_SECONDS * 2 ** (throttle_attempt - 1),
+                    )
+                    if throttle_backoff_spent + backoff > _THROTTLE_BACKOFF_BUDGET_SECONDS:
+                        break
+                    throttle_backoff_spent += backoff
+                    delay = random.uniform(0.0, backoff)
+                    logger.warning(
+                        "gemini_call_throttled_retrying %s",
+                        json.dumps(
+                            {
+                                "model": model,
+                                "attempt": throttle_attempt,
+                                "delay_seconds": round(delay, 1),
+                                "backoff_seconds": backoff,
+                                "backoff_spent_seconds": throttle_backoff_spent,
+                                "error_class": "429_capacity_throttle",
+                                "error_type": type(exc).__name__,
+                            }
+                        ),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 last_error = exc
                 attempt += 1
                 if attempt > self._max_retries:
                     break
                 backoff = 2 ** (attempt - 1)
                 logger.warning(
-                    "gemini_call_failed_retrying",
-                    extra={
-                        "model": model,
-                        "attempt": attempt,
-                        "backoff_seconds": backoff,
-                        "error_type": type(exc).__name__,
-                        "error_code": exc.code,
-                    },
+                    "gemini_call_failed_retrying %s",
+                    json.dumps(
+                        {
+                            "model": model,
+                            "attempt": attempt,
+                            "backoff_seconds": backoff,
+                            "error_class": f"http_{exc.code}",
+                            "error_type": type(exc).__name__,
+                        }
+                    ),
                 )
                 await asyncio.sleep(backoff)
                 continue

@@ -16,6 +16,7 @@ the contract that the rest of the system relies on:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -357,6 +358,62 @@ async def test_gemini_client_gives_up_after_max_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def behaviour() -> _FakeResponse:
+        raise _service_unavailable()
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("packages.core.gemini.asyncio.sleep", no_sleep)
+
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn, max_retries=2)
+
+    with pytest.raises(genai_errors.ServerError):
+        await client.complete(system="sys", user="usr")
+
+    # initial call + 2 retries = 3 attempts → 3 boundary invocations
+    assert len(calls) == 3
+
+
+def _quota_metric_429() -> genai_errors.ClientError:
+    return genai_errors.ClientError(
+        429,
+        {
+            "error": {
+                "status": "RESOURCE_EXHAUSTED",
+                "message": (
+                    "Quota exceeded for quota metric 'Generate Content API requests "
+                    "per minute' and limit 'GenerateContent request limit per minute'"
+                ),
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_quota_metric_429_fails_fast() -> None:
+    # Class A: a 429 that NAMES a quota metric is terminal — no retry at all.
+    async def behaviour() -> _FakeResponse:
+        raise _quota_metric_429()
+
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(genai_errors.ClientError) as excinfo:
+        await client.complete(system="sys", user="usr")
+
+    assert excinfo.value.code == 429
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_capacity_429_retries_until_budget_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Class B: a nameless RESOURCE_EXHAUSTED 429 retries on the throttle policy.
+    # Pre-jitter series 10+20+40+80+120+120 = 390s fits the 480s budget; the 7th
+    # backoff (120s) would exceed it → 6 retries, 7 boundary invocations.
+    async def behaviour() -> _FakeResponse:
         raise _rate_limited()
 
     async def no_sleep(_seconds: float) -> None:
@@ -370,8 +427,73 @@ async def test_gemini_client_gives_up_after_max_retries(
     with pytest.raises(genai_errors.ClientError):
         await client.complete(system="sys", user="usr")
 
-    # initial call + 2 retries = 3 attempts → 3 boundary invocations
-    assert len(calls) == 3
+    assert len(calls) == 7
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_capacity_429_does_not_consume_max_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The throttle counter is separate: even max_retries=0 recovers from a
+    # capacity 429, because class B runs on its own budget.
+    state = {"count": 0}
+
+    async def behaviour() -> _FakeResponse:
+        state["count"] += 1
+        if state["count"] == 1:
+            raise _rate_limited()
+        return _FakeResponse("ok", prompt_tokens=5, candidate_tokens=5)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("packages.core.gemini.asyncio.sleep", no_sleep)
+
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn, max_retries=0)
+
+    response = await client.complete(system="sys", user="usr")
+    assert response.content == "ok"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_capacity_429_logs_attempt_delay_and_class_in_message(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = {"count": 0}
+    slept: list[float] = []
+
+    async def behaviour() -> _FakeResponse:
+        state["count"] += 1
+        if state["count"] == 1:
+            raise _rate_limited()
+        return _FakeResponse("ok", prompt_tokens=5, candidate_tokens=5)
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("packages.core.gemini.asyncio.sleep", record_sleep)
+
+    fn, _ = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with caplog.at_level(logging.WARNING, logger="packages.core.gemini"):
+        await client.complete(system="sys", user="usr")
+
+    records = [
+        r for r in caplog.records if r.getMessage().startswith("gemini_call_throttled_retrying ")
+    ]
+    assert len(records) == 1
+    payload = json.loads(records[0].getMessage().removeprefix("gemini_call_throttled_retrying "))
+    assert payload["attempt"] == 1
+    assert payload["error_class"] == "429_capacity_throttle"
+    assert payload["backoff_seconds"] == 10.0
+    # Full jitter: the actual delay is uniform in [0, backoff] and is what we slept.
+    assert 0.0 <= payload["delay_seconds"] <= 10.0
+    assert len(slept) == 1
+    assert 0.0 <= slept[0] <= 10.0
 
 
 @pytest.mark.asyncio
