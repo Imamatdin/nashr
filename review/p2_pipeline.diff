@@ -1,0 +1,2724 @@
+diff --git a/Dockerfile b/Dockerfile
+index bea1e88..84738cd 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -21,6 +21,7 @@ WORKDIR /app
+ #   - poppler    : PyMuPDF helpers / PDF rasterisation
+ #   - tesseract  : OCR fallback for scanned PDFs (uz + ru language packs)
+ #   - libreoffice-writer : DOCX -> PDF in the article pipeline
++#   - postgresql-client  : pg_dump/pg_restore/psql for the nightly backup service
+ #   - ca-certificates    : TLS to Supabase / R2 / LLM providers
+ RUN apt-get update \
+     && apt-get install -y --no-install-recommends \
+@@ -32,6 +33,7 @@ RUN apt-get update \
+         tesseract-ocr-rus \
+         libreoffice-writer \
+         libreoffice-impress \
++        postgresql-client \
+     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+     && apt-get install -y --no-install-recommends nodejs \
+     && rm -rf /var/lib/apt/lists/*
+diff --git a/docker-compose.yml b/docker-compose.yml
+index b3fac61..2af545e 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -119,6 +119,63 @@ services:
+     networks:
+       - nashr-net
+ 
++  # Generation-jobs worker (P2): claims queued rows from generation_jobs,
++  # runs the full pipeline, heartbeats, reaps zombies. Same image as the bot
++  # (full pipeline toolchain: node worker, Chromium, LibreOffice, fonts).
++  worker:
++    build:
++      context: .
++      dockerfile: Dockerfile
++    container_name: nashr-worker
++    command: ["python", "scripts/worker_run_job.py", "--loop"]
++    restart: unless-stopped
++    environment:
++      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
++      NASHR_ENV: ${NASHR_ENV:-production}
++      SUPABASE_URL: ${SUPABASE_URL}
++      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
++      R2_ENDPOINT: ${R2_ENDPOINT:-}
++      R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
++      R2_SECRET_KEY: ${R2_SECRET_KEY:-}
++      R2_BUCKET: ${R2_BUCKET:-nashr-files}
++      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
++      LLM_TRANSPORT: ${LLM_TRANSPORT:-vertex}
++      GEMINI_API_KEY: ${GEMINI_API_KEY}
++      GEMINI_BRAIN_CACHE: ${GEMINI_BRAIN_CACHE:-1}
++      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
++      GOOGLE_APPLICATION_CREDENTIALS: /app/vertex-key.json
++      VERTEX_PROJECT: nashr-prod
++      VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
++    volumes:
++      - nashr-temp:/tmp/nashr
++      - ./debug:/app/debug
++      - ./vertex-key.json:/app/vertex-key.json:ro
++    networks:
++      - nashr-net
++
++  # Nightly pg_dump -> R2 backups/ (14-day retention). Same image (has
++  # postgresql-client + boto3). SUPABASE_DB_URL is the DIRECT Postgres
++  # connection string, not the REST URL.
++  backup:
++    build:
++      context: .
++      dockerfile: Dockerfile
++    container_name: nashr-backup
++    command: ["python", "scripts/backup_db.py", "--loop"]
++    restart: unless-stopped
++    environment:
++      NASHR_ENV: ${NASHR_ENV:-production}
++      SUPABASE_URL: ${SUPABASE_URL}
++      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
++      SUPABASE_DB_URL: ${SUPABASE_DB_URL:?set SUPABASE_DB_URL for backups}
++      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
++      R2_ENDPOINT: ${R2_ENDPOINT:-}
++      R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
++      R2_SECRET_KEY: ${R2_SECRET_KEY:-}
++      R2_BUCKET: ${R2_BUCKET:-nashr-files}
++    networks:
++      - nashr-net
++
+   # TLS terminator + reverse proxy. Auto-provisions a Let's Encrypt cert for
+   # $API_DOMAIN (needs the A record pointed at this host and :80/:443 open).
+   # Containerized (not host-Caddy) so the whole stack stays host-portable.
+diff --git a/packages/api/app.py b/packages/api/app.py
+index 71dedc4..953477e 100644
+--- a/packages/api/app.py
++++ b/packages/api/app.py
+@@ -14,9 +14,13 @@ from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
+ 
+ from packages.api.routes.auth import router as auth_router
++from packages.api.routes.jobs import router as jobs_router
+ from packages.api.services.identity import IdentityService
+ from packages.platform.config import PlatformConfig
++from packages.platform.credits import CreditLedger
+ from packages.platform.database import DatabaseClient
++from packages.platform.jobs import JobQueue
++from packages.platform.rate_limit import RateLimiter
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -25,6 +29,9 @@ def create_app(
+     config: PlatformConfig | None = None,
+     db: DatabaseClient | None = None,
+     identity_service: IdentityService | None = None,
++    credits: CreditLedger | None = None,
++    job_queue: JobQueue | None = None,
++    rate_limiter: RateLimiter | None = None,
+ ) -> FastAPI:
+     """Build the API app; tests inject config/db/service, production uses env."""
+ 
+@@ -35,11 +42,19 @@ def create_app(
+         if identity_service is not None
+         else IdentityService(resolved_config, resolved_db)
+     )
++    resolved_credits = (
++        credits
++        if credits is not None
++        else CreditLedger(resolved_db, dev_mode=resolved_config.dev_mode)
++    )
+ 
+     app = FastAPI(title="Nashr API", docs_url=None, redoc_url=None)
+     app.state.config = resolved_config
+     app.state.db = resolved_db
+     app.state.identity_service = resolved_identity
++    app.state.credits = resolved_credits
++    app.state.job_queue = job_queue if job_queue is not None else JobQueue(resolved_db)
++    app.state.rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter(resolved_db)
+ 
+     if resolved_config.web_cors_origins:
+         app.add_middleware(
+@@ -50,6 +65,7 @@ def create_app(
+         )
+ 
+     app.include_router(auth_router)
++    app.include_router(jobs_router)
+     app.add_api_route("/health", _health, methods=["GET"])
+ 
+     return app
+diff --git a/packages/api/routes/jobs.py b/packages/api/routes/jobs.py
+new file mode 100644
+index 0000000..95c2247
+--- /dev/null
++++ b/packages/api/routes/jobs.py
+@@ -0,0 +1,188 @@
++"""Job enqueue + polling routes (P2 pipeline; plan §5 "Job queue").
++
++The FIRST publicly reachable credit-burning surface, so the order of gates is
++load-bearing and spends zero model tokens before rejection:
++
++1. persisted abuse caps (per-user AND per-IP) → 429 with visible counter state;
++2. project ownership → 404 (existence is not leaked to non-owners);
++3. idempotency — an active job for (project, job_type) is returned, not re-run;
++4. entitlement — the existing balance path (``has_sufficient_credits`` +
++   ``deduct_for_generation``) → 402 with balance/required, rejected pre-spend;
++5. insert; a lost enqueue race refunds the deduction and returns the winner.
++"""
++
++from __future__ import annotations
++
++import logging
++from typing import Any
++
++from fastapi import APIRouter, HTTPException, Request, status
++from pydantic import BaseModel, ConfigDict, Field
++
++from packages.api.middleware.auth import Authenticated
++from packages.core.enums import ExportFormat, GenerationPackage
++from packages.platform.credits import CreditLedger
++from packages.platform.jobs import DuplicateActiveJobError, GenerationJob, JobQueue, JobType
++from packages.platform.rate_limit import ENQUEUE_ACTION, RateLimiter
++
++logger = logging.getLogger(__name__)
++
++router = APIRouter(prefix="/jobs", tags=["jobs"])
++
++_MAX_SOURCES = 10
++
++_PACKAGE_TO_JOB_TYPE: dict[GenerationPackage, JobType] = {
++    GenerationPackage.PRESENTATION_BASIC: JobType.PRESENTATION_GENERATION,
++    GenerationPackage.PRESENTATION_STANDARD: JobType.PRESENTATION_GENERATION,
++    GenerationPackage.PRESENTATION_PREMIUM: JobType.PRESENTATION_GENERATION,
++}
++
++
++class SourceRef(BaseModel):
++    """One already-uploaded source file, referenced by its R2 key."""
++
++    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
++
++    storage_key: str = Field(min_length=1, max_length=512)
++    filename: str = Field(min_length=1, max_length=255)
++
++
++class EnqueueRequest(BaseModel):
++    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
++
++    project_id: str = Field(min_length=1, max_length=64)
++    package: GenerationPackage
++    sources: list[SourceRef] = Field(min_length=1, max_length=_MAX_SOURCES)
++    language: str = Field(default="uz", max_length=8)
++    formats: list[ExportFormat] | None = None
++    answers: dict[str, Any] | None = None
++
++
++class JobView(BaseModel):
++    """The polling shape the UI reads (also returned by enqueue)."""
++
++    model_config = ConfigDict(extra="forbid")
++
++    id: str
++    project_id: str
++    job_type: str
++    status: str
++    progress: dict[str, Any]
++    error_message: str | None
++    existing: bool = False
++
++
++def _view(job: GenerationJob, *, existing: bool = False) -> JobView:
++    return JobView(
++        id=job.id,
++        project_id=job.project_id,
++        job_type=job.job_type.value,
++        status=job.status.value,
++        progress=job.progress,
++        error_message=job.error_message,
++        existing=existing,
++    )
++
++
++def _client_ip(request: Request) -> str:
++    """Caller address for the per-IP cap; Caddy sets X-Forwarded-For."""
++
++    forwarded = request.headers.get("X-Forwarded-For", "")
++    if forwarded:
++        return forwarded.split(",")[0].strip()
++    return request.client.host if request.client else "unknown"
++
++
++@router.post("", response_model=JobView)
++async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticated) -> JobView:
++    """Enqueue a presentation generation job for a project the caller owns."""
++
++    limiter: RateLimiter = request.app.state.rate_limiter
++    queue: JobQueue = request.app.state.job_queue
++    credits: CreditLedger = request.app.state.credits
++    user_id = str(auth.user_id)
++
++    decision = await limiter.check(action=ENQUEUE_ACTION, user_id=user_id, ip=_client_ip(request))
++    if not decision.allowed:
++        raise HTTPException(
++            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
++            detail={
++                "reason": "rate_limited",
++                "scope": decision.scope,
++                "count": decision.count,
++                "limit": decision.limit,
++                "resets_at": decision.resets_at.isoformat(),
++            },
++        )
++
++    job_type = _PACKAGE_TO_JOB_TYPE.get(body.package)
++    if job_type is None:
++        raise HTTPException(
++            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
++            detail="package_not_enqueueable",
++        )
++
++    project = await request.app.state.db.get_project(body.project_id)
++    if project is None or str(project.get("user_id")) != user_id:
++        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project_not_found")
++
++    existing = await queue.get_active_job(body.project_id, job_type)
++    if existing is not None:
++        return _view(existing, existing=True)
++
++    product_type = body.package.value
++    if not await credits.has_sufficient_credits(user_id, product_type):
++        balance = await credits.get_balance(user_id)
++        raise HTTPException(
++            status_code=status.HTTP_402_PAYMENT_REQUIRED,
++            detail={
++                "reason": "insufficient_balance",
++                "balance": balance,
++                "required": CreditLedger.PRICING[product_type],
++            },
++        )
++    deduction = await credits.deduct_for_generation(user_id, body.project_id, product_type)
++
++    payload: dict[str, Any] = {
++        "package": body.package.value,
++        "product_type": product_type,
++        "language": body.language,
++        "sources": [s.model_dump() for s in body.sources],
++        "formats": [f.value for f in body.formats] if body.formats else None,
++        "answers": body.answers,
++    }
++    try:
++        job = await queue.enqueue(
++            project_id=body.project_id,
++            user_id=user_id,
++            job_type=job_type,
++            payload=payload,
++        )
++    except DuplicateActiveJobError as exc:
++        # Lost the enqueue race: undo our deduction, hand back the winner.
++        await credits.refund(
++            user_id,
++            body.project_id,
++            -deduction.amount,
++            reason=f"refund:duplicate_enqueue:{exc.existing.id}",
++        )
++        return _view(exc.existing, existing=True)
++    logger.info(
++        "job_enqueued project=%s job=%s type=%s user=%s",
++        body.project_id,
++        job.id,
++        job_type.value,
++        user_id,
++    )
++    return _view(job)
++
++
++@router.get("/{job_id}", response_model=JobView)
++async def get_job(request: Request, job_id: str, auth: Authenticated) -> JobView:
++    """Poll one job's status/progress (owner only)."""
++
++    queue: JobQueue = request.app.state.job_queue
++    job = await queue.get_job(job_id)
++    if job is None or job.user_id != str(auth.user_id):
++        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
++    return _view(job)
+diff --git a/packages/api/services/identity.py b/packages/api/services/identity.py
+index cdb719d..63cf506 100644
+--- a/packages/api/services/identity.py
++++ b/packages/api/services/identity.py
+@@ -18,6 +18,7 @@ record the identity mapping, mint the Path A session JWT):
+ 
+ from __future__ import annotations
+ 
++import json
+ import logging
+ from typing import Any, Protocol
+ from uuid import UUID
+@@ -103,9 +104,11 @@ class IdentityService:
+                 if user is None:
+                     raise
+             else:
++                # Audit events embed their payload in the message string (the
++                # 4409e72 pattern) so docker logs carry the fields verbatim.
+                 logger.info(
+-                    "identity_telegram_user_created",
+-                    extra={"telegram_id": payload.telegram_id},
++                    "identity_telegram_user_created %s",
++                    json.dumps({"telegram_id": payload.telegram_id}),
+                 )
+         user_id = UUID(str(user["id"]))
+         await self._store.upsert_identity(IdentityProvider.TELEGRAM, external_id, user_id)
+@@ -151,9 +154,12 @@ class IdentityService:
+         winner_id = UUID(str(winner.user_id))
+         if winner_id != user_id:
+             await self._store.delete_user(user_id)
+-            logger.info("identity_email_orphan_reclaimed", extra={"orphan": str(user_id)})
++            logger.info(
++                "identity_email_orphan_reclaimed %s",
++                json.dumps({"orphan": str(user_id), "winner": str(winner_id)}),
++            )
+             return winner_id
+-        logger.info("identity_email_user_created", extra={"user_id": str(user_id)})
++        logger.info("identity_email_user_created %s", json.dumps({"user_id": str(user_id)}))
+         return user_id
+ 
+     async def _fetch_gotrue_user(self, access_token: str) -> tuple[str, UUID]:
+@@ -210,8 +216,8 @@ class IdentityService:
+             # validated initData proves the telegram account. Fold the orphan in.
+             await self._store.merge_users(current_user_id, other_user_id)
+             logger.info(
+-                "identity_users_merged",
+-                extra={"canonical": str(current_user_id), "orphan": str(other_user_id)},
++                "identity_users_merged %s",
++                json.dumps({"canonical": str(current_user_id), "orphan": str(other_user_id)}),
+             )
+             merged = True
+         else:
+diff --git a/packages/bot/orchestrators/presentation_orchestrator.py b/packages/bot/orchestrators/presentation_orchestrator.py
+index 7550023..6fbf989 100644
+--- a/packages/bot/orchestrators/presentation_orchestrator.py
++++ b/packages/bot/orchestrators/presentation_orchestrator.py
+@@ -256,7 +256,13 @@ class PresentationOrchestrator:
+ 
+         filename = str(info.get("filename") or "upload.bin")
+         try:
+-            file_bytes = await self._download_telegram_file(str(info.get("file_id") or ""))
++            storage_key = str(info.get("storage_key") or "")
++            if storage_key:
++                # Queue jobs (P2): the web surface already uploaded the source
++                # to R2; fetch by key instead of through Telegram.
++                file_bytes = await self._download_stored_source(storage_key)
++            else:
++                file_bytes = await self._download_telegram_file(str(info.get("file_id") or ""))
+         except Exception as exc:
+             logger.warning(
+                 "presentation_source_download_failed",
+@@ -299,6 +305,13 @@ class PresentationOrchestrator:
+             reason=FreeCreditsReason.SOURCE_UPLOAD,
+         )
+ 
++    async def _download_stored_source(self, storage_key: str) -> bytes:
++        """Fetch an already-uploaded source from R2 (web/queue path)."""
++
++        if self._storage is None:
++            raise RuntimeError("storage not configured; cannot fetch stored source")
++        return await self._storage.get_bytes(storage_key)
++
+     async def _download_telegram_file(self, file_id: str) -> bytes:
+         """Download a Telegram file; raise on transport errors."""
+ 
+@@ -825,9 +838,16 @@ class PresentationOrchestrator:
+             return
+         for ext, path in result.by_extension().items():
+             try:
+-                key_namespace = project_id if project_id else path.stem
+-                key = FileStorage.generated_key(key_namespace, path.name)
++                if project_id:
++                    # Stable per-format key (migration 007): a regenerated or
++                    # brain-fixed deck OVERWRITES in place, so share links and
++                    # web downloads never point at an orphaned title-named key.
++                    key = FileStorage.stable_generated_key(project_id, ext)
++                else:
++                    key = FileStorage.generated_key(path.stem, path.name)
+                 await storage.upload(path, key)
++                if project_id:
++                    await self._register_generated_file(project_id, ext, key, path)
+             except Exception as exc:
+                 result.warnings.append(f"{ext}: upload failed ({type(exc).__name__})")
+                 logger.warning(
+@@ -835,6 +855,29 @@ class PresentationOrchestrator:
+                     extra={"format": ext, "error_type": type(exc).__name__},
+                 )
+ 
++    async def _register_generated_file(
++        self,
++        project_id: str,
++        ext: str,
++        key: str,
++        path: Path,
++    ) -> None:
++        """Upsert the project's generated_files row for one format (best-effort).
++
++        Keys on (project_id, file_type), so re-delivery refreshes the row
++        instead of appending duplicates — the web surface reads these rows.
++        A DB failure never blocks delivery; the local files still flow.
++        """
++
++        try:
++            size = int(path.stat().st_size)
++            await self._db.upsert_generated_file(project_id, ext, key, size)
++        except Exception as exc:
++            logger.warning(
++                "presentation_generated_file_register_failed",
++                extra={"format": ext, "error_type": type(exc).__name__},
++            )
++
+     # ====================================================================
+     # FULL PIPELINE
+     # ====================================================================
+diff --git a/packages/platform/database.py b/packages/platform/database.py
+index e5a09dc..3c1757b 100644
+--- a/packages/platform/database.py
++++ b/packages/platform/database.py
+@@ -662,6 +662,38 @@ class DatabaseClient:
+             )
+         )
+ 
++    # ------------------------------------------------------ generated upsert
++
++    async def upsert_generated_file(
++        self,
++        project_id: str,
++        file_type: str,
++        storage_path: str,
++        file_size: int,
++    ) -> dict[str, Any]:
++        """Register (or refresh) the project's single output row per format.
++
++        Keys on the migration-007 ``uq_generated_files_project_type`` unique
++        constraint, mirroring the stable R2 key layout
++        ``generated/{project_id}/presentation.{ext}`` that overwrites in
++        place — re-delivery updates the row instead of appending duplicates.
++        """
++
++        payload: dict[str, Any] = {
++            "project_id": project_id,
++            "file_type": file_type,
++            "storage_path": storage_path,
++            "file_size": file_size,
++        }
++        result = await asyncio.to_thread(
++            lambda: (
++                self._client.table("generated_files")
++                .upsert(payload, on_conflict="project_id,file_type")
++                .execute()
++            )
++        )
++        return cast(dict[str, Any], result.data[0])
++
+     # ---------------------------------------------------------- raw queries
+ 
+     def _query(self, table: str) -> Any:
+@@ -674,3 +706,13 @@ class DatabaseClient:
+         """
+ 
+         return self._client.table(table)
++
++    def rpc(self, fn: str, params: dict[str, Any]) -> Any:
++        """Call a Postgres function via PostgREST (synchronous; callers thread it).
++
++        Used by the job queue (``claim_next_job`` / ``heartbeat_job`` /
++        ``reap_stale_jobs``) and the rate limiter (``consume_rate_limit``) —
++        operations that must be a single atomic statement server-side.
++        """
++
++        return self._client.rpc(fn, params).execute()
+diff --git a/packages/platform/jobs.py b/packages/platform/jobs.py
+new file mode 100644
+index 0000000..743f243
+--- /dev/null
++++ b/packages/platform/jobs.py
+@@ -0,0 +1,321 @@
++"""Queue client over the ``generation_jobs`` table (P2 job pipeline).
++
++The row IS the truth: enqueue inserts it, workers claim it atomically through
++the migration-006 ``claim_next_job`` SQL function (``FOR UPDATE SKIP LOCKED``),
++heartbeat while running, and land it on a terminal status. The reaper turns a
++lost worker into an honest failure (or a re-queue while attempts remain) —
++never a zombie ``processing`` row.
++
++All Supabase calls go through the injected :class:`DatabaseClient`'s raw query
++seam, wrapped in ``asyncio.to_thread`` like every other platform module.
++"""
++
++from __future__ import annotations
++
++import asyncio
++from datetime import UTC, datetime
++from enum import StrEnum
++from typing import Any, cast
++
++from pydantic import BaseModel, ConfigDict, Field
++
++from packages.platform.database import DatabaseClient
++
++DEFAULT_STALE_SECONDS: int = 120
++HEARTBEAT_INTERVAL_SECONDS: float = 15.0
++
++
++class JobType(StrEnum):
++    """Wire-stable job types (generation_jobs.job_type CHECK, migration 006)."""
++
++    SOURCE_PROCESSING = "source_processing"
++    ARTICLE_GENERATION = "article_generation"
++    PRESENTATION_GENERATION = "presentation_generation"
++    EXPORT = "export"
++    PRESENTATION_EDIT = "presentation_edit"
++    IMAGE_REGEN = "image_regen"
++
++
++class JobStatus(StrEnum):
++    """Wire-stable job statuses (generation_jobs.status CHECK, migration 006)."""
++
++    QUEUED = "queued"
++    PROCESSING = "processing"
++    COMPLETED = "completed"
++    FAILED = "failed"
++    CANCELLED = "cancelled"
++
++
++class GenerationJob(BaseModel):
++    """One generation_jobs row, as the queue layer reads it."""
++
++    model_config = ConfigDict(extra="ignore")
++
++    id: str
++    project_id: str
++    user_id: str | None = None
++    job_type: JobType
++    status: JobStatus
++    payload: dict[str, Any] = Field(default_factory=dict)
++    progress: dict[str, Any] = Field(default_factory=dict)
++    worker_id: str | None = None
++    attempts: int = 0
++    max_attempts: int = 1
++    error_message: str | None = None
++    created_at: datetime | None = None
++    claimed_at: datetime | None = None
++    heartbeat_at: datetime | None = None
++    completed_at: datetime | None = None
++
++
++class DuplicateActiveJobError(Exception):
++    """An active (queued/processing) job of this type already exists for the project."""
++
++    def __init__(self, existing: GenerationJob) -> None:
++        self.existing = existing
++        super().__init__(f"active {existing.job_type} job {existing.id} already queued")
++
++
++def _row_to_job(row: dict[str, Any]) -> GenerationJob:
++    return GenerationJob.model_validate(row)
++
++
++class JobQueue:
++    """Enqueue / claim / heartbeat / terminal transitions for generation jobs."""
++
++    def __init__(self, db: DatabaseClient) -> None:
++        self._db = db
++
++    async def get_active_job(self, project_id: str, job_type: JobType) -> GenerationJob | None:
++        """Return the project's active job of this type, or None."""
++
++        def run() -> Any:
++            return (
++                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
++                .select("*")
++                .eq("project_id", project_id)
++                .eq("job_type", job_type.value)
++                .in_("status", [JobStatus.QUEUED.value, JobStatus.PROCESSING.value])
++                .limit(1)
++                .execute()
++            )
++
++        result = await asyncio.to_thread(run)
++        if not result.data:
++            return None
++        return _row_to_job(cast(dict[str, Any], result.data[0]))
++
++    async def get_job(self, job_id: str) -> GenerationJob | None:
++        """Fetch one job row by id."""
++
++        def run() -> Any:
++            return (
++                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
++                .select("*")
++                .eq("id", job_id)
++                .limit(1)
++                .execute()
++            )
++
++        result = await asyncio.to_thread(run)
++        if not result.data:
++            return None
++        return _row_to_job(cast(dict[str, Any], result.data[0]))
++
++    async def enqueue(
++        self,
++        *,
++        project_id: str,
++        user_id: str,
++        job_type: JobType,
++        payload: dict[str, Any],
++        max_attempts: int = 1,
++    ) -> GenerationJob:
++        """Insert a queued job row.
++
++        The migration-006 partial unique index makes a concurrent double
++        enqueue a constraint violation; that surfaces here as
++        :class:`DuplicateActiveJobError` carrying the winning row so the
++        caller can undo its side effects (the credit deduction) and return
++        the existing job instead of executing twice.
++        """
++
++        row: dict[str, Any] = {
++            "project_id": project_id,
++            "user_id": user_id,
++            "job_type": job_type.value,
++            "status": JobStatus.QUEUED.value,
++            "payload": payload,
++            "max_attempts": max_attempts,
++        }
++
++        def run() -> Any:
++            return self._db._query("generation_jobs").insert(row).execute()  # pyright: ignore[reportPrivateUsage]
++
++        try:
++            result = await asyncio.to_thread(run)
++        except Exception as exc:
++            existing = await self.get_active_job(project_id, job_type)
++            if existing is not None:
++                raise DuplicateActiveJobError(existing) from exc
++            raise
++        return _row_to_job(cast(dict[str, Any], result.data[0]))
++
++    # ------------------------------------------------------------- worker side
++
++    async def claim_next(self, worker_id: str) -> GenerationJob | None:
++        """Atomically claim the oldest queued job, or None when the queue is empty."""
++
++        result = await asyncio.to_thread(
++            lambda: self._db.rpc("claim_next_job", {"p_worker_id": worker_id})
++        )
++        rows = cast(list[dict[str, Any]], list(result.data or []))
++        if not rows:
++            return None
++        return _row_to_job(rows[0])
++
++    async def claim_job(self, job_id: str, worker_id: str) -> GenerationJob | None:
++        """Atomically claim ONE specific queued job (the --job-id path).
++
++        A single guarded UPDATE: only a row still ``queued`` transitions, so a
++        concurrent loop-worker claim makes this return None instead of
++        double-running.
++        """
++
++        def run() -> Any:
++            return (
++                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
++                .update(
++                    {
++                        "status": JobStatus.PROCESSING.value,
++                        "worker_id": worker_id,
++                        "claimed_at": datetime.now(UTC).isoformat(),
++                        "heartbeat_at": datetime.now(UTC).isoformat(),
++                    }
++                )
++                .eq("id", job_id)
++                .eq("status", JobStatus.QUEUED.value)
++                .execute()
++            )
++
++        result = await asyncio.to_thread(run)
++        rows = cast(list[dict[str, Any]], list(result.data or []))
++        if not rows:
++            return None
++        claimed = _row_to_job(rows[0])
++
++        # attempts/started_at ride a follow-up write; claim atomicity is the
++        # status CAS above, not these bookkeeping fields.
++        def bump() -> Any:
++            return (
++                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
++                .update(
++                    {
++                        "attempts": claimed.attempts + 1,
++                        "started_at": claimed.claimed_at.isoformat()
++                        if claimed.claimed_at
++                        else datetime.now(UTC).isoformat(),
++                    }
++                )
++                .eq("id", job_id)
++                .eq("worker_id", worker_id)
++                .execute()
++            )
++
++        await asyncio.to_thread(bump)
++        return claimed
++
++    async def heartbeat(self, job_id: str, worker_id: str) -> bool:
++        """Bump heartbeat_at; False means the row is no longer ours (reaped)."""
++
++        result = await asyncio.to_thread(
++            lambda: self._db.rpc("heartbeat_job", {"p_job_id": job_id, "p_worker_id": worker_id})
++        )
++        return bool(result.data)
++
++    async def set_progress(self, job_id: str, worker_id: str, progress: dict[str, Any]) -> None:
++        """Write the UI-polling progress blob, guarded by worker identity."""
++
++        def run() -> Any:
++            return (
++                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
++                .update({"progress": progress})
++                .eq("id", job_id)
++                .eq("worker_id", worker_id)
++                .eq("status", JobStatus.PROCESSING.value)
++                .execute()
++            )
++
++        await asyncio.to_thread(run)
++
++    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> None:
++        """Land the job on ``completed`` with its cost telemetry."""
++
++        await self._finish(job_id, worker_id, JobStatus.COMPLETED, None, telemetry)
++
++    async def fail(
++        self,
++        job_id: str,
++        worker_id: str,
++        *,
++        step: str,
++        message: str,
++        telemetry: dict[str, Any] | None = None,
++    ) -> None:
++        """Land the job on ``failed`` with an honest step-named error message."""
++
++        error = f"{step}: {message}"[:4000]
++        await self._finish(job_id, worker_id, JobStatus.FAILED, error, telemetry or {})
++
++    async def _finish(
++        self,
++        job_id: str,
++        worker_id: str,
++        status: JobStatus,
++        error_message: str | None,
++        telemetry: dict[str, Any],
++    ) -> None:
++        payload: dict[str, Any] = {
++            "status": status.value,
++            "completed_at": datetime.now(UTC).isoformat(),
++            **telemetry,
++        }
++        if error_message is not None:
++            payload["error_message"] = error_message
++
++        def run() -> Any:
++            return (
++                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
++                .update(payload)
++                .eq("id", job_id)
++                .eq("worker_id", worker_id)
++                .eq("status", JobStatus.PROCESSING.value)
++                .execute()
++            )
++
++        await asyncio.to_thread(run)
++
++    async def reap_stale(self, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[GenerationJob]:
++        """Reap zombie processing rows; returns the jobs that were FAILED.
++
++        Retryable zombies are silently re-queued inside the SQL function; only
++        the terminally failed ones come back, and only to the single caller
++        whose UPDATE won — the refund hook fires exactly once per job.
++        """
++
++        result = await asyncio.to_thread(
++            lambda: self._db.rpc("reap_stale_jobs", {"p_stale_seconds": stale_seconds})
++        )
++        rows = cast(list[dict[str, Any]], list(result.data or []))
++        return [_row_to_job(r) for r in rows]
++
++
++__all__ = [
++    "DEFAULT_STALE_SECONDS",
++    "HEARTBEAT_INTERVAL_SECONDS",
++    "DuplicateActiveJobError",
++    "GenerationJob",
++    "JobQueue",
++    "JobStatus",
++    "JobType",
++]
+diff --git a/packages/platform/rate_limit.py b/packages/platform/rate_limit.py
+new file mode 100644
+index 0000000..746ac4a
+--- /dev/null
++++ b/packages/platform/rate_limit.py
+@@ -0,0 +1,114 @@
++"""Persisted abuse caps: per-user AND per-IP fixed-window counters (plan P2).
++
++Every publicly reachable credit-burning surface calls :meth:`RateLimiter.check`
++BEFORE any model token is spent. Counters live in the migration-006
++``rate_limit_counters`` table and are bumped through the atomic
++``consume_rate_limit`` SQL function, so caps survive restarts and apply across
++processes (the in-memory 3-gen/hour soft limit the bot carries is log-only —
++this is the enforced layer).
++
++Windows are fixed UTC days: coarse on purpose — the cap is an abuse backstop,
++not a traffic shaper. ``action`` separates surfaces; ``enqueue`` is live now
++and ``chat`` is pre-wired for the P4 chat route.
++"""
++
++from __future__ import annotations
++
++import asyncio
++from datetime import UTC, datetime, timedelta
++from typing import cast
++
++from pydantic import BaseModel, ConfigDict
++
++from packages.platform.database import DatabaseClient
++
++ENQUEUE_ACTION: str = "enqueue"
++CHAT_ACTION: str = "chat"
++
++# Defaults sized off SPEC §9 ("max 10 generation jobs per user per day") with
++# per-IP headroom for NAT'd campus networks sharing one address.
++DEFAULT_LIMITS: dict[tuple[str, str], int] = {
++    ("user", ENQUEUE_ACTION): 10,
++    ("ip", ENQUEUE_ACTION): 40,
++    ("user", CHAT_ACTION): 200,
++    ("ip", CHAT_ACTION): 800,
++}
++
++
++class RateDecision(BaseModel):
++    """The visible state a rejected caller gets back."""
++
++    model_config = ConfigDict(extra="forbid")
++
++    allowed: bool
++    scope: str
++    action: str
++    count: int
++    limit: int
++    resets_at: datetime
++
++
++class RateLimiter:
++    """Fixed-window request limiter over the persisted counter table."""
++
++    def __init__(
++        self,
++        db: DatabaseClient,
++        limits: dict[tuple[str, str], int] | None = None,
++    ) -> None:
++        self._db = db
++        self._limits = limits if limits is not None else dict(DEFAULT_LIMITS)
++
++    @staticmethod
++    def _window_start(now: datetime) -> datetime:
++        return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
++
++    async def _consume(self, scope: str, action: str, key: str) -> RateDecision:
++        now = datetime.now(UTC)
++        window_start = self._window_start(now)
++        limit = self._limits.get((scope, action), 0)
++        result = await asyncio.to_thread(
++            lambda: self._db.rpc(
++                "consume_rate_limit",
++                {
++                    "p_scope": scope,
++                    "p_action": action,
++                    "p_key": key,
++                    "p_window_start": window_start.isoformat(),
++                },
++            )
++        )
++        count = int(cast(int, result.data))
++        return RateDecision(
++            allowed=limit <= 0 or count <= limit,
++            scope=scope,
++            action=action,
++            count=count,
++            limit=limit,
++            resets_at=window_start + timedelta(days=1),
++        )
++
++    async def check(self, *, action: str, user_id: str, ip: str) -> RateDecision:
++        """Count this request against BOTH scopes; return the first violation.
++
++        Both counters are always bumped (an attempt is an attempt), then the
++        user decision wins the rejection message when both are over — the user
++        cap is the one the caller can actually reason about.
++        """
++
++        user_decision = await self._consume("user", action, user_id)
++        ip_decision = await self._consume("ip", action, ip)
++        if not user_decision.allowed:
++            return user_decision
++        if not ip_decision.allowed:
++            return ip_decision
++        return user_decision
++
++
++__all__ = [
++    "CHAT_ACTION",
++    "DEFAULT_LIMITS",
++    "ENQUEUE_ACTION",
++    "RateDecision",
++    "RateLimiter",
++]
+diff --git a/packages/platform/storage.py b/packages/platform/storage.py
+index 453f9bd..84c7266 100644
+--- a/packages/platform/storage.py
++++ b/packages/platform/storage.py
+@@ -229,6 +229,17 @@ class FileStorage:
+ 
+         return f"generated/{project_id}/{_sanitize_filename(filename)}"
+ 
++    @staticmethod
++    def stable_generated_key(project_id: str, ext: str) -> str:
++        """Stable per-format output key: ``generated/{project_id}/presentation.{ext}``.
++
++        Deliberately NOT title-derived: regenerations and brain fixes
++        overwrite the same object, so share links and ``generated_files``
++        rows stay valid across edits (migration 007).
++        """
++
++        return f"generated/{project_id}/presentation.{ext.lstrip('.')}"
++
+     # ============================================================ local fallback
+ 
+     @property
+diff --git a/scripts/backup_db.py b/scripts/backup_db.py
+new file mode 100644
+index 0000000..223e4fd
+--- /dev/null
++++ b/scripts/backup_db.py
+@@ -0,0 +1,159 @@
++"""Nightly pg_dump → R2 ``backups/`` prefix, 14-day retention (plan amendment 3).
++
++Modes::
++
++    python scripts/backup_db.py            # one dump now, then exit
++    python scripts/backup_db.py --loop     # compose service: dump nightly at 02:00 UTC
++
++Requires ``SUPABASE_DB_URL`` (the direct Postgres connection string — the
++Supabase REST URL cannot drive pg_dump) and the R2 credentials the platform
++already uses. ``pg_dump`` must be on PATH (Dockerfile installs
++``postgresql-client``). Dumps are custom-format (``-Fc``) so
++``scripts/backup_restore_verify.py`` can pg_restore them into a scratch DB.
++
++The product and the money live in Postgres (decks, brain_sessions,
++credit_ledger, orders); Supabase free tier has minimal recovery — this is the
++recovery path.
++"""
++
++from __future__ import annotations
++
++import argparse
++import asyncio
++import json
++import logging
++import os
++import subprocess
++import sys
++import tempfile
++from datetime import UTC, datetime, timedelta
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++
++from packages.platform.config import PlatformConfig
++from packages.platform.storage import FileStorage
++
++logger = logging.getLogger("nashr.backup")
++
++BACKUP_PREFIX = "backups/"
++RETENTION_DAYS = 14
++NIGHTLY_HOUR_UTC = 2
++DUMP_TIMEOUT_SECONDS = 1800
++
++
++def _dump_key(now: datetime) -> str:
++    return f"{BACKUP_PREFIX}nashr_{now.strftime('%Y%m%dT%H%M%SZ')}.dump"
++
++
++def run_pg_dump(db_url: str, target: Path) -> None:
++    """Run ``pg_dump -Fc`` to ``target``; raises on non-zero exit."""
++
++    completed = subprocess.run(
++        [
++            "pg_dump",
++            "--format=custom",
++            "--no-owner",
++            "--no-privileges",
++            "--file",
++            str(target),
++            db_url,
++        ],
++        capture_output=True,
++        text=True,
++        timeout=DUMP_TIMEOUT_SECONDS,
++        check=False,
++    )
++    if completed.returncode != 0:
++        tail = (completed.stderr or "").strip()[-1000:]
++        raise RuntimeError(f"pg_dump exited {completed.returncode}: {tail}")
++    if not target.exists() or target.stat().st_size == 0:
++        raise RuntimeError("pg_dump reported success but produced no file")
++
++
++async def prune_old_backups(storage: FileStorage, now: datetime) -> int:
++    """Delete backups/ objects older than RETENTION_DAYS; returns count deleted."""
++
++    if not storage.available:
++        return 0
++    cutoff = now - timedelta(days=RETENTION_DAYS)
++
++    def list_keys() -> list[tuple[str, datetime]]:
++        client = storage._client  # pyright: ignore[reportPrivateUsage]
++        paginator = client.get_paginator("list_objects_v2")
++        out: list[tuple[str, datetime]] = []
++        for page in paginator.paginate(Bucket=storage.bucket, Prefix=BACKUP_PREFIX):
++            for obj in page.get("Contents", []):
++                out.append((str(obj["Key"]), obj["LastModified"]))
++        return out
++
++    keys = await asyncio.to_thread(list_keys)
++    deleted = 0
++    for key, modified in keys:
++        if modified < cutoff:
++            await storage.delete(key)
++            deleted += 1
++    return deleted
++
++
++async def backup_once(config: PlatformConfig, db_url: str) -> str:
++    """Dump the database, upload to R2, prune the retention window; return the key."""
++
++    storage = FileStorage(config)
++    now = datetime.now(UTC)
++    key = _dump_key(now)
++    tmpdir = Path(tempfile.mkdtemp(prefix="nashr_backup_"))
++    dump_path = tmpdir / "nashr.dump"
++    try:
++        await asyncio.to_thread(run_pg_dump, db_url, dump_path)
++        await storage.upload(dump_path, key, content_type="application/octet-stream")
++        pruned = await prune_old_backups(storage, now)
++        logger.info(
++            "backup_complete %s",
++            json.dumps({"key": key, "size_bytes": dump_path.stat().st_size, "pruned": pruned}),
++        )
++        return key
++    finally:
++        dump_path.unlink(missing_ok=True)
++
++
++def _seconds_until_nightly(now: datetime) -> float:
++    target = now.replace(hour=NIGHTLY_HOUR_UTC, minute=0, second=0, microsecond=0)
++    if target <= now:
++        target += timedelta(days=1)
++    return (target - now).total_seconds()
++
++
++async def _amain(args: argparse.Namespace) -> int:
++    db_url = os.environ.get("SUPABASE_DB_URL", "").strip()
++    if not db_url:
++        logger.error("backup_missing_db_url SUPABASE_DB_URL is not set")
++        return 1
++    config = PlatformConfig.from_env()
++
++    if not args.loop:
++        await backup_once(config, db_url)
++        return 0
++
++    while True:
++        delay = _seconds_until_nightly(datetime.now(UTC))
++        logger.info("backup_sleeping %s", json.dumps({"seconds": int(delay)}))
++        await asyncio.sleep(delay)
++        try:
++            await backup_once(config, db_url)
++        except Exception as exc:
++            # Log and keep the service alive: one failed night must not stop
++            # the next; the operator greps backup_failed.
++            logger.exception("backup_failed %s", json.dumps({"error_type": type(exc).__name__}))
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="Nightly pg_dump → R2 backups/")
++    parser.add_argument("--loop", action="store_true", help="run as the nightly compose service")
++    args = parser.parse_args()
++    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
++    return asyncio.run(_amain(args))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/backup_restore_verify.py b/scripts/backup_restore_verify.py
+new file mode 100644
+index 0000000..50a0f95
+--- /dev/null
++++ b/scripts/backup_restore_verify.py
+@@ -0,0 +1,133 @@
++"""Restore-verify a nightly backup into a SCRATCH database (P2 gate item).
++
++Usage::
++
++    python scripts/backup_restore_verify.py --target-url postgresql://.../scratch_db
++    python scripts/backup_restore_verify.py --target-url ... --key backups/nashr_x.dump
++
++Downloads the newest ``backups/`` dump from R2 (or the named one), runs
++``pg_restore`` into the target database (which must be an EMPTY scratch DB —
++this script refuses to guess and never touches the production URL), then
++counts rows in the load-bearing tables and prints them so a human can eyeball
++the restore against expectations.
++"""
++
++from __future__ import annotations
++
++import argparse
++import asyncio
++import json
++import logging
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++
++from packages.platform.config import PlatformConfig
++from packages.platform.storage import FileStorage
++from scripts.backup_db import BACKUP_PREFIX
++
++logger = logging.getLogger("nashr.restore_verify")
++
++VERIFY_TABLES = ("users", "projects", "decks", "brain_sessions", "credit_ledger", "orders")
++RESTORE_TIMEOUT_SECONDS = 1800
++
++
++async def latest_backup_key(storage: FileStorage) -> str | None:
++    """Newest backups/ object key by last-modified, or None when none exist."""
++
++    def run() -> str | None:
++        client = storage._client  # pyright: ignore[reportPrivateUsage]
++        paginator = client.get_paginator("list_objects_v2")
++        best: tuple[str, object] | None = None
++        for page in paginator.paginate(Bucket=storage.bucket, Prefix=BACKUP_PREFIX):
++            for obj in page.get("Contents", []):
++                if best is None or obj["LastModified"] > best[1]:  # pyright: ignore[reportOperatorIssue]
++                    best = (str(obj["Key"]), obj["LastModified"])
++        return best[0] if best else None
++
++    return await asyncio.to_thread(run)
++
++
++def run_pg_restore(dump_path: Path, target_url: str) -> None:
++    """pg_restore the custom-format dump into the scratch database."""
++
++    completed = subprocess.run(
++        [
++            "pg_restore",
++            "--no-owner",
++            "--no-privileges",
++            "--exit-on-error",
++            "--dbname",
++            target_url,
++            str(dump_path),
++        ],
++        capture_output=True,
++        text=True,
++        timeout=RESTORE_TIMEOUT_SECONDS,
++        check=False,
++    )
++    if completed.returncode != 0:
++        tail = (completed.stderr or "").strip()[-2000:]
++        raise RuntimeError(f"pg_restore exited {completed.returncode}: {tail}")
++
++
++def count_rows(target_url: str) -> dict[str, str]:
++    """Row counts per verify table via psql (present in postgresql-client)."""
++
++    counts: dict[str, str] = {}
++    for table in VERIFY_TABLES:
++        completed = subprocess.run(
++            ["psql", target_url, "-tAc", f"select count(*) from {table}"],
++            capture_output=True,
++            text=True,
++            timeout=60,
++            check=False,
++        )
++        counts[table] = (
++            completed.stdout.strip()
++            if completed.returncode == 0
++            else f"ERROR: {completed.stderr.strip()[:200]}"
++        )
++    return counts
++
++
++async def _amain(args: argparse.Namespace) -> int:
++    config = PlatformConfig.from_env()
++    storage = FileStorage(config)
++    key = args.key or await latest_backup_key(storage)
++    if key is None:
++        logger.error("restore_verify_no_backups no objects under %s", BACKUP_PREFIX)
++        return 1
++
++    tmpdir = Path(tempfile.mkdtemp(prefix="nashr_restore_"))
++    dump_path = tmpdir / "restore.dump"
++    await storage.download(key, dump_path)
++    logger.info(
++        "restore_verify_downloaded %s",
++        json.dumps({"key": key, "size_bytes": dump_path.stat().st_size}),
++    )
++    await asyncio.to_thread(run_pg_restore, dump_path, args.target_url)
++    counts = await asyncio.to_thread(count_rows, args.target_url)
++    print(json.dumps({"backup_key": key, "row_counts": counts}, indent=2))
++    failed = [t for t, v in counts.items() if v.startswith("ERROR")]
++    if failed:
++        logger.error("restore_verify_failed %s", json.dumps({"tables": failed}))
++        return 1
++    logger.info("restore_verify_ok %s", json.dumps({"key": key}))
++    return 0
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="Restore a backup into a scratch DB and verify")
++    parser.add_argument("--target-url", required=True, help="EMPTY scratch database URL")
++    parser.add_argument("--key", help="specific backups/ key (default: newest)")
++    args = parser.parse_args()
++    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
++    return asyncio.run(_amain(args))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/worker_run_job.py b/scripts/worker_run_job.py
+new file mode 100644
+index 0000000..2d80bb3
+--- /dev/null
++++ b/scripts/worker_run_job.py
+@@ -0,0 +1,286 @@
++"""Queue worker over generation_jobs (P2): claim → run → heartbeat → terminal row.
++
++Two modes::
++
++    python scripts/worker_run_job.py --job-id <uuid>   # run ONE specific job
++    python scripts/worker_run_job.py --loop            # VM compose service
++
++The loop mode polls ``claim_next_job`` (atomic, SKIP LOCKED), runs each claimed
++job through the REAL :class:`PresentationOrchestrator` (a real aiogram Bot —
++bot-enqueued jobs carry Telegram file_ids, web jobs carry R2 storage keys; the
++orchestrator handles both), and reaps zombie ``processing`` rows every tick,
++refunding the honest-failed ones through the existing ledger path.
++
++Failure contract: an ``_OrchestratorError`` lands the job on ``failed`` with
++its step name in ``error_message`` AND refunds the enqueue-time deduction —
++exactly the bot handler's refund discipline, moved queue-side.
++"""
++
++from __future__ import annotations
++
++import argparse
++import asyncio
++import json
++import logging
++import os
++import socket
++import sys
++import uuid
++from pathlib import Path
++from typing import Any, cast
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++
++from packages.core.enums import ExportFormat, GenerationPackage
++from packages.platform.config import PlatformConfig
++from packages.platform.credits import CreditLedger
++from packages.platform.database import DatabaseClient
++from packages.platform.jobs import (
++    DEFAULT_STALE_SECONDS,
++    HEARTBEAT_INTERVAL_SECONDS,
++    GenerationJob,
++    JobQueue,
++    JobType,
++)
++from packages.platform.storage import FileStorage
++
++logger = logging.getLogger("nashr.worker")
++
++POLL_INTERVAL_SECONDS = 5.0
++
++
++def _worker_id() -> str:
++    return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
++
++
++def _refund_amount(payload: dict[str, Any]) -> int | None:
++    product_type = payload.get("product_type")
++    if isinstance(product_type, str) and product_type in CreditLedger.PRICING:
++        return CreditLedger.PRICING[product_type]
++    return None
++
++
++async def _refund_job(credits: CreditLedger, job: GenerationJob, reason: str) -> None:
++    """Refund a failed job's deduction; a job with no priced payload is skipped."""
++
++    amount = _refund_amount(job.payload)
++    if amount is None or job.user_id is None:
++        logger.warning(
++            "worker_refund_skipped %s",
++            json.dumps({"job_id": job.id, "reason": "no product_type or user_id"}),
++        )
++        return
++    await credits.refund(job.user_id, job.project_id, amount, reason=reason[:200])
++    logger.info(
++        "worker_job_refunded %s",
++        json.dumps({"job_id": job.id, "amount": amount, "reason": reason[:200]}),
++    )
++
++
++class JobRunner:
++    """Executes one claimed job with a live heartbeat and progress writes."""
++
++    def __init__(
++        self,
++        config: PlatformConfig,
++        db: DatabaseClient,
++        queue: JobQueue,
++        credits: CreditLedger,
++        storage: FileStorage,
++        worker_id: str,
++    ) -> None:
++        self._config = config
++        self._db = db
++        self._queue = queue
++        self._credits = credits
++        self._storage = storage
++        self._worker_id = worker_id
++
++    async def run(self, job: GenerationJob) -> None:
++        heartbeat = asyncio.create_task(self._heartbeat_forever(job.id))
++        try:
++            await self._execute(job)
++        finally:
++            heartbeat.cancel()
++
++    async def _heartbeat_forever(self, job_id: str) -> None:
++        while True:
++            await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
++            try:
++                alive = await self._queue.heartbeat(job_id, self._worker_id)
++                if not alive:
++                    logger.warning(
++                        "worker_heartbeat_lost %s",
++                        json.dumps({"job_id": job_id, "worker_id": self._worker_id}),
++                    )
++            except Exception as exc:
++                logger.warning(
++                    "worker_heartbeat_error %s",
++                    json.dumps({"job_id": job_id, "error_type": type(exc).__name__}),
++                )
++
++    async def _execute(self, job: GenerationJob) -> None:
++        if job.job_type is not JobType.PRESENTATION_GENERATION:
++            await self._queue.fail(
++                job.id,
++                self._worker_id,
++                step="dispatch",
++                message=f"job_type {job.job_type.value} has no worker executor yet",
++            )
++            await _refund_job(self._credits, job, f"refund:job:{job.id}:unsupported_type")
++            return
++        try:
++            await self._run_presentation(job)
++        except Exception as exc:
++            step = getattr(exc, "step", "pipeline")
++            original = getattr(exc, "original", exc)
++            message = f"{type(original).__name__}: {original}"
++            logger.exception(
++                "worker_job_failed %s",
++                json.dumps({"job_id": job.id, "step": step}),
++            )
++            await self._queue.fail(job.id, self._worker_id, step=str(step), message=message)
++            await _refund_job(self._credits, job, f"refund:job:{job.id}:{step}")
++
++    async def _run_presentation(self, job: GenerationJob) -> None:
++        # Imported here so --help / unit tests never pull aiogram + the full
++        # pipeline stack just to parse args.
++        from aiogram import Bot
++
++        from packages.bot.orchestrators.presentation_orchestrator import (
++            PresentationOrchestrator,
++        )
++
++        payload = job.payload
++        package = GenerationPackage(str(payload.get("package", "presentation_standard")))
++        formats_raw = payload.get("formats")
++        formats: list[ExportFormat] | None = None
++        if isinstance(formats_raw, list) and formats_raw:
++            formats = [ExportFormat(str(f)) for f in cast(list[Any], formats_raw)]
++        sources_raw = payload.get("sources")
++        file_infos: list[dict[str, object]] = []
++        if isinstance(sources_raw, list):
++            for entry in cast(list[Any], sources_raw):
++                if isinstance(entry, dict):
++                    file_infos.append(cast(dict[str, object], entry))
++        answers_raw = payload.get("answers")
++        answers: dict[str, object] | None = (
++            cast(dict[str, object], answers_raw) if isinstance(answers_raw, dict) else None
++        )
++        language = str(payload.get("language", "uz"))
++        if job.user_id is None:
++            raise RuntimeError("job has no user_id; cannot run entitled pipeline")
++
++        bot = Bot(token=self._config.telegram_bot_token)
++        orchestrator = PresentationOrchestrator(
++            bot=bot,
++            db=self._db,
++            credits=self._credits,
++            storage=self._storage,
++        )
++
++        async def progress(step: str, current: int, total: int) -> None:
++            await self._queue.set_progress(
++                job.id,
++                self._worker_id,
++                {"step": step, "current": current, "total": total},
++            )
++
++        try:
++            result = await orchestrator.run_full_pipeline(
++                file_infos=file_infos,
++                project_id=job.project_id,
++                user_id=job.user_id,
++                language=language,
++                raw_answers=answers,
++                requested_formats=formats,
++                progress=progress,
++                package=package,
++            )
++        finally:
++            await bot.session.close()
++
++        files = {ext: str(path) for ext, path in result.render.by_extension().items()}
++        await self._queue.complete(job.id, self._worker_id, telemetry={})
++        logger.info(
++            "worker_job_completed %s",
++            json.dumps({"job_id": job.id, "project_id": job.project_id, "files": files}),
++        )
++
++
++async def _reap(queue: JobQueue, credits: CreditLedger, stale_seconds: int) -> None:
++    try:
++        failed = await queue.reap_stale(stale_seconds)
++    except Exception as exc:
++        logger.warning("worker_reap_error %s", json.dumps({"error_type": type(exc).__name__}))
++        return
++    for job in failed:
++        logger.warning(
++            "worker_job_reaped %s",
++            json.dumps({"job_id": job.id, "error_message": job.error_message}),
++        )
++        await _refund_job(credits, job, f"refund:job:{job.id}:reaped")
++
++
++async def _amain(args: argparse.Namespace) -> int:
++    config = PlatformConfig.from_env()
++    db = DatabaseClient(config)
++    queue = JobQueue(db)
++    credits = CreditLedger(db, dev_mode=config.dev_mode)
++    storage = FileStorage(config)
++    worker_id = _worker_id()
++    runner = JobRunner(config, db, queue, credits, storage, worker_id)
++    logger.info("worker_started %s", json.dumps({"worker_id": worker_id, "loop": args.loop}))
++
++    if args.job_id:
++        claimed = await queue.claim_job(args.job_id, worker_id)
++        if claimed is None:
++            job = await queue.get_job(args.job_id)
++            state = job.status.value if job is not None else "not_found"
++            logger.error(
++                "worker_job_not_claimable %s",
++                json.dumps({"job_id": args.job_id, "status": state}),
++            )
++            return 1
++        await runner.run(claimed)
++        final = await queue.get_job(args.job_id)
++        return 0 if final is not None and final.status.value == "completed" else 1
++
++    while True:
++        await _reap(queue, credits, args.stale_seconds)
++        try:
++            job = await queue.claim_next(worker_id)
++        except Exception as exc:
++            logger.warning("worker_claim_error %s", json.dumps({"error_type": type(exc).__name__}))
++            job = None
++        if job is None:
++            await asyncio.sleep(POLL_INTERVAL_SECONDS)
++            continue
++        logger.info(
++            "worker_job_claimed %s",
++            json.dumps({"job_id": job.id, "job_type": job.job_type.value}),
++        )
++        await runner.run(job)
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description="Nashr generation-jobs worker")
++    group = parser.add_mutually_exclusive_group(required=True)
++    group.add_argument("--job-id", help="run one specific queued job, then exit")
++    group.add_argument("--loop", action="store_true", help="poll-claim-run forever (VM service)")
++    parser.add_argument(
++        "--stale-seconds",
++        type=int,
++        default=DEFAULT_STALE_SECONDS,
++        help="heartbeat age after which a processing row is reaped",
++    )
++    args = parser.parse_args()
++    logging.basicConfig(
++        level=logging.INFO,
++        format="%(asctime)s %(name)s %(levelname)s %(message)s",
++    )
++    return asyncio.run(_amain(args))
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/supabase/migrations/006_generation_jobs_queue.sql b/supabase/migrations/006_generation_jobs_queue.sql
+new file mode 100644
+index 0000000..65855e9
+--- /dev/null
++++ b/supabase/migrations/006_generation_jobs_queue.sql
+@@ -0,0 +1,176 @@
++-- ============================================================================
++-- 006_generation_jobs_queue — P2 job pipeline (plan §5 "Job queue")
++--
++-- HUMAN-APPLIED. Do not run from code.
++--
++-- Extends the dormant generation_jobs table (001) into a real queue:
++--   1. Queue columns: payload, user_id, worker_id, claimed_at, heartbeat_at,
++--      attempts, max_attempts, progress.
++--   2. job_type gains presentation_edit / image_regen; status gains cancelled.
++--   3. Partial unique index (project_id, job_type) over active rows so a
++--      double enqueue is a constraint violation, not a duplicate execution.
++--   4. claim_next_job(): atomic claim via FOR UPDATE SKIP LOCKED
++--      (SECURITY DEFINER so supabase-py can call it over PostgREST rpc).
++--   5. reap_stale_jobs(): zombie 'processing' rows whose heartbeat went stale
++--      are re-queued while attempts < max_attempts, else failed HONESTLY with
++--      a step-named error_message. Returns the rows it FAILED so exactly one
++--      caller refunds each.
++--   6. rate_limit_counters + consume_rate_limit(): persisted per-user AND
++--      per-IP fixed-window request counters (abuse caps, plan amendment 2).
++-- ============================================================================
++
++-- 1. Queue columns -----------------------------------------------------------
++
++alter table generation_jobs
++    add column if not exists payload       jsonb not null default '{}'::jsonb,
++    add column if not exists user_id       uuid references users(id) on delete cascade,
++    add column if not exists worker_id     text,
++    add column if not exists claimed_at    timestamptz,
++    add column if not exists heartbeat_at  timestamptz,
++    add column if not exists attempts      integer not null default 0 check (attempts >= 0),
++    add column if not exists max_attempts  integer not null default 1 check (max_attempts >= 1),
++    add column if not exists progress      jsonb not null default '{}'::jsonb;
++
++-- 2. Widen the CHECK constraints (drop + re-add; names from 001 defaults).
++
++alter table generation_jobs drop constraint if exists generation_jobs_job_type_check;
++alter table generation_jobs add constraint generation_jobs_job_type_check
++    check (job_type in (
++        'source_processing', 'article_generation',
++        'presentation_generation', 'export',
++        'presentation_edit', 'image_regen'
++    ));
++
++alter table generation_jobs drop constraint if exists generation_jobs_status_check;
++alter table generation_jobs add constraint generation_jobs_status_check
++    check (status in ('queued', 'processing', 'completed', 'failed', 'cancelled'));
++
++-- 3. Idempotent enqueue: one ACTIVE job per (project, job_type).
++
++create unique index if not exists uq_generation_jobs_active
++    on generation_jobs (project_id, job_type)
++    where status in ('queued', 'processing');
++
++create index if not exists idx_generation_jobs_status_created
++    on generation_jobs (status, created_at);
++
++-- 4. Atomic claim ------------------------------------------------------------
++-- SKIP LOCKED so N workers never double-claim; oldest queued row first.
++
++create or replace function claim_next_job(p_worker_id text)
++returns setof generation_jobs
++language sql
++security definer
++set search_path = public
++as $$
++    update generation_jobs
++       set status       = 'processing',
++           worker_id    = p_worker_id,
++           claimed_at   = now(),
++           heartbeat_at = now(),
++           started_at   = coalesce(started_at, now()),
++           attempts     = attempts + 1
++     where id = (
++        select id from generation_jobs
++         where status = 'queued'
++         order by created_at
++         for update skip locked
++         limit 1
++     )
++    returning *;
++$$;
++
++-- Heartbeat guarded by worker identity so a reaped-and-reclaimed job can
++-- never be touched by the old (zombie) worker.
++create or replace function heartbeat_job(p_job_id uuid, p_worker_id text)
++returns boolean
++language sql
++security definer
++set search_path = public
++as $$
++    with bumped as (
++        update generation_jobs
++           set heartbeat_at = now()
++         where id = p_job_id
++           and worker_id = p_worker_id
++           and status = 'processing'
++        returning id
++    )
++    select exists (select 1 from bumped);
++$$;
++
++-- 5. Reaper ------------------------------------------------------------------
++-- The transition is atomic per row; only the caller whose UPDATE won gets the
++-- failed rows back, so the refund fires exactly once.
++
++create or replace function reap_stale_jobs(p_stale_seconds integer default 120)
++returns setof generation_jobs
++language plpgsql
++security definer
++set search_path = public
++as $$
++begin
++    -- Retryable zombies go back to the queue.
++    update generation_jobs
++       set status = 'queued', worker_id = null, claimed_at = null, heartbeat_at = null
++     where status = 'processing'
++       and heartbeat_at < now() - make_interval(secs => p_stale_seconds)
++       and attempts < max_attempts;
++
++    -- Exhausted zombies fail honestly, naming the last reported step.
++    return query
++    update generation_jobs
++       set status = 'failed',
++           completed_at = now(),
++           error_message = left(
++               'reaped: worker heartbeat lost at step '
++               || coalesce(progress->>'step', 'unknown'), 4000)
++     where status = 'processing'
++       and heartbeat_at < now() - make_interval(secs => p_stale_seconds)
++       and attempts >= max_attempts
++    returning *;
++end;
++$$;
++
++-- 6. Abuse caps: persisted fixed-window counters ------------------------------
++-- scope 'user' keys on users.id; scope 'ip' keys on the caller address.
++-- action distinguishes surfaces ('enqueue' now; 'chat' pre-wired for P4).
++
++create table if not exists rate_limit_counters (
++    scope        text not null check (scope in ('user', 'ip')),
++    action       text not null check (char_length(action) <= 40),
++    key          text not null check (char_length(key) <= 128),
++    window_start timestamptz not null,
++    count        integer not null default 0 check (count >= 0),
++    primary key (scope, action, key, window_start)
++);
++
++alter table rate_limit_counters enable row level security;
++-- Service-role only: no policies on purpose — anon/authenticated see nothing.
++
++-- Atomically count this request and report the running total. The counter
++-- increments even on rejected requests (it counts attempts, which is what an
++-- abuse cap must measure).
++create or replace function consume_rate_limit(
++    p_scope text,
++    p_action text,
++    p_key text,
++    p_window_start timestamptz
++)
++returns integer
++language sql
++security definer
++set search_path = public
++as $$
++    insert into rate_limit_counters (scope, action, key, window_start, count)
++    values (p_scope, p_action, p_key, p_window_start, 1)
++    on conflict (scope, action, key, window_start)
++    do update set count = rate_limit_counters.count + 1
++    returning count;
++$$;
++
++revoke all on function claim_next_job(text) from public, anon, authenticated;
++revoke all on function heartbeat_job(uuid, text) from public, anon, authenticated;
++revoke all on function reap_stale_jobs(integer) from public, anon, authenticated;
++revoke all on function consume_rate_limit(text, text, text, timestamptz)
++    from public, anon, authenticated;
+diff --git a/supabase/migrations/007_generated_files_stable_keys.sql b/supabase/migrations/007_generated_files_stable_keys.sql
+new file mode 100644
+index 0000000..b74b920
+--- /dev/null
++++ b/supabase/migrations/007_generated_files_stable_keys.sql
+@@ -0,0 +1,23 @@
++-- ============================================================================
++-- 007_generated_files_stable_keys — P2 stable R2 keys (plan C5 / deferred #2)
++--
++-- HUMAN-APPLIED. Do not run from code.
++--
++-- generated_files becomes one row per (project, file_type), upserted in
++-- place, mirroring the R2 layout generated/{project_id}/presentation.{ext}
++-- that overwrites in place. Existing duplicate rows (insert-only history)
++-- are collapsed to the newest before the constraint lands.
++-- ============================================================================
++
++delete from generated_files gf
++ using generated_files newer
++ where gf.project_id = newer.project_id
++   and gf.file_type = newer.file_type
++   and (newer.created_at, newer.id) > (gf.created_at, gf.id);
++
++-- A named UNIQUE constraint (not a bare index) so PostgREST upsert can target
++-- it via on_conflict=project_id,file_type.
++alter table generated_files
++    drop constraint if exists uq_generated_files_project_type;
++alter table generated_files
++    add constraint uq_generated_files_project_type unique (project_id, file_type);
+diff --git a/supabase/migrations/008_realtime_publication.sql b/supabase/migrations/008_realtime_publication.sql
+new file mode 100644
+index 0000000..54484f3
+--- /dev/null
++++ b/supabase/migrations/008_realtime_publication.sql
+@@ -0,0 +1,33 @@
++-- ============================================================================
++-- 008_realtime_publication — P2 UI polling/subscription surface
++--
++-- HUMAN-APPLIED. Do not run from code.
++--
++-- Adds generation_jobs and decks to the supabase_realtime publication so the
++-- web UI can subscribe to job progress and deck updates (RLS owner-SELECT
++-- policies already scope what each user can see). Guarded so re-running the
++-- file is a no-op.
++-- ============================================================================
++
++do $$
++begin
++    if not exists (
++        select 1 from pg_publication_tables
++        where pubname = 'supabase_realtime'
++          and schemaname = 'public' and tablename = 'generation_jobs'
++    ) then
++        alter publication supabase_realtime add table generation_jobs;
++    end if;
++    if not exists (
++        select 1 from pg_publication_tables
++        where pubname = 'supabase_realtime'
++          and schemaname = 'public' and tablename = 'decks'
++    ) then
++        alter publication supabase_realtime add table decks;
++    end if;
++end;
++$$;
++
++-- Realtime UPDATE payloads need full old-row images for RLS filtering.
++alter table generation_jobs replica identity full;
++alter table decks replica identity full;
+diff --git a/tests/unit/test_database_client.py b/tests/unit/test_database_client.py
+index 9a301a2..779ec5f 100644
+--- a/tests/unit/test_database_client.py
++++ b/tests/unit/test_database_client.py
+@@ -190,15 +190,20 @@ class FakeSupabaseClient:
+             return SimpleNamespace(data=updated)
+         if mode == "upsert":
+             assert payload is not None
+-            conflict_col = on_conflict or "id"
++            conflict_cols = (on_conflict or "id").split(",")
+             match = next(
+-                (r for r in rows if r.get(conflict_col) == payload.get(conflict_col)),
++                (
++                    r
++                    for r in rows
++                    if all(r.get(c) == payload.get(c) for c in conflict_cols)
++                    and any(payload.get(c) is not None for c in conflict_cols)
++                ),
+                 None,
+             )
+             if match is not None:
+                 match.update(payload)
+                 self.updates.append(
+-                    (table, dict(payload), [(conflict_col, payload.get(conflict_col))])
++                    (table, dict(payload), [(c, payload.get(c)) for c in conflict_cols])
+                 )
+                 return SimpleNamespace(data=[match])
+             row = dict(payload)
+diff --git a/tests/unit/test_identity_service.py b/tests/unit/test_identity_service.py
+index ea5b896..7882cdc 100644
+--- a/tests/unit/test_identity_service.py
++++ b/tests/unit/test_identity_service.py
+@@ -285,6 +285,30 @@ class TestIdentityServiceLink:
+         assert merged is False
+         assert store.merges == []
+ 
++    @pytest.mark.asyncio
++    async def test_merge_audit_event_embeds_json_payload_in_message(
++        self, caplog: pytest.LogCaptureFixture
++    ) -> None:
++        # F1 (4409e72 pattern): the audit payload must live IN the message
++        # string so docker logs carry the fields verbatim, not in extra=.
++        import json as _json
++
++        store, db = _FakeStore(), _FakeDb()
++        other = uuid4()
++        await store.upsert_identity(IdentityProvider.TELEGRAM, "777000111", other)
++        service = IdentityService(_config(), db, store)  # type: ignore[arg-type]
++        me = uuid4()
++
++        with caplog.at_level("INFO", logger="packages.api.services.identity"):
++            await service.link_telegram(me, _payload())
++
++        merged_msgs = [
++            r.getMessage() for r in caplog.records if "identity_users_merged" in r.getMessage()
++        ]
++        assert len(merged_msgs) == 1
++        payload = _json.loads(merged_msgs[0].split(" ", 1)[1])
++        assert payload == {"canonical": str(me), "orphan": str(other)}
++
+ 
+ class TestTokenHardening:
+     def test_raw_supabase_style_token_without_issuer_is_rejected(self) -> None:
+diff --git a/tests/unit/test_job_queue.py b/tests/unit/test_job_queue.py
+new file mode 100644
+index 0000000..bc2f1b8
+--- /dev/null
++++ b/tests/unit/test_job_queue.py
+@@ -0,0 +1,236 @@
++"""Behaviour tests for the P2 job queue client (packages/platform/jobs.py).
++
++The Supabase surface is replaced by a behavioural fake at the DatabaseClient
++seam: ``_query`` returns a recording builder, ``rpc`` dispatches to canned
++handlers. The SQL functions themselves (claim CAS, reaper transitions) live in
++migration 006 and are exercised on the VM gate; here we pin the CLIENT
++contract — what gets sent, and how responses are interpreted.
++"""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++from typing import Any, cast
++
++import pytest
++
++from packages.platform.database import DatabaseClient
++from packages.platform.jobs import (
++    DuplicateActiveJobError,
++    GenerationJob,
++    JobQueue,
++    JobStatus,
++    JobType,
++)
++
++pytestmark = pytest.mark.asyncio
++
++_JOB_ROW: dict[str, Any] = {
++    "id": "11111111-1111-1111-1111-111111111111",
++    "project_id": "22222222-2222-2222-2222-222222222222",
++    "user_id": "33333333-3333-3333-3333-333333333333",
++    "job_type": "presentation_generation",
++    "status": "queued",
++    "payload": {"product_type": "presentation_standard"},
++    "progress": {},
++    "attempts": 0,
++    "max_attempts": 1,
++}
++
++
++class _FakeBuilder:
++    def __init__(self, db: _FakeDb, table: str) -> None:
++        self._db = db
++        self.table = table
++        self.op: str | None = None
++        self.op_payload: Any = None
++        self.filters: list[tuple[str, str, Any]] = []
++
++    def select(self, *_cols: str) -> _FakeBuilder:
++        self.op = self.op or "select"
++        return self
++
++    def insert(self, payload: dict[str, Any]) -> _FakeBuilder:
++        self.op = "insert"
++        self.op_payload = payload
++        return self
++
++    def update(self, payload: dict[str, Any]) -> _FakeBuilder:
++        self.op = "update"
++        self.op_payload = payload
++        return self
++
++    def eq(self, col: str, value: Any) -> _FakeBuilder:
++        self.filters.append(("eq", col, value))
++        return self
++
++    def in_(self, col: str, values: Any) -> _FakeBuilder:
++        self.filters.append(("in", col, values))
++        return self
++
++    def limit(self, _n: int) -> _FakeBuilder:
++        return self
++
++    def execute(self) -> Any:
++        return self._db.execute(self)
++
++
++class _FakeDb:
++    """Stands in for DatabaseClient: only _query and rpc are consumed."""
++
++    def __init__(self) -> None:
++        self.builders: list[_FakeBuilder] = []
++        self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
++        self.select_rows: list[dict[str, Any]] = []
++        self.insert_raises: Exception | None = None
++        self.update_rows: list[dict[str, Any]] = []
++        self.rpc_data: Any = []
++
++    def _query(self, table: str) -> _FakeBuilder:
++        builder = _FakeBuilder(self, table)
++        self.builders.append(builder)
++        return builder
++
++    def rpc(self, fn: str, params: dict[str, Any]) -> Any:
++        self.rpc_calls.append((fn, params))
++        return SimpleNamespace(data=self.rpc_data)
++
++    def execute(self, builder: _FakeBuilder) -> Any:
++        if builder.op == "insert":
++            if self.insert_raises is not None:
++                raise self.insert_raises
++            return SimpleNamespace(data=[{**_JOB_ROW, **cast(dict[str, Any], builder.op_payload)}])
++        if builder.op == "update":
++            return SimpleNamespace(data=self.update_rows)
++        return SimpleNamespace(data=self.select_rows)
++
++
++def _queue() -> tuple[JobQueue, _FakeDb]:
++    fake = _FakeDb()
++    return JobQueue(cast(DatabaseClient, fake)), fake
++
++
++async def test_enqueue_inserts_queued_row_with_payload() -> None:
++    queue, fake = _queue()
++    job = await queue.enqueue(
++        project_id="p1",
++        user_id="u1",
++        job_type=JobType.PRESENTATION_GENERATION,
++        payload={"product_type": "presentation_basic"},
++    )
++    insert = next(b for b in fake.builders if b.op == "insert")
++    sent = cast(dict[str, Any], insert.op_payload)
++    assert sent["status"] == "queued"
++    assert sent["job_type"] == "presentation_generation"
++    assert sent["payload"] == {"product_type": "presentation_basic"}
++    assert job.status is JobStatus.QUEUED
++
++
++async def test_enqueue_conflict_surfaces_existing_active_job() -> None:
++    queue, fake = _queue()
++    fake.insert_raises = RuntimeError("duplicate key value violates uq_generation_jobs_active")
++    fake.select_rows = [dict(_JOB_ROW)]
++    with pytest.raises(DuplicateActiveJobError) as excinfo:
++        await queue.enqueue(
++            project_id=_JOB_ROW["project_id"],
++            user_id="u1",
++            job_type=JobType.PRESENTATION_GENERATION,
++            payload={},
++        )
++    assert excinfo.value.existing.id == _JOB_ROW["id"]
++
++
++async def test_enqueue_error_without_existing_job_reraises() -> None:
++    queue, fake = _queue()
++    fake.insert_raises = RuntimeError("network down")
++    fake.select_rows = []
++    with pytest.raises(RuntimeError, match="network down"):
++        await queue.enqueue(
++            project_id="p1", user_id="u1", job_type=JobType.PRESENTATION_GENERATION, payload={}
++        )
++
++
++async def test_claim_next_goes_through_rpc_and_parses_row() -> None:
++    queue, fake = _queue()
++    fake.rpc_data = [dict(_JOB_ROW, status="processing", worker_id="w1")]
++    job = await queue.claim_next("w1")
++    assert fake.rpc_calls == [("claim_next_job", {"p_worker_id": "w1"})]
++    assert job is not None and job.status is JobStatus.PROCESSING
++
++
++async def test_claim_next_empty_queue_returns_none() -> None:
++    queue, fake = _queue()
++    fake.rpc_data = []
++    assert await queue.claim_next("w1") is None
++
++
++async def test_heartbeat_reports_row_no_longer_ours() -> None:
++    queue, fake = _queue()
++    fake.rpc_data = False
++    assert await queue.heartbeat("j1", "w1") is False
++    fake.rpc_data = True
++    assert await queue.heartbeat("j1", "w1") is True
++
++
++async def test_fail_writes_step_named_error_guarded_by_worker_identity() -> None:
++    queue, fake = _queue()
++    await queue.fail("j1", "w1", step="render", message="boom")
++    update = next(b for b in fake.builders if b.op == "update")
++    sent = cast(dict[str, Any], update.op_payload)
++    assert sent["status"] == "failed"
++    assert sent["error_message"] == "render: boom"
++    assert ("eq", "worker_id", "w1") in update.filters
++    assert ("eq", "status", "processing") in update.filters
++
++
++async def test_fail_truncates_error_to_column_cap() -> None:
++    queue, fake = _queue()
++    await queue.fail("j1", "w1", step="render", message="x" * 5000)
++    update = next(b for b in fake.builders if b.op == "update")
++    assert len(cast(dict[str, Any], update.op_payload)["error_message"]) == 4000
++
++
++async def test_set_progress_guarded_by_worker_and_status() -> None:
++    queue, fake = _queue()
++    await queue.set_progress("j1", "w1", {"step": "Rendering", "current": 7, "total": 7})
++    update = next(b for b in fake.builders if b.op == "update")
++    assert cast(dict[str, Any], update.op_payload)["progress"]["step"] == "Rendering"
++    assert ("eq", "worker_id", "w1") in update.filters
++
++
++async def test_reap_stale_returns_failed_jobs_for_refund() -> None:
++    queue, fake = _queue()
++    fake.rpc_data = [dict(_JOB_ROW, status="failed", error_message="reaped: ...")]
++    reaped = await queue.reap_stale(90)
++    assert fake.rpc_calls == [("reap_stale_jobs", {"p_stale_seconds": 90})]
++    assert len(reaped) == 1 and reaped[0].status is JobStatus.FAILED
++
++
++async def test_claim_job_cas_returns_none_when_not_queued() -> None:
++    queue, fake = _queue()
++    fake.update_rows = []
++    assert await queue.claim_job("j1", "w1") is None
++
++
++async def test_claim_job_cas_claims_and_bumps_attempts() -> None:
++    queue, fake = _queue()
++    fake.update_rows = [dict(_JOB_ROW, status="processing", worker_id="w1")]
++    job = await queue.claim_job(_JOB_ROW["id"], "w1")
++    assert job is not None and job.worker_id == "w1"
++    updates = [b for b in fake.builders if b.op == "update"]
++    assert any("attempts" in cast(dict[str, Any], b.op_payload) for b in updates)
++
++
++async def test_get_active_job_filters_on_active_statuses() -> None:
++    queue, fake = _queue()
++    fake.select_rows = [dict(_JOB_ROW)]
++    job = await queue.get_active_job("p1", JobType.PRESENTATION_GENERATION)
++    assert job is not None
++    select = fake.builders[0]
++    in_filter = next(f for f in select.filters if f[0] == "in")
++    assert set(in_filter[2]) == {"queued", "processing"}
++
++
++def test_generation_job_tolerates_extra_columns() -> None:
++    job = GenerationJob.model_validate({**_JOB_ROW, "estimated_cost_uzs": 0, "novel_col": 1})
++    assert job.job_type is JobType.PRESENTATION_GENERATION
+diff --git a/tests/unit/test_jobs_routes.py b/tests/unit/test_jobs_routes.py
+new file mode 100644
+index 0000000..5036a3a
+--- /dev/null
++++ b/tests/unit/test_jobs_routes.py
+@@ -0,0 +1,245 @@
++"""Behaviour tests for the P2 enqueue/poll routes (packages/api/routes/jobs.py).
++
++The route's gate ORDER is the contract under test: rate limit → ownership →
++idempotency → entitlement → insert. Fakes record every call so tests can
++assert what was (and crucially was NOT) reached — e.g. an over-cap request
++must never touch the ledger, and a lost enqueue race must refund.
++"""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime, timedelta
++from typing import Any, ClassVar, cast
++from uuid import UUID, uuid4
++
++import httpx
++import pytest
++
++from packages.api.app import create_app
++from packages.api.services.tokens import mint_app_jwt
++from packages.platform.config import PlatformConfig
++from packages.platform.jobs import (
++    DuplicateActiveJobError,
++    GenerationJob,
++    JobType,
++)
++from packages.platform.rate_limit import RateDecision
++
++pytestmark = pytest.mark.asyncio
++
++_SECRET = "test-jwt-secret"
++_USER_ID = uuid4()
++_PROJECT_ID = str(uuid4())
++
++
++def _config() -> PlatformConfig:
++    return PlatformConfig(
++        supabase_url="https://example.supabase.co",
++        supabase_service_key="service",
++        telegram_bot_token="123:abc",
++        supabase_jwt_secret=_SECRET,
++    )
++
++
++def _job(status: str = "queued", user_id: UUID | None = None) -> GenerationJob:
++    return GenerationJob.model_validate(
++        {
++            "id": str(uuid4()),
++            "project_id": _PROJECT_ID,
++            "user_id": str(user_id or _USER_ID),
++            "job_type": "presentation_generation",
++            "status": status,
++            "payload": {},
++            "progress": {"step": "Rendering", "current": 7, "total": 7},
++        }
++    )
++
++
++class _FakeDb:
++    def __init__(self) -> None:
++        self.project_owner: str = str(_USER_ID)
++        self.project_exists = True
++
++    async def get_project(self, project_id: str) -> dict[str, Any] | None:
++        if not self.project_exists:
++            return None
++        return {"id": project_id, "user_id": self.project_owner}
++
++
++class _FakeCredits:
++    PRICING: ClassVar[dict[str, int]] = {"presentation_standard": 10_000}
++
++    def __init__(self) -> None:
++        self.sufficient = True
++        self.deductions: list[tuple[str, str, str]] = []
++        self.refunds: list[tuple[str, str, int, str]] = []
++
++    async def has_sufficient_credits(self, user_id: str, product_type: str) -> bool:
++        return self.sufficient
++
++    async def get_balance(self, user_id: str) -> int:
++        return 3_000
++
++    async def deduct_for_generation(self, user_id: str, project_id: str, product_type: str) -> Any:
++        self.deductions.append((user_id, project_id, product_type))
++        from types import SimpleNamespace
++
++        return SimpleNamespace(amount=-10_000)
++
++    async def refund(self, user_id: str, project_id: str, amount: int, reason: str) -> None:
++        self.refunds.append((user_id, project_id, amount, reason))
++
++
++class _FakeQueue:
++    def __init__(self) -> None:
++        self.active: GenerationJob | None = None
++        self.jobs: dict[str, GenerationJob] = {}
++        self.enqueue_raises: DuplicateActiveJobError | None = None
++        self.enqueued: list[dict[str, Any]] = []
++
++    async def get_active_job(self, project_id: str, job_type: JobType) -> GenerationJob | None:
++        return self.active
++
++    async def get_job(self, job_id: str) -> GenerationJob | None:
++        return self.jobs.get(job_id)
++
++    async def enqueue(self, **kwargs: Any) -> GenerationJob:
++        if self.enqueue_raises is not None:
++            raise self.enqueue_raises
++        self.enqueued.append(kwargs)
++        job = _job()
++        self.jobs[job.id] = job
++        return job
++
++
++class _FakeLimiter:
++    def __init__(self) -> None:
++        self.allowed = True
++        self.calls: list[dict[str, str]] = []
++
++    async def check(self, *, action: str, user_id: str, ip: str) -> RateDecision:
++        self.calls.append({"action": action, "user_id": user_id, "ip": ip})
++        return RateDecision(
++            allowed=self.allowed,
++            scope="user",
++            action=action,
++            count=11,
++            limit=10,
++            resets_at=datetime.now(UTC) + timedelta(hours=1),
++        )
++
++
++def _client() -> tuple[httpx.AsyncClient, _FakeDb, _FakeCredits, _FakeQueue, _FakeLimiter]:
++    db = _FakeDb()
++    credits = _FakeCredits()
++    queue = _FakeQueue()
++    limiter = _FakeLimiter()
++    app = create_app(
++        config=_config(),
++        db=cast(Any, db),
++        identity_service=cast(Any, object()),
++        credits=cast(Any, credits),
++        job_queue=cast(Any, queue),
++        rate_limiter=cast(Any, limiter),
++    )
++    transport = httpx.ASGITransport(app=app)
++    client = httpx.AsyncClient(transport=transport, base_url="http://test")
++    return client, db, credits, queue, limiter
++
++
++def _headers() -> dict[str, str]:
++    session = mint_app_jwt(_SECRET, _USER_ID, 3600)
++    return {"Authorization": f"Bearer {session.access_token}"}
++
++
++def _body(**overrides: Any) -> dict[str, Any]:
++    body: dict[str, Any] = {
++        "project_id": _PROJECT_ID,
++        "package": "presentation_standard",
++        "sources": [{"storage_key": f"sources/{_PROJECT_ID}/a.pdf", "filename": "a.pdf"}],
++        "language": "uz",
++    }
++    body.update(overrides)
++    return body
++
++
++async def test_enqueue_requires_auth() -> None:
++    client, *_ = _client()
++    response = await client.post("/jobs", json=_body())
++    assert response.status_code == 401
++
++
++async def test_over_cap_rejected_visibly_before_any_spend() -> None:
++    client, _db, credits, queue, limiter = _client()
++    limiter.allowed = False
++    response = await client.post("/jobs", json=_body(), headers=_headers())
++    assert response.status_code == 429
++    detail = response.json()["detail"]
++    assert detail["reason"] == "rate_limited"
++    assert detail["scope"] == "user" and detail["count"] == 11 and detail["limit"] == 10
++    assert "resets_at" in detail
++    # Zero spend of any kind: no deduction, no enqueue.
++    assert credits.deductions == [] and queue.enqueued == []
++
++
++async def test_non_owner_project_is_404_before_entitlement() -> None:
++    client, db, credits, _queue, _limiter = _client()
++    db.project_owner = str(uuid4())
++    response = await client.post("/jobs", json=_body(), headers=_headers())
++    assert response.status_code == 404
++    assert credits.deductions == []
++
++
++async def test_active_job_returned_idempotently_without_deduction() -> None:
++    client, _db, credits, queue, _limiter = _client()
++    queue.active = _job(status="processing")
++    response = await client.post("/jobs", json=_body(), headers=_headers())
++    assert response.status_code == 200
++    assert response.json()["existing"] is True
++    assert credits.deductions == []
++
++
++async def test_insufficient_balance_is_402_pre_spend() -> None:
++    client, _db, credits, queue, _limiter = _client()
++    credits.sufficient = False
++    response = await client.post("/jobs", json=_body(), headers=_headers())
++    assert response.status_code == 402
++    detail = response.json()["detail"]
++    assert detail == {"reason": "insufficient_balance", "balance": 3_000, "required": 10_000}
++    assert credits.deductions == [] and queue.enqueued == []
++
++
++async def test_happy_path_deducts_then_enqueues_with_payload() -> None:
++    client, _db, credits, queue, _limiter = _client()
++    response = await client.post("/jobs", json=_body(), headers=_headers())
++    assert response.status_code == 200
++    body = response.json()
++    assert body["status"] == "queued" and body["existing"] is False
++    assert credits.deductions == [(str(_USER_ID), _PROJECT_ID, "presentation_standard")]
++    payload = queue.enqueued[0]["payload"]
++    assert payload["product_type"] == "presentation_standard"
++    assert payload["sources"][0]["filename"] == "a.pdf"
++
++
++async def test_lost_enqueue_race_refunds_and_returns_winner() -> None:
++    client, _db, credits, queue, _limiter = _client()
++    winner = _job(status="queued")
++    queue.enqueue_raises = DuplicateActiveJobError(winner)
++    response = await client.post("/jobs", json=_body(), headers=_headers())
++    assert response.status_code == 200
++    assert response.json()["id"] == winner.id and response.json()["existing"] is True
++    assert len(credits.refunds) == 1
++    _user_id, _project_id, amount, reason = credits.refunds[0]
++    assert amount == 10_000 and "duplicate_enqueue" in reason
++
++
++async def test_poll_returns_progress_to_owner_only() -> None:
++    client, _db, _credits, queue, _limiter = _client()
++    mine = _job(status="processing")
++    theirs = _job(status="processing", user_id=uuid4())
++    queue.jobs = {mine.id: mine, theirs.id: theirs}
++    ok = await client.get(f"/jobs/{mine.id}", headers=_headers())
++    assert ok.status_code == 200
++    assert ok.json()["progress"]["step"] == "Rendering"
++    denied = await client.get(f"/jobs/{theirs.id}", headers=_headers())
++    assert denied.status_code == 404
+diff --git a/tests/unit/test_presentation_orchestrator.py b/tests/unit/test_presentation_orchestrator.py
+index 0b03a74..43a430c 100644
+--- a/tests/unit/test_presentation_orchestrator.py
++++ b/tests/unit/test_presentation_orchestrator.py
+@@ -639,6 +639,66 @@ async def test_render_uploads_to_storage_with_project_id_namespace() -> None:
+         assert key.startswith(f"generated/{PROJECT_ID}/")
+ 
+ 
++async def test_render_uploads_use_stable_per_format_keys_and_upsert_registration() -> None:
++    """P2 stable keys: uploads land on generated/{pid}/presentation.{ext} and the
++    generated_files row is upserted per (project, format) — never title-derived,
++    never appended as duplicates."""
++
++    from unittest.mock import AsyncMock, MagicMock
++
++    bot = _StubBot()
++    worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
++
++    storage_stub = MagicMock()
++    storage_stub.available = True
++    storage_stub.upload = AsyncMock(return_value="")
++
++    orch, _, _, fake = _build_orch(bot, worker=worker, storage=storage_stub)
++
++    await orch.render(
++        _deck_spec(),
++        [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
++        _noop_progress,
++        project_id=PROJECT_ID,
++    )
++
++    keys = sorted(call.args[1] for call in storage_stub.upload.await_args_list)
++    assert keys == [
++        f"generated/{PROJECT_ID}/presentation.html",
++        f"generated/{PROJECT_ID}/presentation.pptx",
++    ]
++    rows = fake.tables.get("generated_files", [])
++    assert {r["file_type"] for r in rows} == {"html", "pptx"}
++    for row in rows:
++        assert row["storage_path"] == f"generated/{PROJECT_ID}/presentation.{row['file_type']}"
++        assert row["project_id"] == PROJECT_ID
++        assert row["file_size"] > 0
++
++
++async def test_process_sources_fetches_from_storage_when_key_present() -> None:
++    """P2 queue path: a source carrying storage_key is fetched from R2, not Telegram."""
++
++    from unittest.mock import AsyncMock, MagicMock
++
++    bot = _StubBot()
++    pipeline = _StubSourcePipeline([_pipeline_result(), _pipeline_result()])
++    storage_stub = MagicMock()
++    storage_stub.available = True
++    storage_stub.get_bytes = AsyncMock(return_value=b"%PDF-1.4 stored bytes")
++
++    orch, _db, _credits, _fake = _build_orch(bot, pipeline=pipeline, storage=storage_stub)
++
++    file_infos: list[dict[str, object]] = [
++        {"storage_key": f"sources/{PROJECT_ID}/web.pdf", "filename": "web.pdf"},
++        {"file_id": "f1", "filename": "tg.pdf", "file_size": 100, "file_type": "pdf"},
++    ]
++    result = await orch.process_sources(file_infos, PROJECT_ID, USER_ID, _noop_progress)
++
++    storage_stub.get_bytes.assert_awaited_once_with(f"sources/{PROJECT_ID}/web.pdf")
++    assert bot.downloaded == ["f1"]
++    assert len(result.claims) == 2
++
++
+ async def test_render_records_timeout_as_warning_and_continues() -> None:
+     bot = _StubBot()
+     worker = _StubWorkerRunner(
+diff --git a/tests/unit/test_rate_limit_persisted.py b/tests/unit/test_rate_limit_persisted.py
+new file mode 100644
+index 0000000..3ce0c28
+--- /dev/null
++++ b/tests/unit/test_rate_limit_persisted.py
+@@ -0,0 +1,79 @@
++"""Behaviour tests for the persisted abuse caps (packages/platform/rate_limit.py)."""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from types import SimpleNamespace
++from typing import Any, cast
++
++import pytest
++
++from packages.platform.database import DatabaseClient
++from packages.platform.rate_limit import ENQUEUE_ACTION, RateLimiter
++
++pytestmark = pytest.mark.asyncio
++
++
++class _FakeDb:
++    """Counts consume_rate_limit calls per (scope, key) like the SQL fn would."""
++
++    def __init__(self) -> None:
++        self.counts: dict[tuple[str, str, str, str], int] = {}
++        self.calls: list[dict[str, Any]] = []
++
++    def rpc(self, fn: str, params: dict[str, Any]) -> Any:
++        assert fn == "consume_rate_limit"
++        self.calls.append(params)
++        key = (params["p_scope"], params["p_action"], params["p_key"], params["p_window_start"])
++        self.counts[key] = self.counts.get(key, 0) + 1
++        return SimpleNamespace(data=self.counts[key])
++
++
++def _limiter(limits: dict[tuple[str, str], int]) -> tuple[RateLimiter, _FakeDb]:
++    fake = _FakeDb()
++    return RateLimiter(cast(DatabaseClient, fake), limits=limits), fake
++
++
++async def test_under_limit_allows_and_reports_count() -> None:
++    limiter, _ = _limiter({("user", ENQUEUE_ACTION): 2, ("ip", ENQUEUE_ACTION): 10})
++    decision = await limiter.check(action=ENQUEUE_ACTION, user_id="u1", ip="1.2.3.4")
++    assert decision.allowed and decision.count == 1 and decision.limit == 2
++
++
++async def test_user_cap_rejects_with_visible_state() -> None:
++    limiter, _ = _limiter({("user", ENQUEUE_ACTION): 2, ("ip", ENQUEUE_ACTION): 10})
++    await limiter.check(action=ENQUEUE_ACTION, user_id="u1", ip="1.2.3.4")
++    await limiter.check(action=ENQUEUE_ACTION, user_id="u1", ip="1.2.3.4")
++    decision = await limiter.check(action=ENQUEUE_ACTION, user_id="u1", ip="1.2.3.4")
++    assert not decision.allowed
++    assert decision.scope == "user" and decision.count == 3 and decision.limit == 2
++    assert decision.resets_at > datetime.now(UTC)
++
++
++async def test_ip_cap_rejects_across_users() -> None:
++    limiter, _ = _limiter({("user", ENQUEUE_ACTION): 10, ("ip", ENQUEUE_ACTION): 2})
++    await limiter.check(action=ENQUEUE_ACTION, user_id="u1", ip="9.9.9.9")
++    await limiter.check(action=ENQUEUE_ACTION, user_id="u2", ip="9.9.9.9")
++    decision = await limiter.check(action=ENQUEUE_ACTION, user_id="u3", ip="9.9.9.9")
++    assert not decision.allowed and decision.scope == "ip"
++
++
++async def test_both_scopes_are_always_counted() -> None:
++    limiter, fake = _limiter({("user", ENQUEUE_ACTION): 5, ("ip", ENQUEUE_ACTION): 5})
++    await limiter.check(action=ENQUEUE_ACTION, user_id="u1", ip="1.1.1.1")
++    scopes = [c["p_scope"] for c in fake.calls]
++    assert scopes == ["user", "ip"]
++
++
++async def test_unknown_action_limit_zero_means_unlimited() -> None:
++    limiter, _ = _limiter({})
++    decision = await limiter.check(action="chat", user_id="u1", ip="1.1.1.1")
++    assert decision.allowed and decision.limit == 0
++
++
++async def test_window_start_is_utc_midnight() -> None:
++    limiter, fake = _limiter({("user", ENQUEUE_ACTION): 5, ("ip", ENQUEUE_ACTION): 5})
++    await limiter.check(action=ENQUEUE_ACTION, user_id="u1", ip="1.1.1.1")
++    window = datetime.fromisoformat(fake.calls[0]["p_window_start"])
++    assert window.tzinfo is not None
++    assert (window.hour, window.minute, window.second) == (0, 0, 0)
+diff --git a/tests/unit/test_worker_and_backup.py b/tests/unit/test_worker_and_backup.py
+new file mode 100644
+index 0000000..a85601e
+--- /dev/null
++++ b/tests/unit/test_worker_and_backup.py
+@@ -0,0 +1,162 @@
++"""Behaviour tests for the worker entrypoint helpers and backup scripts."""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from typing import Any, cast
++
++import pytest
++
++from packages.platform.credits import CreditLedger
++from packages.platform.jobs import GenerationJob, JobType
++from scripts.backup_db import (
++    BACKUP_PREFIX,
++    RETENTION_DAYS,
++    _dump_key,
++    _seconds_until_nightly,
++)
++from scripts.worker_run_job import JobRunner, _refund_amount, _refund_job
++
++
++def _job(**overrides: Any) -> GenerationJob:
++    row: dict[str, Any] = {
++        "id": "11111111-1111-1111-1111-111111111111",
++        "project_id": "p1",
++        "user_id": "u1",
++        "job_type": "presentation_generation",
++        "status": "processing",
++        "payload": {"product_type": "presentation_standard"},
++    }
++    row.update(overrides)
++    return GenerationJob.model_validate(row)
++
++
++class _FakeCredits:
++    def __init__(self) -> None:
++        self.refunds: list[tuple[str, str, int, str]] = []
++
++    async def refund(self, user_id: str, project_id: str, amount: int, reason: str) -> None:
++        self.refunds.append((user_id, project_id, amount, reason))
++
++
++class _FakeQueue:
++    def __init__(self) -> None:
++        self.failed: list[dict[str, Any]] = []
++        self.completed: list[str] = []
++
++    async def fail(
++        self,
++        job_id: str,
++        worker_id: str,
++        *,
++        step: str,
++        message: str,
++        telemetry: dict[str, Any] | None = None,
++    ) -> None:
++        self.failed.append({"job_id": job_id, "step": step, "message": message})
++
++    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> None:
++        self.completed.append(job_id)
++
++    async def heartbeat(self, job_id: str, worker_id: str) -> bool:
++        return True
++
++
++def test_refund_amount_reads_product_type_pricing() -> None:
++    assert (
++        _refund_amount({"product_type": "presentation_standard"})
++        == (CreditLedger.PRICING["presentation_standard"])
++    )
++    assert _refund_amount({"product_type": "nonsense"}) is None
++    assert _refund_amount({}) is None
++
++
++@pytest.mark.asyncio
++async def test_refund_job_writes_priced_refund() -> None:
++    credits = _FakeCredits()
++    await _refund_job(cast(Any, credits), _job(), "refund:job:x:render")
++    assert credits.refunds == [("u1", "p1", 10_000, "refund:job:x:render")]
++
++
++@pytest.mark.asyncio
++async def test_refund_job_skips_unpriced_payload() -> None:
++    credits = _FakeCredits()
++    await _refund_job(cast(Any, credits), _job(payload={}), "refund:job:x:render")
++    assert credits.refunds == []
++
++
++def _runner(queue: _FakeQueue, credits: _FakeCredits) -> JobRunner:
++    return JobRunner(
++        cast(Any, object()),
++        cast(Any, object()),
++        cast(Any, queue),
++        cast(Any, credits),
++        cast(Any, object()),
++        "w-test",
++    )
++
++
++@pytest.mark.asyncio
++async def test_unsupported_job_type_fails_honestly_and_refunds() -> None:
++    queue, credits = _FakeQueue(), _FakeCredits()
++    runner = _runner(queue, credits)
++    job = _job(job_type=JobType.IMAGE_REGEN.value)
++    await runner._execute(job)  # pyright: ignore[reportPrivateUsage]
++    assert queue.failed[0]["step"] == "dispatch"
++    assert "image_regen" in queue.failed[0]["message"]
++    assert len(credits.refunds) == 1
++
++
++@pytest.mark.asyncio
++async def test_orchestrator_error_lands_step_named_failure_and_refund(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    queue, credits = _FakeQueue(), _FakeCredits()
++    runner = _runner(queue, credits)
++
++    class _StepError(Exception):
++        def __init__(self) -> None:
++            super().__init__("editorial blew up")
++            self.step = "editorial"
++            self.original = RuntimeError("schema cascade")
++
++    async def boom(job: GenerationJob) -> None:
++        raise _StepError()
++
++    monkeypatch.setattr(runner, "_run_presentation", boom)
++    await runner._execute(_job())  # pyright: ignore[reportPrivateUsage]
++    assert queue.failed[0]["step"] == "editorial"
++    assert "schema cascade" in queue.failed[0]["message"]
++    assert credits.refunds[0][3].endswith(":editorial")
++
++
++@pytest.mark.asyncio
++async def test_success_path_never_refunds(monkeypatch: pytest.MonkeyPatch) -> None:
++    queue, credits = _FakeQueue(), _FakeCredits()
++    runner = _runner(queue, credits)
++
++    async def ok(job: GenerationJob) -> None:
++        await queue.complete(job.id, "w-test", telemetry={})
++
++    monkeypatch.setattr(runner, "_run_presentation", ok)
++    await runner._execute(_job())  # pyright: ignore[reportPrivateUsage]
++    assert queue.failed == [] and credits.refunds == []
++
++
++# ------------------------------------------------------------------- backup
++
++
++def test_dump_key_is_timestamped_under_backups_prefix() -> None:
++    key = _dump_key(datetime(2026, 8, 3, 2, 0, 0, tzinfo=UTC))
++    assert key == f"{BACKUP_PREFIX}nashr_20260803T020000Z.dump"
++
++
++def test_seconds_until_nightly_rolls_to_next_day() -> None:
++    before = datetime(2026, 8, 3, 1, 0, 0, tzinfo=UTC)
++    after = datetime(2026, 8, 3, 3, 0, 0, tzinfo=UTC)
++    assert _seconds_until_nightly(before) == 3600.0
++    assert _seconds_until_nightly(after) == 23 * 3600.0
++
++
++def test_retention_days_is_fourteen() -> None:
++    assert RETENTION_DAYS == 14

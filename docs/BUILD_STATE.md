@@ -1904,3 +1904,75 @@ sessions) — cache-read evidence still owed at P4 gate.
 
 OPEN HUMAN ITEMS: Anthropic balance \$5.11 (top-up decision); escalation attempts 3→4
 (live data: 5→4→2→1 hit the cap one short); key rotations post-P1.
+
+## 2026-08-03 — P2 JOB PIPELINE: CODE-COMPLETE, NOT GATED (branch build1-content-critic)
+
+One autonomous run, 3 commits on top of edafee8: `f3d2610` (F1) · `342d8dc` (queue core) ·
+`f390776` (worker + backups). Review package in `review/` (p2_pipeline.diff, the 4 new test
+files, **NOTES_P2.md — read it: the three riskiest decisions + gate expectations**).
+Migrations 006/007/008 WRITTEN, NEVER APPLIED. Nothing deployed. Gates are HUMAN-RUN and
+not self-marked.
+
+WHAT SHIPPED:
+- **F1** — the 4 identity audit events (`identity_users_merged`, `identity_email_orphan_
+  reclaimed`, `identity_email_user_created`, `identity_telegram_user_created`) now embed
+  their payload via json.dumps in the message string (4409e72 pattern); format test-pinned.
+- **Queue contract** (migration `006_generation_jobs_queue.sql` + `packages/platform/jobs.py`):
+  generation_jobs gains payload/user_id/worker_id/claimed_at/heartbeat_at/attempts/
+  max_attempts/progress; job_type += presentation_edit/image_regen; status += cancelled;
+  partial unique (project_id, job_type) over active rows. `claim_next_job` (SECURITY
+  DEFINER, FOR UPDATE SKIP LOCKED), `heartbeat_job` (worker-guarded), `reap_stale_jobs`
+  (re-queue while attempts < max_attempts, else FAIL honestly with the last progress step
+  named in error_message; failed rows returned to exactly one caller for refund). All
+  terminal/progress writes are guarded `WHERE worker_id = me AND status = 'processing'`
+  so a reaped-and-reclaimed job ignores the zombie's late writes.
+- **Enqueue route** (`packages/api/routes/jobs.py`): POST /jobs gate order = persisted rate
+  limit → project ownership (404) → idempotent active-job return → entitlement via the
+  EXISTING balance path (`has_sufficient_credits` + `deduct_for_generation`; 402 with
+  balance/required, pre-spend) → insert; a lost enqueue race refunds the deduction and
+  returns the winner. GET /jobs/{id} = owner-only progress polling. Zero model tokens on
+  every rejection path (route makes no LLM call at all).
+- **Abuse caps** (006 `rate_limit_counters` + `consume_rate_limit`, `packages/platform/
+  rate_limit.py`): persisted per-user AND per-IP fixed UTC-day windows (user 10 / ip 40
+  enqueues; `chat` action pre-wired at 200/800 for P4). Reject = 429 carrying
+  scope/count/limit/resets_at (visible state). Counters count attempts by design.
+- **Worker** (`scripts/worker_run_job.py`): `--job-id` (atomic claim-by-id CAS) and
+  `--loop` (VM: reap → claim → run, 5s poll). Real PresentationOrchestrator with a REAL
+  aiogram Bot (no mocks on the production path — bot-enqueued jobs carry file_ids, web jobs
+  carry R2 storage_keys; `_process_one_source` now handles both). 15s heartbeat task;
+  progress jsonb per pipeline step; `_OrchestratorError` → failed row named by step +
+  ledger refund of `PRICING[payload.product_type]`; reaped jobs refunded by the reaping
+  caller. Compose `worker` service added (same image; restart: unless-stopped like every
+  existing service — they already all had it).
+- **Stable R2 keys** (migration `007_generated_files_stable_keys.sql` + storage/orchestrator):
+  `FileStorage.stable_generated_key` → `generated/{project_id}/presentation.{ext}`,
+  overwritten in place at `_upload_rendered` (the one chokepoint — bot AND worker paths);
+  `generated_files` deduped + unique(project_id, file_type) + `upsert_generated_file`
+  registered there best-effort. NOTE: this changes the LIVE bot path's key naming too
+  (deliberate, plan C5); old title-keyed objects orphan.
+- **Backups**: `scripts/backup_db.py` (--loop compose service `backup`, nightly 02:00 UTC,
+  pg_dump -Fc → R2 `backups/`, 14-day prune; needs NEW env `SUPABASE_DB_URL`, compose
+  fails fast without it; Dockerfile += postgresql-client) + `scripts/backup_restore_verify.py`
+  (newest dump → operator-supplied SCRATCH db → row counts printed).
+- **Realtime** (migration `008_realtime_publication.sql`): generation_jobs + decks added to
+  supabase_realtime, replica identity full.
+
+VERIFIED locally: `python -m pytest tests/` **1650 passed / 32 skipped** (baseline 1609;
++41 new tests: queue client contract, rate limiter, route gate-order incl. 429-visible-state
++ 402-pre-spend + race-refund, worker refund/step-failure discipline, backup helpers, stable
+keys + upsert registration, storage_key source branch, F1 log format). ruff check + format
+clean on all changed files (LF); pyright 0/0/0 on the changed set (the repo's 1 pre-existing
+arxiv.py error confirmed on clean HEAD via stash round-trip — local pyright drift).
+FakeSupabaseClient upsert extended to composite on_conflict keys (fidelity fix, existing
+suites green).
+
+NOT VERIFIED (human gates, on the VM after applying 006-008):
+1. browser/bot-initiated job delivers via the queue — NB the bot still generates in-process
+   per plan ("converges later"); the queue delivery surface is R2 stable keys +
+   generated_files + job polling, NOT a Telegram send from the worker (NOTES_P2.md flag 3).
+2. worker killed mid-run → reaper fails honestly, no zombie row, exactly ONE refund.
+3. double dispatch executes once (concurrent enqueue + two loop workers).
+4. over-cap enqueue → visible 429 state, zero token spend.
+5. one backup restored into a scratch database.
+RISK LEDGER (NOTES_P2.md): refund amount keyed off product_type pricing at failure time
+(not the recorded deduction) — flip to ledger-amount-in-payload if unacceptable.
