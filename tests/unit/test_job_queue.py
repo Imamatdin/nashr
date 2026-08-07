@@ -183,6 +183,22 @@ async def test_fail_writes_step_named_error_guarded_by_worker_identity() -> None
     assert ("eq", "status", "processing") in update.filters
 
 
+async def test_fail_returns_true_only_when_guarded_transition_lands() -> None:
+    # F1: the boolean is the refund gate — False means the row was reaped
+    # from under us and the reaping side owns the refund.
+    queue, fake = _queue()
+    fake.update_rows = [dict(_JOB_ROW, status="failed")]
+    assert await queue.fail("j1", "w1", step="render", message="boom") is True
+    fake.update_rows = []
+    assert await queue.fail("j1", "w1", step="render", message="boom") is False
+
+
+async def test_complete_returns_false_when_row_no_longer_ours() -> None:
+    queue, fake = _queue()
+    fake.update_rows = []
+    assert await queue.complete("j1", "w1", telemetry={}) is False
+
+
 async def test_fail_truncates_error_to_column_cap() -> None:
     queue, fake = _queue()
     await queue.fail("j1", "w1", step="render", message="x" * 5000)

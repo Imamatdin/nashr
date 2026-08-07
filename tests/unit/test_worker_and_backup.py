@@ -12,10 +12,14 @@ from packages.platform.jobs import GenerationJob, JobType
 from scripts.backup_db import (
     BACKUP_PREFIX,
     RETENTION_DAYS,
-    _dump_key,
-    _seconds_until_nightly,
+    _dump_key,  # pyright: ignore[reportPrivateUsage]
+    _seconds_until_nightly,  # pyright: ignore[reportPrivateUsage]
 )
-from scripts.worker_run_job import JobRunner, _refund_amount, _refund_job
+from scripts.worker_run_job import (
+    JobRunner,
+    _refund_amount,  # pyright: ignore[reportPrivateUsage]
+    _refund_job,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def _job(**overrides: Any) -> GenerationJob:
@@ -43,6 +47,8 @@ class _FakeQueue:
     def __init__(self) -> None:
         self.failed: list[dict[str, Any]] = []
         self.completed: list[str] = []
+        # False simulates the guarded transition NOT landing (row reaped).
+        self.fail_lands = True
 
     async def fail(
         self,
@@ -52,11 +58,13 @@ class _FakeQueue:
         step: str,
         message: str,
         telemetry: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         self.failed.append({"job_id": job_id, "step": step, "message": message})
+        return self.fail_lands
 
-    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> None:
+    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> bool:
         self.completed.append(job_id)
+        return True
 
     async def heartbeat(self, job_id: str, worker_id: str) -> bool:
         return True
@@ -69,6 +77,16 @@ def test_refund_amount_reads_product_type_pricing() -> None:
     )
     assert _refund_amount({"product_type": "nonsense"}) is None
     assert _refund_amount({}) is None
+
+
+def test_refund_amount_prefers_recorded_deduction_over_pricing() -> None:
+    # F3: refund what was actually charged, not the current price.
+    payload = {"product_type": "presentation_standard", "deducted_amount": 8_000}
+    assert _refund_amount(payload) == 8_000
+    assert (
+        _refund_amount({"deducted_amount": 0, "product_type": "presentation_standard"})
+        == (CreditLedger.PRICING["presentation_standard"])
+    )
 
 
 @pytest.mark.asyncio
@@ -128,6 +146,44 @@ async def test_orchestrator_error_lands_step_named_failure_and_refund(
     assert queue.failed[0]["step"] == "editorial"
     assert "schema cascade" in queue.failed[0]["message"]
     assert credits.refunds[0][3].endswith(":editorial")
+
+
+@pytest.mark.asyncio
+async def test_reaped_then_worker_fails_produces_exactly_one_refund(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: a stalled-but-alive worker racing the reaper must not double-refund.
+
+    Sequence: the reaper already took the row (and refunded it); the worker's
+    pipeline then raises and calls fail(), whose guarded transition does NOT
+    land. The worker's refund must be suppressed — the ledger ends with
+    exactly the reaper's single refund row.
+    """
+
+    queue, credits = _FakeQueue(), _FakeCredits()
+    # The reaper's refund has already been written.
+    await credits.refund("u1", "p1", 10_000, "refund:job:x:reaped")
+    queue.fail_lands = False
+    runner = _runner(queue, credits)
+
+    async def boom(job: GenerationJob) -> None:
+        raise RuntimeError("worker woke up late")
+
+    monkeypatch.setattr(runner, "_run_presentation", boom)
+    await runner._execute(_job())  # pyright: ignore[reportPrivateUsage]
+
+    assert len(queue.failed) == 1  # the attempt was made...
+    assert len(credits.refunds) == 1  # ...but only the reaper's refund exists
+    assert credits.refunds[0][3] == "refund:job:x:reaped"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_type_refund_also_gated_on_fail_landing() -> None:
+    queue, credits = _FakeQueue(), _FakeCredits()
+    queue.fail_lands = False
+    runner = _runner(queue, credits)
+    await runner._execute(_job(job_type=JobType.IMAGE_REGEN.value))  # pyright: ignore[reportPrivateUsage]
+    assert credits.refunds == []
 
 
 @pytest.mark.asyncio

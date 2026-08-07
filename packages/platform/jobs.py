@@ -248,10 +248,10 @@ class JobQueue:
 
         await asyncio.to_thread(run)
 
-    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> None:
-        """Land the job on ``completed`` with its cost telemetry."""
+    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> bool:
+        """Land the job on ``completed``; False means the row was no longer ours."""
 
-        await self._finish(job_id, worker_id, JobStatus.COMPLETED, None, telemetry)
+        return await self._finish(job_id, worker_id, JobStatus.COMPLETED, None, telemetry)
 
     async def fail(
         self,
@@ -261,11 +261,17 @@ class JobQueue:
         step: str,
         message: str,
         telemetry: dict[str, Any] | None = None,
-    ) -> None:
-        """Land the job on ``failed`` with an honest step-named error message."""
+    ) -> bool:
+        """Land the job on ``failed`` with an honest step-named error message.
+
+        Returns True iff OUR guarded transition landed. False means the row
+        was already taken from us (reaped, possibly re-queued and refunded) —
+        the caller must NOT refund on False or a stalled-but-alive worker
+        racing the reaper double-refunds.
+        """
 
         error = f"{step}: {message}"[:4000]
-        await self._finish(job_id, worker_id, JobStatus.FAILED, error, telemetry or {})
+        return await self._finish(job_id, worker_id, JobStatus.FAILED, error, telemetry or {})
 
     async def _finish(
         self,
@@ -274,7 +280,7 @@ class JobQueue:
         status: JobStatus,
         error_message: str | None,
         telemetry: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         payload: dict[str, Any] = {
             "status": status.value,
             "completed_at": datetime.now(UTC).isoformat(),
@@ -293,7 +299,9 @@ class JobQueue:
                 .execute()
             )
 
-        await asyncio.to_thread(run)
+        result = await asyncio.to_thread(run)
+        rows = cast(list[dict[str, Any]], list(result.data or []))
+        return bool(rows)
 
     async def reap_stale(self, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[GenerationJob]:
         """Reap zombie processing rows; returns the jobs that were FAILED.

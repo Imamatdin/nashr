@@ -85,11 +85,16 @@ def _view(job: GenerationJob, *, existing: bool = False) -> JobView:
 
 
 def _client_ip(request: Request) -> str:
-    """Caller address for the per-IP cap; Caddy sets X-Forwarded-For."""
+    """Caller address for the per-IP cap.
+
+    Caddy APPENDS the peer address to X-Forwarded-For, so only the LAST entry
+    is trustworthy — a client can stuff arbitrary leading entries to dodge the
+    per-IP cap. Take the last one.
+    """
 
     forwarded = request.headers.get("X-Forwarded-For", "")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -146,6 +151,9 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
     payload: dict[str, Any] = {
         "package": body.package.value,
         "product_type": product_type,
+        # The exact amount deducted, so a failure refunds what was charged
+        # even if PRICING changes between enqueue and refund.
+        "deducted_amount": -deduction.amount,
         "language": body.language,
         "sources": [s.model_dump() for s in body.sources],
         "formats": [f.value for f in body.formats] if body.formats else None,

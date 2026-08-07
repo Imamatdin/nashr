@@ -54,6 +54,13 @@ def _worker_id() -> str:
 
 
 def _refund_amount(payload: dict[str, Any]) -> int | None:
+    # Prefer the amount actually deducted at enqueue time (stamped into the
+    # payload by the route); PRICING is only the fallback for rows enqueued
+    # before deducted_amount existed. Refunding current-price on a stale row
+    # would mismatch the ledger after a price change.
+    deducted = payload.get("deducted_amount")
+    if isinstance(deducted, int) and deducted > 0:
+        return deducted
     product_type = payload.get("product_type")
     if isinstance(product_type, str) and product_type in CreditLedger.PRICING:
         return CreditLedger.PRICING[product_type]
@@ -120,14 +127,18 @@ class JobRunner:
                 )
 
     async def _execute(self, job: GenerationJob) -> None:
+        # Refunds are gated on OUR guarded fail() transition landing: if the
+        # reaper already took the row (stalled-but-alive worker), the reaping
+        # side owns the refund and ours must not fire — one refund per job.
         if job.job_type is not JobType.PRESENTATION_GENERATION:
-            await self._queue.fail(
+            failed_by_us = await self._queue.fail(
                 job.id,
                 self._worker_id,
                 step="dispatch",
                 message=f"job_type {job.job_type.value} has no worker executor yet",
             )
-            await _refund_job(self._credits, job, f"refund:job:{job.id}:unsupported_type")
+            if failed_by_us:
+                await _refund_job(self._credits, job, f"refund:job:{job.id}:unsupported_type")
             return
         try:
             await self._run_presentation(job)
@@ -139,8 +150,16 @@ class JobRunner:
                 "worker_job_failed %s",
                 json.dumps({"job_id": job.id, "step": step}),
             )
-            await self._queue.fail(job.id, self._worker_id, step=str(step), message=message)
-            await _refund_job(self._credits, job, f"refund:job:{job.id}:{step}")
+            failed_by_us = await self._queue.fail(
+                job.id, self._worker_id, step=str(step), message=message
+            )
+            if failed_by_us:
+                await _refund_job(self._credits, job, f"refund:job:{job.id}:{step}")
+            else:
+                logger.warning(
+                    "worker_refund_suppressed_row_not_ours %s",
+                    json.dumps({"job_id": job.id, "step": str(step)}),
+                )
 
     async def _run_presentation(self, job: GenerationJob) -> None:
         # Imported here so --help / unit tests never pull aiogram + the full
@@ -201,7 +220,16 @@ class JobRunner:
             await bot.session.close()
 
         files = {ext: str(path) for ext, path in result.render.by_extension().items()}
-        await self._queue.complete(job.id, self._worker_id, telemetry={})
+        completed_by_us = await self._queue.complete(job.id, self._worker_id, telemetry={})
+        if not completed_by_us:
+            # Reaped while we were (slowly) finishing: the row is failed or
+            # re-queued and possibly refunded — do not report success. The
+            # --job-id exit code re-reads the row and will reflect this.
+            logger.warning(
+                "worker_complete_suppressed_row_not_ours %s",
+                json.dumps({"job_id": job.id}),
+            )
+            return
         logger.info(
             "worker_job_completed %s",
             json.dumps({"job_id": job.id, "project_id": job.project_id, "files": files}),

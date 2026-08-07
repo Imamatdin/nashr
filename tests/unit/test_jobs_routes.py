@@ -219,6 +219,22 @@ async def test_happy_path_deducts_then_enqueues_with_payload() -> None:
     payload = queue.enqueued[0]["payload"]
     assert payload["product_type"] == "presentation_standard"
     assert payload["sources"][0]["filename"] == "a.pdf"
+    # F3: the exact deducted amount rides the payload so the refund matches
+    # the charge even if PRICING changes later.
+    assert payload["deducted_amount"] == 10_000
+
+
+async def test_spoofed_xff_cannot_dodge_the_ip_cap() -> None:
+    # F2: Caddy APPENDS the peer address, so only the LAST entry is
+    # trustworthy; client-stuffed leading entries must be ignored.
+    client, _db, _credits, _queue, limiter = _client()
+    response = await client.post(
+        "/jobs",
+        json=_body(),
+        headers={**_headers(), "X-Forwarded-For": "6.6.6.6, 203.0.113.9"},
+    )
+    assert response.status_code == 200
+    assert limiter.calls[0]["ip"] == "203.0.113.9"
 
 
 async def test_lost_enqueue_race_refunds_and_returns_winner() -> None:
