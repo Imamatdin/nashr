@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Script from "next/script";
 import type { ReactNode } from "react";
+import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Nashr",
@@ -10,7 +11,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="uz">
-      <body style={{ fontFamily: "system-ui, sans-serif", margin: 0, padding: "2rem" }}>
+      <body>
         {/* Telegram Mini App bridge (panel finding): window.Telegram.WebApp only
             exists if this script loads — without it the Telegram door silently
             never fires and every in-Telegram user falls through to email. */}
