@@ -694,6 +694,62 @@ class DatabaseClient:
         )
         return cast(dict[str, Any], result.data[0])
 
+    # ------------------------------------------------------------ share links
+
+    async def set_project_share_token(self, project_id: str, token: str | None) -> None:
+        """Set (or clear, with ``None``) the project's public share token."""
+
+        await asyncio.to_thread(
+            lambda: (
+                self._client.table("projects")
+                .update({"share_token": token})
+                .eq("id", project_id)
+                .execute()
+            )
+        )
+
+    async def get_project_by_share_token(self, token: str) -> dict[str, Any] | None:
+        """Resolve a public share token to its project row, or ``None``.
+
+        Indexed equality on the migration-009 unique constraint — constant
+        lookup cost regardless of token shape, no prefix matching.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("projects")
+                .select("*")
+                .eq("share_token", token)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not result.data:
+            return None
+        return cast(dict[str, Any], result.data[0])
+
+    async def get_brain_session_sources(self, project_id: str) -> dict[str, Any] | None:
+        """The session's light sources JSON alone (the provenance read).
+
+        Narrower than :meth:`get_brain_session`: skips history and every other
+        column so the provenance endpoint never transfers conversation state.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("brain_sessions")
+                .select("sources_json")
+                .eq("project_id", project_id)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not result.data:
+            return None
+        row = cast(dict[str, Any], result.data[0])
+        sources = row.get("sources_json")
+        return cast("dict[str, Any] | None", sources if isinstance(sources, dict) else None)
+
     # ---------------------------------------------------------- raw queries
 
     def _query(self, table: str) -> Any:
