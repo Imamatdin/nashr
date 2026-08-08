@@ -1976,3 +1976,39 @@ NOT VERIFIED (human gates, on the VM after applying 006-008):
 5. one backup restored into a scratch database.
 RISK LEDGER (NOTES_P2.md): refund amount keyed off product_type pricing at failure time
 (not the recorded deduction) — flip to ledger-amount-in-payload if unacceptable.
+
+## 2026-08-08 — P2 GATE CLOSED: five/five, live on GCE VM @ 653adf6
+
+(653adf6 = architect F1-F3 fixes: refund gated on the guarded fail() transition landing,
+XFF last-entry, refund the recorded deducted_amount — the RISK LEDGER item above is CLOSED.)
+
+- **G1 e2e**: web enqueue → claim → full pipeline → delivery. Job ed6270ee completed; stable
+  keys `generated/{project}/presentation.{html,pptx}` held with generated_files upsert
+  (2 rows, no duplicates). Editorial ran on Anthropic DIRECT after an LLM_TRANSPORT env
+  regression — root cause: laptop-master .env overwrote the VM's sed'd value; master .env is
+  now the single truth. A first failed attempt (Vertex 429 at editorial) exercised the
+  honest-failure contract + refund live.
+- **G2 kill-the-worker**: docker kill mid-run → reaper failed the job at heartbeat+120s,
+  EXACTLY ONE refund (ledger verified), no zombie row; restarted worker came up clean.
+  NOTE: max_attempts=1 default means infra death = refund, never retry. OPEN PRODUCT
+  DECISION: raise to 2 for generation jobs at launch.
+- **G3 double-dispatch**: two --job-id workers raced the same queued row; one claimed, the
+  other exited `worker_job_not_claimable`. FOR UPDATE SKIP LOCKED proven live.
+- **G4 caps**: 11th enqueue of the day → 429 `{scope:user, count:11, limit:10, resets_at}`;
+  idempotency returned `existing:true` pre-402 on repeats; counters persisted across
+  multiple worker kills/rebuilds; zero model tokens on every rejection.
+- **G5 backup**: pg_dump → R2 `backups/nashr_20260808T082631Z.dump` (669KB, prune armed,
+  new DB password). Restored into a scratch postgres:17 and verified: users 4, projects 111,
+  generation_jobs 4, credit_ledger 197.
+
+DEFECTS FOR NEXT SESSION (all found by gates; all runbook/tooling, none block P2):
+1. restore_verify: restore `--schema=public --no-owner` into a fresh/cleaned target; pin the
+   scratch image postgres:17+ in docs (Supabase furniture ≠ our data).
+2. Web needs a source-upload endpoint (P3): bot-era sources carry dead /tmp paths; G1
+   required a manual R2 upload. Presigned PUT + sources row.
+3. Confirm default export formats for web jobs (pdf missing from delivery).
+4. learning_reward (+5000) fires for web jobs — confirm or scope the economics.
+
+OPEN: 4th organic user exists. Credential rotation round due (PAT done? + anthropic key,
+service key, DB password, JWT secret all touched this epic). VM reboot pending (24 updates)
+— first restart:unless-stopped survival test.
