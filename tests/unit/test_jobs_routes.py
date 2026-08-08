@@ -55,15 +55,29 @@ def _job(status: str = "queued", user_id: UUID | None = None) -> GenerationJob:
     )
 
 
+_SOURCE_ID = str(uuid4())
+
+
 class _FakeDb:
     def __init__(self) -> None:
         self.project_owner: str = str(_USER_ID)
         self.project_exists = True
+        self.sources: list[dict[str, Any]] = [
+            {
+                "id": _SOURCE_ID,
+                "project_id": _PROJECT_ID,
+                "filename": "a.pdf",
+                "storage_key": f"sources/{_PROJECT_ID}/a.pdf",
+            }
+        ]
 
     async def get_project(self, project_id: str) -> dict[str, Any] | None:
         if not self.project_exists:
             return None
         return {"id": project_id, "user_id": self.project_owner}
+
+    async def get_project_sources(self, project_id: str) -> list[dict[str, Any]]:
+        return self.sources
 
 
 class _FakeCredits:
@@ -218,7 +232,12 @@ async def test_happy_path_deducts_then_enqueues_with_payload() -> None:
     assert credits.deductions == [(str(_USER_ID), _PROJECT_ID, "presentation_standard")]
     payload = queue.enqueued[0]["payload"]
     assert payload["product_type"] == "presentation_standard"
+    # Sources are resolved against the registered rows: the persisted source
+    # id rides along for provenance stamping.
     assert payload["sources"][0]["filename"] == "a.pdf"
+    assert payload["sources"][0]["source_id"] == _SOURCE_ID
+    # P2 gate defect 3: web delivery defaults to ALL THREE primary formats.
+    assert payload["formats"] == ["html", "pptx_editable", "pdf"]
     # F3: the exact deducted amount rides the payload so the refund matches
     # the charge even if PRICING changes later.
     assert payload["deducted_amount"] == 10_000
@@ -247,6 +266,22 @@ async def test_lost_enqueue_race_refunds_and_returns_winner() -> None:
     assert len(credits.refunds) == 1
     _user_id, _project_id, amount, reason = credits.refunds[0]
     assert amount == 10_000 and "duplicate_enqueue" in reason
+
+
+async def test_unregistered_source_rejected_pre_spend() -> None:
+    client, db, credits, queue, _limiter = _client()
+    db.sources = []
+    response = await client.post("/jobs", json=_body(), headers=_headers())
+    assert response.status_code == 422
+    assert response.json()["detail"]["reason"] == "unregistered_source"
+    assert credits.deductions == [] and queue.enqueued == []
+
+
+async def test_explicit_formats_pass_through_unchanged() -> None:
+    client, _db, _credits, queue, _limiter = _client()
+    response = await client.post("/jobs", json=_body(formats=["html"]), headers=_headers())
+    assert response.status_code == 200
+    assert queue.enqueued[0]["payload"]["formats"] == ["html"]
 
 
 async def test_poll_returns_progress_to_owner_only() -> None:

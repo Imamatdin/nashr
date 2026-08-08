@@ -135,6 +135,30 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
     if existing is not None:
         return _view(existing, existing=True)
 
+    # Every source must be a row this project registered (POST /sources): the
+    # worker fetches whatever key the payload names with the service role, so
+    # an unvalidated key would let a caller feed it arbitrary bucket objects.
+    registered = {
+        str(row.get("storage_key")): row
+        for row in await request.app.state.db.get_project_sources(body.project_id)
+    }
+    resolved_sources: list[dict[str, Any]] = []
+    for ref in body.sources:
+        row = registered.get(ref.storage_key)
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"reason": "unregistered_source", "filename": ref.filename},
+            )
+        resolved_sources.append(
+            {
+                "storage_key": ref.storage_key,
+                "filename": str(row.get("filename") or ref.filename),
+                # Threaded into claim/chunk stamping for the provenance view.
+                "source_id": str(row.get("id") or ""),
+            }
+        )
+
     product_type = body.package.value
     if not await credits.has_sufficient_credits(user_id, product_type):
         balance = await credits.get_balance(user_id)
@@ -155,8 +179,13 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
         # even if PRICING changes between enqueue and refund.
         "deducted_amount": -deduction.amount,
         "language": body.language,
-        "sources": [s.model_dump() for s in body.sources],
-        "formats": [f.value for f in body.formats] if body.formats else None,
+        "sources": resolved_sources,
+        # Web delivery is all three primary formats (SPEC §0 rule 7): an
+        # omitted list means html+pptx+pdf, not the orchestrator's bot-era
+        # two-format default (P2 gate defect 3).
+        "formats": [f.value for f in body.formats]
+        if body.formats
+        else [ExportFormat.HTML.value, ExportFormat.PPTX_EDITABLE.value, ExportFormat.PDF.value],
         "answers": body.answers,
     }
     try:

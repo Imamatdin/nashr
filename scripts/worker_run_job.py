@@ -220,6 +220,28 @@ class JobRunner:
             await bot.session.close()
 
         files = {ext: str(path) for ext, path in result.render.by_extension().items()}
+
+        # Persist the brain session the bot's delivery handler would have
+        # created: web jobs have no Telegram delivery, and the session row is
+        # what the provenance view (and later web editing) reads. Best-effort —
+        # the deck is already rendered and uploaded, so a session write failure
+        # degrades provenance, not delivery.
+        try:
+            from packages.bot.sessions.store import create_session
+
+            await create_session(
+                self._db,
+                project_id=job.project_id,
+                sources=result.sources,
+                package=package,
+                formats=formats or [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+            )
+        except Exception as exc:
+            logger.warning(
+                "worker_session_persist_failed %s",
+                json.dumps({"job_id": job.id, "error_type": type(exc).__name__}),
+            )
+
         completed_by_us = await self._queue.complete(job.id, self._worker_id, telemetry={})
         if not completed_by_us:
             # Reaped while we were (slowly) finishing: the row is failed or

@@ -97,7 +97,13 @@ class ClaimExtractor:
         raw_items = await self._call_with_json_retry(CLAIM_EXTRACTION_SYSTEM, user_prompt)
         if raw_items is None:
             return []
-        return _items_to_claims(raw_items)
+        claims = _items_to_claims(raw_items)
+        # Chunk-to-claim mapping: the chunk index is the only stable handle at
+        # extraction time; callers that know the persisted source id prefix it
+        # ("{source_id}:{chunk_index}") to complete the provenance link.
+        for claim in claims:
+            claim.source_chunk_id = str(chunk.chunk_index)
+        return claims
 
     async def _call_with_json_retry(
         self,

@@ -291,14 +291,36 @@ class PresentationOrchestrator:
             result.failed_sources.append((filename, rejection))
             return
 
+        # Web/queue jobs carry the persisted sources-row id: stamp it into
+        # every claim/chunk so the provenance view can trace claim -> source
+        # file + chunk. Bot uploads have no row id here and keep the bare
+        # chunk-index refs the extractor emits.
+        source_id = str(info.get("source_id") or "")
+        if source_id:
+            for claim in pipeline_result.claims:
+                claim.source_chunk_id = (
+                    f"{source_id}:{claim.source_chunk_id}" if claim.source_chunk_id else source_id
+                )
+            for chunk in pipeline_result.chunks:
+                chunk.source_id = source_id
+                chunk.project_id = project_id
+
         result.claims.extend(pipeline_result.claims)
         result.chunks.extend(pipeline_result.chunks)
         if pipeline_result.parsed is not None:
             result.metadata.append(pipeline_result.parsed.metadata)
             result.figures.extend(pipeline_result.parsed.figures)
-        result.source_ids.append(uuid4())
 
-        await self._register_source(info, project_id, file_bytes, filename)
+        if source_id:
+            # Row already registered by POST /sources; a second insert would
+            # duplicate it with a dead local path.
+            try:
+                result.source_ids.append(UUID(source_id))
+            except ValueError:
+                result.source_ids.append(uuid4())
+        else:
+            result.source_ids.append(uuid4())
+            await self._register_source(info, project_id, file_bytes, filename)
         await self._credits.grant_free_credit(
             user_id=user_id,
             project_id=project_id,
