@@ -6,10 +6,19 @@ Usage::
     python scripts/backup_restore_verify.py --target-url ... --key backups/nashr_x.dump
 
 Downloads the newest ``backups/`` dump from R2 (or the named one), runs
-``pg_restore`` into the target database (which must be an EMPTY scratch DB —
-this script refuses to guess and never touches the production URL), then
-counts rows in the load-bearing tables and prints them so a human can eyeball
-the restore against expectations.
+``pg_restore --schema=public --no-owner --no-privileges`` into the target
+database, then counts rows in the load-bearing tables and prints them so a
+human can eyeball the restore against expectations.
+
+Only the ``public`` schema is restored ON PURPOSE: the Supabase-managed
+schemas (auth/vault/storage/realtime) are provider furniture, not our data,
+and restoring them into a plain scratch Postgres fails on missing roles and
+extensions (2026-08-08 drill finding). The target must have an EMPTY public
+schema; pass ``--clean`` to let pg_restore drop-and-recreate restored objects
+in a previously used scratch DB instead. The script never guesses a target —
+``--target-url`` stays mandatory and must never be the production URL.
+
+Runbook: docs/RUNBOOK_BACKUP_RESTORE.md (pins scratch image postgres:17+).
 """
 
 from __future__ import annotations
@@ -51,19 +60,45 @@ async def latest_backup_key(storage: FileStorage) -> str | None:
     return await asyncio.to_thread(run)
 
 
-def run_pg_restore(dump_path: Path, target_url: str) -> None:
-    """pg_restore the custom-format dump into the scratch database."""
+def public_schema_table_count(target_url: str) -> int:
+    """Number of tables already in the target's public schema (via psql)."""
 
     completed = subprocess.run(
         [
-            "pg_restore",
-            "--no-owner",
-            "--no-privileges",
-            "--exit-on-error",
-            "--dbname",
+            "psql",
             target_url,
-            str(dump_path),
+            "-tAc",
+            "select count(*) from pg_tables where schemaname = 'public'",
         ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"target preflight failed: {completed.stderr.strip()[:500]}")
+    return int(completed.stdout.strip())
+
+
+def run_pg_restore(dump_path: Path, target_url: str, *, clean: bool) -> None:
+    """pg_restore the custom-format dump into the scratch database.
+
+    ``--schema=public`` restricts the restore to our data; Supabase-managed
+    schemas in the dump (auth/vault/storage) are intentionally skipped — a
+    plain scratch Postgres has neither their roles nor their extensions.
+    """
+
+    args = [
+        "pg_restore",
+        "--schema=public",
+        "--no-owner",
+        "--no-privileges",
+        "--exit-on-error",
+    ]
+    if clean:
+        args += ["--clean", "--if-exists"]
+    completed = subprocess.run(
+        [*args, "--dbname", target_url, str(dump_path)],
         capture_output=True,
         text=True,
         timeout=RESTORE_TIMEOUT_SECONDS,
@@ -102,6 +137,17 @@ async def _amain(args: argparse.Namespace) -> int:
         logger.error("restore_verify_no_backups no objects under %s", BACKUP_PREFIX)
         return 1
 
+    if not args.clean:
+        existing = await asyncio.to_thread(public_schema_table_count, args.target_url)
+        if existing > 0:
+            logger.error(
+                "restore_verify_target_not_empty %s",
+                json.dumps(
+                    {"public_tables": existing, "hint": "use a fresh scratch DB or pass --clean"}
+                ),
+            )
+            return 1
+
     tmpdir = Path(tempfile.mkdtemp(prefix="nashr_restore_"))
     dump_path = tmpdir / "restore.dump"
     await storage.download(key, dump_path)
@@ -109,7 +155,7 @@ async def _amain(args: argparse.Namespace) -> int:
         "restore_verify_downloaded %s",
         json.dumps({"key": key, "size_bytes": dump_path.stat().st_size}),
     )
-    await asyncio.to_thread(run_pg_restore, dump_path, args.target_url)
+    await asyncio.to_thread(lambda: run_pg_restore(dump_path, args.target_url, clean=args.clean))
     counts = await asyncio.to_thread(count_rows, args.target_url)
     print(json.dumps({"backup_key": key, "row_counts": counts}, indent=2))
     failed = [t for t, v in counts.items() if v.startswith("ERROR")]
@@ -124,6 +170,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Restore a backup into a scratch DB and verify")
     parser.add_argument("--target-url", required=True, help="EMPTY scratch database URL")
     parser.add_argument("--key", help="specific backups/ key (default: newest)")
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="pg_restore --clean --if-exists into a previously used scratch DB",
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     return asyncio.run(_amain(args))
