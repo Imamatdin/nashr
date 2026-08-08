@@ -106,6 +106,17 @@ async def test_extract_claims_parses_valid_json() -> None:
 
 
 @pytest.mark.asyncio
+async def test_extract_claims_stamps_chunk_index_as_ref() -> None:
+    stub = _StubGemini([_valid_claims_payload()])
+    extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]
+
+    chunk = SourceChunkCreate(chunk_index=7, text="Sample chunk text from a source.", page=2)
+    claims = await extractor.extract_claims_from_chunk(chunk, "ctx")
+
+    assert [c.source_chunk_id for c in claims] == ["7", "7"]
+
+
+@pytest.mark.asyncio
 async def test_extract_claims_handles_invalid_json() -> None:
     stub = _StubGemini(["Here are the claims: [invalid json", "still bad"])
     extractor = ClaimExtractor(gemini=stub)  # type: ignore[arg-type]

@@ -184,6 +184,29 @@ def test_generated_key_format() -> None:
     assert FileStorage.generated_key("abc123", "article.docx") == "generated/abc123/article.docx"
 
 
+def test_upload_source_key_format_and_sanitization() -> None:
+    key = FileStorage.upload_source_key("user-1", "deadbeef", "path/to/my file.pdf")
+    assert key == "uploads/user-1/deadbeef/path_to_my file.pdf"
+
+
+@pytest.mark.asyncio
+async def test_local_object_size_and_missing(tmp_path: Path) -> None:
+    storage = FileStorage(_make_local_config())
+    src = tmp_path / "src.txt"
+    src.write_bytes(b"12345")
+    await storage.upload(src, "uploads/u/x/src.txt")
+
+    assert await storage.object_size("uploads/u/x/src.txt") == 5
+    assert await storage.object_size("uploads/u/x/absent.txt") is None
+
+
+@pytest.mark.asyncio
+async def test_presigned_put_requires_r2() -> None:
+    storage = FileStorage(_make_local_config())
+    with pytest.raises(RuntimeError, match="R2 not configured"):
+        await storage.presigned_put_url("uploads/u/x/a.pdf", "application/pdf")
+
+
 def test_key_sanitizes_slashes() -> None:
     key = FileStorage.source_key("abc", "path/to/file.pdf")
     assert key == "sources/abc/path_to_file.pdf"
