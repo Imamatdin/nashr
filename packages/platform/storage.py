@@ -180,6 +180,55 @@ class FileStorage:
             raise RuntimeError("R2 signed URL was not a string")
         return url
 
+    async def presigned_put_url(
+        self,
+        remote_key: str,
+        content_type: str,
+        expires_in: int = 900,
+    ) -> str:
+        """Generate a pre-signed HTTPS URL for a direct browser PUT to R2.
+
+        ``content_type`` is signed into the URL, so the uploader must send
+        the same ``Content-Type`` header or R2 rejects the request. Raises
+        when R2 is not configured — there is no local-fallback PUT because
+        a browser cannot write to this host's filesystem.
+        """
+
+        if not self._available:
+            raise RuntimeError("R2 not configured; presigned uploads unavailable")
+
+        url = await asyncio.to_thread(
+            self._client.generate_presigned_url,
+            "put_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": remote_key,
+                "ContentType": content_type,
+            },
+            ExpiresIn=expires_in,
+        )
+        if not isinstance(url, str):
+            raise RuntimeError("R2 presigned PUT URL was not a string")
+        return url
+
+    async def object_size(self, remote_key: str) -> int | None:
+        """Size in bytes of the object at ``remote_key``, or None when absent."""
+
+        if not self._available:
+            path = self._local_storage_dir / remote_key
+            return path.stat().st_size if path.exists() else None
+
+        try:
+            response: Any = await asyncio.to_thread(
+                self._client.head_object,
+                Bucket=self._bucket,
+                Key=remote_key,
+            )
+        except Exception:
+            return None
+        size = response.get("ContentLength")
+        return int(size) if isinstance(size, int) else None
+
     async def delete(self, remote_key: str) -> None:
         """Delete the file at ``remote_key``."""
 
@@ -222,6 +271,18 @@ class FileStorage:
         """
 
         return f"sources/{project_id}/{_sanitize_filename(filename)}"
+
+    @staticmethod
+    def upload_source_key(user_id: str, unique_id: str, filename: str) -> str:
+        """Compose the R2 key for a web-uploaded source file.
+
+        ``uploads/{user_id}/{unique_id}/{sanitized_filename}`` — the user id
+        prefix lets the register endpoint verify a caller only registers keys
+        it was issued, and the per-upload unique id prevents overwrites
+        between files sharing a name.
+        """
+
+        return f"uploads/{user_id}/{unique_id}/{_sanitize_filename(filename)}"
 
     @staticmethod
     def generated_key(project_id: str, filename: str) -> str:

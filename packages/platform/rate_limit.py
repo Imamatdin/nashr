@@ -24,14 +24,21 @@ from packages.platform.database import DatabaseClient
 
 ENQUEUE_ACTION: str = "enqueue"
 CHAT_ACTION: str = "chat"
+UPLOAD_ACTION: str = "upload"
+SHARE_VIEW_ACTION: str = "share_view"
 
 # Defaults sized off SPEC §9 ("max 10 generation jobs per user per day") with
-# per-IP headroom for NAT'd campus networks sharing one address.
+# per-IP headroom for NAT'd campus networks sharing one address. Upload caps
+# assume max 10 sources per job × the 10-job user cap, minus slack for retried
+# uploads. share_view is IP-only: the public route has no authenticated user.
 DEFAULT_LIMITS: dict[tuple[str, str], int] = {
     ("user", ENQUEUE_ACTION): 10,
     ("ip", ENQUEUE_ACTION): 40,
     ("user", CHAT_ACTION): 200,
     ("ip", CHAT_ACTION): 800,
+    ("user", UPLOAD_ACTION): 60,
+    ("ip", UPLOAD_ACTION): 240,
+    ("ip", SHARE_VIEW_ACTION): 600,
 }
 
 
@@ -104,11 +111,18 @@ class RateLimiter:
             return ip_decision
         return user_decision
 
+    async def check_ip(self, *, action: str, ip: str) -> RateDecision:
+        """IP-scope-only counter for unauthenticated surfaces (public share views)."""
+
+        return await self._consume("ip", action, ip)
+
 
 __all__ = [
     "CHAT_ACTION",
     "DEFAULT_LIMITS",
     "ENQUEUE_ACTION",
+    "SHARE_VIEW_ACTION",
+    "UPLOAD_ACTION",
     "RateDecision",
     "RateLimiter",
 ]
