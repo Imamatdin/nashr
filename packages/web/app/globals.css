@@ -1,42 +1,338 @@
-/* Nashr design system (P3.5). Hand-rolled, no framework.
-   Direction: editorial paper — warm stone ground, near-black ink, lapis
-   accent, one restrained gold mark. Literata carries display type,
-   Manrope carries UI. Both loaded via next/font (see layout.tsx), exposed
-   here as CSS variables. */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-/* ------------------------------------------------------------------ tokens */
+@custom-variant dark (&:is(.dark *));
+
+/* ============================================================================
+   NASHR DESIGN SYSTEM — governed by docs/DESIGN_DIRECTION.md.
+   A scholarly publishing house with an engine inside. Ink on paper for
+   marketing; paper on ink for the product. One gold element per viewport.
+   Type: Literata (display) / Source Sans 3 (UI) / IBM Plex Mono (machine
+   facts only). No pure grays, no pure #000/#FFF, no gradients-as-decoration.
+   ========================================================================= */
+
+/* --------------------------------------------------------- §2 core palette */
 
 :root {
-  /* palette */
-  --paper: #f6f4ef;
-  --surface: #ffffff;
-  --ink: #1b1a16;
-  --ink-soft: #43413a;
-  --muted: #706c60;
-  --line: #e5e1d6;
-  --line-strong: #cfc9ba;
+  /* the four named colors of the identity */
+  --qogoz: #f7f3ea; /* paper — warm manuscript cream */
+  --siyoh: #16130e; /* ink — near-black warm */
+  --zangori: #274690; /* lapis lazuli — links, primary actions */
+  --oltin: #a67c2e; /* gilding — RARE, one per viewport */
 
-  --brand: #2946a8;
-  --brand-deep: #1d3179;
-  --brand-soft: #edf0fa;
-  --brand-line: #c6cfec;
-  --gold: #b8892e;
+  /* derived inks (opacity steps of siyoh on qogoz) */
+  --ink-88: color-mix(in srgb, var(--siyoh) 88%, var(--qogoz));
+  --ink-60: color-mix(in srgb, var(--siyoh) 60%, var(--qogoz));
+  --ink-40: color-mix(in srgb, var(--siyoh) 40%, var(--qogoz));
+  --rule: color-mix(in srgb, var(--siyoh) 15%, transparent);
+  --rule-strong: color-mix(in srgb, var(--siyoh) 26%, transparent);
 
-  --danger: #b23a2e;
-  --danger-soft: #faeeec;
-  --ok: #2e7d4f;
-  --ok-soft: #ecf5f0;
+  --zangori-deep: #1b3268;
+  --zangori-wash: color-mix(in srgb, var(--zangori) 8%, var(--qogoz));
+  --oltin-bright: #c9973a;
 
-  /* type scale (minor third-ish) */
+  --xato: #a0432f; /* warm error red — never pure */
+  --xato-wash: color-mix(in srgb, var(--xato) 9%, var(--qogoz));
+  --tayyor: #3d6b4f; /* manuscript green */
+  --tayyor-wash: color-mix(in srgb, var(--tayyor) 10%, var(--qogoz));
+
+  /* ---------------------------------------------- shadcn semantic mapping */
+  --background: var(--qogoz);
+  --foreground: var(--siyoh);
+  --card: color-mix(in srgb, #ffffff 55%, var(--qogoz));
+  --card-foreground: var(--siyoh);
+  --popover: color-mix(in srgb, #ffffff 70%, var(--qogoz));
+  --popover-foreground: var(--siyoh);
+  --primary: var(--zangori);
+  --primary-foreground: var(--qogoz);
+  --secondary: var(--zangori-wash);
+  --secondary-foreground: var(--zangori-deep);
+  --muted: color-mix(in srgb, var(--siyoh) 5%, var(--qogoz));
+  --muted-foreground: var(--ink-60);
+  --accent: var(--zangori-wash);
+  --accent-foreground: var(--zangori-deep);
+  --destructive: var(--xato);
+  --destructive-foreground: var(--qogoz);
+  --border: var(--rule);
+  --input: var(--rule-strong);
+  --ring: var(--zangori);
+  --radius: 0.375rem;
+
+  /* type */
+  --font-display: var(--font-literata), "Literata", Georgia, serif;
+  --font-sans: var(--font-source-sans), "Source Sans 3", system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), "IBM Plex Mono", ui-monospace, monospace;
+
+  /* display scale — the serif does the talking (§3: brave) */
+  --text-hero: clamp(3rem, 7.5vw, 5.6rem);
+  --text-display: clamp(2rem, 4.5vw, 3.25rem);
+
+  --shadow-plate: 0 2px 6px rgb(22 19 14 / 7%), 0 18px 48px rgb(22 19 14 / 11%);
+}
+
+/* The product side: paper on ink — crossing into the app opens the
+   manuscript in a dark reading room. */
+.dark {
+  --background: var(--siyoh);
+  --foreground: var(--qogoz);
+  --card: color-mix(in srgb, var(--qogoz) 6%, var(--siyoh));
+  --card-foreground: var(--qogoz);
+  --popover: color-mix(in srgb, var(--qogoz) 9%, var(--siyoh));
+  --popover-foreground: var(--qogoz);
+  --primary: #6d8dd6; /* lapis lifted for dark ground */
+  --primary-foreground: var(--siyoh);
+  --secondary: color-mix(in srgb, var(--qogoz) 10%, var(--siyoh));
+  --secondary-foreground: var(--qogoz);
+  --muted: color-mix(in srgb, var(--qogoz) 7%, var(--siyoh));
+  --muted-foreground: color-mix(in srgb, var(--qogoz) 55%, var(--siyoh));
+  --accent: color-mix(in srgb, var(--qogoz) 10%, var(--siyoh));
+  --accent-foreground: var(--qogoz);
+  --destructive: #c96a55;
+  --destructive-foreground: var(--siyoh);
+  --border: color-mix(in srgb, var(--qogoz) 14%, transparent);
+  --input: color-mix(in srgb, var(--qogoz) 22%, transparent);
+  --ring: #6d8dd6;
+  --rule: color-mix(in srgb, var(--qogoz) 14%, transparent);
+  --rule-strong: color-mix(in srgb, var(--qogoz) 24%, transparent);
+  --ink-60: color-mix(in srgb, var(--qogoz) 55%, var(--siyoh));
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-qogoz: var(--qogoz);
+  --color-siyoh: var(--siyoh);
+  --color-zangori: var(--zangori);
+  --color-zangori-deep: var(--zangori-deep);
+  --color-zangori-wash: var(--zangori-wash);
+  --color-oltin: var(--oltin);
+  --color-ink-60: var(--ink-60);
+  --color-ink-40: var(--ink-40);
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 4px);
+  --radius-xl: calc(var(--radius) + 10px);
+}
+
+/* ------------------------------------------------------------------- base */
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--background);
+  color: var(--foreground);
+  line-height: 1.6;
+  font-size: 1.0625rem;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+  margin: 0;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--zangori);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  text-decoration-thickness: 1px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--zangori) 18%, var(--qogoz));
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* -------------------------------------------------- manuscript vocabulary */
+
+/* Folio section number: I. II. III. — small, spaced, ink-60. */
+.folio {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-60);
+}
+
+/* Kicker line above headings. Sans, caps, quiet. */
+.kicker {
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-60);
+}
+
+/* Machine facts only (§3): chunk refs, citation marks. */
+.cite-mark {
+  font-family: var(--font-mono);
+  font-size: 0.78em;
+  color: var(--zangori);
+  vertical-align: super;
+  letter-spacing: 0;
+}
+
+/* Footnote rule: the short horizontal stroke above marginalia. */
+.footnote {
+  border: 0;
+  border-top: 1px solid var(--rule-strong);
+  width: 7rem;
+  margin: 0 0 0.9rem;
+}
+
+.footnote-text {
+  font-size: 0.9rem;
+  color: var(--ink-60);
+  max-width: 46ch;
+}
+
+/* A plate: how every artifact (deck screenshot, engraving) is framed —
+   like a plate in a book, with a caption beneath. */
+.plate {
+  background: color-mix(in srgb, #ffffff 42%, var(--qogoz));
+  border: 1px solid var(--rule-strong);
+  padding: clamp(0.8rem, 1.6vw, 1.4rem);
+  box-shadow: var(--shadow-plate);
+}
+
+.plate-caption {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-60);
+  text-align: center;
+  padding-top: 0.85rem;
+}
+
+/* Coarse dither texture (CSS stand-in until the Higgsfield plates land):
+   a fine ink dot matrix, the site's engraving grain. */
+.dither {
+  background-image: radial-gradient(
+      color-mix(in srgb, var(--siyoh) 17%, transparent) 1px,
+      transparent 1px
+    ),
+    radial-gradient(color-mix(in srgb, var(--siyoh) 9%, transparent) 1px, transparent 1px);
+  background-size:
+    7px 7px,
+    11px 11px;
+  background-position:
+    0 0,
+    3px 5px;
+}
+
+/* The gilded moment (§4.3): one 600ms gold underline draw, once. */
+.gild-underline {
+  position: relative;
+}
+
+.gild-underline::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -7px;
+  height: 2px;
+  width: 100%;
+  background: var(--oltin);
+  transform: scaleX(0);
+  transform-origin: left;
+}
+
+.gilded .gild-underline::after {
+  animation: gild-draw 600ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes gild-draw {
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* ============================================================================
+   LEGACY LAYER — pre-direction app chrome (login, projects, workspace,
+   share). Kept so ungated routes stay coherent on the new palette; each
+   gate ((c), (d)) replaces its consumers, then these classes get deleted.
+   Aliased onto the new tokens — no second palette exists.
+   ========================================================================= */
+
+:root {
+  --paper: var(--qogoz);
+  --surface: color-mix(in srgb, #ffffff 55%, var(--qogoz));
+  --ink: var(--siyoh);
+  --ink-soft: var(--ink-88);
+  --muted-ink: var(--ink-60);
+  --line: var(--rule);
+  --line-strong: var(--rule-strong);
+  --brand: var(--zangori);
+  --brand-deep: var(--zangori-deep);
+  --brand-soft: var(--zangori-wash);
+  --brand-line: color-mix(in srgb, var(--zangori) 30%, var(--qogoz));
+  --gold: var(--oltin);
+  --danger: var(--xato);
+  --danger-soft: var(--xato-wash);
+  --ok: var(--tayyor);
+  --ok-soft: var(--tayyor-wash);
   --text-xs: 0.8rem;
   --text-sm: 0.9rem;
   --text-md: 1rem;
   --text-lg: 1.2rem;
   --text-xl: 1.55rem;
   --text-2xl: 2rem;
-  --text-hero: clamp(2.2rem, 5.5vw, 3.4rem);
-
-  /* spacing */
   --sp-1: 0.25rem;
   --sp-2: 0.5rem;
   --sp-3: 0.75rem;
@@ -45,80 +341,14 @@
   --sp-6: 2rem;
   --sp-7: 3rem;
   --sp-8: 4.5rem;
-
-  /* shape */
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 18px;
-  --shadow-sm: 0 1px 2px rgb(27 26 22 / 5%), 0 1px 6px rgb(27 26 22 / 4%);
-  --shadow-md: 0 2px 6px rgb(27 26 22 / 6%), 0 10px 28px rgb(27 26 22 / 8%);
-  --shadow-lg: 0 4px 12px rgb(27 26 22 / 8%), 0 24px 60px rgb(27 26 22 / 12%);
-
-  --font-ui: var(--font-manrope), "Segoe UI", system-ui, sans-serif;
-  --font-display: var(--font-literata), Georgia, serif;
+  --radius-sm-l: 8px;
+  --radius-md-l: 12px;
+  --radius-lg-l: 18px;
+  --shadow-sm: 0 1px 2px rgb(22 19 14 / 5%), 0 1px 6px rgb(22 19 14 / 4%);
+  --shadow-md: 0 2px 6px rgb(22 19 14 / 6%), 0 10px 28px rgb(22 19 14 / 8%);
+  --shadow-lg: 0 4px 12px rgb(22 19 14 / 8%), 0 24px 60px rgb(22 19 14 / 12%);
+  --font-ui: var(--font-sans);
 }
-
-/* ------------------------------------------------------------------- base */
-
-* {
-  box-sizing: border-box;
-}
-
-html {
-  -webkit-text-size-adjust: 100%;
-}
-
-body {
-  margin: 0;
-  font-family: var(--font-ui);
-  font-size: var(--text-md);
-  color: var(--ink);
-  background: var(--paper);
-  line-height: 1.55;
-}
-
-h1,
-h2,
-h3 {
-  font-family: var(--font-display);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: -0.01em;
-  color: var(--ink);
-  margin: 0 0 var(--sp-4);
-}
-
-h1 {
-  font-size: var(--text-2xl);
-}
-
-h2 {
-  font-size: var(--text-xl);
-}
-
-h3 {
-  font-size: var(--text-lg);
-}
-
-p {
-  margin: 0 0 var(--sp-4);
-}
-
-a {
-  color: var(--brand);
-  text-decoration: none;
-}
-
-a:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-::selection {
-  background: var(--brand-soft);
-}
-
-/* ----------------------------------------------------------------- layout */
 
 .shell {
   min-height: 100dvh;
@@ -128,7 +358,7 @@ a:hover {
 
 .container {
   width: 100%;
-  max-width: 1040px;
+  max-width: 1120px;
   margin: 0 auto;
   padding: 0 var(--sp-5);
 }
@@ -139,7 +369,7 @@ a:hover {
 }
 
 .topbar {
-  background: color-mix(in srgb, var(--paper) 86%, transparent);
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--line);
   position: sticky;
@@ -152,36 +382,25 @@ a:hover {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-4);
-  height: 60px;
+  height: 64px;
 }
 
 .wordmark {
   font-family: var(--font-display);
   font-weight: 700;
-  font-size: 1.3rem;
+  font-size: 1.35rem;
   color: var(--ink);
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
+  letter-spacing: -0.01em;
 }
 
 .wordmark:hover {
   text-decoration: none;
 }
 
-.wordmark::after {
-  content: "";
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--gold);
-  transform: translateY(-1px);
-}
-
 .nav-links {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   font-size: var(--text-sm);
   font-weight: 600;
 }
@@ -194,7 +413,7 @@ a:hover {
   border-top: 1px solid var(--line);
   padding: var(--sp-5) 0;
   font-size: var(--text-sm);
-  color: var(--muted);
+  color: var(--muted-ink);
 }
 
 .footer-inner {
@@ -205,8 +424,6 @@ a:hover {
   flex-wrap: wrap;
 }
 
-/* ---------------------------------------------------------------- buttons */
-
 .btn {
   display: inline-flex;
   align-items: center;
@@ -214,10 +431,10 @@ a:hover {
   gap: var(--sp-2);
   font-family: var(--font-ui);
   font-size: var(--text-sm);
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
-  padding: 0.72rem 1.2rem;
-  border-radius: var(--radius-sm);
+  padding: 0.74rem 1.3rem;
+  border-radius: var(--radius-sm-l);
   border: 1px solid transparent;
   cursor: pointer;
   transition:
@@ -238,16 +455,9 @@ a:hover {
   cursor: not-allowed;
 }
 
-.btn:focus-visible,
-.input:focus-visible,
-a:focus-visible {
-  outline: 2px solid var(--brand);
-  outline-offset: 2px;
-}
-
 .btn-primary {
   background: var(--brand);
-  color: #fff;
+  color: var(--paper);
   box-shadow: var(--shadow-sm);
 }
 
@@ -278,14 +488,12 @@ a:focus-visible {
 .btn-lg {
   font-size: var(--text-md);
   padding: 0.95rem 1.7rem;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-md-l);
 }
 
 .btn-block {
   width: 100%;
 }
-
-/* ----------------------------------------------------------------- inputs */
 
 .input {
   font-family: var(--font-ui);
@@ -293,14 +501,14 @@ a:focus-visible {
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm-l);
   padding: 0.68rem 0.9rem;
   width: 100%;
   transition: border-color 120ms ease;
 }
 
 .input::placeholder {
-  color: var(--muted);
+  color: var(--muted-ink);
 }
 
 .input:focus {
@@ -317,12 +525,10 @@ a:focus-visible {
   flex: 1;
 }
 
-/* ------------------------------------------------------------------ cards */
-
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-lg-l);
   box-shadow: var(--shadow-sm);
   padding: var(--sp-5);
 }
@@ -355,8 +561,6 @@ a:focus-visible {
   transform: translateY(-2px);
 }
 
-/* ----------------------------------------------------------------- badges */
-
 .badge {
   display: inline-flex;
   align-items: center;
@@ -376,7 +580,7 @@ a:focus-visible {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--muted);
+  background: var(--muted-ink);
 }
 
 .badge-ok {
@@ -409,8 +613,6 @@ a:focus-visible {
   background: var(--danger);
 }
 
-/* --------------------------------------------------------------- progress */
-
 .steps {
   list-style: none;
   margin: 0;
@@ -425,7 +627,7 @@ a:focus-visible {
   align-items: center;
   gap: var(--sp-3);
   font-size: var(--text-sm);
-  color: var(--muted);
+  color: var(--muted-ink);
 }
 
 .step-dot {
@@ -438,7 +640,7 @@ a:focus-visible {
   justify-content: center;
   font-size: 0.7rem;
   font-weight: 800;
-  color: var(--muted);
+  color: var(--muted-ink);
   flex-shrink: 0;
   background: var(--surface);
 }
@@ -450,7 +652,7 @@ a:focus-visible {
 .step-done .step-dot {
   background: var(--ok);
   border-color: var(--ok);
-  color: #fff;
+  color: var(--paper);
 }
 
 .step-current {
@@ -467,11 +669,11 @@ a:focus-visible {
 @keyframes pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgb(41 70 168 / 30%);
+    box-shadow: 0 0 0 0 rgb(39 70 144 / 30%);
   }
 
   50% {
-    box-shadow: 0 0 0 6px rgb(41 70 168 / 0%);
+    box-shadow: 0 0 0 6px rgb(39 70 144 / 0%);
   }
 }
 
@@ -490,13 +692,16 @@ a:focus-visible {
   transition: width 400ms ease;
 }
 
-/* -------------------------------------------------------------- skeletons */
-
 .skeleton {
-  background: linear-gradient(100deg, var(--line) 40%, #efede6 50%, var(--line) 60%);
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--siyoh) 8%, var(--paper)) 40%,
+    color-mix(in srgb, var(--siyoh) 4%, var(--paper)) 50%,
+    color-mix(in srgb, var(--siyoh) 8%, var(--paper)) 60%
+  );
   background-size: 200% 100%;
   animation: shimmer 1.4s linear infinite;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm-l);
   min-height: 1em;
 }
 
@@ -506,12 +711,10 @@ a:focus-visible {
   }
 }
 
-/* ----------------------------------------------------- empty/error states */
-
 .state {
   text-align: center;
   padding: var(--sp-7) var(--sp-5);
-  color: var(--muted);
+  color: var(--muted-ink);
 }
 
 .state-icon {
@@ -533,8 +736,6 @@ a:focus-visible {
   color: var(--danger);
 }
 
-/* ------------------------------------------------------------------ toast */
-
 .toast {
   position: fixed;
   bottom: var(--sp-5);
@@ -545,7 +746,7 @@ a:focus-visible {
   font-size: var(--text-sm);
   font-weight: 600;
   padding: 0.7rem 1.2rem;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-md-l);
   box-shadow: var(--shadow-lg);
   z-index: 50;
   animation: toast-in 200ms ease;
@@ -554,7 +755,7 @@ a:focus-visible {
 
 .toast-danger {
   background: var(--danger);
-  color: #fff;
+  color: var(--paper);
 }
 
 @keyframes toast-in {
@@ -569,8 +770,6 @@ a:focus-visible {
   }
 }
 
-/* ------------------------------------------------------------------ table */
-
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -582,7 +781,7 @@ a:focus-visible {
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--muted);
+  color: var(--muted-ink);
   font-weight: 700;
   padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--line-strong);
@@ -602,8 +801,6 @@ a:focus-visible {
   overflow-x: auto;
 }
 
-/* ---------------------------------------------------------------- sources */
-
 .source-row {
   display: flex;
   align-items: center;
@@ -619,7 +816,7 @@ a:focus-visible {
 .file-chip {
   width: 38px;
   height: 38px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-sm-l);
   background: var(--brand-soft);
   color: var(--brand-deep);
   display: inline-flex;
@@ -640,14 +837,12 @@ a:focus-visible {
   font-size: var(--text-sm);
 }
 
-/* ----------------------------------------------------------------- viewer */
-
 .viewer-frame {
   width: 100%;
   aspect-ratio: 16 / 9;
   border: none;
-  border-radius: var(--radius-md);
-  background: var(--ink);
+  border-radius: var(--radius-md-l);
+  background: var(--siyoh);
   box-shadow: var(--shadow-md);
   display: block;
 }
@@ -655,112 +850,10 @@ a:focus-visible {
 .viewer-chrome {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-lg-l);
   padding: var(--sp-4);
   box-shadow: var(--shadow-md);
 }
-
-/* ---------------------------------------------------------------- landing */
-
-.hero {
-  padding: var(--sp-8) 0 var(--sp-7);
-  display: grid;
-  grid-template-columns: 1.05fr 1fr;
-  gap: var(--sp-7);
-  align-items: center;
-}
-
-.hero h1 {
-  font-size: var(--text-hero);
-  margin-bottom: var(--sp-4);
-}
-
-.hero-sub {
-  font-size: var(--text-lg);
-  color: var(--ink-soft);
-  max-width: 46ch;
-  margin-bottom: var(--sp-5);
-}
-
-.hero-actions {
-  display: flex;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-}
-
-/* CSS-drawn deck mock: a stacked pair of slides, pure gradients. */
-
-.deck-mock {
-  position: relative;
-  aspect-ratio: 16 / 10;
-}
-
-.mock-slide {
-  position: absolute;
-  inset: 0;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  overflow: hidden;
-  background: linear-gradient(150deg, #1c2a55 0%, #2946a8 68%, #3a5cc9 100%);
-  padding: 9% 8%;
-  color: #fff;
-}
-
-.mock-slide-back {
-  transform: rotate(3.5deg) translate(4%, -7%) scale(0.96);
-  background: linear-gradient(150deg, #6c5121 0%, #b8892e 80%);
-  opacity: 0.85;
-}
-
-.mock-kicker {
-  width: 26%;
-  height: 6%;
-  border-radius: 4px;
-  background: rgb(255 255 255 / 45%);
-  margin-bottom: 6%;
-}
-
-.mock-title {
-  width: 74%;
-  height: 11%;
-  border-radius: 6px;
-  background: rgb(255 255 255 / 92%);
-  margin-bottom: 4%;
-}
-
-.mock-title-2 {
-  width: 52%;
-  height: 11%;
-  border-radius: 6px;
-  background: rgb(255 255 255 / 85%);
-  margin-bottom: 9%;
-}
-
-.mock-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 5%;
-  height: 34%;
-}
-
-.mock-bar {
-  flex: 1;
-  border-radius: 5px 5px 0 0;
-  background: rgb(255 255 255 / 35%);
-}
-
-.mock-bar-hot {
-  background: #e9c46a;
-}
-
-.feature-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: var(--sp-5);
-  padding-bottom: var(--sp-8);
-}
-
-/* ------------------------------------------------------------------- auth */
 
 .auth-wrap {
   flex: 1;
@@ -775,7 +868,7 @@ a:focus-visible {
   max-width: 400px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-lg-l);
   box-shadow: var(--shadow-md);
   padding: var(--sp-6);
 }
@@ -784,7 +877,7 @@ a:focus-visible {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  color: var(--muted);
+  color: var(--muted-ink);
   font-size: var(--text-xs);
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -799,8 +892,6 @@ a:focus-visible {
   height: 1px;
   background: var(--line);
 }
-
-/* ------------------------------------------------------------ share/marketing */
 
 .share-shell {
   min-height: 100dvh;
@@ -821,26 +912,14 @@ a:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  color: var(--muted);
+  color: var(--muted-ink);
   font-size: var(--text-sm);
   font-weight: 600;
 }
 
-/* ----------------------------------------------------------------- mobile */
-
 @media (max-width: 720px) {
   .container {
     padding: 0 var(--sp-4);
-  }
-
-  .hero {
-    grid-template-columns: 1fr;
-    gap: var(--sp-6);
-    padding-top: var(--sp-6);
-  }
-
-  .feature-grid {
-    grid-template-columns: 1fr;
   }
 
   .field-row {
@@ -856,6 +935,6 @@ a:focus-visible {
   }
 
   .topbar-inner {
-    height: 54px;
+    height: 56px;
   }
 }
