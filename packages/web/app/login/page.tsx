@@ -1,11 +1,14 @@
 "use client";
 
-// Both identity doors (plan §5). Inside Telegram the Mini App initData logs in
-// automatically; in a plain browser the email magic link is offered. Either
-// door ends in the SAME app session minted by the API.
+// Identity doors (plan §5 + P3.5 4a). Inside Telegram the Mini App initData
+// logs in automatically. In a plain browser Google OAuth is the primary door
+// and the email magic link is the fallback; both produce a GoTrue session the
+// API exchanges for the SAME app session, so the identity model is identical.
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { GoogleIcon } from "@/components/ui";
 import { telegramLogin, ApiError } from "@/lib/api";
 import { createAnonClient } from "@/lib/supabase";
 import { readInitData } from "@/lib/telegram";
@@ -33,6 +36,21 @@ export default function LoginPage() {
       });
   }, [router]);
 
+  async function signInWithGoogle() {
+    setStatus({ kind: "working", message: "Google sahifasiga o'tilmoqda…" });
+    try {
+      const supabase = createAnonClient();
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: `${window.location.origin}/auth/callback` },
+      });
+      if (error) throw error;
+      // The browser navigates away to Google here; no further state needed.
+    } catch {
+      setStatus({ kind: "error", message: "Google orqali kirishda xato — qayta urinib ko'ring" });
+    }
+  }
+
   async function sendMagicLink() {
     setStatus({ kind: "working", message: "Havola yuborilmoqda…" });
     try {
@@ -48,26 +66,70 @@ export default function LoginPage() {
     }
   }
 
+  const working = status.kind === "working";
+
   return (
-    <main>
-      <h1>Kirish</h1>
-      {status.kind === "error" && <p style={{ color: "crimson" }}>Xato: {status.message}</p>}
-      {status.kind === "working" && <p>{status.message}</p>}
-      {status.kind === "sent" ? (
-        <p>Email yuborildi — havolani oching.</p>
-      ) : (
-        <div>
-          <input
-            type="email"
-            value={email}
-            placeholder="email@example.com"
-            onChange={(event) => setEmail(event.target.value)}
-          />
-          <button onClick={sendMagicLink} disabled={!email || status.kind === "working"}>
-            Magic link yuborish
-          </button>
+    <div className="shell">
+      <header className="topbar">
+        <div className="container topbar-inner">
+          <Link href="/" className="wordmark">
+            Nashr
+          </Link>
         </div>
-      )}
-    </main>
+      </header>
+
+      <div className="auth-wrap">
+        <div className="auth-card">
+          <h1 style={{ marginBottom: "0.4rem" }}>Kirish</h1>
+          <p style={{ color: "var(--muted)" }}>Loyihalaringiz va taqdimotlaringizga qaytish.</p>
+
+          {status.kind === "error" && (
+            <p style={{ color: "var(--danger)", fontSize: "var(--text-sm)", fontWeight: 600 }}>
+              {status.message}
+            </p>
+          )}
+          {working && <p style={{ color: "var(--muted)" }}>{status.message}</p>}
+
+          {status.kind === "sent" ? (
+            <div className="state" style={{ padding: "var(--sp-5) 0" }}>
+              <div className="state-icon" aria-hidden>
+                ✉️
+              </div>
+              <h3>Email yuborildi</h3>
+              <p>Pochtangizni oching va xatdagi havolani bosing — shu yerga qaytasiz.</p>
+            </div>
+          ) : (
+            <>
+              <button
+                className="btn btn-ghost btn-lg btn-block"
+                onClick={() => void signInWithGoogle()}
+                disabled={working}
+              >
+                <GoogleIcon />
+                Google bilan kirish
+              </button>
+
+              <div className="divider">yoki email orqali</div>
+
+              <input
+                className="input"
+                type="email"
+                value={email}
+                placeholder="email@example.com"
+                onChange={(event) => setEmail(event.target.value)}
+                style={{ marginBottom: "var(--sp-3)" }}
+              />
+              <button
+                className="btn btn-primary btn-block"
+                onClick={() => void sendMagicLink()}
+                disabled={!email || working}
+              >
+                Havola yuborish
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

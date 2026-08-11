@@ -51,9 +51,28 @@ export default function AuthCallbackPage() {
   }, [router]);
 
   return (
-    <main>
-      <h1>Kirish…</h1>
-      {error && <p style={{ color: "crimson" }}>Xato: {error}</p>}
-    </main>
+    <div className="shell">
+      <div className="auth-wrap">
+        <div className="auth-card">
+          {error ? (
+            <div className="state state-error" style={{ padding: "var(--sp-4) 0" }}>
+              <div className="state-icon" aria-hidden>
+                ⚠️
+              </div>
+              <h3>Kirish amalga oshmadi</h3>
+              <p>{error}</p>
+              <a className="btn btn-ghost" href="/login">
+                Qaytadan kirish
+              </a>
+            </div>
+          ) : (
+            <div className="state" style={{ padding: "var(--sp-4) 0" }}>
+              <div className="skeleton" style={{ height: "1.4rem", width: "60%", margin: "0 auto var(--sp-4)" }} />
+              <p>Kirilmoqda…</p>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
