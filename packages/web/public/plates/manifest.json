@@ -1,0 +1,58 @@
+{
+  "hero-observatory": {
+    "full": "/plates/hero-observatory.webp",
+    "dither": "/plates/dither/hero-observatory.webp",
+    "width": 2048,
+    "height": 1158,
+    "alt": "Ulug’bek rasadxonasining qadimiy gravyurasi: doira shaklidagi g’ishtin bino va yer ostidagi handaqqa tushuvchi ulkan sekstant yoyi, yonida bir necha munajjim, chapda ochiq osmon",
+    "title": "RASADXONA"
+  },
+  "plate-armillary": {
+    "full": "/plates/plate-armillary.webp",
+    "dither": "/plates/dither/plate-armillary.webp",
+    "width": 1600,
+    "height": 2143,
+    "alt": "Yog’och oyoqqa o’rnatilgan armillyar sfera: bo’lim chiziqchalari tushirilgan ichma-ich halqalar, qiya ekliptika kamari va qutb o’qidagi kichik yer shari; qadimiy misgarlik gravyurasi uslubida.",
+    "title": "ARMILLYAR SFERA"
+  },
+  "plate-astrolabe": {
+    "full": "/plates/plate-astrolabe.webp",
+    "dither": "/plates/dither/plate-astrolabe.webp",
+    "width": 1600,
+    "height": 1600,
+    "alt": "Qadimiy usturlobning mis o’ymakor gravyurasi: yulduz ko’rsatkichli to’ri, aylanma shkalasi va yuqorisidagi osma halqasi",
+    "title": "USTURLOB"
+  },
+  "plate-manuscript": {
+    "full": "/plates/plate-manuscript.webp",
+    "dither": "/plates/dither/plate-manuscript.webp",
+    "width": 1600,
+    "height": 2143,
+    "alt": "O’rta asr Markaziy Osiyo qo’lyozma varag’ining o’yma gravyurasi: markazda zich xattotlik satrlari, tashqi hoshiyada qiya izohlar va kichik geometrik medalyon.",
+    "title": "QO’LYOZMA"
+  },
+  "plate-registan": {
+    "full": "/plates/plate-registan.webp",
+    "dither": "/plates/dither/plate-registan.webp",
+    "width": 1600,
+    "height": 1600,
+    "alt": "Samarqanddagi Registon madrasasi peshtog’ining gravyurasi: uchli ravoq, girih geometrik naqshlari va muqarnas bezaklari.",
+    "title": "REGISTON PESHTOQI"
+  },
+  "spot-folio": {
+    "full": "/plates/spot-folio.webp",
+    "dither": "/plates/dither/spot-folio.webp",
+    "width": 800,
+    "height": 800,
+    "alt": "Qo’lda yasalgan, chekkalari notekis bo’sh varaq gravyurasi: sirtida hech qanday yozuv yo’q, ostida parallel shtrixlar bilan chizilgan soya, atrofida keng bo’sh qog’oz",
+    "title": "VARAQ"
+  },
+  "spot-inkwell": {
+    "full": "/plates/spot-inkwell.webp",
+    "dither": "/plates/dither/spot-inkwell.webp",
+    "width": 800,
+    "height": 800,
+    "alt": "Og’zida g’oz pati qalami yotgan shisha siyohdon, yonida bitta siyoh tomchisi tushirilgan qadimiy o’ymakorlik uslubidagi kichik chizma.",
+    "title": "SIYOHDON"
+  }
+}

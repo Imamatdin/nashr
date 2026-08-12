@@ -303,6 +303,171 @@ a:hover {
   }
 }
 
+/* Dither-in stack (§4.2): the two plate layers occupy the same cell, the
+   coarse variant underneath is upscaled without smoothing so it reads as
+   printer's grain rather than a blurred JPEG. */
+.plate-stack {
+  display: grid;
+  position: relative;
+  width: 100%;
+}
+
+.plate-layer {
+  grid-area: 1 / 1;
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.pixelated {
+  image-rendering: pixelated;
+}
+
+/* Marginalia: the aside written in the outer margin of a folio. Set off by
+   a vertical rule, quieter than body, never wider than a hand-note. */
+.marginalia {
+  border-left: 1px solid var(--rule-strong);
+  padding-left: 1.1rem;
+  font-size: 0.95rem;
+  color: var(--ink-60);
+  max-width: 34ch;
+}
+
+/* Drop cap (§ steal note 3): opens one body paragraph per page, no more. */
+.dropcap::first-letter {
+  font-family: var(--font-display);
+  font-weight: 600;
+  float: left;
+  font-size: 3.4em;
+  line-height: 0.86;
+  padding: 0.06em 0.12em 0 0;
+  color: var(--siyoh);
+}
+
+/* Section rule: the thin stroke that closes a folio section. */
+.folio-rule {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 0;
+}
+
+/* Hero entrance (§4.1/§4.2, CSS state): section I must paint before any
+   script runs — the framer variants hold content at opacity 0 until
+   hydration, which on a slow device blanks the first viewport for seconds.
+   Same strokes, driven by CSS from first paint; stagger via animation-delay. */
+.ink-css {
+  animation: ink-rise 550ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes ink-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+/* The hero headline is the LCP element: it must be part of the very first
+   paint frame, so its rise starts from a visible opacity instead of 0 —
+   an element painted at opacity 0 registers its largest-contentful-paint
+   only after scripting, which reads as seconds of render delay on slow
+   devices. Visually the ink still settles. */
+.ink-css-lcp {
+  animation: ink-rise-lcp 550ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes ink-rise-lcp {
+  from {
+    opacity: 0.32;
+    transform: translateY(12px);
+  }
+}
+
+.dither-in-css {
+  animation: dither-in 900ms linear 250ms both;
+}
+
+@keyframes dither-in {
+  0% {
+    opacity: 0;
+  }
+  26% {
+    opacity: 0.24;
+  }
+  48% {
+    opacity: 0.24;
+  }
+  74% {
+    opacity: 0.68;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Observer-driven states for below-fold reveals (see components/motion.tsx):
+   SSR ships everything visible; .ink-pending / .dither-pending hide only
+   what is still below the fold at mount, and .ink-in / .dither-in-view run
+   the same strokes on first viewport entry. Stagger: 80ms per line, offset
+   by the wrapper's --ink-delay. */
+@media (prefers-reduced-motion: no-preference) {
+  .ink-pending .ink-line {
+    opacity: 0;
+  }
+
+  .ink-in .ink-line {
+    animation: ink-rise 550ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--ink-delay, 0ms) + var(--ink-i, 0) * 80ms);
+  }
+
+  .ink-in .ink-line:nth-child(2) {
+    --ink-i: 1;
+  }
+
+  .ink-in .ink-line:nth-child(3) {
+    --ink-i: 2;
+  }
+
+  .ink-in .ink-line:nth-child(4) {
+    --ink-i: 3;
+  }
+
+  .ink-in .ink-line:nth-child(5) {
+    --ink-i: 4;
+  }
+
+  .ink-in .ink-line:nth-child(6) {
+    --ink-i: 5;
+  }
+
+  .ink-in .ink-line:nth-child(7) {
+    --ink-i: 6;
+  }
+
+  .ink-in .ink-line:nth-child(8) {
+    --ink-i: 7;
+  }
+
+  .ink-in .ink-line:nth-child(9) {
+    --ink-i: 8;
+  }
+
+  .dither-pending {
+    opacity: 0;
+  }
+
+  .dither-in-view {
+    animation: dither-in 900ms linear both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ink-css,
+  .ink-css-lcp,
+  .dither-in-css {
+    animation: none;
+  }
+}
+
 /* ============================================================================
    LEGACY LAYER — pre-direction app chrome (login, projects, workspace,
    share). Kept so ungated routes stay coherent on the new palette; each

@@ -27,10 +27,22 @@ const plexMono = IBM_Plex_Mono({
   display: "swap",
 });
 
+// Icons are conventional files, not config: app/icon.svg and app/apple-icon.png
+// are picked up by the App Router automatically — declaring them here would
+// only fight the convention.
 export const metadata: Metadata = {
   title: "Nashr — manbaga asoslangan taqdimotlar",
   description:
-    "Nashr har bir fikrni manbaga bog'laydi: yuklangan manbalardan bir urinishda nashr sifatidagi taqdimot.",
+    "Nashr har bir fikrni manbaga bog’laydi: yuklangan manbalardan bir urinishda nashr sifatidagi taqdimot. HTML, PDF va PPTX — uchala format ham asosiy.",
+  openGraph: {
+    type: "website",
+    locale: "uz_UZ",
+    siteName: "Nashr",
+    title: "Nashr — manbaga asoslangan taqdimotlar",
+    description:
+      "Har bir da’vo manbaga bog’lanadi, tanqidchi to’qimani rad etadi. Ma’ruzangiz savolga dosh beradi.",
+    images: [{ url: "/og.jpg", width: 1200, height: 630, alt: "Nashr" }],
+  },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
