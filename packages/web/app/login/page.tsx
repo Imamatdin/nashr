@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import Script from "next/script";
 import { GoogleIcon } from "@/components/ui";
 import { telegramLogin, ApiError } from "@/lib/api";
 import { createAnonClient } from "@/lib/supabase";
@@ -23,8 +24,17 @@ export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  // The Telegram bridge (panel finding): window.Telegram.WebApp only exists
+  // once telegram.org/js/telegram-web-app.js loads — without it the Telegram
+  // door silently never fires and every in-Telegram user falls through to
+  // email. The script loads here, not in the root layout, so the landing does
+  // not pay its main-thread cost; onReady fires both on fresh load and when
+  // the script is already present after a client-side navigation, so the door
+  // check below never races the script.
+  const [bridgeReady, setBridgeReady] = useState(false);
 
   useEffect(() => {
+    if (!bridgeReady) return;
     const initData = readInitData();
     if (!initData) return;
     setStatus({ kind: "working", message: "Telegram orqali kirilmoqda…" });
@@ -34,7 +44,7 @@ export default function LoginPage() {
         const message = error instanceof ApiError ? error.reason : "kutilmagan xato";
         setStatus({ kind: "error", message });
       });
-  }, [router]);
+  }, [bridgeReady, router]);
 
   async function signInWithGoogle() {
     setStatus({ kind: "working", message: "Google sahifasiga o'tilmoqda…" });
@@ -70,6 +80,10 @@ export default function LoginPage() {
 
   return (
     <div className="shell">
+      <Script
+        src="https://telegram.org/js/telegram-web-app.js"
+        onReady={() => setBridgeReady(true)}
+      />
       <header className="topbar">
         <div className="container topbar-inner">
           <Link href="/" className="wordmark">

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, Literata, Source_Sans_3 } from "next/font/google";
-import Script from "next/script";
 import type { ReactNode } from "react";
 import "./globals.css";
 import { cn } from "@/lib/utils";
@@ -47,20 +46,16 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    // suppressHydrationWarning: the Telegram bridge stamps --tg-viewport-* on
-    // <html> before hydration; attribute-level and expected, not a bug.
+    // suppressHydrationWarning: on /login the Telegram bridge stamps
+    // --tg-viewport-* on <html>; attribute-level and expected, not a bug.
+    // The bridge script itself lives in app/login — it cost ~800ms of mobile
+    // main-thread on every page while only the login door reads it.
     <html
       lang="uz"
       suppressHydrationWarning
       className={cn(literata.variable, sourceSans.variable, plexMono.variable, "font-sans")}
     >
-      <body>
-        {/* Telegram Mini App bridge (panel finding): window.Telegram.WebApp only
-            exists if this script loads — without it the Telegram door silently
-            never fires and every in-Telegram user falls through to email. */}
-        <Script src="https://telegram.org/js/telegram-web-app.js" strategy="beforeInteractive" />
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
