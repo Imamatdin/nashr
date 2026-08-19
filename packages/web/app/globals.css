@@ -1103,3 +1103,461 @@ a:hover {
     height: 56px;
   }
 }
+
+/* ============================================================================
+   P3.6 INTERIOR CHROME — the workspace side of the split (§2: paper on ink).
+   Every rule below is scoped to .dark or to an interior-only class family; the
+   approved landing must not move by a pixel. Crossing from the site into the
+   product opens the manuscript in a dark reading room.
+   ========================================================================= */
+
+/* Legacy alias inversion: the pre-direction classes (.card .btn .badge …) keep
+   working inside .dark because their aliases now resolve against ink. */
+.dark {
+  --paper: var(--siyoh);
+  --surface: color-mix(in srgb, var(--qogoz) 6%, var(--siyoh));
+  --ink: var(--qogoz);
+  /* --ink-88 is mixed against qogoz and never inverts, so --ink-soft has to be
+     restated rather than aliased — otherwise every legacy secondary text
+     colour stays near-black on ink. */
+  --ink-soft: color-mix(in srgb, var(--qogoz) 88%, var(--siyoh));
+  --muted-ink: color-mix(in srgb, var(--qogoz) 55%, var(--siyoh));
+  --line: color-mix(in srgb, var(--qogoz) 14%, transparent);
+  --line-strong: color-mix(in srgb, var(--qogoz) 24%, transparent);
+  --brand: #6d8dd6;
+  --brand-deep: #8aa5e0;
+  --brand-soft: color-mix(in srgb, #6d8dd6 14%, var(--siyoh));
+  --brand-line: color-mix(in srgb, #6d8dd6 35%, var(--siyoh));
+  --gold: var(--oltin-bright);
+  --danger: #c96a55;
+  --danger-soft: color-mix(in srgb, #c96a55 14%, var(--siyoh));
+  --ok: #6fa383;
+  --ok-soft: color-mix(in srgb, #6fa383 14%, var(--siyoh));
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 32%), 0 1px 6px rgb(0 0 0 / 22%);
+  --shadow-md: 0 2px 6px rgb(0 0 0 / 34%), 0 10px 28px rgb(0 0 0 / 30%);
+  --shadow-lg: 0 4px 12px rgb(0 0 0 / 38%), 0 24px 60px rgb(0 0 0 / 38%);
+}
+
+/* Contrast sweep — the legacy rules whose colour mixes flip meaning on ink. */
+
+/* The base link colour is deep lapis: 1.8:1 against ink. The guards below
+   restore the classes an anchor can also carry — .dark a outranks a bare
+   .btn-primary, which would otherwise paint the label lapis on lapis. */
+.dark a {
+  color: var(--brand);
+}
+
+.dark .btn-primary {
+  color: var(--paper);
+}
+
+.dark .btn-ghost,
+.dark .wordmark {
+  color: var(--ink);
+}
+
+.dark .btn-danger {
+  color: var(--danger);
+}
+
+/* The shimmer mixes siyoh into --paper; with --paper = siyoh it collapses to an
+   invisible black-on-black band. Inverted: qogoz lifted out of the ink. */
+.dark .skeleton {
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--qogoz) 10%, var(--siyoh)) 40%,
+    color-mix(in srgb, var(--qogoz) 5%, var(--siyoh)) 50%,
+    color-mix(in srgb, var(--qogoz) 10%, var(--siyoh)) 60%
+  );
+}
+
+/* .badge-danger sits at 4.3:1 on its own wash; lifted toward paper it clears
+   4.5. .badge-ok (5.3:1) and .badge-busy (6.3:1) already pass. */
+.dark .badge-danger {
+  color: color-mix(in srgb, var(--danger) 80%, var(--qogoz));
+}
+
+/* @keyframes pulse hardcodes deep lapis, invisible against ink; and the dot's
+   numeral at brand blue is under 4.5 on the card surface. */
+.dark .step-current .step-dot {
+  color: var(--ink);
+  border-color: var(--brand-deep);
+  animation-name: pulse-dark;
+}
+
+@keyframes pulse-dark {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(109 141 214 / 34%);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px rgb(109 141 214 / 0%);
+  }
+}
+
+.dark .dropcap::first-letter {
+  color: var(--qogoz);
+}
+
+/* Chunk refs are interior furniture, and deep lapis is 1.8:1 on ink. */
+.dark .cite-mark {
+  color: var(--brand);
+}
+
+/* ----------------------------------------------------------- the app frame */
+
+.dark.app-frame {
+  min-height: 100dvh;
+  background: var(--background);
+  color: var(--foreground);
+  display: grid;
+  grid-template-columns: 232px 1fr;
+}
+
+.dark .app-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  padding: var(--sp-5) var(--sp-4);
+  border-right: 1px solid var(--rule);
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+}
+
+.dark .app-brand {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.3rem;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+}
+
+.dark .app-brand:hover {
+  text-decoration: none;
+}
+
+.dark .app-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dark .app-nav-link {
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-sm-l);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--muted-ink);
+  transition:
+    color 120ms ease,
+    background 120ms ease;
+}
+
+.dark .app-nav-link:hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--qogoz) 5%, transparent);
+  text-decoration: none;
+}
+
+.dark .app-nav-link[data-active="true"] {
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.dark .app-nav-footer {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+.dark .app-logout {
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--muted-ink);
+  background: none;
+  border: 0;
+  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-sm-l);
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.dark .app-logout:hover {
+  color: var(--foreground);
+}
+
+.dark .app-tag {
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--muted-ink);
+  padding: 0 0.7rem;
+  max-width: 22ch;
+}
+
+.dark .app-main {
+  width: 100%;
+  max-width: 920px;
+  padding: clamp(1.5rem, 3vw, 2.5rem);
+}
+
+.dark .app-topbar {
+  display: none;
+}
+
+@media (max-width: 879px) {
+  .dark.app-frame {
+    grid-template-columns: 1fr;
+  }
+
+  .dark .app-sidebar {
+    display: none;
+  }
+
+  .dark .app-topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    padding: 0.7rem var(--sp-4);
+    border-bottom: 1px solid var(--rule);
+    background: var(--background);
+  }
+
+  .dark .app-topbar-links {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    margin-left: auto;
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+}
+
+/* ------------------------------------------------------------ page heading */
+
+.dark .page-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: var(--sp-5);
+}
+
+.dark .page-title {
+  font-family: var(--font-display);
+  font-size: clamp(1.6rem, 3vw, 2.1rem);
+  font-weight: 600;
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+  margin: 0;
+}
+
+.dark .page-sub {
+  font-size: var(--text-sm);
+  color: var(--muted-ink);
+  max-width: 62ch;
+}
+
+/* -------------------------------------------------------------- choice card */
+
+.dark .choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--sp-3);
+}
+
+.dark .choice {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: var(--sp-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md-l);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+/* Hidden but still focusable and still announced — display:none would drop the
+   radio out of the tab order and out of the accessibility tree. */
+.dark .choice input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.dark .choice-name {
+  font-weight: 600;
+}
+
+.dark .choice-desc {
+  font-size: var(--text-sm);
+  color: var(--muted-ink);
+}
+
+.dark .choice-price {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--ink-soft);
+}
+
+.dark .choice:hover {
+  border-color: var(--ink-soft);
+}
+
+.dark .choice:has(input:checked) {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.dark .choice:has(input:focus-visible) {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* ----------------------------------------------------- progressive flow step */
+
+.dark .flow-step {
+  border-top: 1px solid var(--rule);
+  padding: var(--sp-5) 0;
+}
+
+.dark .flow-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+
+.dark .flow-step-head h2 {
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.dark .flow-step-locked {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.dark .flow-step-done .folio {
+  color: var(--ok);
+}
+
+.dark .flow-step-done .folio::after {
+  content: " ✓";
+}
+
+/* Progress as typesetting (§4.5): the press setting the current line. */
+.dark .step-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 0.35em;
+  vertical-align: -0.12em;
+  background: var(--gold);
+  animation: caret-blink 1.1s steps(2) infinite;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dark .step-caret {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+/* --------------------------------------------------------------- auth door */
+
+.dark.auth-min {
+  min-height: 100dvh;
+  background: var(--background);
+  color: var(--foreground);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: var(--sp-6);
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+}
+
+.dark .auth-min-brand {
+  justify-self: start;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.3rem;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+}
+
+.dark .auth-min-brand:hover {
+  text-decoration: none;
+}
+
+.dark .auth-min-form {
+  width: 100%;
+  max-width: 24rem;
+  margin: 0 auto;
+  align-self: center;
+}
+
+/* -------------------------------------------------------------------- 404 */
+
+.dark.notfound {
+  min-height: 100dvh;
+  background: var(--background);
+  color: var(--foreground);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  padding: var(--sp-6) var(--sp-5);
+  text-align: center;
+}
+
+.dark .notfound-folio {
+  font-family: var(--font-display);
+  font-size: clamp(4.5rem, 16vw, 9rem);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.dark .notfound-line {
+  color: var(--ink-soft);
+  max-width: 34ch;
+}
+
+.dark .notfound-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--sp-5);
+  margin-top: var(--sp-3);
+}
+
+.dark .notfound-quiet {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--muted-ink);
+}

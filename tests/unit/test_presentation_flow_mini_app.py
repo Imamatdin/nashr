@@ -2,8 +2,8 @@
 
 Three handlers are exercised here:
 
-1. :func:`continue_to_questionnaire` — builds the Mini App URL with
-   query params drawn from FSM state and platform config.
+1. :func:`continue_to_questionnaire` — builds the web login-door URL
+   with query params drawn from FSM state and platform config.
 2. :func:`receive_mini_app_data` — receives the ``sendData`` payload
    Telegram delivers when the user submits the questionnaire, parses
    it, and advances to tier selection.
@@ -81,12 +81,12 @@ def test_build_mini_app_url_includes_all_required_params() -> None:
         domain="engineering",
         people=5,
     )
-    assert url.startswith("https://nashr.uz/mini-app/presentation?")
-    assert "lang=uz" in url
-    assert "project_id=proj_42" in url
-    assert "stats=3" in url
-    assert "domain=engineering" in url
-    assert "people=5" in url
+    assert url.startswith("https://nashr.uz/login?returnTo=%2Fnew%3F")
+    assert "lang%3Duz" in url
+    assert "project_id%3Dproj_42" in url
+    assert "stats%3D3" in url
+    assert "domain%3Dengineering" in url
+    assert "people%3D5" in url
 
 
 def test_build_mini_app_url_handles_trailing_slash_base() -> None:
@@ -96,8 +96,8 @@ def test_build_mini_app_url_handles_trailing_slash_base() -> None:
         project_id="p1",
         stats=0,
     )
-    assert "//mini-app" not in url
-    assert url.startswith("https://nashr.uz/mini-app/presentation?")
+    assert "//login" not in url
+    assert url.startswith("https://nashr.uz/login?returnTo=%2Fnew%3F")
 
 
 def test_build_mini_app_url_escapes_special_chars_in_values() -> None:
@@ -107,8 +107,8 @@ def test_build_mini_app_url_escapes_special_chars_in_values() -> None:
         project_id="a b&c",
         stats=0,
     )
-    # urlencode quotes spaces and ampersands so the URL parses correctly.
-    assert "project_id=a+b%26c" in url
+    # Two encoding rounds: the inner /new query, then returnTo wrapping it.
+    assert "project_id%3Da%2Bb%2526c" in url
 
 
 # ---------------------------------------------------------------------------
@@ -155,11 +155,11 @@ async def test_continue_to_questionnaire_shows_mini_app_button_with_url(
     web_app_buttons = [b for b in buttons if b.web_app is not None]
     assert len(web_app_buttons) == 1
     url = web_app_buttons[0].web_app.url
-    assert "https://test.example/mini-app/presentation?" in url
-    assert "lang=uz" in url
-    assert "project_id=proj_abc" in url
+    assert url.startswith("https://test.example/login?returnTo=%2Fnew%3F")
+    assert "lang%3Duz" in url
+    assert "project_id%3Dproj_abc" in url
     # One xlsx source → stats=1.
-    assert "stats=1" in url
+    assert "stats%3D1" in url
     assert (await state.get_state()) == PresentationStates.opening_mini_app.state
 
 
@@ -181,8 +181,8 @@ async def test_continue_to_questionnaire_counts_no_stat_sources_as_zero(
     web_app_btn = next(
         btn for row in markup.inline_keyboard for btn in row if btn.web_app is not None
     )
-    assert "stats=0" in web_app_btn.web_app.url
-    assert "lang=ru" in web_app_btn.web_app.url
+    assert "stats%3D0" in web_app_btn.web_app.url
+    assert "lang%3Dru" in web_app_btn.web_app.url
 
 
 # ---------------------------------------------------------------------------

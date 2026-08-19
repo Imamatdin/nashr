@@ -1,14 +1,14 @@
 "use client";
 
-// Project workspace (P3 item 2, restyled in P3.5): upload sources, enqueue,
+// Project workspace (P3 item 2, moved into the P3.6 chrome): upload sources, enqueue,
 // watch progress by polling, then the delivered deck inline with downloads,
 // share controls and the provenance table. Reads ride RLS (sources list);
 // every mutation and signed-URL mint goes through the API.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { AppChrome } from "@/components/chrome";
 import {
-  AppShell,
   EmptyState,
   ErrorState,
   GenerationSteps,
@@ -133,7 +133,10 @@ export default function ProjectPage() {
   useEffect(() => {
     const active = loadSession();
     if (!active) {
-      router.replace("/login");
+      router.replace(
+        "/login?returnTo=" +
+          encodeURIComponent(window.location.pathname + window.location.search),
+      );
       return;
     }
     setSession(active);
@@ -165,6 +168,15 @@ export default function ProjectPage() {
     },
     [loadDeck],
   );
+
+  // /new enqueues, then hands the job over in the URL. useSearchParams would
+  // force this page under a Suspense boundary; window.location in the effect
+  // reads the same value without it.
+  useEffect(() => {
+    if (!session) return;
+    const jobId = new URLSearchParams(window.location.search).get("job");
+    if (jobId) pollJob(jobId, session);
+  }, [session, pollJob]);
 
   async function onUpload() {
     if (!session) return;
@@ -238,7 +250,7 @@ export default function ProjectPage() {
 
   if (projectError) {
     return (
-      <AppShell authed>
+      <AppChrome active="projects">
         <div className="card">
           <ErrorState
             title="Loyiha ochilmadi"
@@ -246,26 +258,28 @@ export default function ProjectPage() {
             onRetry={session ? () => loadProject(session) : undefined}
           />
         </div>
-      </AppShell>
+      </AppChrome>
     );
   }
 
   return (
-    <AppShell authed>
+    <AppChrome active="projects">
       {project === null ? (
         <div className="skeleton" style={{ height: "2.2rem", width: "40%", marginBottom: "var(--sp-5)" }} />
       ) : (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "var(--sp-4)",
-            marginBottom: "var(--sp-5)",
-            flexWrap: "wrap",
-          }}
-        >
-          <h1 style={{ margin: 0 }}>{project.title}</h1>
-          <StatusBadge status={running ? "processing" : project.status} />
+        <div className="page-head">
+          <p className="kicker">Loyiha</p>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: "var(--sp-4)",
+              flexWrap: "wrap",
+            }}
+          >
+            <h1 className="page-title">{project.title}</h1>
+            <StatusBadge status={running ? "processing" : project.status} />
+          </div>
         </div>
       )}
 
@@ -307,11 +321,12 @@ export default function ProjectPage() {
 
         {!job && (
           <>
-            <p style={{ color: "var(--muted)" }}>
+            <p style={{ color: "var(--muted-ink)" }}>
               Manbalar tayyor bo'lgach, taqdimotni buyurtma qiling. Odatda 3–6 daqiqa davom etadi.
             </p>
             <button
               className="btn btn-primary btn-lg"
+              style={{ background: "var(--gold)", color: "var(--siyoh)" }}
               onClick={() => void onEnqueue()}
               disabled={!sources || sources.length === 0 || running}
             >
@@ -371,7 +386,13 @@ export default function ProjectPage() {
             </div>
             {shareUrl ? (
               <>
-                <p style={{ fontSize: "var(--text-sm)", wordBreak: "break-all" }}>
+                <p
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: "var(--text-sm)",
+                    wordBreak: "break-all",
+                  }}
+                >
                   <a href={shareUrl} target="_blank" rel="noreferrer">
                     {shareUrl}
                   </a>
@@ -390,7 +411,7 @@ export default function ProjectPage() {
               </>
             ) : (
               <>
-                <p style={{ color: "var(--muted)" }}>
+                <p style={{ color: "var(--muted-ink)" }}>
                   Ommaviy havola taqdimotni istalgan kishiga — kirmasdan — ko'rsatadi. Havolani
                   yangilasangiz, eskisi darhol bekor bo'ladi.
                 </p>
@@ -423,9 +444,17 @@ export default function ProjectPage() {
                 {provenance.rows.map((row, index) => (
                   <tr key={index}>
                     <td>{row.claim_text}</td>
-                    <td style={{ color: "var(--muted)" }}>{row.quote ?? "—"}</td>
+                    <td style={{ color: "var(--muted-ink)" }}>{row.quote ?? "—"}</td>
                     <td>{row.source_filename ?? "—"}</td>
-                    <td>{row.chunk_index ?? "—"}</td>
+                    <td>
+                      {row.chunk_index === null ? (
+                        "—"
+                      ) : (
+                        <span className="cite-mark" style={{ verticalAlign: "baseline" }}>
+                          {row.chunk_index}
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -435,6 +464,6 @@ export default function ProjectPage() {
       )}
 
       {toast && <Toast message={toast.message} danger={toast.danger} />}
-    </AppShell>
+    </AppChrome>
   );
 }

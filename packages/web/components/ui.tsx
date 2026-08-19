@@ -3,40 +3,7 @@
 // Shared presentational pieces of the P3.5 design system. Purely visual —
 // no data fetching, no auth; pages own their state and pass it down.
 
-import Link from "next/link";
 import type { ReactNode } from "react";
-
-export function AppShell({ children, authed }: { children: ReactNode; authed?: boolean }) {
-  return (
-    <div className="shell">
-      <header className="topbar">
-        <div className="container topbar-inner">
-          <Link href="/" className="wordmark">
-            Nashr
-          </Link>
-          <nav className="nav-links">
-            {authed ? (
-              <Link href="/projects">Loyihalarim</Link>
-            ) : (
-              <Link href="/login" className="btn btn-primary">
-                Kirish
-              </Link>
-            )}
-          </nav>
-        </div>
-      </header>
-      <main className="page">
-        <div className="container">{children}</div>
-      </main>
-      <footer className="footer">
-        <div className="container footer-inner">
-          <span>© {new Date().getFullYear()} Nashr</span>
-          <span>Manbaga asoslangan akademik nashrlar</span>
-        </div>
-      </footer>
-    </div>
-  );
-}
 
 export function EmptyState({
   icon,
@@ -155,7 +122,14 @@ export function GenerationSteps({ step, current }: { step?: string; current?: nu
         return (
           <li key={entry.key} className={`step ${state}`}>
             <span className="step-dot">{index < done ? "✓" : index + 1}</span>
-            {entry.label}
+            {index === done ? (
+              <span style={{ fontFamily: "var(--font-display)", fontSize: "1.02rem" }}>
+                {entry.label}
+                <span className="step-caret" aria-hidden />
+              </span>
+            ) : (
+              entry.label
+            )}
           </li>
         );
       })}

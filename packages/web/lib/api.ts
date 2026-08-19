@@ -91,8 +91,12 @@ export interface ProjectView {
   status: string;
 }
 
-export function createProject(title: string, token: string): Promise<ProjectView> {
-  return postJson<ProjectView>("/projects", { title }, token);
+export function createProject(
+  title: string,
+  token: string,
+  language = "uz",
+): Promise<ProjectView> {
+  return postJson<ProjectView>("/projects", { title, language }, token);
 }
 
 // ----------------------------------------------------------------- sources
@@ -167,10 +171,11 @@ export function enqueueJob(
   sources: Array<{ storage_key: string; filename: string }>,
   token: string,
   packageName = "presentation_standard",
+  language = "uz",
 ): Promise<JobView> {
   return postJson<JobView>(
     "/jobs",
-    { project_id: projectId, package: packageName, sources, language: "uz" },
+    { project_id: projectId, package: packageName, sources, language },
     token,
   );
 }

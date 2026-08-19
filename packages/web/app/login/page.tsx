@@ -11,6 +11,8 @@ import { useRouter } from "next/navigation";
 import Script from "next/script";
 import { GoogleIcon } from "@/components/ui";
 import { telegramLogin, ApiError } from "@/lib/api";
+import { DEFAULT_RETURN_TO, sanitizeReturnTo, stashReturnTo } from "@/lib/return-to";
+import { loadSession } from "@/lib/session";
 import { createAnonClient } from "@/lib/supabase";
 import { readInitData } from "@/lib/telegram";
 
@@ -32,21 +34,34 @@ export default function LoginPage() {
   // the script is already present after a client-side navigation, so the door
   // check below never races the script.
   const [bridgeReady, setBridgeReady] = useState(false);
+  const [returnTo] = useState(() =>
+    typeof window === "undefined"
+      ? DEFAULT_RETURN_TO
+      : sanitizeReturnTo(new URLSearchParams(window.location.search).get("returnTo")),
+  );
 
   useEffect(() => {
     if (!bridgeReady) return;
     const initData = readInitData();
-    if (!initData) return;
+    if (!initData) {
+      // A bot link opened in an external browser has no initData but may still
+      // carry a live app session; sending it onward beats stranding the user at
+      // a door they are already through. Nested here so it can never race the
+      // Telegram door — with initData present this branch is unreachable.
+      if (loadSession()) router.replace(returnTo);
+      return;
+    }
     setStatus({ kind: "working", message: "Telegram orqali kirilmoqda…" });
     telegramLogin(initData)
-      .then(() => router.replace("/projects"))
+      .then(() => router.replace(returnTo))
       .catch((error: unknown) => {
         const message = error instanceof ApiError ? error.reason : "kutilmagan xato";
         setStatus({ kind: "error", message });
       });
-  }, [bridgeReady, router]);
+  }, [bridgeReady, returnTo, router]);
 
   async function signInWithGoogle() {
+    stashReturnTo(returnTo);
     setStatus({ kind: "working", message: "Google sahifasiga o'tilmoqda…" });
     try {
       const supabase = createAnonClient();
@@ -62,6 +77,7 @@ export default function LoginPage() {
   }
 
   async function sendMagicLink() {
+    stashReturnTo(returnTo);
     setStatus({ kind: "working", message: "Havola yuborilmoqda…" });
     try {
       const supabase = createAnonClient();
@@ -79,36 +95,31 @@ export default function LoginPage() {
   const working = status.kind === "working";
 
   return (
-    <div className="shell">
+    <div className="dark auth-min">
       <Script
         src="https://telegram.org/js/telegram-web-app.js"
         onReady={() => setBridgeReady(true)}
       />
-      <header className="topbar">
-        <div className="container topbar-inner">
-          <Link href="/" className="wordmark">
-            Nashr
-          </Link>
+      <Link href="/" className="auth-min-brand">
+        Nashr
+      </Link>
+
+      <div className="auth-min-form">
+        <div className="page-head">
+          <h1 className="page-title">Kirish</h1>
+          <p className="page-sub">Loyihalaringiz va taqdimotlaringizga qaytish.</p>
         </div>
-      </header>
 
-      <div className="auth-wrap">
-        <div className="auth-card">
-          <h1 style={{ marginBottom: "0.4rem" }}>Kirish</h1>
-          <p style={{ color: "var(--muted)" }}>Loyihalaringiz va taqdimotlaringizga qaytish.</p>
-
+        <div className="card">
           {status.kind === "error" && (
             <p style={{ color: "var(--danger)", fontSize: "var(--text-sm)", fontWeight: 600 }}>
               {status.message}
             </p>
           )}
-          {working && <p style={{ color: "var(--muted)" }}>{status.message}</p>}
+          {working && <p style={{ color: "var(--muted-ink)" }}>{status.message}</p>}
 
           {status.kind === "sent" ? (
             <div className="state" style={{ padding: "var(--sp-5) 0" }}>
-              <div className="state-icon" aria-hidden>
-                ✉️
-              </div>
               <h3>Email yuborildi</h3>
               <p>Pochtangizni oching va xatdagi havolani bosing — shu yerga qaytasiz.</p>
             </div>
@@ -125,9 +136,23 @@ export default function LoginPage() {
 
               <div className="divider">yoki email orqali</div>
 
+              <label
+                htmlFor="email"
+                style={{
+                  display: "block",
+                  color: "var(--muted-ink)",
+                  fontSize: "var(--text-sm)",
+                  marginBottom: "var(--sp-2)",
+                }}
+              >
+                Email manzil
+              </label>
               <input
                 className="input"
+                id="email"
+                name="email"
                 type="email"
+                autoComplete="email"
                 value={email}
                 placeholder="email@example.com"
                 onChange={(event) => setEmail(event.target.value)}

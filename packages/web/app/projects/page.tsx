@@ -3,14 +3,14 @@
 // The authed shell: proves the whole identity chain end to end — app JWT →
 // Supabase RLS read of the user's own projects. This page IS the P1 gate's
 // positive half; the negative half (cannot read another user's rows) is the
-// two-account test in the gate script. P3 adds creation (via the API, which
-// holds the service role) and links into each project's workspace.
+// two-account test in the gate script. P3.6 moves it into the workspace chrome
+// and hands creation over to /new.
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AppShell, EmptyState, ErrorState, Skeleton, StatusBadge } from "@/components/ui";
-import { createProject } from "@/lib/api";
+import { AppChrome } from "@/components/chrome";
+import { EmptyState, ErrorState, Skeleton, StatusBadge } from "@/components/ui";
 import { type AppSession, loadSession } from "@/lib/session";
 import { createRlsClient } from "@/lib/supabase";
 
@@ -26,8 +26,6 @@ export default function ProjectsPage() {
   const [session, setSession] = useState<AppSession | null>(null);
   const [projects, setProjects] = useState<ProjectRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [title, setTitle] = useState("");
-  const [creating, setCreating] = useState(false);
 
   const refresh = useCallback((activeSession: AppSession) => {
     setError(null);
@@ -48,50 +46,36 @@ export default function ProjectsPage() {
   useEffect(() => {
     const active = loadSession();
     if (!active) {
-      router.replace("/login");
+      router.replace("/login?returnTo=" + encodeURIComponent("/projects"));
       return;
     }
     setSession(active);
     refresh(active);
   }, [router, refresh]);
 
-  async function onCreate() {
-    if (!session || !title.trim()) return;
-    setCreating(true);
-    setError(null);
-    try {
-      const project = await createProject(title.trim(), session.accessToken);
-      router.push(`/projects/${project.id}`);
-    } catch (createError) {
-      setError(String(createError));
-      setCreating(false);
-    }
-  }
-
   return (
-    <AppShell authed>
-      <h1>Loyihalarim</h1>
-
-      <div className="card" style={{ marginBottom: "var(--sp-5)" }}>
-        <div className="field-row">
-          <input
-            className="input"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void onCreate();
-            }}
-            placeholder="Yangi loyiha nomi — masalan, «Yoritish davri»"
-            maxLength={200}
-          />
-          <button
-            className="btn btn-primary"
-            onClick={() => void onCreate()}
-            disabled={creating || !title.trim()}
-          >
-            {creating ? "Yaratilmoqda…" : "Loyiha yaratish"}
-          </button>
+    <AppChrome active="projects">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-end",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: "var(--sp-4)",
+          marginBottom: "var(--sp-5)",
+        }}
+      >
+        <div className="page-head" style={{ marginBottom: 0 }}>
+          <p className="kicker">Ish stoli</p>
+          <h1 className="page-title">Loyihalar</h1>
         </div>
+        <Link
+          href="/new"
+          className="btn btn-primary"
+          style={{ background: "var(--gold)", color: "var(--siyoh)" }}
+        >
+          Yangi loyiha
+        </Link>
       </div>
 
       {error && (
@@ -111,13 +95,17 @@ export default function ProjectsPage() {
           <EmptyState
             icon="🗂️"
             title="Hozircha loyiha yo'q"
-            hint="Yuqorida nom yozib birinchi loyihangizni yarating — keyin manba yuklab, taqdimot buyurtma qilasiz."
-          />
+            hint="Birinchi loyihangizni boshlang — manba yuklaysiz, talablarni aytasiz, taqdimot yig'iladi."
+          >
+            <Link href="/new" className="btn btn-ghost">
+              Yangi loyiha
+            </Link>
+          </EmptyState>
         </div>
       )}
 
       {projects !== null && projects.length > 0 && (
-        <div style={{ display: "grid", gap: "var(--sp-4)" }}>
+        <div style={{ display: "grid", gap: "var(--sp-3)" }}>
           {projects.map((project) => (
             <Link
               key={project.id}
@@ -133,10 +121,17 @@ export default function ProjectsPage() {
               }}
             >
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div
+                  style={{
+                    fontWeight: 600,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
                   {project.title}
                 </div>
-                <div style={{ color: "var(--muted)", fontSize: "var(--text-sm)" }}>
+                <div style={{ color: "var(--muted-ink)", fontSize: "var(--text-xs)" }}>
                   {project.type === "presentation" ? "Taqdimot" : project.type}
                 </div>
               </div>
@@ -145,6 +140,6 @@ export default function ProjectsPage() {
           ))}
         </div>
       )}
-    </AppShell>
+    </AppChrome>
   );
 }

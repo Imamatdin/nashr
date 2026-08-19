@@ -4,8 +4,10 @@
 // the app session (the Supabase session is NOT the app credential — plan §5).
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { emailExchange, ApiError } from "@/lib/api";
+import { consumeReturnTo } from "@/lib/return-to";
 import { createAnonClient } from "@/lib/supabase";
 
 export default function AuthCallbackPage() {
@@ -43,7 +45,7 @@ export default function AuthCallbackPage() {
         if (signOutError) {
           console.warn("supabase local sign-out failed after exchange", signOutError.message);
         }
-        router.replace("/projects");
+        router.replace(consumeReturnTo());
       })
       .catch((exchangeError: unknown) => {
         setError(exchangeError instanceof ApiError ? exchangeError.reason : "kutilmagan xato");
@@ -51,14 +53,15 @@ export default function AuthCallbackPage() {
   }, [router]);
 
   return (
-    <div className="shell">
-      <div className="auth-wrap">
-        <div className="auth-card">
+    <div className="dark auth-min">
+      <Link href="/" className="auth-min-brand">
+        Nashr
+      </Link>
+
+      <div className="auth-min-form">
+        <div className="card">
           {error ? (
             <div className="state state-error" style={{ padding: "var(--sp-4) 0" }}>
-              <div className="state-icon" aria-hidden>
-                ⚠️
-              </div>
               <h3>Kirish amalga oshmadi</h3>
               <p>{error}</p>
               <a className="btn btn-ghost" href="/login">
@@ -67,7 +70,10 @@ export default function AuthCallbackPage() {
             </div>
           ) : (
             <div className="state" style={{ padding: "var(--sp-4) 0" }}>
-              <div className="skeleton" style={{ height: "1.4rem", width: "60%", margin: "0 auto var(--sp-4)" }} />
+              <div
+                className="skeleton"
+                style={{ height: "1.4rem", width: "60%", margin: "0 auto var(--sp-4)" }}
+              />
               <p>Kirilmoqda…</p>
             </div>
           )}

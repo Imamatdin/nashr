@@ -186,9 +186,11 @@ def build_mini_app_url(
     domain: str = "general",
     people: int = 0,
 ) -> str:
-    """Compose the URL the Mini App button opens.
+    """Compose the URL the inline button opens.
 
-    Query params parallel the Mini App's JS reader; keep both in sync.
+    The button now opens the web login door, which forwards to ``/new``.
+    The ``/new`` page reads ``lang``; the other params ride along for
+    future use.
     """
 
     params: dict[str, str] = {
@@ -199,7 +201,8 @@ def build_mini_app_url(
         "domain": domain,
     }
     base = base_url.rstrip("/")
-    return f"{base}/mini-app/presentation?{urlencode(params)}"
+    target = "/new?" + urlencode(params)
+    return f"{base}/login?{urlencode({'returnTo': target})}"
 
 
 # ---------------------------------------------------------------------------
