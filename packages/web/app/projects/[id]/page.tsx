@@ -306,7 +306,15 @@ export default function ProjectPage() {
           </div>
         )}
         <div className="field-row">
-          <input ref={fileInput} className="input" type="file" accept={ACCEPTED} />
+          <input
+            ref={fileInput}
+            id="source-file"
+            name="source-file"
+            className="input"
+            type="file"
+            autoComplete="off"
+            accept={ACCEPTED}
+          />
           <button className="btn btn-ghost" onClick={() => void onUpload()} disabled={uploading}>
             {uploading ? "Yuklanmoqda…" : "Yuklash"}
           </button>
