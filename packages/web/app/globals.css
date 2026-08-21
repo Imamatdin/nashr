@@ -12,43 +12,89 @@
    facts only). No pure grays, no pure #000/#FFF, no gradients-as-decoration.
    ========================================================================= */
 
+/* ------------------------------------------------- §2 the Flexoki scale */
+
+/* Flexoki (stephango.com/flexoki) is the palette of record. This block is the
+   ONLY place in the codebase where a raw colour value may appear; everything
+   below, and every consumer, resolves through the role tokens. */
+:root {
+  --flexoki-paper: #fffcf0;
+  --flexoki-base-50: #f2f0e5;
+  --flexoki-base-100: #e6e4d9;
+  --flexoki-base-150: #dad8ce;
+  --flexoki-base-200: #cecdc3;
+  --flexoki-base-300: #b7b5ac;
+  --flexoki-base-400: #9f9d96;
+  --flexoki-base-500: #878580;
+  --flexoki-base-600: #6f6e69;
+  --flexoki-base-700: #575653;
+  --flexoki-base-800: #403e3c;
+  --flexoki-base-850: #343331;
+  --flexoki-base-900: #282726;
+  --flexoki-base-950: #1c1b1a;
+  --flexoki-black: #100f0f;
+
+  --flexoki-red-700: #942822;
+  --flexoki-red-600: #af3029;
+  --flexoki-red-400: #d14d41;
+  --flexoki-red-300: #e8705f;
+  --flexoki-yellow-600: #ad8301;
+  --flexoki-yellow-400: #d0a215;
+  --flexoki-green-700: #536907;
+  --flexoki-green-600: #66800b;
+  --flexoki-green-400: #879a39;
+  --flexoki-blue-700: #1a4f8c;
+  --flexoki-blue-600: #205ea6;
+  --flexoki-blue-400: #4385be;
+  --flexoki-blue-300: #66a0c8;
+}
+
 /* --------------------------------------------------------- §2 core palette */
 
 :root {
-  /* the four named colors of the identity */
-  --qogoz: #f7f3ea; /* paper — warm manuscript cream */
-  --siyoh: #16130e; /* ink — near-black warm */
-  --zangori: #274690; /* lapis lazuli — links, primary actions */
-  --oltin: #a67c2e; /* gilding — RARE, one per viewport */
+  /* the four named colors of the identity, on Flexoki */
+  --qogoz: var(--flexoki-paper); /* paper — Flexoki paper, marketing ground */
+  --siyoh: var(--flexoki-base-950); /* ink — base-950, text and app ground */
+  --zangori: var(--flexoki-blue-600); /* lapis lazuli — links, primary actions */
+  --oltin: var(--flexoki-yellow-600); /* gilding — RARE, one per viewport */
 
-  /* derived inks (opacity steps of siyoh on qogoz) */
-  --ink-88: color-mix(in srgb, var(--siyoh) 88%, var(--qogoz));
-  --ink-60: color-mix(in srgb, var(--siyoh) 60%, var(--qogoz));
-  --ink-40: color-mix(in srgb, var(--siyoh) 40%, var(--qogoz));
-  --rule: color-mix(in srgb, var(--siyoh) 15%, transparent);
-  --rule-strong: color-mix(in srgb, var(--siyoh) 26%, transparent);
+  /* text tiers (base scale, not opacity steps — the names are kept so the
+     existing consumers keep resolving). --ink-60 sits at base-700 rather than
+     the role table's base-600: base-600 is 4.47:1 on the base-50 card surface
+     where most muted copy lives, base-700 is 6.42:1. */
+  --ink-88: var(--flexoki-base-800);
+  --ink-60: var(--flexoki-base-700);
+  --ink-40: var(--flexoki-base-300);
+  /* ui-2 / ui-3 rather than ui / ui-2: base-100 against paper is lighter than
+     the 15%-ink hairline these replace, and the rules would go missing. */
+  --rule: var(--flexoki-base-150);
+  --rule-strong: var(--flexoki-base-200);
 
-  --zangori-deep: #1b3268;
+  --zangori-deep: var(--flexoki-blue-700);
   --zangori-wash: color-mix(in srgb, var(--zangori) 8%, var(--qogoz));
-  --oltin-bright: #c9973a;
+  --oltin-bright: var(--flexoki-yellow-400);
 
-  --xato: #a0432f; /* warm error red — never pure */
+  /* green-700 rather than the 600 tier: green-600 is 4.39:1 both as text on
+     paper and under paper-coloured text on a green fill. */
+  --xato: var(--flexoki-red-600);
   --xato-wash: color-mix(in srgb, var(--xato) 9%, var(--qogoz));
-  --tayyor: #3d6b4f; /* manuscript green */
+  --tayyor: var(--flexoki-green-700);
   --tayyor-wash: color-mix(in srgb, var(--tayyor) 10%, var(--qogoz));
 
   /* ---------------------------------------------- shadcn semantic mapping */
   --background: var(--qogoz);
   --foreground: var(--siyoh);
-  --card: color-mix(in srgb, #ffffff 55%, var(--qogoz));
+  --card: var(--flexoki-base-50);
   --card-foreground: var(--siyoh);
-  --popover: color-mix(in srgb, #ffffff 70%, var(--qogoz));
+  /* the popover is the one light surface that still reads as RAISED: paper
+     over the base-50 cards, held apart by its border and shadow. */
+  --popover: var(--flexoki-paper);
   --popover-foreground: var(--siyoh);
   --primary: var(--zangori);
   --primary-foreground: var(--qogoz);
   --secondary: var(--zangori-wash);
   --secondary-foreground: var(--zangori-deep);
-  --muted: color-mix(in srgb, var(--siyoh) 5%, var(--qogoz));
+  --muted: var(--flexoki-base-100);
   --muted-foreground: var(--ink-60);
   --accent: var(--zangori-wash);
   --accent-foreground: var(--zangori-deep);
@@ -68,34 +114,43 @@
   --text-hero: clamp(3rem, 7.5vw, 5.6rem);
   --text-display: clamp(2rem, 4.5vw, 3.25rem);
 
-  --shadow-plate: 0 2px 6px rgb(22 19 14 / 7%), 0 18px 48px rgb(22 19 14 / 11%);
+  /* base-950 ink, restated as rgb so the alpha steps stay legal */
+  --shadow-plate: 0 2px 6px rgb(28 27 26 / 7%), 0 18px 48px rgb(28 27 26 / 11%);
 }
 
 /* The product side: paper on ink — crossing into the app opens the
-   manuscript in a dark reading room. */
+   manuscript in a dark reading room. The workspace ground is base-950 (the
+   mandated shift off Flexoki black), so the whole dark ramp moves one step
+   with it: surface base-900, ui base-850/800/700, text base-200/400/600. */
 .dark {
-  --background: var(--siyoh);
-  --foreground: var(--qogoz);
-  --card: color-mix(in srgb, var(--qogoz) 6%, var(--siyoh));
-  --card-foreground: var(--qogoz);
-  --popover: color-mix(in srgb, var(--qogoz) 9%, var(--siyoh));
-  --popover-foreground: var(--qogoz);
-  --primary: #6d8dd6; /* lapis lifted for dark ground */
-  --primary-foreground: var(--siyoh);
-  --secondary: color-mix(in srgb, var(--qogoz) 10%, var(--siyoh));
-  --secondary-foreground: var(--qogoz);
-  --muted: color-mix(in srgb, var(--qogoz) 7%, var(--siyoh));
-  --muted-foreground: color-mix(in srgb, var(--qogoz) 55%, var(--siyoh));
-  --accent: color-mix(in srgb, var(--qogoz) 10%, var(--siyoh));
-  --accent-foreground: var(--qogoz);
-  --destructive: #c96a55;
-  --destructive-foreground: var(--siyoh);
-  --border: color-mix(in srgb, var(--qogoz) 14%, transparent);
-  --input: color-mix(in srgb, var(--qogoz) 22%, transparent);
-  --ring: #6d8dd6;
-  --rule: color-mix(in srgb, var(--qogoz) 14%, transparent);
-  --rule-strong: color-mix(in srgb, var(--qogoz) 24%, transparent);
-  --ink-60: color-mix(in srgb, var(--qogoz) 55%, var(--siyoh));
+  --background: var(--flexoki-base-950);
+  --foreground: var(--flexoki-base-200);
+  --card: var(--flexoki-base-900);
+  --card-foreground: var(--flexoki-base-200);
+  --popover: var(--flexoki-base-850);
+  --popover-foreground: var(--flexoki-base-200);
+  --primary: var(--flexoki-blue-400); /* lapis lifted for dark ground */
+  /* the label on a blue-400 fill is Flexoki black, not base-950: base-950
+     lands at 4.37:1, black at 4.86:1 */
+  --primary-foreground: var(--flexoki-black);
+  --secondary: var(--flexoki-base-850);
+  --secondary-foreground: var(--flexoki-base-200);
+  --muted: var(--flexoki-base-900);
+  --muted-foreground: var(--flexoki-base-400);
+  --accent: var(--flexoki-base-850);
+  --accent-foreground: var(--flexoki-base-200);
+  /* red-300, not the 400 tier: red-400 is 3.97:1 on base-950 and 3.44:1 on
+     the base-900 card surface. */
+  --destructive: var(--flexoki-red-300);
+  --destructive-foreground: var(--flexoki-black);
+  --border: var(--flexoki-base-850);
+  --input: var(--flexoki-base-800);
+  --ring: var(--flexoki-blue-400);
+  --rule: var(--flexoki-base-850);
+  --rule-strong: var(--flexoki-base-800);
+  --ink-88: var(--flexoki-base-300);
+  --ink-60: var(--flexoki-base-400);
+  --ink-40: var(--flexoki-base-600);
 }
 
 @theme inline {
@@ -184,6 +239,13 @@ a:hover {
   background: color-mix(in srgb, var(--zangori) 18%, var(--qogoz));
 }
 
+/* On the ink ground the light selection band would carry the browser's own
+   text colour; keep the band inside the Flexoki dark ramp instead. */
+.dark ::selection {
+  background: color-mix(in srgb, var(--primary) 30%, var(--flexoki-base-900));
+  color: var(--foreground);
+}
+
 :focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
@@ -245,7 +307,7 @@ a:hover {
 /* A plate: how every artifact (deck screenshot, engraving) is framed —
    like a plate in a book, with a caption beneath. */
 .plate {
-  background: color-mix(in srgb, #ffffff 42%, var(--qogoz));
+  background: var(--card);
   border: 1px solid var(--rule-strong);
   padding: clamp(0.8rem, 1.6vw, 1.4rem);
   box-shadow: var(--shadow-plate);
@@ -477,7 +539,9 @@ a:hover {
 
 :root {
   --paper: var(--qogoz);
-  --surface: color-mix(in srgb, #ffffff 55%, var(--qogoz));
+  /* Flexoki has nothing lighter than paper, so the raised surface is base-50:
+     the card now sits a step BELOW the ground instead of a step above it. */
+  --surface: var(--card);
   --ink: var(--siyoh);
   --ink-soft: var(--ink-88);
   --muted-ink: var(--ink-60);
@@ -509,9 +573,10 @@ a:hover {
   --radius-sm-l: 8px;
   --radius-md-l: 12px;
   --radius-lg-l: 18px;
-  --shadow-sm: 0 1px 2px rgb(22 19 14 / 5%), 0 1px 6px rgb(22 19 14 / 4%);
-  --shadow-md: 0 2px 6px rgb(22 19 14 / 6%), 0 10px 28px rgb(22 19 14 / 8%);
-  --shadow-lg: 0 4px 12px rgb(22 19 14 / 8%), 0 24px 60px rgb(22 19 14 / 12%);
+  /* base-950 ink, restated as rgb so the alpha steps stay legal */
+  --shadow-sm: 0 1px 2px rgb(28 27 26 / 5%), 0 1px 6px rgb(28 27 26 / 4%);
+  --shadow-md: 0 2px 6px rgb(28 27 26 / 6%), 0 10px 28px rgb(28 27 26 / 8%);
+  --shadow-lg: 0 4px 12px rgb(28 27 26 / 8%), 0 24px 60px rgb(28 27 26 / 12%);
   --font-ui: var(--font-sans);
 }
 
@@ -589,7 +654,23 @@ a:hover {
   flex-wrap: wrap;
 }
 
+/* ---------------------------------------------------------- the button system
+
+   One press object, four dresses (primary / ghost / danger / gilded) and six
+   states (rest, hover, active, focus-visible, disabled, loading). Both themes
+   are covered: the light rules sit here, the .dark guards live with the rest
+   of the inversion layer below, because `.dark a` outranks a bare .btn class
+   and would otherwise paint anchor-buttons lapis on lapis.
+
+   Every label/fill pair in the matrix is >= 4.5:1 (see the audit in the scope
+   (b) report). The loading label dims to 95%, not lower: at 90% the dark
+   primary falls to 4.41:1 and the dark danger to 4.26:1.
+   ------------------------------------------------------------------------- */
+
 .btn {
+  --btn-press: 1px;
+  --btn-label-opacity: 1;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -606,18 +687,119 @@ a:hover {
     background 120ms ease,
     border-color 120ms ease,
     color 120ms ease,
-    box-shadow 120ms ease;
+    box-shadow 120ms ease,
+    transform 90ms ease;
   text-decoration: none;
   white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .btn:hover {
   text-decoration: none;
 }
 
+/* Tactile press. Guarded off the inert states so a disabled or busy control
+   never answers the pointer. */
+.btn:active:not(:disabled):not(.btn-loading) {
+  transform: translateY(var(--btn-press));
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 .btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* Loading is NOT disabled-looking: the control keeps its full colour, the
+   label keeps its place, and only the ink pulse says work is happening. */
+.btn-loading {
+  --btn-label-opacity: 0.95;
+  pointer-events: none;
+  cursor: progress;
+}
+
+.btn-loading:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+
+.btn-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  opacity: var(--btn-label-opacity);
+  transition: opacity 120ms ease;
+}
+
+/* The pulse sits centred in the BOTTOM padding gutter, out of flow, so
+   turning loading on and off cannot move the button or its label by a pixel —
+   and, unlike a right-gutter placement, it never crowds the label on a
+   shrink-to-fit control (cycle 1 finding). It reads as an ellipsis set under
+   the word: the compositor is still working. */
+.btn-pulse {
+  position: absolute;
+  bottom: 0.34rem;
+  left: 50%;
+  display: none;
+  align-items: center;
+  gap: 2px;
+  transform: translateX(-50%);
+  color: currentcolor;
+}
+
+.btn-lg .btn-pulse {
+  bottom: 0.46rem;
+}
+
+.btn-loading .btn-pulse {
+  display: inline-flex;
+}
+
+.btn-pulse i {
+  width: 3px;
+  height: 3px;
+  border-radius: 1px;
+  background: currentcolor;
+  opacity: 0.28;
+  animation: ink-pulse 1020ms ease-in-out infinite;
+}
+
+.btn-pulse i:nth-child(2) {
+  animation-delay: 170ms;
+}
+
+.btn-pulse i:nth-child(3) {
+  animation-delay: 340ms;
+}
+
+/* An ellipsis setting itself, one dot at a time — the typesetting reading of
+   "still composing", not a rotating disc. */
+@keyframes ink-pulse {
+  0%,
+  70%,
+  100% {
+    opacity: 0.28;
+  }
+
+  25% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn:active:not(:disabled):not(.btn-loading) {
+    transform: none;
+  }
+
+  /* The global reduce rule freezes the animation on frame one, which would
+     leave three barely-there dots; settle them into a static ellipsis. */
+  .btn-pulse i {
+    opacity: 0.62;
+  }
 }
 
 .btn-primary {
@@ -626,8 +808,20 @@ a:hover {
   box-shadow: var(--shadow-sm);
 }
 
-.btn-primary:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled):not(.btn-loading) {
   background: var(--brand-deep);
+}
+
+.btn-primary:active:not(:disabled):not(.btn-loading) {
+  background: var(--brand-deep);
+  box-shadow: none;
+}
+
+/* The default ring is the same lapis as the primary's own fill, so it read as
+   a halo rather than a ring (cycle 2 finding). Primary takes the deep tier:
+   blue-700 is 8.04:1 on paper, blue-300 6.08:1 on ink. */
+.btn-primary:focus-visible {
+  outline-color: var(--brand-deep);
 }
 
 .btn-ghost {
@@ -636,7 +830,15 @@ a:hover {
   border-color: var(--line-strong);
 }
 
-.btn-ghost:hover:not(:disabled) {
+/* Border-only hover was too quiet to read at a glance (cycle 1 finding); the
+   surface lifts a step with it. base-100 keeps the ink label at 13.48:1. */
+.btn-ghost:hover:not(:disabled):not(.btn-loading) {
+  background: var(--muted);
+  border-color: var(--ink-soft);
+}
+
+.btn-ghost:active:not(:disabled):not(.btn-loading) {
+  background: var(--flexoki-base-150);
   border-color: var(--ink-soft);
 }
 
@@ -646,8 +848,45 @@ a:hover {
   border-color: color-mix(in srgb, var(--danger) 38%, var(--surface));
 }
 
-.btn-danger:hover:not(:disabled) {
+.btn-danger:hover:not(:disabled):not(.btn-loading) {
   background: var(--danger-soft);
+}
+
+.btn-danger:active:not(:disabled):not(.btn-loading) {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+
+/* The gilded dress (§4.3): ONE per view. Ink fill, paper label, and a single
+   gold underline drawn once beneath the control. The rule sits on the page
+   ground, not on the fill — gold-on-paper-fill reads 1.48:1 in dark mode. */
+.btn-gilded {
+  background: var(--siyoh);
+  color: var(--qogoz);
+  border-color: transparent;
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-gilded::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -7px;
+  height: 2px;
+  background: var(--gold);
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: gild-draw 600ms cubic-bezier(0.22, 1, 0.36, 1) 120ms forwards;
+}
+
+.btn-gilded:hover:not(:disabled):not(.btn-loading) {
+  background: var(--flexoki-black);
+}
+
+.btn-gilded:active:not(:disabled):not(.btn-loading) {
+  background: var(--flexoki-black);
+  box-shadow: none;
 }
 
 .btn-lg {
@@ -658,6 +897,18 @@ a:hover {
 
 .btn-block {
   width: 100%;
+}
+
+/* Machine facts — prices, credits, counts, ids. Mono with tabular figures so
+   a changing number never reflows the line it sits in. */
+.data-text {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings:
+    "tnum" 1,
+    "zero" 1;
+  letter-spacing: -0.01em;
+  font-size: 0.94em;
 }
 
 .input {
@@ -831,14 +1082,15 @@ a:hover {
   animation: pulse 1.6s ease-in-out infinite;
 }
 
+/* blue-600, restated as rgb so the alpha steps stay legal */
 @keyframes pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgb(39 70 144 / 30%);
+    box-shadow: 0 0 0 0 rgb(32 94 166 / 30%);
   }
 
   50% {
-    box-shadow: 0 0 0 6px rgb(39 70 144 / 0%);
+    box-shadow: 0 0 0 6px rgb(32 94 166 / 0%);
   }
 }
 
@@ -860,9 +1112,9 @@ a:hover {
 .skeleton {
   background: linear-gradient(
     100deg,
-    color-mix(in srgb, var(--siyoh) 8%, var(--paper)) 40%,
-    color-mix(in srgb, var(--siyoh) 4%, var(--paper)) 50%,
-    color-mix(in srgb, var(--siyoh) 8%, var(--paper)) 60%
+    var(--flexoki-base-150) 40%,
+    var(--flexoki-base-100) 50%,
+    var(--flexoki-base-150) 60%
   );
   background-size: 200% 100%;
   animation: shimmer 1.4s linear infinite;
@@ -1114,41 +1366,45 @@ a:hover {
 /* Legacy alias inversion: the pre-direction classes (.card .btn .badge …) keep
    working inside .dark because their aliases now resolve against ink. */
 .dark {
-  --paper: var(--siyoh);
-  --surface: color-mix(in srgb, var(--qogoz) 6%, var(--siyoh));
-  --ink: var(--qogoz);
-  /* --ink-88 is mixed against qogoz and never inverts, so --ink-soft has to be
-     restated rather than aliased — otherwise every legacy secondary text
-     colour stays near-black on ink. */
-  --ink-soft: color-mix(in srgb, var(--qogoz) 88%, var(--siyoh));
-  --muted-ink: color-mix(in srgb, var(--qogoz) 55%, var(--siyoh));
-  --line: color-mix(in srgb, var(--qogoz) 14%, transparent);
-  --line-strong: color-mix(in srgb, var(--qogoz) 24%, transparent);
-  --brand: #6d8dd6;
-  --brand-deep: #8aa5e0;
-  --brand-soft: color-mix(in srgb, #6d8dd6 14%, var(--siyoh));
-  --brand-line: color-mix(in srgb, #6d8dd6 35%, var(--siyoh));
+  --paper: var(--background);
+  --surface: var(--card);
+  --ink: var(--foreground);
+  /* the dark ramp's text tiers, restated rather than aliased: the light
+     --ink-88/--ink-60 point down the base scale and never invert. */
+  --ink-soft: var(--flexoki-base-300);
+  --muted-ink: var(--flexoki-base-400);
+  --line: var(--flexoki-base-850);
+  --line-strong: var(--flexoki-base-800);
+  --brand: var(--flexoki-blue-400);
+  /* --brand-deep is the LIFTED tier on ink (hover fills, and every blue that
+     carries text): blue-400 as text is 4.37:1 on the ground and 3.79:1 on the
+     card, blue-300 is 6.08 / 5.27. */
+  --brand-deep: var(--flexoki-blue-300);
+  --brand-soft: color-mix(in srgb, var(--flexoki-blue-400) 14%, var(--background));
+  --brand-line: color-mix(in srgb, var(--flexoki-blue-400) 35%, var(--background));
   --gold: var(--oltin-bright);
-  --danger: #c96a55;
-  --danger-soft: color-mix(in srgb, #c96a55 14%, var(--siyoh));
-  --ok: #6fa383;
-  --ok-soft: color-mix(in srgb, #6fa383 14%, var(--siyoh));
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 32%), 0 1px 6px rgb(0 0 0 / 22%);
-  --shadow-md: 0 2px 6px rgb(0 0 0 / 34%), 0 10px 28px rgb(0 0 0 / 30%);
-  --shadow-lg: 0 4px 12px rgb(0 0 0 / 38%), 0 24px 60px rgb(0 0 0 / 38%);
+  --danger: var(--destructive);
+  --danger-soft: color-mix(in srgb, var(--destructive) 14%, var(--background));
+  --ok: var(--flexoki-green-400);
+  --ok-soft: color-mix(in srgb, var(--flexoki-green-400) 14%, var(--background));
+  /* Flexoki black, restated as rgb so the alpha steps stay legal */
+  --shadow-sm: 0 1px 2px rgb(16 15 15 / 32%), 0 1px 6px rgb(16 15 15 / 22%);
+  --shadow-md: 0 2px 6px rgb(16 15 15 / 34%), 0 10px 28px rgb(16 15 15 / 30%);
+  --shadow-lg: 0 4px 12px rgb(16 15 15 / 38%), 0 24px 60px rgb(16 15 15 / 38%);
 }
 
 /* Contrast sweep — the legacy rules whose colour mixes flip meaning on ink. */
 
-/* The base link colour is deep lapis: 1.8:1 against ink. The guards below
-   restore the classes an anchor can also carry — .dark a outranks a bare
-   .btn-primary, which would otherwise paint the label lapis on lapis. */
+/* The base link colour is blue-600: 2.1:1 against the base-950 ground. Dark
+   links take the lifted tier (blue-300, 6.08:1). The guards below restore the
+   classes an anchor can also carry — .dark a outranks a bare .btn-primary,
+   which would otherwise paint the label lapis on lapis. */
 .dark a {
-  color: var(--brand);
+  color: var(--brand-deep);
 }
 
 .dark .btn-primary {
-  color: var(--paper);
+  color: var(--primary-foreground);
 }
 
 .dark .btn-ghost,
@@ -1160,49 +1416,73 @@ a:hover {
   color: var(--danger);
 }
 
-/* The shimmer mixes siyoh into --paper; with --paper = siyoh it collapses to an
-   invisible black-on-black band. Inverted: qogoz lifted out of the ink. */
+/* The gilded dress inverts wholesale: on the ink ground the ONE CTA is the
+   paper-toned plate, and its label is the ink. --siyoh/--qogoz are absolute
+   (they never invert), and --ink here aliases to base-200 — the dark fill
+   itself — so the label is stated on the raw scale rather than aliased. */
+.dark .btn-gilded {
+  background: var(--flexoki-base-200);
+  color: var(--flexoki-base-950);
+}
+
+.dark .btn-gilded:hover:not(:disabled):not(.btn-loading),
+.dark .btn-gilded:active:not(:disabled):not(.btn-loading) {
+  background: var(--flexoki-paper);
+}
+
+/* base-900 is both --surface and --muted on ink, so the light hover/press
+   washes would be invisible; the dark pair lifts UP the ramp instead.
+   base-200 stays at 7.90:1 on base-850 and 6.66:1 on base-800. */
+.dark .btn-ghost:hover:not(:disabled):not(.btn-loading) {
+  background: var(--flexoki-base-850);
+}
+
+.dark .btn-ghost:active:not(:disabled):not(.btn-loading) {
+  background: var(--flexoki-base-800);
+}
+
+/* The light shimmer is a base-150/base-100 band, invisible on the ink ground.
+   Inverted: the same one-step lift, taken up the dark end of the ramp. */
 .dark .skeleton {
   background: linear-gradient(
     100deg,
-    color-mix(in srgb, var(--qogoz) 10%, var(--siyoh)) 40%,
-    color-mix(in srgb, var(--qogoz) 5%, var(--siyoh)) 50%,
-    color-mix(in srgb, var(--qogoz) 10%, var(--siyoh)) 60%
+    var(--flexoki-base-850) 40%,
+    var(--flexoki-base-800) 50%,
+    var(--flexoki-base-850) 60%
   );
 }
 
-/* .badge-danger sits at 4.3:1 on its own wash; lifted toward paper it clears
-   4.5. .badge-ok (5.3:1) and .badge-busy (6.3:1) already pass. */
-.dark .badge-danger {
-  color: color-mix(in srgb, var(--danger) 80%, var(--qogoz));
-}
+/* .badge-danger needed a lift when --danger was red-400; on red-300 it reads
+   5.4:1 against its own wash and the override is gone. .badge-ok (5.3:1) and
+   .badge-busy (5.9:1) pass on the base tiers too. */
 
-/* @keyframes pulse hardcodes deep lapis, invisible against ink; and the dot's
-   numeral at brand blue is under 4.5 on the card surface. */
+/* @keyframes pulse hardcodes light-ground lapis, invisible against ink; and
+   the dot's numeral at brand blue is under 4.5 on the card surface. */
 .dark .step-current .step-dot {
   color: var(--ink);
   border-color: var(--brand-deep);
   animation-name: pulse-dark;
 }
 
+/* blue-400, restated as rgb so the alpha steps stay legal */
 @keyframes pulse-dark {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgb(109 141 214 / 34%);
+    box-shadow: 0 0 0 0 rgb(67 133 190 / 34%);
   }
 
   50% {
-    box-shadow: 0 0 0 6px rgb(109 141 214 / 0%);
+    box-shadow: 0 0 0 6px rgb(67 133 190 / 0%);
   }
 }
 
 .dark .dropcap::first-letter {
-  color: var(--qogoz);
+  color: var(--foreground);
 }
 
-/* Chunk refs are interior furniture, and deep lapis is 1.8:1 on ink. */
+/* Chunk refs are interior furniture, and blue-600 is 2.1:1 on ink. */
 .dark .cite-mark {
-  color: var(--brand);
+  color: var(--brand-deep);
 }
 
 /* ----------------------------------------------------------- the app frame */
@@ -1257,7 +1537,7 @@ a:hover {
 
 .dark .app-nav-link:hover {
   color: var(--foreground);
-  background: color-mix(in srgb, var(--qogoz) 5%, transparent);
+  background: var(--flexoki-base-900);
   text-decoration: none;
 }
 
@@ -1560,4 +1840,1088 @@ a:hover {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--muted-ink);
+}
+
+/* ============================================================================
+   GATE (c) — CRAFTED WORKSPACE
+   Everything below re-dresses the interior (chrome, lists, the press, forms,
+   the auth door, 404). Theme-neutral primitives come first because two of
+   them (.state-*, .folio-plate) also render on the LIGHT public share page;
+   everything else is .dark-scoped, so the legacy light rules stay untouched.
+   ========================================================================= */
+
+/* ------------------------------------------------ blank folio + note states */
+
+/* A page with nothing set on it yet: a hairline leaf with three ruled lines
+   that stop short of the edge. Rules only — the direction bans emoji and icon
+   libraries from the chrome. */
+.folio-plate {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  width: 44px;
+  height: 58px;
+  margin: 0 auto var(--sp-4);
+  padding: 0 8px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+}
+
+.folio-plate i {
+  display: block;
+  height: 1px;
+  background: var(--rule-strong);
+}
+
+.folio-plate i:nth-child(1) {
+  width: 100%;
+}
+
+.folio-plate i:nth-child(2) {
+  width: 74%;
+}
+
+.folio-plate i:nth-child(3) {
+  width: 88%;
+}
+
+.state-blank h3,
+.state-note h3 {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* The error note is marginalia, not an alert box: left rule, no icon, no
+   tinted slab. */
+.state-note {
+  text-align: left;
+  padding: var(--sp-4) 0 var(--sp-4) var(--sp-4);
+  border-left: 2px solid var(--xato);
+}
+
+.state-note p {
+  margin: 0 0 var(--sp-4);
+  max-width: 56ch;
+}
+
+.state-note p:last-child {
+  margin-bottom: 0;
+}
+
+/* ------------------------------------------------------------- file field */
+
+/* Visually hidden, never display:none — the input keeps id/name/autocomplete,
+   its tab stop and its accessible name. */
+.filefield-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.filefield-drop {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0.85rem 1rem;
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius-sm-l);
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.filefield-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.filefield-hint {
+  font-size: var(--text-xs);
+  color: var(--ink-60);
+}
+
+.filefield-picked {
+  min-height: 1.3rem;
+  margin: 0.45rem 0 0;
+  font-size: var(--text-xs);
+  color: var(--ink-60);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filefield-drop[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* ===================== the dark interior ================================= */
+
+.dark .filefield-input:focus-visible + .filefield-drop,
+.dark .filefield-drop:hover {
+  border-color: var(--primary);
+  background: var(--flexoki-base-900);
+}
+
+.dark .state-blank {
+  padding: var(--sp-6) var(--sp-5);
+}
+
+.dark .state-note h3 {
+  color: var(--danger);
+}
+
+/* ---------------------------------------------------------- card, re-cut */
+
+/* On ink a drop shadow is invisible noise and an 18px radius reads as a chat
+   bubble. The interior card is a ruled panel: hairline, small radius, flat. */
+.dark .card {
+  border-radius: var(--radius-sm-l);
+  border-color: var(--rule);
+  box-shadow: none;
+  padding: var(--sp-5);
+}
+
+.dark .card + .card {
+  margin-top: var(--sp-4);
+}
+
+.dark .card-title {
+  align-items: baseline;
+  padding-bottom: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.dark .card-title h2 {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+
+/* --------------------------------------------------------------- badges */
+
+/* Squared off: a stamp in the margin, not a pill. */
+.dark .badge {
+  gap: 5px;
+  padding: 0.2rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: transparent;
+  border-color: var(--rule-strong);
+  color: var(--ink-88);
+}
+
+.dark .badge::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+}
+
+.dark .badge-ok {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--ok) 32%, var(--background));
+}
+
+.dark .badge-busy {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--brand) 32%, var(--background));
+}
+
+.dark .badge-danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--background));
+}
+
+/* ------------------------------------------------------- the folio list */
+
+/* Project rows, ported from the task-rows list variant: one ruled panel,
+   hairline-separated rows, hierarchy carried by weight and colour rather than
+   by giving every row its own card. */
+.dark .folio-list {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm-l);
+  overflow: hidden;
+}
+
+.dark .folio-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto 14px;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 0.85rem var(--sp-4);
+  border-bottom: 1px solid var(--rule);
+  color: inherit;
+  text-decoration: none;
+  transition: background 120ms ease;
+}
+
+.dark .folio-row:last-child {
+  border-bottom: none;
+}
+
+.dark .folio-row:hover {
+  background: var(--flexoki-base-900);
+  text-decoration: none;
+}
+
+.dark .folio-row:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.dark .folio-row-main {
+  min-width: 0;
+}
+
+.dark .folio-row-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dark .folio-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--muted-ink);
+}
+
+.dark .folio-row-date {
+  font-size: var(--text-xs);
+  color: var(--muted-ink);
+}
+
+/* The affordance: a quiet arrow that steps right under the pointer. */
+.dark .folio-row-arrow {
+  width: 14px;
+  height: 14px;
+  position: relative;
+  opacity: 0.45;
+  transition:
+    transform 140ms ease,
+    opacity 140ms ease;
+}
+
+.dark .folio-row-arrow::before {
+  content: "";
+  position: absolute;
+  top: 6.5px;
+  left: 0;
+  width: 11px;
+  height: 1px;
+  background: var(--muted-ink);
+}
+
+.dark .folio-row-arrow::after {
+  content: "";
+  position: absolute;
+  top: 3.5px;
+  right: 1px;
+  width: 7px;
+  height: 7px;
+  border-top: 1px solid var(--muted-ink);
+  border-right: 1px solid var(--muted-ink);
+  transform: rotate(45deg);
+}
+
+.dark .folio-row:hover .folio-row-arrow {
+  opacity: 1;
+  transform: translateX(3px);
+}
+
+/* --------------------------------------------------------- source rows */
+
+.dark .source-row {
+  gap: var(--sp-3);
+  padding: 0.6rem 0;
+}
+
+.dark .file-chip {
+  width: 32px;
+  height: 26px;
+  border-radius: 3px;
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  color: var(--muted-ink);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 500;
+}
+
+.dark .source-name {
+  font-weight: 500;
+}
+
+/* ======================= the press (generation progress) ================= */
+
+/* Progress as typesetting (§4.5): the current line is the only one set in the
+   display serif and the only carrier of the gold caret. */
+.dark .press {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.dark .press-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.dark .press-head:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.dark .press-now {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--foreground);
+}
+
+.dark .press-count {
+  font-size: var(--text-xs);
+  color: var(--muted-ink);
+}
+
+.dark .press-chevron {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  align-self: center;
+  border-right: 1.5px solid var(--muted-ink);
+  border-bottom: 1.5px solid var(--muted-ink);
+  transform: rotate(45deg) translate(-2px, -2px);
+  transition: transform 240ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.dark .press-chevron[data-open="true"] {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.dark .press-trace {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 320ms cubic-bezier(0.23, 1, 0.32, 1),
+    opacity 240ms ease;
+}
+
+.dark .press-trace[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.dark .press-trace-inner {
+  overflow: hidden;
+}
+
+/* The spine: the hairline that runs down the left of a trace, the way a
+   manuscript ruling runs down the margin. */
+.dark .press .steps {
+  gap: 0;
+  padding-left: var(--sp-4);
+  border-left: 1px solid var(--rule-strong);
+  margin-top: var(--sp-1);
+}
+
+.dark .press .step {
+  gap: 0.6rem;
+  min-height: 30px;
+  font-size: var(--text-sm);
+  color: var(--ink-40);
+}
+
+/* The numbered ring is gone: a step is marked the way a proof is marked — a
+   small square that fills as the line is set. */
+.dark .press .step-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  border: 1px solid var(--ink-40);
+  background: none;
+  margin-left: -3.5px;
+  animation: none;
+}
+
+.dark .press .step-done {
+  color: var(--muted-ink);
+}
+
+.dark .press .step-done .step-dot {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+
+.dark .press .step-current {
+  color: var(--foreground);
+}
+
+.dark .press .step-current .step-label {
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-weight: 600;
+}
+
+.dark .press .step-current .step-dot {
+  border-color: var(--primary);
+  background: var(--primary);
+  box-shadow: none;
+}
+
+/* The measure: a hairline that fills, not a chunky meter. */
+.dark .press .progress-track {
+  height: 2px;
+  border-radius: 0;
+  background: var(--rule-strong);
+  margin: 0;
+}
+
+.dark .press .progress-fill {
+  border-radius: 0;
+  transition: width 400ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* -------------------------------------------------------- form furniture */
+
+.dark .field {
+  margin-bottom: var(--sp-5);
+}
+
+.dark .field-label {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+.dark .field-help {
+  min-height: 1.3rem;
+  margin: 0.4rem 0 0;
+  font-size: var(--text-xs);
+  color: var(--muted-ink);
+}
+
+.dark .field-help[data-danger="true"] {
+  color: var(--danger);
+}
+
+.dark .fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--sp-5);
+  min-inline-size: 0;
+}
+
+.dark .input {
+  border-radius: var(--radius-sm-l);
+}
+
+/* --------------------------------------------------------- summary table */
+
+/* The confirmation reads like a colophon: label left, fact right, hairline
+   between, every machine fact in mono. */
+.dark .summary {
+  border-top: 1px solid var(--rule);
+  margin-bottom: var(--sp-5);
+}
+
+.dark .summary-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.dark .summary-label {
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  color: var(--muted-ink);
+}
+
+.dark .summary-value {
+  min-width: 0;
+  text-align: right;
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dark .state-note {
+  border-left-color: var(--danger);
+}
+
+/* ------------------------------------------------------------ page header */
+
+/* Title left, one action right, sharing a baseline — not a serif headline with
+   a button floating beside its cap-height. */
+.dark .page-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  padding-bottom: var(--sp-4);
+  margin-bottom: var(--sp-5);
+  border-bottom: 1px solid var(--rule);
+}
+
+.dark .page-bar .page-head {
+  margin-bottom: 0;
+}
+
+.dark .page-count {
+  font-size: var(--text-xs);
+  color: var(--muted-ink);
+}
+
+/* --------------------------------------------------- sidebar + topbar craft */
+
+.dark .app-sidebar {
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--sp-3);
+}
+
+.dark .app-brand {
+  padding: 0 0.55rem;
+}
+
+/* The wordmark sits over a footnote rule — the same stroke that closes a folio
+   section opens the rail. */
+.dark .app-brand-rule {
+  height: 1px;
+  margin: calc(var(--sp-5) * -1 + 0.7rem) 0.55rem 0;
+  background: var(--rule);
+}
+
+.dark .app-nav {
+  gap: 1px;
+}
+
+.dark .app-nav-link {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 0.6rem 0 1.05rem;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+/* The marker in the margin: a filled square beside the line you are on. */
+.dark .app-nav-link::before {
+  content: "";
+  position: absolute;
+  left: 0.45rem;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 1px;
+  background: var(--primary);
+  opacity: 0;
+  transform: scale(0.4);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.dark .app-nav-link[data-active="true"] {
+  background: var(--flexoki-base-900);
+  font-weight: 600;
+}
+
+.dark .app-nav-link[data-active="true"]::before {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.dark .app-nav-link:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.dark .app-nav-footer {
+  gap: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--rule);
+  align-self: stretch;
+}
+
+/* Aligned to the nav rows above it, not indented by an accident of padding. */
+.dark .app-logout {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 0.6rem 0 1.05rem;
+  font-weight: 500;
+  border-radius: 6px;
+}
+
+.dark .app-logout:hover {
+  background: var(--flexoki-base-900);
+}
+
+.dark .app-logout:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.dark .app-tag {
+  padding: 0 0.6rem;
+  color: var(--ink-40);
+}
+
+.dark .app-main {
+  max-width: 880px;
+}
+
+@media (max-width: 879px) {
+  /* Not a collapsed sidebar: a designed masthead. Wordmark left against a
+     hairline, the two destinations as marked lines, sign-out set off by a
+     rule. */
+  .dark .app-topbar {
+    gap: var(--sp-3);
+    min-height: 52px;
+    padding: 0 max(var(--sp-4), env(safe-area-inset-right)) 0
+      max(var(--sp-4), env(safe-area-inset-left));
+  }
+
+  .dark .app-topbar .app-brand {
+    padding: 0;
+    font-size: 1.15rem;
+  }
+
+  .dark .app-topbar-links {
+    gap: 1px;
+    font-weight: 500;
+  }
+
+  .dark .app-topbar .app-nav-link {
+    min-height: 32px;
+    padding: 0 0.5rem 0 0.9rem;
+    font-size: var(--text-xs);
+  }
+
+  .dark .app-topbar .app-nav-link::before {
+    left: 0.38rem;
+    width: 3px;
+    height: 3px;
+    margin-top: -1.5px;
+  }
+
+  .dark .app-topbar .app-logout {
+    min-height: 32px;
+    margin-left: 0.3rem;
+    padding: 0 0 0 0.65rem;
+    border-radius: 0;
+    border-left: 1px solid var(--rule);
+    font-size: var(--text-xs);
+  }
+
+  .dark .app-topbar .app-logout:hover {
+    background: none;
+    color: var(--foreground);
+  }
+
+  .dark .app-brand-rule {
+    display: none;
+  }
+}
+
+/* ----------------------------------------------------------- choice cards */
+
+.dark .choice-grid {
+  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  gap: var(--sp-2);
+}
+
+.dark .choice {
+  position: relative;
+  gap: 0.15rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: var(--radius-sm-l);
+  border-color: var(--rule-strong);
+  background: transparent;
+}
+
+.dark .choice-name {
+  font-size: 0.95rem;
+}
+
+.dark .choice-desc {
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.dark .choice-price {
+  margin-top: 0.35rem;
+  font-size: var(--text-xs);
+  color: var(--foreground);
+}
+
+.dark .choice:hover {
+  border-color: var(--ink-40);
+  background: var(--flexoki-base-900);
+}
+
+.dark .choice:has(input:checked) {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+
+/* The chosen line is stamped, not merely tinted — colour is never the only
+   channel carrying the selection. */
+.dark .choice:has(input:checked)::after {
+  content: "";
+  position: absolute;
+  top: 0.85rem;
+  right: 0.8rem;
+  width: 5px;
+  height: 9px;
+  border-right: 2px solid var(--brand-deep);
+  border-bottom: 2px solid var(--brand-deep);
+  transform: rotate(45deg);
+}
+
+/* ------------------------------------------------------------ flow steps */
+
+.dark .flow-step {
+  padding: var(--sp-5) 0 var(--sp-6);
+}
+
+.dark .flow-step:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.dark .flow-step-head {
+  margin-bottom: var(--sp-4);
+}
+
+.dark .flow-step-head h2 {
+  font-size: 1.15rem;
+}
+
+/* A locked step is a section not yet written: the folio number, the heading,
+   and one line saying what opens it. Nothing is rendered at 45% opacity — a
+   dimmed summary of empty values is clutter, and a dimmed gold CTA spends the
+   view's one gilded moment on a disabled control. */
+.dark .flow-step-locked {
+  opacity: 1;
+  pointer-events: none;
+  color: var(--ink-40);
+}
+
+.dark .flow-step-locked .folio,
+.dark .flow-step-locked h2 {
+  color: var(--ink-40);
+}
+
+.dark .flow-locked-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-40);
+}
+
+.dark .flow-step-done .folio {
+  color: var(--ok);
+}
+
+.dark .flow-summary {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--muted-ink);
+}
+
+/* ------------------------------------------------------- the auth door */
+
+/* The door is a narrow column, optically centred: brand at the head, the form
+   at the reading line, a colophon at the foot. */
+.dark.auth-min {
+  grid-template-rows: auto 1fr auto;
+  gap: var(--sp-5);
+}
+
+.dark .auth-min-form {
+  max-width: 22rem;
+  align-self: center;
+  padding-bottom: var(--sp-7);
+}
+
+.dark .auth-min-form .card {
+  padding: var(--sp-5);
+}
+
+.dark .auth-min-form .page-head {
+  margin-bottom: var(--sp-4);
+}
+
+.dark .auth-min-form .page-title {
+  font-size: 1.75rem;
+}
+
+.dark .auth-foot {
+  justify-self: center;
+  max-width: 30ch;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--ink-40);
+  text-align: center;
+}
+
+.dark .auth-status {
+  margin: 0 0 var(--sp-4);
+  font-size: var(--text-sm);
+  color: var(--muted-ink);
+}
+
+.dark .auth-status[data-danger="true"] {
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--danger);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 404 */
+
+.dark.notfound {
+  position: relative;
+  gap: var(--sp-3);
+}
+
+.dark .notfound-folio {
+  color: var(--foreground);
+  margin: 0;
+}
+
+/* The rule under the folio number: the stroke that closes a section. */
+.dark .notfound-rule {
+  width: 64px;
+  height: 1px;
+  background: var(--rule-strong);
+  margin: var(--sp-2) 0 var(--sp-4);
+}
+
+.dark .notfound-line {
+  margin: 0;
+}
+
+.dark .notfound-brand {
+  position: absolute;
+  top: clamp(1.5rem, 4vw, 2.5rem);
+  left: clamp(1.5rem, 4vw, 2.5rem);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.3rem;
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+}
+
+.dark .notfound-brand:hover {
+  text-decoration: none;
+}
+
+.dark .notfound-actions {
+  gap: var(--sp-4);
+  margin-top: var(--sp-4);
+}
+
+/* --------------------------------------------- workspace connective tissue */
+
+/* The lede under a card's rule: the one line of prose a panel is allowed. */
+.dark .card-lede {
+  margin: 0 0 var(--sp-4);
+  max-width: 62ch;
+  color: var(--muted-ink);
+}
+
+.dark .card-lede-ok {
+  margin-bottom: 0;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.dark .btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.dark .source-list {
+  margin-bottom: var(--sp-4);
+}
+
+/* The picker and its action share a baseline; below 560px they stack rather
+   than squeezing the filename line to nothing. */
+.dark .upload-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+.dark .upload-row .filefield {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 560px) {
+  .dark .upload-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* A share link is a machine fact: mono, breakable, quiet until hovered. */
+.dark .share-url {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  word-break: break-all;
+  margin: 0 0 var(--sp-4);
+}
+
+.dark .table-quiet {
+  color: var(--muted-ink);
+}
+
+/* The count line closes a list the way a folio number closes a page. */
+.dark .page-count {
+  margin: var(--sp-3) 0 0;
+}
+
+.dark .card-title .page-count {
+  margin: 0;
+}
+
+/* --------------------------------------------------- folio list, aligned */
+
+/* Cycle 1: each row was its own grid, so a long badge in row 2 pushed its date
+   left of the date in row 1 and the right edge zig-zagged. The columns are
+   pinned instead — the date measure is tabular, the stamp column is fixed and
+   its contents hang right against the arrow. */
+.dark .folio-row {
+  grid-template-columns: 1fr 8ch 8.5rem 14px;
+}
+
+.dark .folio-row-date {
+  text-align: right;
+}
+
+.dark .folio-row .badge {
+  justify-self: end;
+}
+
+@media (max-width: 640px) {
+  /* The date is the first thing to go: the title, the stamp and the arrow are
+     what a thumb navigates by. */
+  .dark .folio-row {
+    grid-template-columns: 1fr auto 14px;
+    gap: var(--sp-3);
+  }
+
+  .dark .folio-row-date {
+    display: none;
+  }
+}
+
+@media (max-width: 560px) {
+  .dark .upload-row {
+    gap: var(--sp-2);
+  }
+}
+
+/* Cycle 2: the row's title span was inline, so its ellipsis never engaged and
+   a long title ran under the status stamp at 390px. */
+.dark .folio-row-main {
+  display: block;
+}
+
+.dark .folio-row-title {
+  display: block;
+}
+
+@media (max-width: 879px) {
+  /* The frame is a stretch grid: on a short page (an empty folio, a 404 of a
+     list) the masthead row grew to fill the viewport and floated its own
+     content mid-air. The bar keeps its height; the main pane takes the slack. */
+  .dark.app-frame {
+    grid-template-rows: auto 1fr;
+    align-content: start;
+  }
+}
+
+/* Cycle 2: an empty-state hint set to the full card measure broke a closing
+   "MB)." onto its own line. The blank folio reads at a book measure. */
+.dark .state-blank p {
+  max-width: 46ch;
+  margin-inline: auto;
+}
+
+/* A disabled CTA must not spend the view's one gilded moment: the plate stays
+   (it is still where the action will be) but the gold draw is withheld until
+   the control can actually be pressed. */
+.dark .btn-gilded:disabled::after {
+  animation: none;
+  opacity: 0;
+}
+
+/* Two package cards fit a 390px webview at this measure; four language cards
+   stack two-up instead of running four rows deep. */
+@media (max-width: 560px) {
+  .dark .choice-grid {
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  }
+}
+
+/* Cycle 3: the gilded underline draws 7px below the plate, so a note line set
+   at the usual 0.4rem sat on top of the gold. The flow's CTA carries the
+   clearance, and an error note keeps its own distance from what raised it. */
+.dark .flow-step .btn-gilded {
+  margin-bottom: 0.55rem;
+}
+
+.dark .flow-step .state-note,
+.dark .card .state-note {
+  margin-top: var(--sp-4);
+}
+
+/* A note line is a caption for what is above it, not a label for the button
+   below — give the following action its own air. */
+.dark .field-help + .btn {
+  margin-top: var(--sp-3);
 }

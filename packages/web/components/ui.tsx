@@ -1,26 +1,122 @@
 "use client";
 
-// Shared presentational pieces of the P3.5 design system. Purely visual —
-// no data fetching, no auth; pages own their state and pass it down.
+// Shared presentational pieces of the workspace. Purely visual — no data
+// fetching, no auth; pages own their state and pass it down.
 
-import type { ReactNode } from "react";
+import type { ComponentPropsWithoutRef, ReactNode, RefObject } from "react";
+import { useEffect, useState } from "react";
+
+type ButtonVariant = "primary" | "ghost" | "danger";
+type ButtonSize = "md" | "lg";
+
+type ButtonProps = Omit<ComponentPropsWithoutRef<"button">, "className"> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  /** The one-per-view CTA dress: ink plate with a gold underline draw. */
+  gilded?: boolean;
+  loading?: boolean;
+  block?: boolean;
+  className?: string;
+};
+
+const VARIANT_CLASS: Record<ButtonVariant, string> = {
+  primary: "btn-primary",
+  ghost: "btn-ghost",
+  danger: "btn-danger",
+};
+
+/** The three-dot ink pulse — an ellipsis setting itself, one dot at a time. */
+function InkPulse() {
+  return (
+    <span className="btn-pulse" aria-hidden>
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
+
+export function Button({
+  variant = "primary",
+  size = "md",
+  gilded = false,
+  loading = false,
+  block = false,
+  className,
+  disabled,
+  type = "button",
+  children,
+  ...rest
+}: ButtonProps) {
+  const classes = [
+    "btn",
+    gilded ? "btn-gilded" : VARIANT_CLASS[variant],
+    size === "lg" ? "btn-lg" : null,
+    block ? "btn-block" : null,
+    loading ? "btn-loading" : null,
+    className,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <button
+      {...rest}
+      type={type}
+      className={classes}
+      disabled={disabled === true || loading}
+      aria-busy={loading || undefined}
+    >
+      <span className="btn-label">{children}</span>
+      {loading && <InkPulse />}
+    </button>
+  );
+}
+
+/**
+ * Machine facts — prices, credit counts, ids. Mono with tabular figures so a
+ * changing number never reflows the line around it.
+ */
+export function DataText({
+  children,
+  className,
+  ...rest
+}: ComponentPropsWithoutRef<"span"> & { className?: string }) {
+  return (
+    <span {...rest} className={className ? `data-text ${className}` : "data-text"}>
+      {children}
+    </span>
+  );
+}
+
+/**
+ * The blank folio: a page with nothing set on it yet. Rules and borders only —
+ * the direction bans emoji and icon libraries from the chrome.
+ */
+function BlankFolio() {
+  return (
+    <span className="folio-plate" aria-hidden>
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
 
 export function EmptyState({
-  icon,
+  /** Kept for source compatibility; the folio plate replaces it. */
+  icon: _icon,
   title,
   hint,
   children,
 }: {
-  icon: string;
+  icon?: string;
   title: string;
   hint: string;
   children?: ReactNode;
 }) {
   return (
-    <div className="state">
-      <div className="state-icon" aria-hidden>
-        {icon}
-      </div>
+    <div className="state state-blank">
+      <BlankFolio />
       <h3>{title}</h3>
       <p>{hint}</p>
       {children}
@@ -38,16 +134,13 @@ export function ErrorState({
   onRetry?: () => void;
 }) {
   return (
-    <div className="state state-error">
-      <div className="state-icon" aria-hidden>
-        ⚠️
-      </div>
+    <div className="state state-error state-note" role="alert">
       <h3>{title}</h3>
       <p>{message}</p>
       {onRetry && (
-        <button className="btn btn-ghost" onClick={onRetry}>
+        <Button variant="ghost" onClick={onRetry}>
           Qayta urinish
-        </button>
+        </Button>
       )}
     </div>
   );
@@ -100,6 +193,72 @@ export function StatusBadge({ status }: { status: string }) {
   return <span className={cls}>{label[status] ?? status}</span>;
 }
 
+/**
+ * The upload control. A native file input renders the browser's own
+ * "Choose File / No file chosen" plate, which no amount of surrounding craft
+ * survives — so the input is visually hidden (never display:none: it keeps its
+ * id/name/autocomplete and its place in the tab order) and a label drives it.
+ */
+export function FileField({
+  inputRef,
+  id,
+  name,
+  accept,
+  multiple,
+  disabled,
+  clearSignal = 0,
+  label,
+  hint,
+}: {
+  inputRef: RefObject<HTMLInputElement | null>;
+  id: string;
+  name: string;
+  accept: string;
+  multiple?: boolean;
+  disabled?: boolean;
+  /** Bump to drop the chosen-file line after the parent clears the input. */
+  clearSignal?: number;
+  label: string;
+  hint: string;
+}) {
+  const [picked, setPicked] = useState<string[]>([]);
+  useEffect(() => setPicked([]), [clearSignal]);
+
+  return (
+    <div className="filefield">
+      <input
+        ref={inputRef}
+        id={id}
+        name={name}
+        className="filefield-input"
+        type="file"
+        autoComplete="off"
+        accept={accept}
+        multiple={multiple}
+        disabled={disabled}
+        onChange={(event) =>
+          setPicked(Array.from(event.target.files ?? []).map((file) => file.name))
+        }
+      />
+      <label htmlFor={id} className="filefield-drop" data-disabled={disabled ? "true" : undefined}>
+        <span className="filefield-label">{label}</span>
+        <span className="filefield-hint">{hint}</span>
+      </label>
+      <p className="filefield-picked">
+        {picked.length === 0 ? (
+          " "
+        ) : picked.length === 1 ? (
+          picked[0]
+        ) : (
+          <>
+            <DataText>{picked.length}</DataText> ta fayl tanlandi
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
 // The worker's 7 pipeline steps (progress.step strings), humanized. Keys must
 // match packages/bot/orchestrators/presentation_orchestrator.py verbatim.
 export const STEP_LABELS: ReadonlyArray<{ key: string; label: string }> = [
@@ -112,28 +271,65 @@ export const STEP_LABELS: ReadonlyArray<{ key: string; label: string }> = [
   { key: "Rendering presentation", label: "Taqdimot yig'ilmoqda" },
 ];
 
+/**
+ * Progress as typesetting (§4.5). The press sets one line at a time: the
+ * current step is the only line in the display serif and the only one carrying
+ * the gold caret — it is the view's single gold element while a job runs. The
+ * trace is expandable (thinking-state grammar) and open by default, because a
+ * user watching a 4-minute job wants to see the queue, not a spinner.
+ */
 export function GenerationSteps({ step, current }: { step?: string; current?: number }) {
-  const activeIndex = STEP_LABELS.findIndex((s) => s.key === step);
-  const done = activeIndex >= 0 ? activeIndex : Math.max(0, (current ?? 1) - 1);
+  const total = STEP_LABELS.length;
+  const activeIndex = STEP_LABELS.findIndex((entry) => entry.key === step);
+  const done = activeIndex >= 0 ? activeIndex : Math.max(0, Math.min((current ?? 1) - 1, total - 1));
+  const [open, setOpen] = useState(true);
+  const currentLabel = STEP_LABELS[done]?.label ?? STEP_LABELS[0].label;
+
   return (
-    <ol className="steps">
-      {STEP_LABELS.map((entry, index) => {
-        const state = index < done ? "step-done" : index === done ? "step-current" : "";
-        return (
-          <li key={entry.key} className={`step ${state}`}>
-            <span className="step-dot">{index < done ? "✓" : index + 1}</span>
-            {index === done ? (
-              <span style={{ fontFamily: "var(--font-display)", fontSize: "1.02rem" }}>
-                {entry.label}
-                <span className="step-caret" aria-hidden />
-              </span>
-            ) : (
-              entry.label
-            )}
-          </li>
-        );
-      })}
-    </ol>
+    <div className="press">
+      <button
+        type="button"
+        className="press-head"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="press-now">
+          {currentLabel}
+          <span className="step-caret" aria-hidden />
+        </span>
+        <DataText className="press-count">
+          {done + 1}/{total}
+        </DataText>
+        <span className="press-chevron" aria-hidden data-open={open ? "true" : undefined} />
+      </button>
+
+      <div
+        className="progress-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={total}
+        aria-valuenow={done + 1}
+        aria-label="Generatsiya bosqichi"
+      >
+        <div className="progress-fill" style={{ width: `${((done + 1) / total) * 100}%` }} />
+      </div>
+
+      <div className="press-trace" data-open={open ? "true" : undefined}>
+        <div className="press-trace-inner">
+          <ol className="steps">
+            {STEP_LABELS.map((entry, index) => {
+              const state = index < done ? "step-done" : index === done ? "step-current" : "";
+              return (
+                <li key={entry.key} className={`step ${state}`}>
+                  <span className="step-dot" aria-hidden />
+                  <span className="step-label">{entry.label}</span>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -38,20 +38,48 @@ then the mechanism, then proof.
 
 ## 2. PALETTE (tokens, not vibes)
 
-- **Qog'oz** (paper): #F7F3EA — warm manuscript cream. Marketing ground.
-- **Siyoh** (ink): #16130E — near-black warm ink. Text, and the APP's ground.
-- **Zangori** (lapis): #1D4ED8-family adjusted warm → use #274690. The
-  manuscript lapis lazuli accent. Links, primary actions.
-- **Oltin** (gilding): #B8860B-family → #A67C2E. RARE. Only for the moments
-  that matter (the CTA, one highlight per view). Gilding was expensive; treat
-  it that way.
-- Rules/borders: ink at 12-18% opacity. No pure grays anywhere.
+**Flexoki** (stephango.com/flexoki) is the palette of record. Every colour in
+the product comes from its scale — nothing is invented, nothing is mixed by
+eye. The four role names stay; they are now names for Flexoki values.
+
+- **Qog'oz** (paper): `paper` #FFFCF0. Marketing ground.
+- **Siyoh** (ink): `base-950` #1C1B1A. Text on the marketing side, and the
+  APP's ground. (Flexoki `black` #100F0F is reserved for labels sitting on a
+  bright accent fill, where base-950 is a step short of 4.5:1.)
+- **Zangori** (lapis): `blue-600` #205EA6 light / `blue-400` #4385BE dark.
+  Links, primary actions. Blue that carries TEXT on the dark ground lifts one
+  more step to `blue-300` #66A0C8 — blue-400 as text is 4.37:1 on base-950.
+- **Oltin** (gilding): `yellow-600` #AD8301 light / `yellow-400` #D0A215 dark.
+  RARE — one element per view. Gilding was expensive; treat it that way.
+  **Gold is never small text**: yellow-600 on paper is 3.39:1. Gold is fills,
+  rules, underline-draws and carets; text sitting ON a gold fill is ink.
+- Status: **Xato** (error) `red-600` #AF3029 light / `red-300` #E8705F dark;
+  **Tayyor** (success) `green-700` #536907 light / `green-400` #879A39 dark.
+  Both light/dark tiers are set one step off the plain 600/400 rule where the
+  600/400 value failed 4.5:1 — see the ratios in the token file's comments.
+- **The accent rule**: 600-series on light ground, 400-series on dark ground.
+  Deviations exist only where a measured contrast ratio forced them, and each
+  one is annotated at the token.
+- **Rules, borders, muted text, surface tints**: the Flexoki base scale, never
+  an opacity wash. Light: ground `paper`, surface `base-50`, borders
+  `base-100`/`base-200`, muted text `base-700`, secondary text `base-800`.
+  Dark: ground `base-950`, surface `base-900`, borders `base-850`/`base-800`,
+  text `base-200`, muted `base-400`, secondary `base-300`. `color-mix()` is
+  allowed only when both inputs are already Flexoki tokens (the accent washes).
+  Note the flip: Flexoki has nothing lighter than paper, so a raised light
+  surface sits one step BELOW the ground, not above it.
 - **The split**: marketing surfaces = ink on paper (light). The product
   viewer/workspace = paper on ink (dark, matching the deck engine's output).
   Crossing from site into product feels like opening the manuscript.
+- Raw hex lives in exactly one place: the `--flexoki-*` block at the top of
+  `packages/web/app/globals.css`. Everything else resolves through a role
+  token. Baked assets (plates, OG image, icons) carry the same values by hand
+  because they render outside the cascade.
 
 Banned: purple, gradients as decoration, glassmorphism, neon, emoji in chrome,
-pure #000/#FFF, more than one gold element per viewport.
+pure #000/#FFF, more than one gold element per viewport. Amended: the Flexoki
+base scale is the ONLY permitted neutral family — no slate/zinc/gray/neutral/
+stone utilities, no ad-hoc grays, no ink-at-N%-opacity rules.
 
 ---
 
