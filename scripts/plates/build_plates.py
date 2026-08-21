@@ -21,8 +21,8 @@ from PIL import Image, ImageOps
 RAW = Path(__file__).resolve().parent.parent / "raw"
 OUT = Path(r"C:\Users\imama\Projects\nashr\packages\web\public\plates")
 
-INK = (0x16, 0x13, 0x0E)
-CREAM = (0xF7, 0xF3, 0xEA)
+INK = (0x1C, 0x1B, 0x1A)  # Flexoki base-950
+CREAM = (0xFF, 0xFC, 0xF0)  # Flexoki paper
 
 BAYER4 = [
     [0, 8, 2, 10],
