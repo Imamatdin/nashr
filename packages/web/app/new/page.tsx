@@ -5,10 +5,10 @@
 // webview first: single column, one action per step, nothing that scrolls
 // sideways. The gilded moment of the view is the final "Taqdimotni boshlash".
 
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppChrome } from "@/components/chrome";
-import { ErrorState } from "@/components/ui";
+import { Button, DataText, ErrorState, FileField } from "@/components/ui";
 import {
   ApiError,
   type SourceView,
@@ -54,26 +54,6 @@ const PACKAGES = [
 ] as const;
 
 type PackageId = (typeof PACKAGES)[number]["id"];
-
-const LABEL: CSSProperties = {
-  display: "block",
-  fontSize: "var(--text-sm)",
-  fontWeight: 600,
-  marginBottom: "var(--sp-2)",
-};
-
-const GROUP: CSSProperties = {
-  border: 0,
-  padding: 0,
-  margin: "0 0 var(--sp-5) 0",
-  minInlineSize: 0,
-};
-
-const NOTE_LINE: CSSProperties = {
-  minHeight: "1.35rem",
-  margin: "var(--sp-3) 0 0",
-  fontSize: "var(--text-sm)",
-};
 
 function soum(amount: number): string {
   return `${amount.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} so'm`;
@@ -124,28 +104,16 @@ function toEnqueueFailure(error: unknown): EnqueueFailure {
   return { kind: "other", message: "Tarmoqda uzilish — qayta urinib ko'ring" };
 }
 
+/** A colophon line: label left, machine fact right, hairline between. */
 function SummaryRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        gap: "var(--sp-4)",
-        padding: "0.55rem 0",
-        borderTop: "1px solid var(--rule)",
-      }}
-    >
-      <span style={{ color: "var(--muted-ink)", fontSize: "var(--text-sm)" }}>{label}</span>
-      <span
-        style={{
-          textAlign: "right",
-          minWidth: 0,
-          fontFamily: mono ? "var(--font-mono)" : undefined,
-          fontSize: mono ? "var(--text-sm)" : undefined,
-        }}
-      >
-        {value}
-      </span>
+    <div className="summary-row">
+      <span className="summary-label">{label}</span>
+      {mono ? (
+        <DataText className="summary-value">{value}</DataText>
+      ) : (
+        <span className="summary-value">{value}</span>
+      )}
     </div>
   );
 }
@@ -165,6 +133,7 @@ export default function NewProjectPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadNote, setUploadNote] = useState<{ text: string; danger?: boolean } | null>(null);
   const [sourcesConfirmed, setSourcesConfirmed] = useState(false);
+  const [clearSignal, setClearSignal] = useState(0);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
   const [enqueueing, setEnqueueing] = useState(false);
@@ -245,6 +214,7 @@ export default function NewProjectPage() {
       }
     }
     if (input) input.value = "";
+    setClearSignal((value) => value + 1);
     setUploading(false);
     if (failed.length > 0) {
       setUploadNote({ text: `${failed.join(", ")} yuklanmadi — ${reason}`, danger: true });
@@ -296,8 +266,8 @@ export default function NewProjectPage() {
 
         {stage === 1 ? (
           <>
-            <div style={{ marginBottom: "var(--sp-5)" }}>
-              <label htmlFor="title" style={LABEL}>
+            <div className="field">
+              <label htmlFor="title" className="field-label">
                 Mavzu yoki sarlavha
               </label>
               <input
@@ -313,8 +283,8 @@ export default function NewProjectPage() {
               />
             </div>
 
-            <fieldset style={GROUP}>
-              <legend style={LABEL}>Til</legend>
+            <fieldset className="fieldset">
+              <legend className="field-label">Til</legend>
               <div className="choice-grid">
                 {LANGUAGES.map((entry) => (
                   <label key={entry.code} className="choice" htmlFor={`language-${entry.code}`}>
@@ -333,8 +303,8 @@ export default function NewProjectPage() {
               </div>
             </fieldset>
 
-            <fieldset style={GROUP}>
-              <legend style={LABEL}>Paket</legend>
+            <fieldset className="fieldset">
+              <legend className="field-label">Paket</legend>
               <div className="choice-grid">
                 {PACKAGES.map((entry) => (
                   <label key={entry.id} className="choice" htmlFor={`package-${entry.id}`}>
@@ -349,33 +319,30 @@ export default function NewProjectPage() {
                     />
                     <span className="choice-name">{entry.name}</span>
                     <span className="choice-desc">{entry.desc}</span>
-                    <span className="choice-price">{soum(entry.price)}</span>
+                    <DataText className="choice-price">{soum(entry.price)}</DataText>
                   </label>
                 ))}
               </div>
             </fieldset>
 
-            <button
-              type="button"
-              className="btn btn-primary"
+            <Button
               onClick={() => void onCreate()}
-              disabled={!session || creating || !title.trim()}
+              loading={creating}
+              disabled={!session || !title.trim()}
             >
-              {creating ? "Yaratilmoqda…" : "Loyihani boshlash"}
-            </button>
+              Loyihani boshlash
+            </Button>
 
             {createError && (
-              <div style={{ marginTop: "var(--sp-4)" }}>
-                <ErrorState
-                  title="Loyiha yaratilmadi"
-                  message={createError}
-                  onRetry={() => void onCreate()}
-                />
-              </div>
+              <ErrorState
+                title="Loyiha yaratilmadi"
+                message={createError}
+                onRetry={() => void onCreate()}
+              />
             )}
           </>
         ) : (
-          <p style={{ margin: 0, color: "var(--muted-ink)", fontSize: "var(--text-sm)" }}>
+          <p className="flow-summary">
             {title} · {languageName(language)} · {chosenPackage.name}
           </p>
         )}
@@ -387,66 +354,73 @@ export default function NewProjectPage() {
           <h2>Manbalar</h2>
         </div>
 
-        {sources.length === 0 ? (
-          <p style={{ color: "var(--muted-ink)", fontSize: "var(--text-sm)", margin: 0 }}>
-            Manbasiz slayd yozilmaydi — har bir da'vo siz yuklagan hujjatga bog'lanadi. PDF,
-            DOCX yoki PPTX yuklang.
-          </p>
+        {stage === 1 ? (
+          <p className="flow-locked-note">Loyiha nomlangach ochiladi.</p>
         ) : (
-          <div>
-            {sources.map((source) => (
-              <div key={source.id} className="source-row">
-                <span className="file-chip">{source.file_type}</span>
-                <span className="source-name">{source.filename}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {stage === 2 && (
           <>
-            <div className="field-row" style={{ marginTop: "var(--sp-4)", flexWrap: "wrap" }}>
-              <input
-                ref={fileInput}
-                id="sources"
-                name="sources"
-                className="input"
-                type="file"
-                autoComplete="off"
-                accept={ACCEPTED}
-                multiple
-                disabled={uploading || full}
-              />
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => void onUpload()}
-                disabled={uploading || full}
-              >
-                {uploading ? "Yuklanmoqda…" : "Yuklash"}
-              </button>
-            </div>
+            {sources.length === 0 ? (
+              <p className="flow-summary">
+                Manbasiz slayd yozilmaydi — har bir da'vo siz yuklagan hujjatga bog'lanadi. PDF,
+                DOCX yoki PPTX yuklang.
+              </p>
+            ) : (
+              <div className="source-list">
+                {sources.map((source) => (
+                  <div key={source.id} className="source-row">
+                    <span className="file-chip">{source.file_type}</span>
+                    <span className="source-name">{source.filename}</span>
+                  </div>
+                ))}
+              </div>
+            )}
 
-            <p
-              style={{
-                ...NOTE_LINE,
-                color: uploadNote?.danger ? "var(--danger)" : "var(--muted-ink)",
-              }}
-            >
-              {uploading
-                ? "Fayllar navbat bilan yuklanmoqda…"
-                : (uploadNote?.text ?? `${sources.length} / ${MAX_SOURCES} manba`)}
-            </p>
+            {stage === 2 && (
+              <>
+                <div className="upload-row">
+                  <FileField
+                    inputRef={fileInput}
+                    id="sources"
+                    name="sources"
+                    accept={ACCEPTED}
+                    multiple
+                    disabled={uploading || full}
+                    clearSignal={clearSignal}
+                    label="Fayllarni tanlash"
+                    hint={`PDF, DOCX, PPTX — ${MAX_SOURCES} tagacha`}
+                  />
+                  <Button
+                    variant="ghost"
+                    onClick={() => void onUpload()}
+                    loading={uploading}
+                    disabled={full}
+                  >
+                    {uploading ? "Yuklanmoqda" : "Yuklash"}
+                  </Button>
+                </div>
 
-            <button
-              type="button"
-              className="btn btn-primary"
-              style={{ marginTop: "var(--sp-4)" }}
-              onClick={() => setSourcesConfirmed(true)}
-              disabled={sources.length === 0 || uploading}
-            >
-              Davom etish
-            </button>
+                <p className="field-help" data-danger={uploadNote?.danger ? "true" : undefined}>
+                  {uploading ? (
+                    "Fayllar navbat bilan yuklanmoqda…"
+                  ) : uploadNote ? (
+                    uploadNote.text
+                  ) : (
+                    <>
+                      <DataText>
+                        {sources.length}/{MAX_SOURCES}
+                      </DataText>{" "}
+                      manba
+                    </>
+                  )}
+                </p>
+
+                <Button
+                  onClick={() => setSourcesConfirmed(true)}
+                  disabled={sources.length === 0 || uploading}
+                >
+                  Davom etish
+                </Button>
+              </>
+            )}
           </>
         )}
       </section>
@@ -457,48 +431,46 @@ export default function NewProjectPage() {
           <h2>Tasdiqlash</h2>
         </div>
 
-        <div className="card" style={{ marginBottom: "var(--sp-5)" }}>
-          <SummaryRow label="Mavzu" value={title || "—"} />
-          <SummaryRow label="Til" value={languageName(language)} />
-          <SummaryRow label="Paket" value={chosenPackage.name} />
-          <SummaryRow label="Narx" value={soum(chosenPackage.price)} mono />
-          <SummaryRow label="Manbalar" value={`${sources.length} ta manba`} />
-        </div>
+        {stage < 3 ? (
+          <p className="flow-locked-note">Manbalar tasdiqlangach ochiladi.</p>
+        ) : (
+          <>
+            <div className="summary">
+              <SummaryRow label="Mavzu" value={title || "—"} />
+              <SummaryRow label="Til" value={languageName(language)} />
+              <SummaryRow label="Paket" value={chosenPackage.name} />
+              <SummaryRow label="Narx" value={soum(chosenPackage.price)} mono />
+              <SummaryRow label="Manbalar" value={`${sources.length} ta`} mono />
+            </div>
 
-        <button
-          type="button"
-          className="btn btn-lg"
-          style={{ background: "var(--gold)", color: "var(--siyoh)", borderColor: "transparent" }}
-          onClick={() => void onEnqueue()}
-          disabled={stage !== 3 || enqueueing}
-        >
-          {enqueueing ? "Boshlanmoqda…" : "Taqdimotni boshlash"}
-        </button>
+            <Button gilded size="lg" onClick={() => void onEnqueue()} loading={enqueueing}>
+              Taqdimotni boshlash
+            </Button>
 
-        <p style={{ ...NOTE_LINE, color: "var(--muted-ink)" }}>
-          Odatda 3–6 daqiqa. Jarayonni loyiha sahifasida kuzatasiz.
-        </p>
+            <p className="field-help">Odatda 3–6 daqiqa. Jarayonni loyiha sahifasida kuzatasiz.</p>
 
-        {enqueueError?.kind === "credit" && (
-          <ErrorState
-            title="Kredit yetarli emas"
-            message={`Hisobingizda ${soum(enqueueError.balance)}, bu paket uchun ${soum(
-              enqueueError.required,
-            )} kerak. To'lov Telegram bot orqali amalga oshiriladi.`}
-          />
-        )}
-        {enqueueError?.kind === "limit" && (
-          <ErrorState
-            title="Kunlik limit"
-            message="Kunlik limitga yetdingiz — ertaga qayta urinib ko'ring."
-          />
-        )}
-        {enqueueError?.kind === "other" && (
-          <ErrorState
-            title="Generatsiya boshlanmadi"
-            message={enqueueError.message}
-            onRetry={() => void onEnqueue()}
-          />
+            {enqueueError?.kind === "credit" && (
+              <ErrorState
+                title="Kredit yetarli emas"
+                message={`Hisobingizda ${soum(enqueueError.balance)}, bu paket uchun ${soum(
+                  enqueueError.required,
+                )} kerak. To'lov Telegram bot orqali amalga oshiriladi.`}
+              />
+            )}
+            {enqueueError?.kind === "limit" && (
+              <ErrorState
+                title="Kunlik limit"
+                message="Kunlik limitga yetdingiz — ertaga qayta urinib ko'ring."
+              />
+            )}
+            {enqueueError?.kind === "other" && (
+              <ErrorState
+                title="Generatsiya boshlanmadi"
+                message={enqueueError.message}
+                onRetry={() => void onEnqueue()}
+              />
+            )}
+          </>
         )}
       </section>
     </AppChrome>

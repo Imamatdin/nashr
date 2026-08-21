@@ -9,8 +9,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppChrome } from "@/components/chrome";
 import {
+  Button,
+  DataText,
   EmptyState,
   ErrorState,
+  FileField,
   GenerationSteps,
   Skeleton,
   StatusBadge,
@@ -61,7 +64,9 @@ export default function ProjectPage() {
   const [sources, setSources] = useState<SourceRow[] | null>(null);
   const [toast, setToast] = useState<{ message: string; danger?: boolean } | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [clearSignal, setClearSignal] = useState(0);
   const [job, setJob] = useState<JobView | null>(null);
+  const [enqueueing, setEnqueueing] = useState(false);
   const [deck, setDeck] = useState<DeckAccessView | null>(null);
   const [shareToken, setShareToken] = useState<string | null>(null);
   const [provenance, setProvenance] = useState<ProvenanceView | null>(null);
@@ -191,6 +196,7 @@ export default function ProjectPage() {
       await uploadToR2(presign, file);
       await registerSource(projectId, presign.storage_key, file.name, session.accessToken);
       if (fileInput.current) fileInput.current.value = "";
+      setClearSignal((value) => value + 1);
       notify(`${file.name} yuklandi`);
       refreshSources(session);
     } catch (uploadError) {
@@ -202,6 +208,7 @@ export default function ProjectPage() {
 
   async function onEnqueue() {
     if (!session || !sources) return;
+    setEnqueueing(true);
     try {
       const view = await enqueueJob(
         projectId,
@@ -212,6 +219,8 @@ export default function ProjectPage() {
       pollJob(view.id, session);
     } catch (enqueueError) {
       notify(String(enqueueError), true);
+    } finally {
+      setEnqueueing(false);
     }
   }
 
@@ -251,13 +260,11 @@ export default function ProjectPage() {
   if (projectError) {
     return (
       <AppChrome active="projects">
-        <div className="card">
-          <ErrorState
-            title="Loyiha ochilmadi"
-            message={projectError}
-            onRetry={session ? () => loadProject(session) : undefined}
-          />
-        </div>
+        <ErrorState
+          title="Loyiha ochilmadi"
+          message={projectError}
+          onRetry={session ? () => loadProject(session) : undefined}
+        />
       </AppChrome>
     );
   }
@@ -265,38 +272,36 @@ export default function ProjectPage() {
   return (
     <AppChrome active="projects">
       {project === null ? (
-        <div className="skeleton" style={{ height: "2.2rem", width: "40%", marginBottom: "var(--sp-5)" }} />
+        <div
+          className="skeleton"
+          style={{ height: "2.2rem", width: "40%", marginBottom: "var(--sp-5)" }}
+        />
       ) : (
-        <div className="page-head">
-          <p className="kicker">Loyiha</p>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "baseline",
-              gap: "var(--sp-4)",
-              flexWrap: "wrap",
-            }}
-          >
+        <div className="page-bar">
+          <div className="page-head">
+            <p className="kicker">Loyiha</p>
             <h1 className="page-title">{project.title}</h1>
-            <StatusBadge status={running ? "processing" : project.status} />
           </div>
+          <StatusBadge status={running ? "processing" : project.status} />
         </div>
       )}
 
       <div className="card">
         <div className="card-title">
           <h2>Manbalar</h2>
+          {sources !== null && sources.length > 0 && (
+            <DataText className="page-count">{sources.length} ta</DataText>
+          )}
         </div>
         {sources === null && <Skeleton lines={2} />}
         {sources !== null && sources.length === 0 && (
           <EmptyState
-            icon="📄"
             title="Manba yuklanmagan"
             hint="Taqdimot faqat siz yuklagan fayllardagi faktlarga tayanadi. PDF, DOCX yoki PPTX yuklang (maks. 20 MB)."
           />
         )}
         {sources !== null && sources.length > 0 && (
-          <div style={{ marginBottom: "var(--sp-4)" }}>
+          <div className="source-list">
             {sources.map((s) => (
               <div key={s.id} className="source-row">
                 <span className="file-chip">{s.file_type}</span>
@@ -305,57 +310,49 @@ export default function ProjectPage() {
             ))}
           </div>
         )}
-        <div className="field-row">
-          <input
-            ref={fileInput}
+        <div className="upload-row">
+          <FileField
+            inputRef={fileInput}
             id="source-file"
             name="source-file"
-            className="input"
-            type="file"
-            autoComplete="off"
             accept={ACCEPTED}
+            disabled={uploading}
+            clearSignal={clearSignal}
+            label="Fayl tanlash"
+            hint="PDF, DOCX, PPTX — maks. 20 MB"
           />
-          <button className="btn btn-ghost" onClick={() => void onUpload()} disabled={uploading}>
-            {uploading ? "Yuklanmoqda…" : "Yuklash"}
-          </button>
+          <Button variant="ghost" onClick={() => void onUpload()} loading={uploading}>
+            {uploading ? "Yuklanmoqda" : "Yuklash"}
+          </Button>
         </div>
       </div>
 
       <div className="card">
         <div className="card-title">
           <h2>Generatsiya</h2>
-          {job && <StatusBadge status={job.status} />}
+          {/* While the press runs, the step line states the status better than a
+              stamp — and the header already carries one. */}
+          {job && !running && <StatusBadge status={job.status} />}
         </div>
 
         {!job && (
           <>
-            <p style={{ color: "var(--muted-ink)" }}>
+            <p className="card-lede">
               Manbalar tayyor bo'lgach, taqdimotni buyurtma qiling. Odatda 3–6 daqiqa davom etadi.
             </p>
-            <button
-              className="btn btn-primary btn-lg"
-              style={{ background: "var(--gold)", color: "var(--siyoh)" }}
+            <Button
+              gilded
+              size="lg"
               onClick={() => void onEnqueue()}
-              disabled={!sources || sources.length === 0 || running}
+              loading={enqueueing}
+              disabled={!sources || sources.length === 0}
             >
               Taqdimot yaratish
-            </button>
+            </Button>
           </>
         )}
 
-        {running && (
-          <>
-            <div className="progress-track">
-              <div
-                className="progress-fill"
-                style={{
-                  width: `${Math.round(((progress.current ?? 0) / (progress.total ?? 7)) * 100)}%`,
-                }}
-              />
-            </div>
-            <GenerationSteps step={progress.step} current={progress.current} />
-          </>
-        )}
+        {running && <GenerationSteps step={progress.step} current={progress.current} />}
 
         {job?.status === "failed" && (
           <ErrorState
@@ -366,9 +363,7 @@ export default function ProjectPage() {
         )}
 
         {job?.status === "completed" && (
-          <p style={{ color: "var(--ok)", fontWeight: 700, marginBottom: 0 }}>
-            Taqdimot tayyor — quyida ko'ring.
-          </p>
+          <p className="card-lede card-lede-ok">Taqdimot tayyor — quyida ko'ring.</p>
         )}
       </div>
 
@@ -377,7 +372,7 @@ export default function ProjectPage() {
           <div className="card">
             <div className="card-title">
               <h2>Taqdimot</h2>
-              <div style={{ display: "flex", gap: "var(--sp-2)", flexWrap: "wrap" }}>
+              <div className="btn-row">
                 {deck.downloads.map((d) => (
                   <a key={d.format} href={d.url} download className="btn btn-ghost">
                     {d.format.toUpperCase()}
@@ -385,7 +380,12 @@ export default function ProjectPage() {
                 ))}
               </div>
             </div>
-            <iframe className="viewer-frame" src={deck.html_url} sandbox="allow-scripts" title="Taqdimot" />
+            <iframe
+              className="viewer-frame"
+              src={deck.html_url}
+              sandbox="allow-scripts"
+              title="Taqdimot"
+            />
           </div>
 
           <div className="card">
@@ -394,38 +394,30 @@ export default function ProjectPage() {
             </div>
             {shareUrl ? (
               <>
-                <p
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: "var(--text-sm)",
-                    wordBreak: "break-all",
-                  }}
-                >
+                <p className="share-url">
                   <a href={shareUrl} target="_blank" rel="noreferrer">
                     {shareUrl}
                   </a>
                 </p>
-                <div style={{ display: "flex", gap: "var(--sp-2)", flexWrap: "wrap" }}>
-                  <button className="btn btn-ghost" onClick={() => void copyShareUrl(shareUrl)}>
+                <div className="btn-row">
+                  <Button variant="ghost" onClick={() => void copyShareUrl(shareUrl)}>
                     Nusxalash
-                  </button>
-                  <button className="btn btn-ghost" onClick={() => void onShare("rotate")}>
+                  </Button>
+                  <Button variant="ghost" onClick={() => void onShare("rotate")}>
                     Havolani yangilash
-                  </button>
-                  <button className="btn btn-danger" onClick={() => void onShare("disable")}>
+                  </Button>
+                  <Button variant="danger" onClick={() => void onShare("disable")}>
                     O'chirish
-                  </button>
+                  </Button>
                 </div>
               </>
             ) : (
               <>
-                <p style={{ color: "var(--muted-ink)" }}>
+                <p className="card-lede">
                   Ommaviy havola taqdimotni istalgan kishiga — kirmasdan — ko'rsatadi. Havolani
                   yangilasangiz, eskisi darhol bekor bo'ladi.
                 </p>
-                <button className="btn btn-primary" onClick={() => void onShare("enable")}>
-                  Ommaviy havola yaratish
-                </button>
+                <Button onClick={() => void onShare("enable")}>Ommaviy havola yaratish</Button>
               </>
             )}
           </div>
@@ -436,7 +428,7 @@ export default function ProjectPage() {
         <div className="card">
           <div className="card-title">
             <h2>Dalillar</h2>
-            <span className="badge">{provenance.total_claims} ta da'vo</span>
+            <DataText className="page-count">{provenance.total_claims} ta da'vo</DataText>
           </div>
           <div className="table-wrap">
             <table className="table">
@@ -452,7 +444,7 @@ export default function ProjectPage() {
                 {provenance.rows.map((row, index) => (
                   <tr key={index}>
                     <td>{row.claim_text}</td>
-                    <td style={{ color: "var(--muted-ink)" }}>{row.quote ?? "—"}</td>
+                    <td className="table-quiet">{row.quote ?? "—"}</td>
                     <td>{row.source_filename ?? "—"}</td>
                     <td>
                       {row.chunk_index === null ? (

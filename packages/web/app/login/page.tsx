@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import Script from "next/script";
-import { GoogleIcon } from "@/components/ui";
+import { Button, GoogleIcon } from "@/components/ui";
 import { telegramLogin, ApiError } from "@/lib/api";
 import { DEFAULT_RETURN_TO, sanitizeReturnTo, stashReturnTo } from "@/lib/return-to";
 import { loadSession } from "@/lib/session";
@@ -112,63 +112,59 @@ export default function LoginPage() {
 
         <div className="card">
           {status.kind === "error" && (
-            <p style={{ color: "var(--danger)", fontSize: "var(--text-sm)", fontWeight: 600 }}>
+            <p className="auth-status" data-danger="true" role="alert">
               {status.message}
             </p>
           )}
-          {working && <p style={{ color: "var(--muted-ink)" }}>{status.message}</p>}
+          {working && <p className="auth-status">{status.message}</p>}
 
           {status.kind === "sent" ? (
-            <div className="state" style={{ padding: "var(--sp-5) 0" }}>
+            <div className="state state-blank">
               <h3>Email yuborildi</h3>
               <p>Pochtangizni oching va xatdagi havolani bosing — shu yerga qaytasiz.</p>
             </div>
           ) : (
             <>
-              <button
-                className="btn btn-ghost btn-lg btn-block"
+              <Button
+                variant="ghost"
+                size="lg"
+                block
                 onClick={() => void signInWithGoogle()}
                 disabled={working}
               >
                 <GoogleIcon />
                 Google bilan kirish
-              </button>
+              </Button>
 
               <div className="divider">yoki email orqali</div>
 
-              <label
-                htmlFor="email"
-                style={{
-                  display: "block",
-                  color: "var(--muted-ink)",
-                  fontSize: "var(--text-sm)",
-                  marginBottom: "var(--sp-2)",
-                }}
-              >
-                Email manzil
-              </label>
-              <input
-                className="input"
-                id="email"
-                name="email"
-                type="email"
-                autoComplete="email"
-                value={email}
-                placeholder="email@example.com"
-                onChange={(event) => setEmail(event.target.value)}
-                style={{ marginBottom: "var(--sp-3)" }}
-              />
-              <button
-                className="btn btn-primary btn-block"
-                onClick={() => void sendMagicLink()}
-                disabled={!email || working}
-              >
+              <div className="field">
+                <label htmlFor="email" className="field-label">
+                  Email manzil
+                </label>
+                <input
+                  className="input"
+                  id="email"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  value={email}
+                  placeholder="email@example.com"
+                  onChange={(event) => setEmail(event.target.value)}
+                />
+              </div>
+
+              <Button block onClick={() => void sendMagicLink()} disabled={!email || working}>
                 Havola yuborish
-              </button>
+              </Button>
             </>
           )}
         </div>
       </div>
+
+      <p className="auth-foot">
+        Kirish orqali manbaga asoslangan nashr qoidalariga rozilik bildirasiz.
+      </p>
     </div>
   );
 }

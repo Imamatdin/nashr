@@ -122,7 +122,11 @@ function eqValue(search, column) {
   return raw.slice(3);
 }
 
-export async function mockSupabase(page) {
+// Options let a shot ask for a state the happy path never reaches (an empty
+// folio list, a failed job) without forking the mock layer; every default
+// reproduces the original behaviour, so journey.mjs is unaffected.
+export async function mockSupabase(page, options = {}) {
+  const { emptyProjects = false } = options;
   await page.route(`${SUPABASE_ORIGIN}/**`, async (route) => {
     const request = route.request();
     if (request.method() === "OPTIONS") {
@@ -132,7 +136,11 @@ export async function mockSupabase(page) {
     const url = new URL(request.url());
     if (url.pathname === "/rest/v1/projects") {
       const id = eqValue(url.searchParams, "id");
-      const rows = id === null ? PROJECT_ROWS : PROJECT_ROWS.filter((row) => row.id === id);
+      const source = emptyProjects ? [] : PROJECT_ROWS;
+      const all = options.shareToken
+        ? source.map((row) => (row.id === "p-1" ? { ...row, share_token: options.shareToken } : row))
+        : source;
+      const rows = id === null ? all : all.filter((row) => row.id === id);
       if (wantsSingle(request)) {
         if (rows.length !== 1) {
           await fulfillJson(route, 406, {
@@ -149,8 +157,8 @@ export async function mockSupabase(page) {
     }
     if (url.pathname === "/rest/v1/sources") {
       const projectId = eqValue(url.searchParams, "project_id");
-      const rows =
-        projectId === null ? SOURCE_ROWS : SOURCE_ROWS.filter((row) => row.project_id === projectId);
+      const all = options.emptySources ? [] : SOURCE_ROWS;
+      const rows = projectId === null ? all : all.filter((row) => row.project_id === projectId);
       if (wantsSingle(request)) {
         await fulfillJson(route, 200, rows[0] ?? null);
         return;
@@ -163,12 +171,66 @@ export async function mockSupabase(page) {
 }
 
 const API_PATHS = new Set([
+  "/jobs",
   "/jobs/job-stub",
+  "/projects",
   "/projects/p-1/deck",
   "/projects/p-1/provenance",
+  "/projects/p-1/share",
+  "/sources",
+  "/sources/presign",
+  "/r2-stub",
 ]);
 
-export async function mockApi(page) {
+// A delivered deck: the chrome around the viewer is what these shots are for,
+// so the iframe points at a blank document rather than a real render.
+const DECK_VIEW = {
+  html_url: "about:blank",
+  html_expires_in: 604800,
+  downloads: [
+    { format: "html", url: "about:blank", expires_in: 604800 },
+    { format: "pdf", url: "about:blank", expires_in: 604800 },
+    { format: "pptx", url: "about:blank", expires_in: 604800 },
+  ],
+};
+
+const PROVENANCE_VIEW = {
+  total_claims: 3,
+  rows: [
+    {
+      claim_text: "Yoritish davri XVII–XVIII asrlarda Yevropada shakllangan.",
+      quote: "The Enlightenment took shape across the long eighteenth century.",
+      source_filename: "yoritish-davri-tarixi.pdf",
+      chunk_index: 12,
+    },
+    {
+      claim_text: "Monteskyoning hokimiyatlar bo'linishi g'oyasi konstitutsiyalarga kirdi.",
+      quote: null,
+      source_filename: "volter-va-monteskye-tahlil.docx",
+      chunk_index: 4,
+    },
+    {
+      claim_text: "Volter matbuot erkinligini asosiy shart deb bilgan.",
+      quote: "Freedom of the press is the first of freedoms.",
+      source_filename: "volter-va-monteskye-tahlil.docx",
+      chunk_index: 9,
+    },
+  ],
+};
+
+const PROJECT_CREATED = {
+  id: "p-1",
+  title: "Yoritish davri: aql-idrok asrining tug'ilishi",
+  project_type: "presentation",
+  status: "draft",
+};
+
+export async function mockApi(page, options = {}) {
+  const job = {
+    ...JOB_VIEW,
+    ...(options.jobStatus ? { status: options.jobStatus } : {}),
+    ...(options.jobError !== undefined ? { error_message: options.jobError } : {}),
+  };
   await page.route(`${API_ORIGIN}/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -181,14 +243,59 @@ export async function mockApi(page) {
       return;
     }
     if (url.pathname === "/jobs/job-stub") {
-      await fulfillJson(route, 200, JOB_VIEW);
+      await fulfillJson(route, 200, job);
+      return;
+    }
+    if (url.pathname === "/projects") {
+      await fulfillJson(route, 200, PROJECT_CREATED);
+      return;
+    }
+    if (url.pathname === "/sources/presign") {
+      await fulfillJson(route, 200, {
+        storage_key: "u-stub/p-1/yoritish-davri-tarixi.pdf",
+        upload_url: `${API_ORIGIN}/r2-stub`,
+        content_type: "application/pdf",
+        expires_in: 900,
+      });
+      return;
+    }
+    // The browser PUTs the bytes straight at the presigned URL; the stub just
+    // has to answer 200 so the register step runs.
+    if (url.pathname === "/r2-stub") {
+      await route.fulfill({ status: 200, headers: CORS_HEADERS, body: "" });
+      return;
+    }
+    if (url.pathname === "/sources") {
+      await fulfillJson(route, 200, SOURCE_ROWS[0]);
+      return;
+    }
+    if (url.pathname === "/jobs") {
+      // The refusal paths the flow has to dress: no credit (402, detail is an
+      // object the client parses) and the daily cap (429).
+      if (options.enqueue === "credit") {
+        await fulfillJson(route, 402, { detail: { balance: 4000, required: 10000 } });
+        return;
+      }
+      if (options.enqueue === "limit") {
+        await fulfillJson(route, 429, { detail: "daily_job_limit" });
+        return;
+      }
+      await fulfillJson(route, 200, job);
+      return;
+    }
+    if (url.pathname === "/projects/p-1/share") {
+      await fulfillJson(route, 200, { share_token: "share-stub-token" });
       return;
     }
     if (url.pathname === "/projects/p-1/deck") {
+      if (options.deckReady) {
+        await fulfillJson(route, 200, DECK_VIEW);
+        return;
+      }
       await fulfillJson(route, 404, { detail: "deck_not_ready" });
       return;
     }
-    await fulfillJson(route, 200, { rows: [], total_claims: 0 });
+    await fulfillJson(route, 200, options.deckReady ? PROVENANCE_VIEW : { rows: [], total_claims: 0 });
   });
 }
 

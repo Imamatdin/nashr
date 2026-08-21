@@ -41,6 +41,7 @@ export function AppChrome({
         <Link href="/projects" className="app-brand">
           Nashr
         </Link>
+        <div className="app-brand-rule" aria-hidden />
         <nav className="app-nav">
           {NAV.map((item) => (
             <Link

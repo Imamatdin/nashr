@@ -13,7 +13,7 @@ import {
 const BASE_URL = (process.env.BASE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 const BASE_ORIGIN = new URL(BASE_URL).origin;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const OUT_DIR = path.resolve(HERE, "..", "..", "review", "p36_shots");
+const OUT_DIR = path.resolve(HERE, "..", "..", "review", "reset_shots");
 
 const results = [];
 

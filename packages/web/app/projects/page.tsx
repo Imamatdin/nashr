@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AppChrome } from "@/components/chrome";
-import { EmptyState, ErrorState, Skeleton, StatusBadge } from "@/components/ui";
+import { DataText, EmptyState, ErrorState, Skeleton, StatusBadge } from "@/components/ui";
 import { type AppSession, loadSession } from "@/lib/session";
 import { createRlsClient } from "@/lib/supabase";
 
@@ -19,6 +19,22 @@ interface ProjectRow {
   title: string;
   type: string;
   status: string;
+  created_at: string | null;
+}
+
+const TYPE_LABEL: Record<string, string> = {
+  presentation: "Taqdimot",
+  article: "Maqola",
+};
+
+// dd.mm.yyyy — a filing date, not a "3 days ago" that ages behind the user's
+// back. Tabular figures keep the column edge straight down the list.
+function filedOn(value: string | null): string {
+  if (!value) return "—";
+  const when = new Date(value);
+  if (Number.isNaN(when.getTime())) return "—";
+  const pad = (part: number) => part.toString().padStart(2, "0");
+  return `${pad(when.getDate())}.${pad(when.getMonth() + 1)}.${when.getFullYear()}`;
 }
 
 export default function ProjectsPage() {
@@ -32,7 +48,7 @@ export default function ProjectsPage() {
     const supabase = createRlsClient(activeSession.accessToken);
     supabase
       .from("projects")
-      .select("id,title,type,status")
+      .select("id,title,type,status,created_at")
       .order("created_at", { ascending: false })
       .then(({ data, error: queryError }) => {
         if (queryError) {
@@ -55,33 +71,22 @@ export default function ProjectsPage() {
 
   return (
     <AppChrome active="projects">
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-end",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: "var(--sp-4)",
-          marginBottom: "var(--sp-5)",
-        }}
-      >
-        <div className="page-head" style={{ marginBottom: 0 }}>
+      <div className="page-bar">
+        <div className="page-head">
           <p className="kicker">Ish stoli</p>
           <h1 className="page-title">Loyihalar</h1>
         </div>
-        <Link
-          href="/new"
-          className="btn btn-primary"
-          style={{ background: "var(--gold)", color: "var(--siyoh)" }}
-        >
-          Yangi loyiha
-        </Link>
+        {/* One action per view: when the folio is empty the gilded moment moves
+            into the empty state, so the two never appear together. */}
+        {projects !== null && projects.length > 0 && (
+          <Link href="/new" className="btn btn-gilded">
+            Yangi loyiha
+          </Link>
+        )}
       </div>
 
       {error && (
-        <div className="card">
-          <ErrorState message={error} onRetry={session ? () => refresh(session) : undefined} />
-        </div>
+        <ErrorState message={error} onRetry={session ? () => refresh(session) : undefined} />
       )}
 
       {projects === null && !error && (
@@ -91,54 +96,39 @@ export default function ProjectsPage() {
       )}
 
       {projects !== null && projects.length === 0 && !error && (
-        <div className="card">
-          <EmptyState
-            icon="🗂️"
-            title="Hozircha loyiha yo'q"
-            hint="Birinchi loyihangizni boshlang — manba yuklaysiz, talablarni aytasiz, taqdimot yig'iladi."
-          >
-            <Link href="/new" className="btn btn-ghost">
-              Yangi loyiha
-            </Link>
-          </EmptyState>
-        </div>
+        <EmptyState
+          title="Hozircha loyiha yo'q"
+          hint="Birinchi loyihangizni boshlang — manba yuklaysiz, talablarni aytasiz, taqdimot yig'iladi."
+        >
+          <Link href="/new" className="btn btn-gilded">
+            Birinchi loyiha
+          </Link>
+        </EmptyState>
       )}
 
       {projects !== null && projects.length > 0 && (
-        <div style={{ display: "grid", gap: "var(--sp-3)" }}>
-          {projects.map((project) => (
-            <Link
-              key={project.id}
-              href={`/projects/${project.id}`}
-              className="card card-hover"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "var(--sp-4)",
-                color: "inherit",
-                textDecoration: "none",
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div
-                  style={{
-                    fontWeight: 600,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {project.title}
-                </div>
-                <div style={{ color: "var(--muted-ink)", fontSize: "var(--text-xs)" }}>
-                  {project.type === "presentation" ? "Taqdimot" : project.type}
-                </div>
-              </div>
-              <StatusBadge status={project.status} />
-            </Link>
-          ))}
-        </div>
+        <>
+          <div className="folio-list">
+            {projects.map((project) => (
+              <Link key={project.id} href={`/projects/${project.id}`} className="folio-row">
+                <span className="folio-row-main">
+                  <span className="folio-row-title">{project.title}</span>
+                  <span className="folio-row-meta">
+                    {TYPE_LABEL[project.type] ?? project.type}
+                    <span aria-hidden>·</span>
+                    <DataText>{project.id.slice(0, 8)}</DataText>
+                  </span>
+                </span>
+                <DataText className="folio-row-date">{filedOn(project.created_at)}</DataText>
+                <StatusBadge status={project.status} />
+                <span className="folio-row-arrow" aria-hidden />
+              </Link>
+            ))}
+          </div>
+          <p className="page-count">
+            <DataText>{projects.length}</DataText> ta loyiha
+          </p>
+        </>
       )}
     </AppChrome>
   );
