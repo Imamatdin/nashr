@@ -127,7 +127,9 @@ def _flow_language(data: dict[str, Any]) -> str:
     return "uz"
 
 
-def _count_stat_bearing_sources(sources: list[dict[str, Any]]) -> int:
+def _count_stat_bearing_sources(  # pyright: ignore[reportUnusedFunction]
+    sources: list[dict[str, Any]],
+) -> int:
     """DEPRECATED: dead since the in-bot flow decision (fed the Mini App URL)."""
 
     return sum(1 for s in sources if str(s.get("file_type", "")) in _STAT_BEARING_FILE_TYPES)
