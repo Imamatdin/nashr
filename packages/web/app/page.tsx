@@ -7,6 +7,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { DitherPlate, GildOnView, InkLine, InkReveal, TiltPlate } from "@/components/motion";
+import { DataText } from "@/components/ui";
 import plates from "@/public/plates/manifest.json";
 
 const decks = {
@@ -70,17 +71,13 @@ export default function LandingPage() {
               </div>
               <div className="ink-css" style={{ marginTop: "2.2rem", animationDelay: "240ms" }}>
                 <div className="flex flex-wrap items-center gap-6">
+                  {/* The press object from the button system rather than the
+                      hand-rolled fill: same lapis, but hover/active/focus-
+                      visible now exist. The gild wrapper stays — this is the
+                      hero's one gold element. */}
                   <GildOnView>
                     <span className="gild-underline inline-block">
-                      <Link
-                        href="/login"
-                        className="inline-flex items-center px-7 py-3.5 font-semibold"
-                        style={{
-                          background: "var(--zangori)",
-                          color: "var(--qogoz)",
-                          borderRadius: "var(--radius)",
-                        }}
-                      >
+                      <Link href="/login" className="btn btn-primary btn-lg">
                         Boshlash
                       </Link>
                     </span>
@@ -406,8 +403,12 @@ export default function LandingPage() {
               <InkLine style={{ marginTop: "3.4rem" }}>
                 <hr className="footnote" />
                 <p className="footnote-text">
-                  3 eksport formati. Boshqa raqamni va&rsquo;da qilmaymiz — sanab
-                  bo&rsquo;lmaydigan narsani sanamaymiz.
+                  {/* A counted fact, so it sets in the data face like every
+                      other number the product asserts — the footnote's whole
+                      point is that this one is countable. */}
+                  <DataText>3</DataText> eksport formati. Boshqa raqamni
+                  va&rsquo;da qilmaymiz — sanab bo&rsquo;lmaydigan narsani
+                  sanamaymiz.
                 </p>
               </InkLine>
             </InkReveal>
@@ -419,14 +420,16 @@ export default function LandingPage() {
           <section className="flex flex-col items-center py-24 text-center">
             <InkReveal>
               <InkLine>
-                <figure className="plate m-0 mx-auto" style={{ maxWidth: "190px" }}>
+                {/* 190px broke "LAVHA VI — USTURLOB" across two lines; the
+                    caption is the plate's one line of type and must set. */}
+                <figure className="plate m-0 mx-auto" style={{ maxWidth: "232px" }}>
                   <DitherPlate
                     src={plates["plate-astrolabe"].full}
                     dither={plates["plate-astrolabe"].dither}
                     alt={plates["plate-astrolabe"].alt}
                     width={plates["plate-astrolabe"].width}
                     height={plates["plate-astrolabe"].height}
-                    sizes="190px"
+                    sizes="232px"
                   />
                   <figcaption className="plate-caption">
                     LAVHA VI — {plates["plate-astrolabe"].title}
@@ -452,15 +455,7 @@ export default function LandingPage() {
                 <div className="flex justify-center">
                   <GildOnView>
                     <span className="gild-underline inline-block">
-                      <Link
-                        href="/login"
-                        className="inline-flex items-center px-7 py-3.5 font-semibold"
-                        style={{
-                          background: "var(--zangori)",
-                          color: "var(--qogoz)",
-                          borderRadius: "var(--radius)",
-                        }}
-                      >
+                      <Link href="/login" className="btn btn-primary btn-lg">
                         Boshlash
                       </Link>
                     </span>
