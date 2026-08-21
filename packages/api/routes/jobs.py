@@ -4,11 +4,13 @@ The FIRST publicly reachable credit-burning surface, so the order of gates is
 load-bearing and spends zero model tokens before rejection:
 
 1. persisted abuse caps (per-user AND per-IP) → 429 with visible counter state;
-2. project ownership → 404 (existence is not leaked to non-owners);
-3. idempotency — an active job for (project, job_type) is returned, not re-run;
-4. entitlement — the existing balance path (``has_sufficient_credits`` +
+2. package/job-type resolution — an explicit non-enqueueable package is 422;
+3. project ownership → 404 (existence is not leaked to non-owners);
+4. tier resolution for an omitted package, off the project row just fetched;
+5. idempotency — an active job for (project, job_type) is returned, not re-run;
+6. entitlement — the existing balance path (``has_sufficient_credits`` +
    ``deduct_for_generation``) → 402 with balance/required, rejected pre-spend;
-5. insert; a lost enqueue race refunds the deduction and returns the winner.
+7. insert; a lost enqueue race refunds the deduction and returns the winner.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
@@ -37,6 +40,11 @@ _PACKAGE_TO_JOB_TYPE: dict[GenerationPackage, JobType] = {
     GenerationPackage.PRESENTATION_PREMIUM: JobType.PRESENTATION_GENERATION,
 }
 
+# Only for project rows that predate migration 010 (package_tier NULL/absent)
+# or carry a tier this route cannot enqueue. Never a substitute for a tier the
+# project actually has.
+_LEGACY_PACKAGE = GenerationPackage.PRESENTATION_STANDARD
+
 
 class SourceRef(BaseModel):
     """One already-uploaded source file, referenced by its R2 key."""
@@ -51,7 +59,10 @@ class EnqueueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     project_id: str = Field(min_length=1, max_length=64)
-    package: GenerationPackage
+    # Omitted means "charge what this project already committed to": the tier
+    # persisted by an earlier enqueue. The workspace re-generate button sends
+    # nothing, so it can no longer silently downgrade a premium project.
+    package: GenerationPackage | None = None
     sources: list[SourceRef] = Field(min_length=1, max_length=_MAX_SOURCES)
     language: str = Field(default="uz", max_length=8)
     formats: list[ExportFormat] | None = None
@@ -82,6 +93,27 @@ def _view(job: GenerationJob, *, existing: bool = False) -> JobView:
         error_message=job.error_message,
         existing=existing,
     )
+
+
+def _persisted_package(project: dict[str, Any]) -> GenerationPackage:
+    """Resolve a project's stored tier, falling back to the legacy package.
+
+    ``dict.get`` rather than indexing: migration 010 is human-applied, so in
+    the window between deploying this code and applying it the column simply
+    is not in the row. An unparseable or non-enqueueable stored value is
+    treated the same as a missing one.
+    """
+
+    stored = project.get("package_tier")
+    if not isinstance(stored, str):
+        return _LEGACY_PACKAGE
+    try:
+        package = GenerationPackage(stored)
+    except ValueError:
+        return _LEGACY_PACKAGE
+    if package not in _PACKAGE_TO_JOB_TYPE:
+        return _LEGACY_PACKAGE
+    return package
 
 
 def _client_ip(request: Request) -> str:
@@ -120,8 +152,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
             },
         )
 
-    job_type = _PACKAGE_TO_JOB_TYPE.get(body.package)
-    if job_type is None:
+    if body.package is not None and body.package not in _PACKAGE_TO_JOB_TYPE:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="package_not_enqueueable",
@@ -130,6 +161,9 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
     project = await request.app.state.db.get_project(body.project_id)
     if project is None or str(project.get("user_id")) != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project_not_found")
+
+    package = body.package if body.package is not None else _persisted_package(project)
+    job_type = _PACKAGE_TO_JOB_TYPE[package]
 
     existing = await queue.get_active_job(body.project_id, job_type)
     if existing is not None:
@@ -159,7 +193,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
             }
         )
 
-    product_type = body.package.value
+    product_type = package.value
     if not await credits.has_sufficient_credits(user_id, product_type):
         balance = await credits.get_balance(user_id)
         raise HTTPException(
@@ -173,7 +207,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
     deduction = await credits.deduct_for_generation(user_id, body.project_id, product_type)
 
     payload: dict[str, Any] = {
-        "package": body.package.value,
+        "package": package.value,
         "product_type": product_type,
         # The exact amount deducted, so a failure refunds what was charged
         # even if PRICING changes between enqueue and refund.
@@ -204,11 +238,32 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
             reason=f"refund:duplicate_enqueue:{exc.existing.id}",
         )
         return _view(exc.existing, existing=True)
+
+    if body.package is not None:
+        # Stamped only for an EXPLICIT choice, and only after the job is safely
+        # queued — persisting the resolved value would freeze the legacy
+        # fallback onto pre-010 projects as if the user had picked it.
+        #
+        # Best-effort: the credits are already spent and the job is already
+        # running, so a stamp that fails (most plausibly because migration 010
+        # is not yet applied to prod) must not turn a successful enqueue into
+        # an error the user sees as "nothing happened, money gone".
+        try:
+            await request.app.state.db.set_project_package_tier(body.project_id, body.package.value)
+        except APIError:
+            logger.warning(
+                "package_tier_stamp_failed project=%s package=%s",
+                body.project_id,
+                body.package.value,
+                exc_info=True,
+            )
+
     logger.info(
-        "job_enqueued project=%s job=%s type=%s user=%s",
+        "job_enqueued project=%s job=%s type=%s package=%s user=%s",
         body.project_id,
         job.id,
         job_type.value,
+        package.value,
         user_id,
     )
     return _view(job)

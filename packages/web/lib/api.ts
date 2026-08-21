@@ -170,7 +170,10 @@ export function enqueueJob(
   projectId: string,
   sources: Array<{ storage_key: string; filename: string }>,
   token: string,
-  packageName = "presentation_standard",
+  // No client-side default: an omitted package means "charge the tier this
+  // project already committed to", which only the server can resolve.
+  // JSON.stringify drops the undefined key, so the body carries no package.
+  packageName?: string,
   language = "uz",
 ): Promise<JobView> {
   return postJson<JobView>(

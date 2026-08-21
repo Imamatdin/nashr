@@ -240,6 +240,18 @@ class DatabaseClient:
             )
         )
 
+    async def set_project_package_tier(self, project_id: str, package_tier: str) -> None:
+        """Stamp the package tier the user paid for onto a project (migration 010)."""
+
+        await asyncio.to_thread(
+            lambda: (
+                self._client.table("projects")
+                .update({"package_tier": package_tier})
+                .eq("id", project_id)
+                .execute()
+            )
+        )
+
     # ---------------------------------------------------------------- sources
 
     async def create_source(

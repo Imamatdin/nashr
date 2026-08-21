@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from postgrest.exceptions import APIError
 
 from packages.api.app import create_app
 from packages.api.services.tokens import mint_app_jwt
@@ -62,6 +63,11 @@ class _FakeDb:
     def __init__(self) -> None:
         self.project_owner: str = str(_USER_ID)
         self.project_exists = True
+        # None = the row carries no package_tier key at all, which is both the
+        # pre-migration-010 shape and a legacy row's shape after it.
+        self.project_tier: str | None = None
+        self.stamps: list[tuple[str, str]] = []
+        self.stamp_raises: Exception | None = None
         self.sources: list[dict[str, Any]] = [
             {
                 "id": _SOURCE_ID,
@@ -74,14 +80,26 @@ class _FakeDb:
     async def get_project(self, project_id: str) -> dict[str, Any] | None:
         if not self.project_exists:
             return None
-        return {"id": project_id, "user_id": self.project_owner}
+        row: dict[str, Any] = {"id": project_id, "user_id": self.project_owner}
+        if self.project_tier is not None:
+            row["package_tier"] = self.project_tier
+        return row
+
+    async def set_project_package_tier(self, project_id: str, package_tier: str) -> None:
+        if self.stamp_raises is not None:
+            raise self.stamp_raises
+        self.stamps.append((project_id, package_tier))
 
     async def get_project_sources(self, project_id: str) -> list[dict[str, Any]]:
         return self.sources
 
 
 class _FakeCredits:
-    PRICING: ClassVar[dict[str, int]] = {"presentation_standard": 10_000}
+    PRICING: ClassVar[dict[str, int]] = {
+        "presentation_basic": 5_000,
+        "presentation_standard": 10_000,
+        "presentation_premium": 15_000,
+    }
 
     def __init__(self) -> None:
         self.sufficient = True
@@ -98,7 +116,7 @@ class _FakeCredits:
         self.deductions.append((user_id, project_id, product_type))
         from types import SimpleNamespace
 
-        return SimpleNamespace(amount=-10_000)
+        return SimpleNamespace(amount=-self.PRICING[product_type])
 
     async def refund(self, user_id: str, project_id: str, amount: int, reason: str) -> None:
         self.refunds.append((user_id, project_id, amount, reason))
@@ -174,7 +192,9 @@ def _body(**overrides: Any) -> dict[str, Any]:
         "language": "uz",
     }
     body.update(overrides)
-    return body
+    # An override of None means "the web client omitted this key entirely",
+    # which is the shape the workspace re-enqueue now posts.
+    return {key: value for key, value in body.items() if value is not None}
 
 
 async def test_enqueue_requires_auth() -> None:
@@ -282,6 +302,96 @@ async def test_explicit_formats_pass_through_unchanged() -> None:
     response = await client.post("/jobs", json=_body(formats=["html"]), headers=_headers())
     assert response.status_code == 200
     assert queue.enqueued[0]["payload"]["formats"] == ["html"]
+
+
+# ------------------------------------------------------- tier persistence (f)
+#
+# The frozen finding: re-enqueueing from the workspace always charged
+# presentation_standard because the tier chosen on /new was never persisted.
+# The tier now rides the project row and drives every later enqueue.
+
+
+async def test_explicit_package_is_charged_and_stamped_after_enqueue() -> None:
+    client, db, credits, queue, _limiter = _client()
+    response = await client.post(
+        "/jobs", json=_body(package="presentation_premium"), headers=_headers()
+    )
+    assert response.status_code == 200
+    assert credits.deductions == [(str(_USER_ID), _PROJECT_ID, "presentation_premium")]
+    payload = queue.enqueued[0]["payload"]
+    assert payload["package"] == "presentation_premium"
+    assert payload["product_type"] == "presentation_premium"
+    # Stamped only AFTER the queue insert succeeded.
+    assert db.stamps == [(_PROJECT_ID, "presentation_premium")]
+
+
+async def test_omitted_package_uses_the_projects_persisted_tier() -> None:
+    client, db, credits, queue, _limiter = _client()
+    db.project_tier = "presentation_premium"
+    response = await client.post("/jobs", json=_body(package=None), headers=_headers())
+    assert response.status_code == 200
+    assert credits.deductions == [(str(_USER_ID), _PROJECT_ID, "presentation_premium")]
+    assert queue.enqueued[0]["payload"]["product_type"] == "presentation_premium"
+    assert queue.enqueued[0]["payload"]["deducted_amount"] == 15_000
+    # The resolved tier is NOT re-stamped: only an explicit choice writes it.
+    assert db.stamps == []
+
+
+async def test_omitted_package_short_balance_quotes_the_persisted_tier_price() -> None:
+    client, db, credits, queue, _limiter = _client()
+    db.project_tier = "presentation_premium"
+    credits.sufficient = False
+    response = await client.post("/jobs", json=_body(package=None), headers=_headers())
+    assert response.status_code == 402
+    assert response.json()["detail"] == {
+        "reason": "insufficient_balance",
+        "balance": 3_000,
+        "required": 15_000,
+    }
+    assert credits.deductions == [] and queue.enqueued == []
+
+
+async def test_omitted_package_on_legacy_row_falls_back_to_standard() -> None:
+    client, db, credits, queue, _limiter = _client()
+    assert db.project_tier is None  # row has no package_tier key at all
+    response = await client.post("/jobs", json=_body(package=None), headers=_headers())
+    assert response.status_code == 200
+    assert credits.deductions == [(str(_USER_ID), _PROJECT_ID, "presentation_standard")]
+    assert queue.enqueued[0]["payload"]["product_type"] == "presentation_standard"
+    assert db.stamps == []
+
+
+async def test_unenqueueable_persisted_tier_falls_back_rather_than_crashing() -> None:
+    client, db, _credits, queue, _limiter = _client()
+    db.project_tier = "article_short"  # impossible post-010, possible pre-010
+    response = await client.post("/jobs", json=_body(package=None), headers=_headers())
+    assert response.status_code == 200
+    assert queue.enqueued[0]["payload"]["product_type"] == "presentation_standard"
+
+
+async def test_explicit_unenqueueable_package_is_still_422() -> None:
+    client, _db, credits, queue, _limiter = _client()
+    response = await client.post("/jobs", json=_body(package="article_short"), headers=_headers())
+    assert response.status_code == 422
+    assert credits.deductions == [] and queue.enqueued == []
+
+
+async def test_failed_stamp_does_not_fail_an_already_charged_enqueue() -> None:
+    # The prod window where migration 010 is deployed in code but not applied:
+    # the column is missing, the stamp errors, the user keeps their job.
+    client, db, credits, queue, _limiter = _client()
+    db.stamp_raises = APIError(
+        {"message": 'column "package_tier" of relation "projects" does not exist', "code": "42703"}
+    )
+    response = await client.post(
+        "/jobs", json=_body(package="presentation_premium"), headers=_headers()
+    )
+    assert response.status_code == 200
+    assert response.json()["existing"] is False
+    assert len(queue.enqueued) == 1
+    # Charged once, refunded never: the stamp is provenance, not the payment.
+    assert credits.deductions == [(str(_USER_ID), _PROJECT_ID, "presentation_premium")]
+    assert credits.refunds == []
 
 
 async def test_poll_returns_progress_to_owner_only() -> None:
