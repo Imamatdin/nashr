@@ -117,6 +117,7 @@ async def run_polling(
     await dp.start_polling(bot)  # pyright: ignore[reportUnknownMemberType]
 
 
+# DEPRECATED: dead since the in-bot flow decision; no bot button opens it. Do not delete.
 MINI_APP_HTML_PATH: Path = Path(__file__).parent / "mini_app" / "presentation_questionnaire.html"
 
 
@@ -152,6 +153,7 @@ def build_aiohttp_app(
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "nashr-bot", "version": "1.0.0"})
 
+    # DEPRECATED route: dead since the in-bot flow decision; nothing links here. Do not delete.
     app.router.add_get("/mini-app/presentation", serve_mini_app)
     app.router.add_get("/health", health)
 

@@ -2,16 +2,19 @@
 
 End-to-end conversation:
 
-    upload sources → (Mini App questionnaire | skip) → tier →
-    payment → generate → deliver
+    upload sources → tier → payment → generate → deliver
 
-The flow parallels :mod:`packages.bot.handlers.article_flow`. The
-distinguishing feature is that pre-generation preferences come from a
-Telegram Mini App rather than a Telegram-native interview — the user
-either submits a JSON payload via Telegram's ``web_app_data`` channel
-or skips entirely and lets
-:meth:`PresentationInterviewEngine.apply_defaults` derive answers from
+The flow parallels :mod:`packages.bot.handlers.article_flow`. It is
+entirely in-bot: there is no Mini App questionnaire. Pre-generation
+preferences are never collected from the user — every path leaves
+``interview_answers`` as ``None`` and
+:meth:`PresentationInterviewEngine.apply_defaults` derives answers from
 the uploaded sources alone.
+
+The Mini App handlers below (``skip_questionnaire``,
+``receive_mini_app_data``) and :func:`build_mini_app_url` are DEPRECATED
+dead code since the in-bot flow decision; they stay registered so stale
+messages carrying old buttons still resolve.
 
 Heavy work is delegated to :class:`PresentationOrchestrator`; this
 module owns the FSM transitions, the progress messages, and the file
@@ -49,7 +52,6 @@ from packages.bot.keyboards import (
     payment_provider_keyboard,
     presentation_approval_keyboard,
     presentation_chat_keyboard,
-    presentation_mini_app_keyboard,
     presentation_output_keyboard,
     tier_keyboard,
     upload_more_keyboard,
@@ -82,7 +84,6 @@ from packages.core.enums import ExportFormat, GenerationPackage
 from packages.core.gemini import GeminiClient
 from packages.core.gemini_tools import FunctionResult, build_function_responses_content
 from packages.core.models.presentation import SlideFix
-from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
 from packages.platform.storage import FileStorage
@@ -96,10 +97,11 @@ MAX_FILE_BYTES: int = 20 * 1024 * 1024
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset(
     {"pdf", "docx", "doc", "txt", "xlsx", "xls", "pptx", "ppt", "jpg", "jpeg", "png"}
 )
+# DEPRECATED: dead since the in-bot flow decision; no live caller. Do not delete.
 MINI_APP_URL_DEFAULT: str = "https://nashr.uz/mini-app/presentation"
 
-# Source types likely to contain headline statistics — used to decide
-# whether the Mini App shows the "headline numbers" question.
+# DEPRECATED: dead since the in-bot flow decision; only fed the deprecated
+# build_mini_app_url "stats" param. Do not delete.
 _STAT_BEARING_FILE_TYPES: frozenset[str] = frozenset({"xlsx", "xls", "csv"})
 
 # Module-local cache keyed by project_id; see module docstring for why
@@ -126,6 +128,8 @@ def _flow_language(data: dict[str, Any]) -> str:
 
 
 def _count_stat_bearing_sources(sources: list[dict[str, Any]]) -> int:
+    """DEPRECATED: dead since the in-bot flow decision (fed the Mini App URL)."""
+
     return sum(1 for s in sources if str(s.get("file_type", "")) in _STAT_BEARING_FILE_TYPES)
 
 
@@ -186,11 +190,10 @@ def build_mini_app_url(
     domain: str = "general",
     people: int = 0,
 ) -> str:
-    """Compose the URL the inline button opens.
+    """Compose the URL the Mini App button opens.
 
-    The button now opens the web login door, which forwards to ``/new``.
-    The ``/new`` page reads ``lang``; the other params ride along for
-    future use.
+    DEPRECATED: dead since the in-bot flow decision; no live caller (only
+    its own unit tests). Kept, not deleted, this run.
     """
 
     params: dict[str, str] = {
@@ -201,8 +204,7 @@ def build_mini_app_url(
         "domain": domain,
     }
     base = base_url.rstrip("/")
-    target = "/new?" + urlencode(params)
-    return f"{base}/login?{urlencode({'returnTo': target})}"
+    return f"{base}/mini-app/presentation?{urlencode(params)}"
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +289,13 @@ async def upload_more(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(PresentationStates.waiting_for_more_sources, F.data == "continue_flow")
-async def continue_to_questionnaire(
-    callback: CallbackQuery, state: FSMContext, config: PlatformConfig
-) -> None:
-    """Show the Mini App opener (or refuse if no sources)."""
+async def continue_to_questionnaire(callback: CallbackQuery, state: FSMContext) -> None:
+    """Advance to tier selection in-bot (or refuse if no sources).
+
+    Preferences are no longer collected here: ``interview_answers`` is
+    set to ``None`` and :meth:`PresentationInterviewEngine.apply_defaults`
+    derives them from the uploaded sources.
+    """
 
     data = await state.get_data()
     lang = _flow_language(data)
@@ -303,30 +308,23 @@ async def continue_to_questionnaire(
         await callback.answer()
         return
 
-    project_id = str(data.get("project_id", ""))
-    stat_count = _count_stat_bearing_sources(sources)
-    mini_app_url = build_mini_app_url(
-        base_url=config.mini_app_base_url,
-        lang=lang,
-        project_id=project_id,
-        stats=stat_count,
-        domain="general",
-    )
+    await state.update_data(interview_answers=None)
 
     if isinstance(callback.message, Message):
         await callback.message.edit_text(
-            labels.open_questionnaire,
-            reply_markup=presentation_mini_app_keyboard(lang, mini_app_url),
+            labels.choose_tier, reply_markup=tier_keyboard(lang, "presentation")
         )
-    await state.set_state(PresentationStates.opening_mini_app)
+    await state.set_state(PresentationStates.choosing_tier)
     await callback.answer()
 
 
 # ---------------------------------------------------------------------------
-# Mini App / Skip
+# Mini App / Skip — DEPRECATED, dead since the in-bot flow decision
 # ---------------------------------------------------------------------------
 
 
+# DEPRECATED: dead since the in-bot flow decision; kept registered only so a
+# stale message carrying the old skip button still resolves. Do not delete.
 @router.callback_query(PresentationStates.opening_mini_app, F.data == "skip_questionnaire")
 async def skip_questionnaire(callback: CallbackQuery, state: FSMContext) -> None:
     """Skip questionnaire; downstream defaults will be applied."""
@@ -345,6 +343,8 @@ async def skip_questionnaire(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
+# DEPRECATED: dead since the in-bot flow decision; kept registered only so a
+# stale message carrying an old Mini App button still resolves. Do not delete.
 @router.message(PresentationStates.opening_mini_app, F.web_app_data)
 async def receive_mini_app_data(message: Message, state: FSMContext) -> None:
     """Receive questionnaire answers from the Mini App.

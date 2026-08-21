@@ -1,17 +1,21 @@
-"""Tests for the presentation flow's Mini App wiring.
+"""Tests for the presentation flow's questionnaire hand-off.
 
 Three handlers are exercised here:
 
-1. :func:`continue_to_questionnaire` — builds the web login-door URL
-   with query params drawn from FSM state and platform config.
-2. :func:`receive_mini_app_data` — receives the ``sendData`` payload
-   Telegram delivers when the user submits the questionnaire, parses
-   it, and advances to tier selection.
-3. :func:`skip_questionnaire` — short-circuits the Mini App and goes
-   straight to tier selection with ``interview_answers=None``.
+1. :func:`continue_to_questionnaire` — the LIVE in-bot path: it goes
+   straight to tier selection with ``interview_answers=None``, and
+   never shows a Mini App (web_app) button.
+2. :func:`receive_mini_app_data` — DEPRECATED, kept registered for
+   stale messages carrying old buttons; parses the ``sendData``
+   payload and advances to tier selection.
+3. :func:`skip_questionnaire` — DEPRECATED for the same reason; goes
+   to tier selection with ``interview_answers=None``.
 
-We also test the URL builder and the helper that serves the Mini App
-HTML from the aiohttp webhook app.
+The :func:`build_mini_app_url` tests below pin the DEPRECATED helper
+(no live caller since the in-bot flow decision); they stay because the
+helper is kept, not deleted. We also test the helper that serves the
+(likewise deprecated but kept) Mini App HTML from the aiohttp webhook
+app.
 """
 
 from __future__ import annotations
@@ -32,17 +36,15 @@ from packages.bot.handlers.presentation_flow import (
     receive_mini_app_data,
     skip_questionnaire,
 )
+from packages.bot.keyboards import tier_keyboard
+from packages.bot.labels import get_bot_labels
 from packages.bot.states import PresentationStates
-from packages.platform.config import PlatformConfig
 
 
-def _make_config(base_url: str = "https://nashr.uz") -> PlatformConfig:
-    return PlatformConfig(
-        supabase_url="",
-        supabase_service_key="",
-        telegram_bot_token="dummy",
-        mini_app_base_url=base_url,
-    )
+def _web_app_buttons(markup: Any) -> list[Any]:
+    """Every button in ``markup`` that opens a Telegram Mini App."""
+
+    return [btn for row in markup.inline_keyboard for btn in row if btn.web_app is not None]
 
 
 def _make_message_spy() -> MagicMock:
@@ -81,12 +83,12 @@ def test_build_mini_app_url_includes_all_required_params() -> None:
         domain="engineering",
         people=5,
     )
-    assert url.startswith("https://nashr.uz/login?returnTo=%2Fnew%3F")
-    assert "lang%3Duz" in url
-    assert "project_id%3Dproj_42" in url
-    assert "stats%3D3" in url
-    assert "domain%3Dengineering" in url
-    assert "people%3D5" in url
+    assert url.startswith("https://nashr.uz/mini-app/presentation?")
+    assert "lang=uz" in url
+    assert "project_id=proj_42" in url
+    assert "stats=3" in url
+    assert "domain=engineering" in url
+    assert "people=5" in url
 
 
 def test_build_mini_app_url_handles_trailing_slash_base() -> None:
@@ -96,8 +98,8 @@ def test_build_mini_app_url_handles_trailing_slash_base() -> None:
         project_id="p1",
         stats=0,
     )
-    assert "//login" not in url
-    assert url.startswith("https://nashr.uz/login?returnTo=%2Fnew%3F")
+    assert "//mini-app" not in url
+    assert url.startswith("https://nashr.uz/mini-app/presentation?")
 
 
 def test_build_mini_app_url_escapes_special_chars_in_values() -> None:
@@ -107,8 +109,8 @@ def test_build_mini_app_url_escapes_special_chars_in_values() -> None:
         project_id="a b&c",
         stats=0,
     )
-    # Two encoding rounds: the inner /new query, then returnTo wrapping it.
-    assert "project_id%3Da%2Bb%2526c" in url
+    # urlencode quotes spaces and ampersands so the URL parses correctly.
+    assert "project_id=a+b%26c" in url
 
 
 # ---------------------------------------------------------------------------
@@ -124,17 +126,17 @@ async def test_continue_to_questionnaire_blocks_when_no_sources(
     msg = _make_message_spy()
     cb = _make_callback_spy(data="continue_flow", message=msg)
 
-    await continue_to_questionnaire(cast(Any, cb), state, _make_config())
+    await continue_to_questionnaire(cast(Any, cb), state)
 
     msg.edit_text.assert_awaited_once()
     text = msg.edit_text.await_args.args[0]
     assert "manba" in text.lower() or "source" in text.lower()
-    # Mini App keyboard must NOT have been attached.
+    # No keyboard on the refusal.
     assert msg.edit_text.await_args.kwargs.get("reply_markup") is None
     assert (await state.get_state()) == PresentationStates.waiting_for_more_sources.state
 
 
-async def test_continue_to_questionnaire_shows_mini_app_button_with_url(
+async def test_continue_to_questionnaire_goes_straight_to_tier_in_bot(
     state: FSMContext,
 ) -> None:
     await state.set_state(PresentationStates.waiting_for_more_sources)
@@ -146,24 +148,22 @@ async def test_continue_to_questionnaire_shows_mini_app_button_with_url(
     msg = _make_message_spy()
     cb = _make_callback_spy(data="continue_flow", message=msg)
 
-    await continue_to_questionnaire(cast(Any, cb), state, _make_config("https://test.example"))
+    await continue_to_questionnaire(cast(Any, cb), state)
 
     msg.edit_text.assert_awaited_once()
+    assert msg.edit_text.await_args.args[0] == get_bot_labels("uz").choose_tier
     markup = msg.edit_text.await_args.kwargs.get("reply_markup")
     assert markup is not None
-    buttons = [btn for row in markup.inline_keyboard for btn in row]
-    web_app_buttons = [b for b in buttons if b.web_app is not None]
-    assert len(web_app_buttons) == 1
-    url = web_app_buttons[0].web_app.url
-    assert url.startswith("https://test.example/login?returnTo=%2Fnew%3F")
-    assert "lang%3Duz" in url
-    assert "project_id%3Dproj_abc" in url
-    # One xlsx source → stats=1.
-    assert "stats%3D1" in url
-    assert (await state.get_state()) == PresentationStates.opening_mini_app.state
+    assert markup == tier_keyboard("uz", "presentation")
+    # The in-bot flow never offers a Mini App button.
+    assert _web_app_buttons(markup) == []
+    data = await state.get_data()
+    assert "interview_answers" in data
+    assert data["interview_answers"] is None
+    assert (await state.get_state()) == PresentationStates.choosing_tier.state
 
 
-async def test_continue_to_questionnaire_counts_no_stat_sources_as_zero(
+async def test_continue_to_questionnaire_tier_keyboard_is_language_aware(
     state: FSMContext,
 ) -> None:
     await state.set_state(PresentationStates.waiting_for_more_sources)
@@ -175,14 +175,13 @@ async def test_continue_to_questionnaire_counts_no_stat_sources_as_zero(
     msg = _make_message_spy()
     cb = _make_callback_spy(data="continue_flow", message=msg)
 
-    await continue_to_questionnaire(cast(Any, cb), state, _make_config())
+    await continue_to_questionnaire(cast(Any, cb), state)
 
+    assert msg.edit_text.await_args.args[0] == get_bot_labels("ru").choose_tier
     markup = msg.edit_text.await_args.kwargs["reply_markup"]
-    web_app_btn = next(
-        btn for row in markup.inline_keyboard for btn in row if btn.web_app is not None
-    )
-    assert "stats%3D0" in web_app_btn.web_app.url
-    assert "lang%3Dru" in web_app_btn.web_app.url
+    assert markup == tier_keyboard("ru", "presentation")
+    assert _web_app_buttons(markup) == []
+    assert (await state.get_state()) == PresentationStates.choosing_tier.state
 
 
 # ---------------------------------------------------------------------------

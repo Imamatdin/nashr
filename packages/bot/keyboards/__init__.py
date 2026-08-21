@@ -255,6 +255,9 @@ def presentation_approval_keyboard(lang: str) -> InlineKeyboardMarkup:
 def presentation_mini_app_keyboard(lang: str, mini_app_url: str) -> InlineKeyboardMarkup:
     """Button that opens the presentation questionnaire Mini App.
 
+    DEPRECATED: dead since the in-bot flow decision — no handler builds
+    this keyboard any more. Kept, not deleted, this run.
+
     A second 'skip' button lets the user accept default settings and
     proceed without filling the questionnaire; the skip path is
     handled by :class:`PresentationInterviewEngine.apply_defaults`.

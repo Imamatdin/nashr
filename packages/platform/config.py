@@ -53,6 +53,7 @@ class PlatformConfig:
     click_merchant_id: str = ""
     click_secret_key: str = ""
     click_service_id: str = ""
+    # DEPRECATED: dead since the in-bot flow decision; no handler reads it. Do not delete.
     mini_app_base_url: str = "https://nashr.uz"
     webhook_url: str = ""
     webhook_port: int = 8080

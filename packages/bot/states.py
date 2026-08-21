@@ -45,10 +45,14 @@ class ArticleStates(StatesGroup):
 class PresentationStates(StatesGroup):
     """Presentation creation funnel.
 
-    Differs from the article flow in that the research interview is
-    replaced by a Mini App questionnaire; ``opening_mini_app`` is the
-    state while the Mini App button is on screen, and
-    ``waiting_for_mini_app`` is set once the user has tapped it.
+    Differs from the article flow in that there is no research interview
+    at all: upload goes straight to tier selection and generation
+    preferences are derived from the sources.
+
+    ``opening_mini_app`` / ``waiting_for_mini_app`` are DEPRECATED and
+    vestigial since the in-bot flow decision — no handler enters them;
+    the deprecated Mini App handlers stay filtered on ``opening_mini_app``
+    so stale messages carrying old buttons still resolve.
 
     After delivery the user enters ``talking_to_brain`` — the conversational
     editing loop (Build 2, Stage 4). Each inbound message runs one brain turn
@@ -61,6 +65,7 @@ class PresentationStates(StatesGroup):
 
     uploading_sources = State()
     waiting_for_more_sources = State()
+    # DEPRECATED: vestigial since the in-bot flow decision. Do not delete.
     opening_mini_app = State()
     waiting_for_mini_app = State()
     choosing_tier = State()
