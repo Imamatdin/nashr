@@ -80,6 +80,58 @@ const PROJECT_ROWS = [
   },
 ];
 
+// A wider folio for the /projects search, filter and sort shots: eight rows
+// spanning every status the chips group and a date spread wide enough that
+// name-sort and date-sort disagree. Opt in with mockSupabase(page, {manyProjects: true}).
+const MANY_PROJECT_ROWS = [
+  ...PROJECT_ROWS,
+  {
+    id: "p-4",
+    title: "Kremniy quyosh panellari samaradorligi: 2020-2026 tahlili",
+    type: "presentation",
+    project_type: "presentation",
+    status: "ready",
+    share_token: null,
+    created_at: "2026-08-12T11:30:00Z",
+  },
+  {
+    id: "p-5",
+    title: "Buyuk Ipak yo'li shaharlari: savdo tarmog'i geografiyasi",
+    type: "presentation",
+    project_type: "presentation",
+    status: "failed",
+    share_token: null,
+    created_at: "2026-08-09T16:48:00Z",
+  },
+  {
+    id: "p-6",
+    title: "Fermentlar kinetikasi: Mixaelis-Menten modeli",
+    type: "article",
+    project_type: "article",
+    status: "sourcing",
+    share_token: null,
+    created_at: "2026-07-31T08:15:00Z",
+  },
+  {
+    id: "p-7",
+    title: "Zamonaviy o'zbek dramaturgiyasida vaqt qatlamlari",
+    type: "article",
+    project_type: "article",
+    status: "interview",
+    share_token: null,
+    created_at: "2026-07-24T19:02:00Z",
+  },
+  {
+    id: "p-8",
+    title: "Amudaryo delta ekotizimi: qayta tiklash stsenariylari",
+    type: "presentation",
+    project_type: "presentation",
+    status: "archived",
+    share_token: null,
+    created_at: "2026-07-06T10:00:00Z",
+  },
+];
+
 const SOURCE_ROWS = [
   {
     id: "s-1",
@@ -126,7 +178,7 @@ function eqValue(search, column) {
 // folio list, a failed job) without forking the mock layer; every default
 // reproduces the original behaviour, so journey.mjs is unaffected.
 export async function mockSupabase(page, options = {}) {
-  const { emptyProjects = false } = options;
+  const { emptyProjects = false, manyProjects = false } = options;
   await page.route(`${SUPABASE_ORIGIN}/**`, async (route) => {
     const request = route.request();
     if (request.method() === "OPTIONS") {
@@ -136,7 +188,7 @@ export async function mockSupabase(page, options = {}) {
     const url = new URL(request.url());
     if (url.pathname === "/rest/v1/projects") {
       const id = eqValue(url.searchParams, "id");
-      const source = emptyProjects ? [] : PROJECT_ROWS;
+      const source = emptyProjects ? [] : manyProjects ? MANY_PROJECT_ROWS : PROJECT_ROWS;
       const all = options.shareToken
         ? source.map((row) => (row.id === "p-1" ? { ...row, share_token: options.shareToken } : row))
         : source;

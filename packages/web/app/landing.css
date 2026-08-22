@@ -1,0 +1,460 @@
+/* Landing — light permanently, Claude Design grammar: paper ground, centred
+   serif hero, one accent fill, hairline-separated blocks, no decoration.
+   Every value is a role token; the only raw reference is the frame interior,
+   which is a deliberate ink ground behind a deck render. */
+
+.lp {
+  --lp-gutter: 24px;
+  --lp-width: 1080px;
+  --lp-frame: var(--flexoki-base-950);
+  --lp-hero: clamp(2.5rem, 5.6vw, 4.25rem);
+  --lp-section: clamp(2rem, 3.2vw, 2.75rem);
+  --lp-band: clamp(72px, 9vw, 132px);
+
+  min-height: 100dvh;
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+.lp-wrap {
+  width: 100%;
+  max-width: calc(var(--lp-width) + var(--lp-gutter) * 2);
+  margin: 0 auto;
+  padding-inline: var(--lp-gutter);
+}
+
+/* ------------------------------------------------------------------ nav */
+
+.lp-nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1px solid var(--line);
+  background: var(--canvas);
+}
+
+.lp-nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 66px;
+}
+
+.lp-wordmark {
+  font-family: var(--font-display);
+  font-size: 1.375rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.lp-wordmark:hover {
+  text-decoration: none;
+}
+
+.lp-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.lp-navlink {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.lp-navlink:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.lp-btn-ink {
+  background: var(--ink);
+  color: var(--canvas);
+  box-shadow: none;
+}
+
+.lp-btn-ink:hover {
+  background: color-mix(in srgb, var(--ink) 86%, var(--canvas));
+}
+
+.lp-pill {
+  border-radius: 999px;
+  padding: 0.5rem 1.1rem;
+}
+
+/* ----------------------------------------------------------------- hero */
+
+.lp-hero {
+  padding-top: clamp(56px, 7vw, 96px);
+  padding-bottom: clamp(48px, 5vw, 72px);
+  text-align: center;
+}
+
+.lp-eyebrow {
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+
+.lp-title {
+  max-width: 18ch;
+  margin: 20px auto 0;
+  font-family: var(--font-display);
+  font-size: var(--lp-hero);
+  font-weight: 700;
+  line-height: 1.06;
+  letter-spacing: -0.028em;
+  text-wrap: balance;
+}
+
+.lp-verb {
+  color: var(--accent-ink);
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.lp-cite {
+  font-family: var(--font-mono);
+  font-size: 0.28em;
+  font-weight: 500;
+  vertical-align: super;
+  letter-spacing: 0;
+  color: var(--accent-ink);
+}
+
+.lp-lede {
+  max-width: 46ch;
+  margin: 24px auto 0;
+  font-size: 1.1875rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  text-wrap: balance;
+}
+
+.lp-cta {
+  margin-top: 32px;
+}
+
+/* ---------------------------------------------------------------- frame */
+
+.lp-figure {
+  margin: 0;
+}
+
+.lp-frame {
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--lp-frame);
+  box-shadow: var(--shadow-hairline);
+}
+
+.lp-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.lp-shot-b {
+  padding-bottom: var(--lp-band);
+}
+
+.lp-caption {
+  margin-top: 16px;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+
+.lp-footnote {
+  max-width: 66ch;
+  margin: 20px 0 0;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+  text-align: left;
+}
+
+.lp-footnote .lp-cite {
+  font-size: 0.8em;
+  vertical-align: baseline;
+}
+
+/* ------------------------------------------------------------ use cases */
+
+.lp-band {
+  padding-block: var(--lp-band);
+}
+
+.lp-band-head {
+  max-width: 24ch;
+  margin: 0 0 clamp(32px, 4vw, 56px);
+  font-family: var(--font-display);
+  font-size: var(--lp-section);
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.022em;
+}
+
+.lp-uses {
+  display: grid;
+  border-top: 1px solid var(--line);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.lp-use {
+  padding: 32px 28px 40px;
+  border-left: 1px solid var(--line);
+}
+
+.lp-uses > .lp-use:nth-child(n + 4) {
+  border-top: 1px solid var(--line);
+}
+
+.lp-use-icon {
+  color: var(--ink-3);
+}
+
+.lp-use-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 18px;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.lp-chip {
+  padding: 2px 8px;
+  border-radius: var(--radius-chip);
+  background: var(--inset);
+  color: var(--ink-2);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.lp-use-body {
+  max-width: 30ch;
+  margin-top: 10px;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------ mechanism */
+
+.lp-rows {
+  border-bottom: 1px solid var(--line);
+}
+
+.lp-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 32px;
+  padding-block: 34px;
+  border-top: 1px solid var(--line);
+}
+
+.lp-row-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-family: var(--font-display);
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.018em;
+}
+
+.lp-row-label svg {
+  flex: none;
+  margin-top: 5px;
+  color: var(--ink-3);
+}
+
+.lp-row-body {
+  max-width: 54ch;
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+/* ----------------------------------------------------------------- flow */
+
+.lp-flow {
+  background: var(--inset);
+  border-block: 1px solid var(--line);
+}
+
+.lp-flow-inner {
+  padding-block: clamp(64px, 7vw, 104px);
+}
+
+.lp-flow-eyebrow {
+  margin-bottom: 28px;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+
+.lp-flow-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: auto auto;
+  gap: 40px;
+}
+
+/* Subgrid keeps the three bodies on one baseline when a title wraps to two
+   lines; browsers without it fall back to the plain two-row stack. */
+.lp-flow-steps > * {
+  display: grid;
+  grid-row: span 2;
+  grid-template-rows: subgrid;
+  gap: 10px;
+}
+
+.lp-step-title {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.lp-step-body {
+  max-width: 32ch;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+/* -------------------------------------------------------------- closing */
+
+.lp-close {
+  padding-block: clamp(96px, 11vw, 168px);
+  text-align: center;
+}
+
+.lp-close-line {
+  max-width: 20ch;
+  margin: 0 auto;
+  font-family: var(--font-display);
+  font-size: var(--lp-section);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+}
+
+.lp-close .lp-cta {
+  margin-top: 36px;
+}
+
+.lp-foot {
+  border-top: 1px solid var(--line);
+}
+
+.lp-foot-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-block: 28px;
+  font-size: 0.875rem;
+  color: var(--ink-2);
+}
+
+/* --------------------------------------------------------------- motion */
+
+.lp-rise {
+  animation: fade-up 480ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.lp-rise-2 {
+  animation-delay: 70ms;
+}
+
+.lp-rise-3 {
+  animation-delay: 140ms;
+}
+
+.lp-rise-4 {
+  animation-delay: 210ms;
+}
+
+/* The global collapse zeroes duration but not delay, which would leave a
+   fill-mode-hidden element blank for the stagger. Drop the animation whole. */
+@media (prefers-reduced-motion: reduce) {
+  .lp-rise {
+    animation: none;
+  }
+}
+
+/* ----------------------------------------------------------- responsive */
+
+@media (max-width: 900px) {
+  .lp-uses {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lp-uses > .lp-use:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+
+  .lp-flow-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* The accent phrase stays unbroken, so the hero size is set by the phrase
+   fitting the narrowest supported gutter (320px), not by taste. */
+@media (max-width: 430px) {
+  .lp {
+    --lp-hero: 2.125rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .lp-nav-inner {
+    height: 58px;
+  }
+
+  .lp-nav-actions {
+    gap: 14px;
+  }
+
+  .lp-title {
+    max-width: none;
+  }
+
+  .lp-frame {
+    border-radius: 12px;
+  }
+
+  .lp-uses,
+  .lp-flow-steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lp-use {
+    padding: 28px 0 32px;
+    border-left: 0;
+  }
+
+  .lp-uses > .lp-use:nth-child(n + 2) {
+    border-top: 1px solid var(--line);
+  }
+
+  .lp-flow-steps {
+    gap: 32px;
+  }
+
+  .lp-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+}

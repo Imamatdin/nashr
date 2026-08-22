@@ -36,10 +36,15 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [theme, setThemeState] = useState<ThemePreference>("system");
   const [systemDark, setSystemDark] = useState(false);
+  // Until the stored preference and the media state are read, this component
+  // knows less than the inline no-flash script already applied to <html>.
+  // Touching the class before then strips it and flashes light after hydration.
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     setThemeState(readPreference(window.localStorage.getItem(STORAGE_KEY)));
     setSystemDark(window.matchMedia(MEDIA).matches);
+    setReady(true);
   }, []);
 
   useEffect(() => {
@@ -53,8 +58,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const resolved = resolveTheme(theme, systemDark, pathname ?? "/");
 
   useEffect(() => {
+    if (!ready) return;
     document.documentElement.classList.toggle("dark", resolved === "dark");
-  }, [resolved]);
+  }, [ready, resolved]);
 
   const setTheme = useCallback((preference: ThemePreference) => {
     setThemeState(preference);
