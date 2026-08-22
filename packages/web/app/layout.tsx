@@ -2,9 +2,11 @@ import type { Metadata } from "next";
 import { IBM_Plex_Mono, Literata, Source_Sans_3 } from "next/font/google";
 import type { ReactNode } from "react";
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
+import { NO_FLASH_SCRIPT } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-// §3 of docs/DESIGN_DIRECTION.md — the only three families that exist.
+// The only three families that exist: display serif, UI sans, machine mono.
 // Self-hosted via next/font (downloaded at build, served from our origin).
 // Cyrillic subsets cover RU/KAA; latin-ext covers oʻ/gʻ/ń/á forms.
 const literata = Literata({
@@ -47,15 +49,19 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     // suppressHydrationWarning: on /login the Telegram bridge stamps
-    // --tg-viewport-* on <html>; attribute-level and expected, not a bug.
-    // The bridge script itself lives in app/login — it cost ~800ms of mobile
-    // main-thread on every page while only the login door reads it.
+    // --tg-viewport-* on <html>, and the no-flash script stamps the theme
+    // class before React hydrates. Attribute-level and expected, not a bug.
     <html
       lang="uz"
       suppressHydrationWarning
       className={cn(literata.variable, sourceSans.variable, plexMono.variable, "font-sans")}
     >
-      <body>{children}</body>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: NO_FLASH_SCRIPT }} />
+      </head>
+      <body>
+        <ThemeProvider>{children}</ThemeProvider>
+      </body>
     </html>
   );
 }

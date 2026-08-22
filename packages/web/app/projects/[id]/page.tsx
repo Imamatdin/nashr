@@ -14,11 +14,11 @@ import {
   EmptyState,
   ErrorState,
   FileField,
-  GenerationSteps,
   Skeleton,
   StatusBadge,
   Toast,
 } from "@/components/ui";
+import { stepStates } from "@/lib/steps";
 import {
   ApiError,
   type DeckAccessView,
@@ -352,7 +352,15 @@ export default function ProjectPage() {
           </>
         )}
 
-        {running && <GenerationSteps step={progress.step} current={progress.current} />}
+        {running && (
+          <ol className="steps">
+            {stepStates(progress, job?.status ?? "queued").map((entry) => (
+              <li key={entry.key} data-state={entry.state}>
+                {entry.label}
+              </li>
+            ))}
+          </ol>
+        )}
 
         {job?.status === "failed" && (
           <ErrorState

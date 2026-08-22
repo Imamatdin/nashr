@@ -1,8 +1,9 @@
 "use client";
 
-// Shared presentational pieces of the workspace. Purely visual — no data
-// fetching, no auth; pages own their state and pass it down.
+// Shared presentational pieces of the app. Purely visual — no data fetching,
+// no auth; pages own their state and pass it down.
 
+import type { LucideIcon } from "lucide-react";
 import type { ComponentPropsWithoutRef, ReactNode, RefObject } from "react";
 import { useEffect, useState } from "react";
 
@@ -12,7 +13,7 @@ type ButtonSize = "md" | "lg";
 type ButtonProps = Omit<ComponentPropsWithoutRef<"button">, "className"> & {
   variant?: ButtonVariant;
   size?: ButtonSize;
-  /** The one-per-view CTA dress: ink plate with a gold underline draw. */
+  /** Inert. Kept so the not-yet-rebuilt views still type-check. */
   gilded?: boolean;
   loading?: boolean;
   block?: boolean;
@@ -25,8 +26,7 @@ const VARIANT_CLASS: Record<ButtonVariant, string> = {
   danger: "btn-danger",
 };
 
-/** The three-dot ink pulse — an ellipsis setting itself, one dot at a time. */
-function InkPulse() {
+function DotPulse() {
   return (
     <span className="btn-pulse" aria-hidden>
       <i />
@@ -39,7 +39,7 @@ function InkPulse() {
 export function Button({
   variant = "primary",
   size = "md",
-  gilded = false,
+  gilded: _gilded = false,
   loading = false,
   block = false,
   className,
@@ -50,7 +50,7 @@ export function Button({
 }: ButtonProps) {
   const classes = [
     "btn",
-    gilded ? "btn-gilded" : VARIANT_CLASS[variant],
+    VARIANT_CLASS[variant],
     size === "lg" ? "btn-lg" : null,
     block ? "btn-block" : null,
     loading ? "btn-loading" : null,
@@ -67,7 +67,7 @@ export function Button({
       aria-busy={loading || undefined}
     >
       <span className="btn-label">{children}</span>
-      {loading && <InkPulse />}
+      {loading && <DotPulse />}
     </button>
   );
 }
@@ -88,35 +88,24 @@ export function DataText({
   );
 }
 
-/**
- * The blank folio: a page with nothing set on it yet. Rules and borders only —
- * the direction bans emoji and icon libraries from the chrome.
- */
-function BlankFolio() {
-  return (
-    <span className="folio-plate" aria-hidden>
-      <i />
-      <i />
-      <i />
-    </span>
-  );
-}
-
 export function EmptyState({
-  /** Kept for source compatibility; the folio plate replaces it. */
-  icon: _icon,
+  icon: Icon,
   title,
   hint,
   children,
 }: {
-  icon?: string;
+  icon?: LucideIcon;
   title: string;
   hint: string;
   children?: ReactNode;
 }) {
   return (
     <div className="state state-blank">
-      <BlankFolio />
+      {Icon && (
+        <span className="state-icon" aria-hidden>
+          <Icon size={18} strokeWidth={1.75} />
+        </span>
+      )}
       <h3>{title}</h3>
       <p>{hint}</p>
       {children}
@@ -134,7 +123,7 @@ export function ErrorState({
   onRetry?: () => void;
 }) {
   return (
-    <div className="state state-error state-note" role="alert">
+    <div className="state state-note" role="alert">
       <h3>{title}</h3>
       <p>{message}</p>
       {onRetry && (
@@ -246,7 +235,7 @@ export function FileField({
       </label>
       <p className="filefield-picked">
         {picked.length === 0 ? (
-          " "
+          " "
         ) : picked.length === 1 ? (
           picked[0]
         ) : (
@@ -255,80 +244,6 @@ export function FileField({
           </>
         )}
       </p>
-    </div>
-  );
-}
-
-// The worker's 7 pipeline steps (progress.step strings), humanized. Keys must
-// match packages/bot/orchestrators/presentation_orchestrator.py verbatim.
-export const STEP_LABELS: ReadonlyArray<{ key: string; label: string }> = [
-  { key: "Processing sources", label: "Manbalar o'qilmoqda" },
-  { key: "Building evidence matrix", label: "Dalillar jamlanmoqda" },
-  { key: "Applying preferences", label: "Talablar hisobga olinmoqda" },
-  { key: "Choosing design direction", label: "Dizayn yo'nalishi tanlanmoqda" },
-  { key: "Creating slide sequence", label: "Slaydlar ketma-ketligi tuzilmoqda" },
-  { key: "Resolving images", label: "Vizuallar tayyorlanmoqda" },
-  { key: "Rendering presentation", label: "Taqdimot yig'ilmoqda" },
-];
-
-/**
- * Progress as typesetting (§4.5). The press sets one line at a time: the
- * current step is the only line in the display serif and the only one carrying
- * the gold caret — it is the view's single gold element while a job runs. The
- * trace is expandable (thinking-state grammar) and open by default, because a
- * user watching a 4-minute job wants to see the queue, not a spinner.
- */
-export function GenerationSteps({ step, current }: { step?: string; current?: number }) {
-  const total = STEP_LABELS.length;
-  const activeIndex = STEP_LABELS.findIndex((entry) => entry.key === step);
-  const done = activeIndex >= 0 ? activeIndex : Math.max(0, Math.min((current ?? 1) - 1, total - 1));
-  const [open, setOpen] = useState(true);
-  const currentLabel = STEP_LABELS[done]?.label ?? STEP_LABELS[0].label;
-
-  return (
-    <div className="press">
-      <button
-        type="button"
-        className="press-head"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <span className="press-now">
-          {currentLabel}
-          <span className="step-caret" aria-hidden />
-        </span>
-        <DataText className="press-count">
-          {done + 1}/{total}
-        </DataText>
-        <span className="press-chevron" aria-hidden data-open={open ? "true" : undefined} />
-      </button>
-
-      <div
-        className="progress-track"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={total}
-        aria-valuenow={done + 1}
-        aria-label="Generatsiya bosqichi"
-      >
-        <div className="progress-fill" style={{ width: `${((done + 1) / total) * 100}%` }} />
-      </div>
-
-      <div className="press-trace" data-open={open ? "true" : undefined}>
-        <div className="press-trace-inner">
-          <ol className="steps">
-            {STEP_LABELS.map((entry, index) => {
-              const state = index < done ? "step-done" : index === done ? "step-current" : "";
-              return (
-                <li key={entry.key} className={`step ${state}`}>
-                  <span className="step-dot" aria-hidden />
-                  <span className="step-label">{entry.label}</span>
-                </li>
-              );
-            })}
-          </ol>
-        </div>
-      </div>
     </div>
   );
 }
