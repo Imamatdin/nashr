@@ -1,0 +1,1406 @@
+/* ============================================================================
+   MARKETING SITE — light only, Flexoki tokens consumed read-only.
+
+   The site is ink on paper: one ground, hairline rules instead of boxes, the
+   display serif doing the talking, one accent fill, gilding once per page.
+   Nothing here writes to the theme system; every value resolves through a
+   role token defined in app/globals.css.
+   ========================================================================= */
+
+/* The app no-flash script stamps .dark on <html> for every route except "/",
+   so a dark-preference visitor would otherwise get a dark document ground and
+   dark scrollbars behind these permanently-light pages. Keying on the
+   marketing root attribute pins the document to paper for marketing routes
+   only — app surfaces keep their .theme-light class untouched. */
+html:has([data-marketing-root]) {
+  color-scheme: light;
+  background: var(--flexoki-paper);
+}
+
+.mkt {
+  --mkt-gutter: 24px;
+  --mkt-width: 1080px;
+  --mkt-narrow: 720px;
+  --mkt-band: clamp(72px, 9vw, 132px);
+  --mkt-hero: clamp(2.5rem, 5.6vw, 4.25rem);
+  --mkt-page: clamp(2.125rem, 4.4vw, 3.125rem);
+  --mkt-section: clamp(1.75rem, 3.2vw, 2.5rem);
+  --mkt-gild: var(--flexoki-yellow-600);
+
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+.mkt-wrap {
+  width: 100%;
+  max-width: calc(var(--mkt-width) + var(--mkt-gutter) * 2);
+  margin: 0 auto;
+  padding-inline: var(--mkt-gutter);
+}
+
+.mkt-main {
+  flex: 1;
+}
+
+.mkt-band {
+  padding-block: var(--mkt-band);
+}
+
+.mkt-band-tight {
+  padding-block: clamp(56px, 6vw, 88px);
+}
+
+.mkt-ruled {
+  border-top: 1px solid var(--line);
+}
+
+/* A page hero already carries its own bottom space; the band under it does not
+   get to add a second one. */
+.mkt-intro + section,
+.mkt-phero + section {
+  padding-top: clamp(28px, 3.5vw, 48px);
+}
+
+/* Two plates side by side, with nothing drawn around them. */
+.mkt-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.mkt-inset {
+  background: var(--inset);
+  border-block: 1px solid var(--line);
+}
+
+/* ------------------------------------------------------------------ header */
+
+.mkt-head {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  border-bottom: 1px solid var(--line);
+  background: var(--canvas);
+}
+
+.mkt-head-inner {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  height: 66px;
+}
+
+.mkt-brand {
+  font-family: var(--font-display);
+  font-size: 1.375rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.mkt-brand:hover {
+  text-decoration: none;
+}
+
+.mkt-nav {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-width: 0;
+}
+
+.mkt-navlink {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.mkt-navlink:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.mkt-navlink[aria-current="page"] {
+  color: var(--ink);
+}
+
+.mkt-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-left: auto;
+}
+
+/* ----------------------------------------------------------------- buttons */
+
+.mkt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0.55rem 1.15rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--canvas);
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition:
+    background-color 140ms ease,
+    transform 90ms ease;
+}
+
+.mkt-btn:hover {
+  background: color-mix(in srgb, var(--ink) 86%, var(--canvas));
+  text-decoration: none;
+}
+
+.mkt-btn:active {
+  transform: translateY(1px);
+}
+
+.mkt-btn-lg {
+  padding: 0.78rem 1.6rem;
+  font-size: 1rem;
+}
+
+.mkt-btn-quiet {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+.mkt-btn-quiet:hover {
+  background: var(--hover-2);
+  color: var(--ink);
+}
+
+.mkt-linkarrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+
+.mkt-linkarrow svg {
+  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.mkt-linkarrow:hover {
+  text-decoration: none;
+}
+
+.mkt-linkarrow:hover svg {
+  transform: translateX(3px);
+}
+
+/* --------------------------------------------------------------- home hero */
+
+.mkt-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.02fr);
+  gap: clamp(28px, 4vw, 56px);
+  align-items: center;
+  padding-block: clamp(40px, 5vw, 76px) clamp(48px, 6vw, 88px);
+}
+
+.mkt-hero-title {
+  font-family: var(--font-display);
+  font-size: var(--mkt-hero);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.mkt-hero-verb {
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+
+.mkt-hero-cite {
+  font-family: var(--font-mono);
+  font-size: 0.3em;
+  font-weight: 500;
+  vertical-align: super;
+  letter-spacing: 0;
+  color: var(--accent-ink);
+}
+
+.mkt-hero-sub {
+  max-width: 44ch;
+  margin-top: 20px;
+  font-size: 1.1875rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.mkt-hero-foot {
+  max-width: 52ch;
+  margin-top: 22px;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.mkt-hero-foot .mkt-hero-cite {
+  font-size: 0.8em;
+  vertical-align: baseline;
+}
+
+/* ------------------------------------------------------------------- ring */
+
+/* Past the content measure the ring runs into the gutter: a hero object, not a
+   framed picture. */
+@media (min-width: 1180px) {
+  .mkt-hero-visual {
+    margin-inline-end: calc(-1 * var(--mkt-gutter));
+  }
+}
+
+/* The ring projects to a wide ellipse; a square box would leave a third of the
+   height empty above and below it. */
+.mkt-ring {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 0.74;
+}
+
+.mkt-ring-poster,
+.mkt-ring-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mkt-ring-poster {
+  object-fit: contain;
+  transition: opacity 700ms ease;
+}
+
+.mkt-ring-poster[data-swapped="true"] {
+  opacity: 0;
+}
+
+.mkt-ring-canvas {
+  animation: fade-in 700ms ease both;
+}
+
+/* --------------------------------------------------------------- composer */
+
+.mkt-prompt {
+  margin-top: 30px;
+}
+
+.mkt-prompt-box {
+  padding: 14px 14px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 22px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  transition: border-color 140ms ease;
+}
+
+.mkt-prompt-box:focus-within {
+  border-color: var(--ink-3);
+}
+
+.mkt-prompt-input {
+  display: block;
+  width: 100%;
+  min-height: 46px;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+}
+
+.mkt-prompt-input::placeholder {
+  color: var(--ink-3);
+}
+
+.mkt-prompt-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.mkt-prompt-hint {
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+.mkt-prompt-send {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--line-strong);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease,
+    transform 90ms ease;
+}
+
+.mkt-prompt-send[data-armed="true"] {
+  background: var(--ink);
+  color: var(--canvas);
+}
+
+.mkt-prompt-send:active {
+  transform: scale(0.94);
+}
+
+.mkt-prompt-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.mkt-prompt-example {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 6px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.mkt-prompt-example:hover {
+  background: var(--hover-2);
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------------ steps */
+
+.mkt-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(24px, 3vw, 40px);
+}
+
+.mkt-step-n {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+.mkt-step-title {
+  margin-top: 10px;
+  font-family: var(--font-display);
+  font-size: 1.1875rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.mkt-step-body {
+  margin-top: 8px;
+  margin-bottom: 18px;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------- provenance */
+
+.mkt-prov {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.mkt-prov-card {
+  padding: 18px 20px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.mkt-prov-source {
+  background: var(--inset);
+}
+
+.mkt-prov-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.mkt-prov-claim {
+  margin-top: 10px;
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+.mkt-prov-mark {
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  font-weight: 500;
+  color: var(--accent-ink);
+}
+
+.mkt-prov-claim .mkt-prov-mark {
+  margin-left: 2px;
+  vertical-align: super;
+  font-size: 0.6em;
+}
+
+.mkt-prov-quote {
+  margin-top: 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--mkt-gild);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.mkt-prov-meta {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+/* The tie between claim and source: a hairline with one node on it. */
+.mkt-prov-tie {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  height: 34px;
+}
+
+.mkt-prov-tie::before {
+  content: "";
+  width: 1px;
+  background: var(--line-strong);
+}
+
+.mkt-prov-node {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  margin-top: 13px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ------------------------------------------------- interior intro (/maqola) */
+
+.mkt-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.88fr);
+  gap: clamp(28px, 4vw, 56px);
+  align-items: center;
+  padding-top: clamp(40px, 5vw, 72px);
+  padding-bottom: clamp(40px, 5vw, 64px);
+}
+
+.mkt-plate {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 0.92;
+}
+
+.mkt-plate-poster,
+.mkt-plate-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mkt-plate-poster {
+  object-fit: contain;
+  transition: opacity 700ms ease;
+}
+
+.mkt-plate-poster[data-swapped="true"] {
+  opacity: 0;
+}
+
+.mkt-plate-canvas {
+  animation: fade-in 700ms ease both;
+}
+
+@media (max-width: 979px) {
+  .mkt-intro {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mkt-intro-visual {
+    width: min(100%, 420px);
+    margin-inline: auto;
+  }
+}
+
+/* --------------------------------------------------------------- page hero */
+
+.mkt-phero {
+  padding-top: clamp(48px, 6vw, 84px);
+  padding-bottom: clamp(40px, 5vw, 64px);
+}
+
+.mkt-eyebrow {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* Gilding is expensive: exactly one gold mark per page, and it is a rule,
+   never text (yellow-600 on paper is 3.39:1). */
+.mkt-eyebrow::after {
+  content: "";
+  width: 44px;
+  height: 2px;
+  background: var(--mkt-gild);
+}
+
+.mkt-page-title {
+  max-width: 20ch;
+  margin-top: 24px;
+  font-family: var(--font-display);
+  font-size: var(--mkt-page);
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.026em;
+  text-wrap: balance;
+}
+
+.mkt-lede {
+  max-width: 58ch;
+  margin-top: 22px;
+  font-size: 1.1875rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mkt-phero-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  margin-top: 32px;
+}
+
+/* ---------------------------------------------------------------- sections */
+
+.mkt-sec-head {
+  margin-bottom: clamp(32px, 4vw, 56px);
+}
+
+.mkt-folio {
+  display: block;
+  margin-bottom: 14px;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+}
+
+.mkt-sec-title {
+  max-width: 24ch;
+  font-family: var(--font-display);
+  font-size: var(--mkt-section);
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+}
+
+.mkt-sec-lede {
+  max-width: 62ch;
+  margin-top: 18px;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+/* --------------------------------------------------- claim + visual rhythm */
+
+/* A ruled band already drew the line above its first claim; the claim must not
+   draw a second, shorter one under it. */
+.mkt-ruled > .mkt-wrap > .mkt-claim:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.mkt-claim {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: clamp(32px, 5vw, 72px);
+  align-items: center;
+  padding-block: clamp(48px, 6vw, 80px);
+  border-top: 1px solid var(--line);
+}
+
+.mkt-claim-flip .mkt-claim-text {
+  order: 2;
+}
+
+.mkt-claim-title {
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 2.4vw, 1.9rem);
+  font-weight: 700;
+  line-height: 1.16;
+  letter-spacing: -0.02em;
+}
+
+.mkt-claim-body {
+  max-width: 46ch;
+  margin-top: 16px;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+.mkt-claim-body + .mkt-claim-body {
+  margin-top: 14px;
+}
+
+.mkt-claim-note {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+/* -------------------------------------------------------------- asset slot */
+
+.mkt-slot-figure-wrap {
+  margin: 0;
+}
+
+.mkt-slot {
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.mkt-slot-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--inset);
+}
+
+.mkt-slot-dots {
+  display: flex;
+  gap: 5px;
+}
+
+.mkt-slot-dots i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.mkt-slot-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--canvas);
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mkt-slot-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: clamp(28px, 5vw, 56px) 24px;
+  text-align: center;
+  background:
+    repeating-linear-gradient(
+      -45deg,
+      transparent 0 9px,
+      color-mix(in srgb, var(--line) 55%, transparent) 9px 10px
+    ),
+    var(--surface);
+}
+
+.mkt-slot-figure {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.mkt-slot-tag {
+  padding: 3px 10px;
+  border-radius: var(--radius-chip);
+  background: var(--canvas);
+  box-shadow: var(--shadow-hairline);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.mkt-slot-label {
+  max-width: 40ch;
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.mkt-slot-note {
+  max-width: 46ch;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--ink-3);
+}
+
+/* Colour alone does not distinguish a link inside running text. */
+.mkt-caption a:not(.mkt-linkarrow),
+.mkt-prose a,
+.mkt-faq-a a,
+.mkt-tier-desc a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
+.mkt-caption {
+  margin-top: 14px;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--ink-3);
+}
+
+/* -------------------------------------------------------------------- grid */
+
+.mkt-grid {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mkt-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mkt-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 28px 26px 32px;
+  background: var(--canvas);
+}
+
+.mkt-cell-n {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+.mkt-cell-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-size: 1.1875rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.mkt-cell-body {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mkt-chip {
+  padding: 2px 8px;
+  border-radius: var(--radius-chip);
+  background: var(--inset);
+  color: var(--ink-2);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ----------------------------------------------------------------- pricing */
+
+.mkt-tiers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.mkt-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 26px 24px 28px;
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.mkt-tier[data-featured="true"] {
+  box-shadow:
+    0 0 0 1px var(--ink),
+    0 8px 24px rgb(28 27 26 / 8%);
+}
+
+.mkt-tier-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.mkt-tier-tag {
+  padding: 2px 8px;
+  border-radius: var(--radius-chip);
+  background: var(--ink);
+  color: var(--canvas);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mkt-tier-price {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.mkt-tier-desc {
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mkt-tier-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+
+.mkt-tier-list li {
+  display: flex;
+  gap: 10px;
+  line-height: 1.5;
+}
+
+/* A hairline tick, not a typographic dash: the list marker belongs to the same
+   rule grammar as the rest of the page. */
+.mkt-tier-list li::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 1px;
+  margin-top: 0.65em;
+  background: var(--line-strong);
+}
+
+.mkt-tier-foot {
+  margin-top: auto;
+  padding-top: 18px;
+}
+
+.mkt-table-scroll {
+  overflow-x: auto;
+}
+
+.mkt-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+}
+
+.mkt-table th,
+.mkt-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.mkt-table thead th {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.mkt-table tbody th {
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.mkt-table td {
+  color: var(--ink-2);
+}
+
+.mkt-table td.mkt-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------- FAQ */
+
+.mkt-faq {
+  border-top: 1px solid var(--line);
+}
+
+.mkt-faq-item {
+  border-bottom: 1px solid var(--line);
+}
+
+.mkt-faq-q {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  padding-block: 20px;
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--ink);
+  list-style: none;
+}
+
+.mkt-faq-q::-webkit-details-marker {
+  display: none;
+}
+
+.mkt-faq-q::after {
+  content: "+";
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 1.125rem;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.mkt-faq-item[open] .mkt-faq-q::after {
+  content: "−";
+}
+
+.mkt-faq-a {
+  max-width: 68ch;
+  padding-bottom: 22px;
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------------- prose */
+
+.mkt-prose {
+  max-width: var(--mkt-narrow);
+  font-size: 1.0625rem;
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+
+.mkt-prose h2 {
+  margin-top: 44px;
+  margin-bottom: 14px;
+  font-size: 1.375rem;
+  letter-spacing: -0.018em;
+}
+
+.mkt-prose h3 {
+  margin-top: 30px;
+  margin-bottom: 10px;
+  font-size: 1.0625rem;
+}
+
+.mkt-prose p + p {
+  margin-top: 14px;
+}
+
+.mkt-prose ul {
+  margin: 14px 0 0;
+  padding-left: 20px;
+}
+
+.mkt-prose li + li {
+  margin-top: 8px;
+}
+
+.mkt-prose-meta {
+  margin-bottom: 28px;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+/* --------------------------------------------------------------------- CTA */
+
+.mkt-close {
+  padding-block: clamp(80px, 10vw, 148px);
+  text-align: center;
+}
+
+.mkt-close-line {
+  max-width: 22ch;
+  margin: 0 auto;
+  font-family: var(--font-display);
+  font-size: var(--mkt-section);
+  font-weight: 700;
+  line-height: 1.14;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+}
+
+.mkt-close-sub {
+  max-width: 52ch;
+  margin: 18px auto 0;
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mkt-close-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 34px;
+}
+
+/* ------------------------------------------------------------------ footer */
+
+.mkt-foot {
+  border-top: 1px solid var(--line);
+  background: var(--inset);
+}
+
+.mkt-foot-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr));
+  gap: 40px;
+  padding-block: clamp(48px, 6vw, 72px);
+}
+
+.mkt-foot-brand {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.mkt-foot-tag {
+  max-width: 34ch;
+  margin-top: 10px;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.mkt-foot-col h2 {
+  margin-bottom: 14px;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.mkt-foot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mkt-foot-list a {
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+
+.mkt-foot-list a:hover {
+  color: var(--ink);
+}
+
+.mkt-foot-base {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-block: 22px;
+  border-top: 1px solid var(--line);
+  font-size: 0.875rem;
+  color: var(--ink-3);
+}
+
+.mkt-foot-legal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+
+.mkt-foot-legal a {
+  color: var(--ink-3);
+}
+
+.mkt-foot-legal a:hover {
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------------ motion */
+
+/* Ink-reveal, the safe half of it. A scroll-driven fade on the CONTENT was
+   built and cut: animation-timeline holds anything below the fold at the 0%
+   keyframe, so text is invisible in print, in any non-scrolling context, and
+   in every full-page screenshot the design gate runs on. What survives is the
+   hero load stagger — finite, on-screen, and never hiding a paragraph. */
+.mkt-rise {
+  animation: fade-up 520ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.mkt-rise-2 {
+  animation-delay: 80ms;
+}
+
+.mkt-rise-3 {
+  animation-delay: 160ms;
+}
+
+.mkt-rise-4 {
+  animation-delay: 240ms;
+}
+
+/* The rules are drawn as the page is read. Worst case in a browser without
+   scroll-driven animations, or in print, is a hairline that is simply there
+   from the start — the failure mode is a missing animation, never missing
+   content. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) and (min-width: 761px) {
+    .mkt-claim,
+    .mkt-close {
+      border-top-color: transparent;
+      position: relative;
+    }
+
+    .mkt-claim::before,
+    .mkt-close::before {
+      content: "";
+      position: absolute;
+      inset-inline: 0;
+      top: -1px;
+      height: 1px;
+      background: var(--line);
+      transform-origin: left center;
+      animation: rule-draw 1ms linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 90%;
+    }
+  }
+}
+
+@keyframes rule-draw {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* The global reduce rule zeroes duration but not delay, which would leave a
+   fill-mode-hidden element blank for the length of the stagger. */
+@media (prefers-reduced-motion: reduce) {
+  .mkt-rise {
+    animation: none;
+  }
+}
+
+/* -------------------------------------------------------------- responsive */
+
+@media (max-width: 1000px) {
+  .mkt-foot-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 32px;
+  }
+}
+
+/* The ring drops under the hero copy before the columns get too narrow to set
+   a headline in; below 768px it is never a canvas at all, only the poster. */
+@media (max-width: 980px) {
+  .mkt-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The headline stays first on a phone: it is the fastest thing on the page to
+     paint, and putting the poster above it made an image the LCP element. */
+  .mkt-hero-visual {
+    width: min(100%, 460px);
+    margin-top: 8px;
+    margin-inline: auto;
+  }
+
+}
+
+@media (max-width: 900px) {
+  .mkt-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mkt-tiers {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mkt-claim {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 28px;
+  }
+
+  .mkt-claim-flip .mkt-claim-text {
+    order: 0;
+  }
+}
+
+/* Below 760px the header goes two-row: identity and the one CTA on top, the
+   section nav under it as a scroll strip. No disclosure button, so the whole
+   marketing shell stays server-rendered. */
+@media (max-width: 760px) {
+  .mkt-head-inner {
+    flex-wrap: wrap;
+    gap: 0 16px;
+    height: auto;
+    padding-top: 12px;
+  }
+
+  .mkt-actions {
+    gap: 14px;
+  }
+
+  .mkt-nav {
+    order: 3;
+    width: 100%;
+    margin-top: 10px;
+    padding-bottom: 10px;
+    gap: 18px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .mkt-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mkt-steps {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 32px;
+  }
+}
+
+@media (max-width: 640px) {
+  .mkt {
+    --mkt-gutter: 20px;
+  }
+
+  /* On a phone the headline is the hero and the ring supports it. Keeping the
+     ring under 360px also keeps the largest painted element TEXT, which paints
+     at first contentful paint instead of waiting on an image decode. */
+  .mkt-hero-visual {
+    width: min(100%, 340px);
+  }
+
+  .mkt-grid,
+  .mkt-grid-2,
+  .mkt-pair {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mkt-foot-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mkt-cell {
+    padding: 24px 20px 26px;
+  }
+}
