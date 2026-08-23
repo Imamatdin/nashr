@@ -1,246 +1,237 @@
-// Landing — light permanently, Claude Design grammar: a centred serif claim,
-// one accent fill, a real deck render under it, then hairline-separated
-// blocks. Server component: nothing here holds state.
+// The home page. Light permanently, Claude Design grammar: a serif claim, one
+// accent fill, a real composer, and hairline-separated blocks under it. Section
+// order is fixed: hero, proof, how it works, the differentiator, pricing,
+// questions. Server component — the only client islands are the composer and
+// the ring gate, and both load after the page is painted.
+//
+// "/" cannot live in the (marketing) route group: two files would claim the
+// same route. It wraps itself in the same MarketingShell instead.
 
-import {
-  BarChart3,
-  BookOpen,
-  FileDown,
-  FileText,
-  GraduationCap,
-  Link2,
-  NotebookPen,
-  Presentation,
-  Quote,
-  ShieldX,
-} from "lucide-react";
-import Image from "next/image";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import type { Metadata } from "next";
 import Link from "next/link";
-import "./landing.css";
+import { AssetSlot } from "@/components/marketing/asset-slot";
+import { Faq } from "@/components/marketing/faq";
+import { ROUTES, startHref } from "@/components/marketing/links";
+import { TierCards } from "@/components/marketing/pricing-cards";
+import { PromptTeaser } from "@/components/marketing/prompt-teaser";
+import { ProvenanceFigure } from "@/components/marketing/provenance-figure";
+import { HeroRing } from "@/components/marketing/ring/hero-ring";
+import { ArrowLink, Band, CloseCta, FounderCopy, SectionHead } from "@/components/marketing/section";
+import { MarketingShell } from "@/components/marketing/shell";
 
-const DECKS = {
-  criticalPoint: {
-    src: "/decks/sco2-critical-point.jpg",
-    alt: "Nashr dvigateli chiqargan slayd: 31°C va 73.8 bar chegarasi haqidagi sarlavha, to‘rtta dalil bandi va CO₂ ning faza diagrammasi",
-  },
-  integration: {
-    src: "/decks/sco2-integration.jpg",
-    alt: "Nashr dvigateli chiqargan slayd: sarlavha, izohli xatboshi va markazda chip, rack va inshoot halqalarini ko‘rsatuvchi doiraviy sxema",
-  },
-} as const;
+export const metadata: Metadata = {
+  title: "Nashr — manbaga asoslangan taqdimotlar",
+  description:
+    "Nashr har bir fikrni manbaga bog‘laydi: yuklangan hujjatlardan bir urinishda nashr sifatidagi taqdimot. HTML, PDF va PPTX — uchala format ham asosiy.",
+};
 
-const USES = [
+const RING_SLOTS = 12;
+const RING_DIR = path.join(process.cwd(), "public", "marketing", "ring");
+
+// Read once at build: the founder drops 01.png … 12.png into public/marketing/
+// ring/ and the next build picks them up. A slot without a file stays empty and
+// the ring paints its own plate there, so the composition is never short.
+function ringTiles(): string[] {
+  return Array.from({ length: RING_SLOTS }, (_, index) => {
+    const name = `${String(index + 1).padStart(2, "0")}.png`;
+    return existsSync(path.join(RING_DIR, name)) ? `/marketing/ring/${name}` : "";
+  });
+}
+
+const STEPS = [
   {
-    icon: Presentation,
-    title: "Taqdimot",
-    soon: false,
-    body: "Manbadan chiqqan slaydlar. HTML, PDF va PPTX bitta buyurtmadan.",
+    key: "manba",
+    n: "01",
+    title: "Manba yuklaysiz",
+    body: "PDF, DOCX, PPTX yoki rasm. Fayl tekshiruvdan o‘tadi va bo‘laklarga ajratiladi.",
+    slot: "Manba yuklash: fayllar ro‘yxati va tekshiruv holati",
+    file: "public/marketing/shots/step-sources.png",
   },
   {
-    icon: FileText,
-    title: "Maqola",
-    soon: true,
-    body: "Dalil jadvali asosida bo‘lim-bo‘lim yoziladi, havolalari bilan.",
+    key: "savol",
+    n: "02",
+    title: "Savollarga javob berasiz",
+    body: "Dvigatel yetishmayotgan joyni so‘raydi. Javobingiz dalil sifatida ishga kiradi.",
+    slot: "Savol-javob: dvigatel so‘raydi, javob saqlanadi",
+    file: "public/marketing/shots/step-interview.png",
   },
   {
-    icon: GraduationCap,
-    title: "Dissertatsiya",
-    soon: true,
-    body: "Bob tuzilmasi, tayanch adabiyotlar va yagona iqtibos uslubi.",
-  },
-  {
-    icon: NotebookPen,
-    title: "Referat",
-    soon: true,
-    body: "Kirish, asosiy qism, xulosa. So‘ralgan hajmda, ortiqchasisiz.",
-  },
-  {
-    icon: BookOpen,
-    title: "Kurs ishi",
-    soon: true,
-    body: "Nazariy va amaliy boblar, ilovalar va adabiyotlar ro‘yxati.",
-  },
-  {
-    icon: BarChart3,
-    title: "Hisobot",
-    soon: true,
-    body: "Tahlil, natijalar va tavsiyalar aniq va tekshiriladigan tuzilmada.",
+    key: "taqdimot",
+    n: "03",
+    title: "Dalilga tayangan taqdimot olasiz",
+    body: "HTML, PDF va PPTX bitta ishdan chiqadi — har bir slayd manbasi bilan.",
+    slot: "Tayyor taqdimot: slayd va uning manbasi",
+    file: "public/marketing/shots/step-deck.png",
   },
 ] as const;
 
-const MECHANISM = [
+const FAQ = [
   {
-    icon: Link2,
-    label: "Da’vo manbaga bog‘lanadi",
-    body: "Slaydga chiqqan har bir raqam, ta’rif va iqtibos siz yuklagan hujjatning aniq bo‘lagidan keladi. Bog‘lanmagan gap chiqishga yetib bormaydi.",
+    q: "Bu aldash emasmi?",
+    a: (
+      <>
+        Nashr siz o‘rningizga o‘ylab bermaydi: u faqat siz bergan manbadan yozadi va har bir gapning
+        qayerdan kelganini ko‘rsatadi. Ishni topshirish va uning mazmuni uchun javobgarlik sizda
+        qoladi.
+      </>
+    ),
   },
   {
-    icon: ShieldX,
-    label: "Tanqidchi rad etadi",
-    body: "Ichki tekshiruvchi manbada yo‘q raqamni yoki mavjud bo‘lmagan adabiyotni topsa, uni o‘tkazmaydi: bo‘limni qaytaradi va qayta yozdiradi.",
+    q: "Manbam bo‘lmasa nima bo‘ladi?",
+    a: (
+      <>
+        Manbasiz ish boshlanmaydi. Hujjatingiz bo‘lmasa, avval uni yuklang — dvigatel o‘zidan dalil
+        to‘qimaydi.
+      </>
+    ),
   },
   {
-    icon: Quote,
-    label: "Manba — bezak emas",
-    body: "Har bir slayd o‘z manbasini yonida olib yuradi. Ustoz so‘raganda ochib ko‘rsatasiz, qayta izlab o‘tirmaysiz.",
+    q: "Qaysi tillarda ishlaydi?",
+    a: <>O‘zbekcha, qoraqalpoqcha, ruscha va inglizcha.</>,
   },
   {
-    icon: FileDown,
-    label: "Uch formatda olasiz",
-    body: "HTML interaktiv brauzerda ochiladi, PDF chop etishga tayyor, PPTX PowerPointda tahrirlanadi. Uchalasi ham asosiy; biri ikkinchisining o‘rnini bosuvchi emas.",
+    q: "Qanday fayllar chiqadi?",
+    a: (
+      <>
+        Uchtasi ham: interaktiv HTML, chop etishga tayyor PDF va PowerPointda ochiladigan PPTX.
+        Yuklab olish havolasi yetti kun amal qiladi.
+      </>
+    ),
   },
-] as const;
+  {
+    q: "Narxi qancha?",
+    a: (
+      <>
+        Bitta taqdimot 5 000 so‘mdan boshlanadi; farq AI rasmlar va tahrirlar sonida.{" "}
+        <Link href={ROUTES.pricing}>Narxlar sahifasi</Link> hammasini ochiq yozadi.
+      </>
+    ),
+  },
+  {
+    q: "Ustozim tekshira oladimi?",
+    a: (
+      <>
+        Ha. Ulashish havolasini yuborasiz: ishni brauzerda ochadi va har bir da’vo yonida uning
+        manbasini ko‘radi.
+      </>
+    ),
+  },
+];
 
-const FLOW = [
-  {
-    title: "Telegramda yoki brauzerda boshlaysiz",
-    body: "Mavzuni yozasiz yoki hujjatni tashlaysiz: PDF, DOCX, PPTX. Fayl avval tekshiruvdan o‘tadi.",
-  },
-  {
-    title: "Ish stolida kuzatasiz",
-    body: "Manbalar, ajratilgan bo‘laklar va yig‘ilayotgan slaydlar ochiq turadi. Qaysi gap qayerdan kelgani ko‘rinadi.",
-  },
-  {
-    title: "Uch formatda olasiz",
-    body: "HTML, PDF va PPTX bitta ishdan chiqadi. Yuklab olish havolalari yetti kun amal qiladi.",
-  },
-] as const;
+export default function HomePage() {
+  const tiles = ringTiles();
 
-export default function LandingPage() {
   return (
-    <div className="theme-light lp">
-      <header className="lp-nav">
-        <div className="lp-wrap lp-nav-inner">
-          <Link href="/" className="lp-wordmark">
-            Nashr
-          </Link>
-          <nav className="lp-nav-actions">
-            <Link href="/login" className="lp-navlink">
-              Kirish
-            </Link>
-            <Link href="/login" className="btn lp-btn-ink lp-pill">
-              Boshlash
-            </Link>
-          </nav>
-        </div>
-      </header>
-
-      <main>
-        <section className="lp-wrap lp-hero">
-          <p className="lp-eyebrow lp-rise">Manbaga asoslangan taqdimotlar</p>
-          <h1 className="lp-title lp-rise lp-rise-2">
+    <MarketingShell>
+      <section className="mkt-wrap mkt-hero">
+        <div className="mkt-hero-text">
+          <h1 className="mkt-hero-title mkt-rise">
             Ma’ruzangiz savolga{" "}
-            <span className="lp-verb">
-              dosh beradimi?<span className="lp-cite">1</span>
+            <span className="mkt-hero-verb">
+              dosh beradimi?<span className="mkt-hero-cite">1</span>
             </span>
           </h1>
-          <p className="lp-lede lp-rise lp-rise-3">
+          <p className="mkt-hero-sub mkt-rise mkt-rise-2">
             Nashr har bir fikrni manbaga bog‘laydi. Ustoz so‘raganda — javob tayyor.
           </p>
-          <div className="lp-cta lp-rise lp-rise-4">
-            <Link href="/login" className="btn lp-btn-ink btn-lg">
-              Boshlash
-            </Link>
+          <div className="mkt-rise mkt-rise-3">
+            <PromptTeaser />
           </div>
-        </section>
-
-        <section className="lp-wrap">
-          <figure className="lp-figure">
-            <div className="lp-frame">
-              <Image
-                src={DECKS.criticalPoint.src}
-                alt={DECKS.criticalPoint.alt}
-                width={1467}
-                height={825}
-                sizes="(max-width: 1128px) 100vw, 1080px"
-                priority
-              />
-            </div>
-            <figcaption className="lp-footnote">
-              <span className="lp-cite">1</span> Har bir slayd o‘z manbasiga havola qiladi — bu odob
-              emas, dastur darajasidagi talab. Manbasiz da’vo Nashr uchun bilim emas.
-            </figcaption>
-          </figure>
-        </section>
-
-        <section className="lp-wrap lp-band">
-          <h2 className="lp-band-head">Bitta dvigatel, oltita ish turi.</h2>
-          <div className="lp-uses">
-            {USES.map((use) => (
-              <div key={use.title} className="lp-use">
-                <use.icon className="lp-use-icon" size={18} strokeWidth={1.5} aria-hidden />
-                <h3 className="lp-use-title">
-                  {use.title}
-                  {use.soon ? <span className="lp-chip">tez kunda</span> : null}
-                </h3>
-                <p className="lp-use-body">{use.body}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="lp-wrap lp-band">
-          <h2 className="lp-band-head">Qoida dvigatelning o‘zida yozilgan.</h2>
-          <div className="lp-rows">
-            {MECHANISM.map((row) => (
-              <div key={row.label} className="lp-row">
-                <h3 className="lp-row-label">
-                  <row.icon size={18} strokeWidth={1.5} aria-hidden />
-                  {row.label}
-                </h3>
-                <p className="lp-row-body">{row.body}</p>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="lp-wrap lp-shot-b">
-          <figure className="lp-figure">
-            <div className="lp-frame">
-              <Image
-                src={DECKS.integration.src}
-                alt={DECKS.integration.alt}
-                width={1467}
-                height={825}
-                sizes="(max-width: 1128px) 100vw, 1080px"
-              />
-            </div>
-            <figcaption className="lp-caption">
-              Nashr dvigatelining haqiqiy chiqishi — qo‘l tegmagan holda
-            </figcaption>
-          </figure>
-        </section>
-
-        <section className="lp-flow">
-          <div className="lp-wrap lp-flow-inner">
-            <p className="lp-flow-eyebrow">Qanday boshlanadi</p>
-            <div className="lp-flow-steps">
-              {FLOW.map((step) => (
-                <div key={step.title}>
-                  <h3 className="lp-step-title">{step.title}</h3>
-                  <p className="lp-step-body">{step.body}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section className="lp-wrap lp-close">
-          <h2 className="lp-close-line">Savol baribir beriladi. Javob tayyor bo‘lsin.</h2>
-          <div className="lp-cta">
-            <Link href="/login" className="btn lp-btn-ink btn-lg">
-              Boshlash
-            </Link>
-          </div>
-        </section>
-      </main>
-
-      <footer className="lp-foot">
-        <div className="lp-wrap lp-foot-inner">
-          <span>© {new Date().getFullYear()} Nashr</span>
-          <span>Manbaga asoslangan akademik nashriyot</span>
+          <p className="mkt-hero-foot mkt-rise mkt-rise-4">
+            <span className="mkt-hero-cite">1</span> Har bir slayd o‘z manbasiga havola qiladi — bu
+            odob emas, dastur darajasidagi talab.
+          </p>
         </div>
-      </footer>
-    </div>
+
+        <div className="mkt-hero-visual mkt-rise mkt-rise-2">
+          <HeroRing
+            tiles={tiles}
+            poster="/marketing/ring/poster.png"
+            label="Nashr chiqargan slaydlarning sekin aylanuvchi halqasi"
+          />
+        </div>
+      </section>
+
+      <Band tight ruled>
+        <AssetSlot
+          label="Ish stoli: manbalar chapda, yig‘ilayotgan taqdimot o‘ngda"
+          note="Asset: public/marketing/proof-workspace.png — muallif Session W (P2) dan keyin beradi"
+          url="nashr.uz/projects/…"
+          caption="Ish stolida nima bo‘layotgani ochiq turadi: qaysi manba o‘qildi, qaysi slayd yig‘ildi."
+        />
+      </Band>
+
+      <Band tone="inset" tight>
+        <SectionHead folio="I." title="Uch qadam" />
+        <div className="mkt-steps">
+          {STEPS.map((step) => (
+            <div key={step.key} className="mkt-step">
+              <span className="mkt-step-n">{step.n}</span>
+              <h3 className="mkt-step-title">{step.title}</h3>
+              <p className="mkt-step-body">{step.body}</p>
+              <AssetSlot
+                variant="plate"
+                ratio="16 / 10"
+                label={step.slot}
+                note={`Asset: ${step.file}`}
+              />
+            </div>
+          ))}
+        </div>
+      </Band>
+
+      <Band tight>
+        <div className="mkt-claim">
+          <div className="mkt-claim-text">
+            <span className="mkt-folio">II.</span>
+            <h2 className="mkt-claim-title">Nashr faqat siz bergan dalilga tayanadi.</h2>
+            <p className="mkt-claim-body">
+              Slaydga chiqqan har bir raqam, ta’rif va iqtibos yuklangan hujjatning aniq bo‘lagidan
+              keladi. Bog‘lanmagan gap chiqishga yetib bormaydi.
+            </p>
+            <p className="mkt-claim-body">
+              Ichki tekshiruvchi manbada yo‘q raqamni yoki mavjud bo‘lmagan adabiyotni topsa, uni
+              o‘tkazmaydi: bo‘limni qaytaradi va qayta yozdiradi.
+            </p>
+            <p className="mkt-claim-note">
+              <ArrowLink href={ROUTES.presentations}>Mexanizm qanday ishlaydi</ArrowLink>
+            </p>
+          </div>
+          <div className="mkt-claim-visual">
+            <ProvenanceFigure />
+          </div>
+        </div>
+      </Band>
+
+      <Band tone="inset" tight>
+        <SectionHead
+          folio="III."
+          title="Narxlar"
+          lede="Uchta paket, bitta farq: nechta AI rasm va nechta tahrir."
+        />
+        <TierCards />
+        <p className="mkt-caption">
+          <ArrowLink href={ROUTES.pricing}>To‘liq taqqoslash</ArrowLink>
+        </p>
+      </Band>
+
+      <Band tight>
+        <SectionHead folio="IV." title="Savollar" />
+        {/* COPY:FOUNDER — javoblar muallif ko‘rigini kutmoqda, ayniqsa birinchisi */}
+        <FounderCopy>
+          <Faq items={FAQ} />
+        </FounderCopy>
+      </Band>
+
+      <CloseCta
+        line="Savol baribir beriladi. Javob tayyor bo‘lsin."
+        primaryHref={startHref()}
+        primaryLabel="Boshlash"
+        secondaryHref={ROUTES.presentations}
+        secondaryLabel="Qanday ishlaydi"
+      />
+    </MarketingShell>
   );
 }

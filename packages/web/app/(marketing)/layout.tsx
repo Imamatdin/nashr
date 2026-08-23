@@ -1,13 +1,14 @@
-// The marketing shell. Light permanently — the site has no theme toggle and a
-// dark-preference visitor gets the same paper ground (see marketing.css for
-// how the document itself is pinned). Server component: the header, the
-// footer and every interior page render with no client bundle at all.
+// The marketing route group. Light permanently — the site has no theme toggle
+// and a dark-preference visitor gets the same paper ground (marketing.css pins
+// the document itself). Server component: the interior pages render with no
+// client bundle at all.
+//
+// "/" is not in this group: it stays at app/page.tsx and wraps itself in the
+// same MarketingShell, so the two entry points cannot drift.
 
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { SiteFooter } from "@/components/marketing/site-footer";
-import { SiteHeader } from "@/components/marketing/site-header";
-import "@/components/marketing/marketing.css";
+import { MarketingShell } from "@/components/marketing/shell";
 
 export const metadata: Metadata = {
   title: {
@@ -17,11 +18,5 @@ export const metadata: Metadata = {
 };
 
 export default function MarketingLayout({ children }: { children: ReactNode }) {
-  return (
-    <div data-marketing-root className="theme-light mkt">
-      <SiteHeader />
-      <main className="mkt-main">{children}</main>
-      <SiteFooter />
-    </div>
-  );
+  return <MarketingShell>{children}</MarketingShell>;
 }
