@@ -16,16 +16,23 @@ load-bearing and spends zero model tokens before rejection:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
 from packages.core.enums import ExportFormat, GenerationPackage
 from packages.platform.credits import CreditLedger
-from packages.platform.jobs import DuplicateActiveJobError, GenerationJob, JobQueue, JobType
+from packages.platform.jobs import (
+    DuplicateActiveJobError,
+    GenerationJob,
+    JobQueue,
+    JobStatus,
+    JobType,
+)
 from packages.platform.rate_limit import ENQUEUE_ACTION, RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -67,10 +74,22 @@ class EnqueueRequest(BaseModel):
     language: str = Field(default="uz", max_length=8)
     formats: list[ExportFormat] | None = None
     answers: dict[str, Any] | None = None
+    # The user's own framing of what they want out of these sources. Steering
+    # context for the editorial pass, never evidence: the grounding discipline
+    # is unchanged downstream, so a topic the sources cannot support still
+    # hard-stops rather than being fabricated to.
+    topic: str | None = Field(default=None, max_length=2000)
 
 
 class JobView(BaseModel):
-    """The polling shape the UI reads (also returned by enqueue)."""
+    """The polling shape the UI reads (also returned by enqueue).
+
+    Everything past ``existing`` is state the row already carried and the web
+    could not see: timestamps for elapsed/stall detection, the AUTHORITATIVE
+    tier and charged amount (the project's ``package_tier`` is best-effort and
+    can disagree), and whether the failure was refunded — a fact, read from the
+    job-stamped ledger row, not a guess.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -81,9 +100,41 @@ class JobView(BaseModel):
     progress: dict[str, Any]
     error_message: str | None
     existing: bool = False
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    completed_at: datetime | None = None
+    package: str | None = None
+    deducted_amount: int | None = None
+    refunded: bool = False
 
 
-def _view(job: GenerationJob, *, existing: bool = False) -> JobView:
+def _payload_str(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _payload_int(payload: dict[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+async def _view(
+    job: GenerationJob,
+    credits: CreditLedger | None = None,
+    *,
+    existing: bool = False,
+) -> JobView:
+    """Render one job row for the wire, resolving the refund fact when relevant.
+
+    The ledger probe fires ONLY for a failed job: a queued/processing/completed
+    row cannot have been refunded by the worker's failure path, and the web
+    polls this shape every few seconds.
+    """
+
+    refunded = False
+    if credits is not None and job.status is JobStatus.FAILED and job.user_id:
+        refunded = await credits.has_refund_for_job(job.user_id, job.id)
     return JobView(
         id=job.id,
         project_id=job.project_id,
@@ -92,6 +143,13 @@ def _view(job: GenerationJob, *, existing: bool = False) -> JobView:
         progress=job.progress,
         error_message=job.error_message,
         existing=existing,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        heartbeat_at=job.heartbeat_at,
+        completed_at=job.completed_at,
+        package=_payload_str(job.payload, "package"),
+        deducted_amount=_payload_int(job.payload, "deducted_amount"),
+        refunded=refunded,
     )
 
 
@@ -167,7 +225,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
 
     existing = await queue.get_active_job(body.project_id, job_type)
     if existing is not None:
-        return _view(existing, existing=True)
+        return await _view(existing, credits, existing=True)
 
     # Every source must be a row this project registered (POST /sources): the
     # worker fetches whatever key the payload names with the service role, so
@@ -221,6 +279,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
         if body.formats
         else [ExportFormat.HTML.value, ExportFormat.PPTX_EDITABLE.value, ExportFormat.PDF.value],
         "answers": body.answers,
+        "topic": body.topic or None,
     }
     try:
         job = await queue.enqueue(
@@ -237,7 +296,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
             -deduction.amount,
             reason=f"refund:duplicate_enqueue:{exc.existing.id}",
         )
-        return _view(exc.existing, existing=True)
+        return await _view(exc.existing, credits, existing=True)
 
     if body.package is not None:
         # Stamped only for an EXPLICIT choice, and only after the job is safely
@@ -266,7 +325,43 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
         package.value,
         user_id,
     )
-    return _view(job)
+    return await _view(job, credits)
+
+
+@router.get("", response_model=JobView)
+async def get_latest_project_job(
+    request: Request,
+    auth: Authenticated,
+    project_id: str = Query(min_length=1, max_length=64),
+    job_type: JobType = JobType.PRESENTATION_GENERATION,
+) -> JobView:
+    """The project's most recent job of ``job_type``, whatever its status.
+
+    The discovery route the workspace derives its state from: without it a
+    returning user who no longer holds ``?job=`` sees an idle pay button over a
+    running, failed or delivered project.
+
+    ``job_type`` defaults to the generation job on purpose — the workspace's
+    state machine is about the deck's run, and an edit job (which carries no
+    charge and does not change deck readiness) must not displace it. The chat
+    pane tracks its own edit job from the id the chat route hands back.
+
+    Ownership is enforced on the JOB row (``user_id``), the same check
+    ``GET /jobs/{id}`` makes, and a project with no such job is 404 — the same
+    shape as an unknown project, so existence is not leaked either way.
+    """
+
+    queue: JobQueue = request.app.state.job_queue
+    credits: CreditLedger = request.app.state.credits
+
+    project = await request.app.state.db.get_project(project_id)
+    if project is None or str(project.get("user_id")) != str(auth.user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project_not_found")
+
+    job = await queue.get_latest_job(project_id, job_type)
+    if job is None or (job.user_id is not None and job.user_id != str(auth.user_id)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
+    return await _view(job, credits)
 
 
 @router.get("/{job_id}", response_model=JobView)
@@ -274,7 +369,8 @@ async def get_job(request: Request, job_id: str, auth: Authenticated) -> JobView
     """Poll one job's status/progress (owner only)."""
 
     queue: JobQueue = request.app.state.job_queue
+    credits: CreditLedger = request.app.state.credits
     job = await queue.get_job(job_id)
     if job is None or job.user_id != str(auth.user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-    return _view(job)
+    return await _view(job, credits)

@@ -9,11 +9,15 @@ needed because auth rides the Authorization header.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from packages.api.routes.auth import router as auth_router
+from packages.api.routes.chat import router as chat_router
+from packages.api.routes.credits import router as credits_router
 from packages.api.routes.jobs import router as jobs_router
 from packages.api.routes.projects import router as projects_router
 from packages.api.routes.public import router as public_router
@@ -37,6 +41,7 @@ def create_app(
     job_queue: JobQueue | None = None,
     rate_limiter: RateLimiter | None = None,
     storage: FileStorage | None = None,
+    brain_driver_factory: Callable[[], Any] | None = None,
 ) -> FastAPI:
     """Build the API app; tests inject config/db/service, production uses env."""
 
@@ -61,6 +66,9 @@ def create_app(
     app.state.job_queue = job_queue if job_queue is not None else JobQueue(resolved_db)
     app.state.rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter(resolved_db)
     app.state.storage = storage if storage is not None else FileStorage(resolved_config)
+    # None means "build the real Gemini brain lazily, per turn" (see
+    # packages/api/routes/chat.py::_driver). Tests inject a scripted stub.
+    app.state.brain_driver_factory = brain_driver_factory
 
     if resolved_config.web_cors_origins:
         app.add_middleware(
@@ -71,6 +79,8 @@ def create_app(
         )
 
     app.include_router(auth_router)
+    app.include_router(credits_router)
+    app.include_router(chat_router)
     app.include_router(jobs_router)
     app.include_router(sources_router)
     app.include_router(projects_router)

@@ -74,6 +74,11 @@ class CreditEntry(BaseModel):
     id: str = ""
     user_id: str
     project_id: str | None = None
+    # The job this row settles, when there is one. ``reason`` cannot carry it:
+    # migration 001's CHECK constraint pins that column to five fixed values,
+    # so the detail a caller passes is mapped away by ``_ACTION_TO_REASON``.
+    # This is the only exact link between a failed job and its refund row.
+    generation_job_id: str | None = None
     action: CreditAction
     amount: int
     reason: str = Field(max_length=200)
@@ -251,17 +256,49 @@ class CreditLedger:
         project_id: str,
         amount_uzs: int,
         reason: str,
+        *,
+        generation_job_id: str | None = None,
     ) -> CreditEntry:
-        """Issue a positive-amount refund row."""
+        """Issue a positive-amount refund row.
+
+        ``generation_job_id`` is what makes :meth:`has_refund_for_job` exact —
+        pass it whenever the refund settles a specific job. Deliberately NOT
+        passed by the enqueue route's lost-race refund: that undoes the LOSING
+        deduction while the winning job's own charge stands, so stamping the
+        winner's id would make it report itself refunded.
+        """
 
         entry = CreditEntry(
             user_id=user_id,
             project_id=project_id,
+            generation_job_id=generation_job_id,
             action=CreditAction.REFUND,
             amount=amount_uzs,
             reason=reason,
         )
         return await self._insert(entry)
+
+    async def has_refund_for_job(self, user_id: str, generation_job_id: str) -> bool:
+        """True iff a refund row is stamped with this job id.
+
+        Rows written before the stamp existed carry NULL, so a pre-deploy
+        failed job answers False — an honest "no evidence of a refund" rather
+        than a guess from timestamps.
+        """
+
+        def run() -> Any:
+            return (
+                self._db._query("credit_ledger")  # pyright: ignore[reportPrivateUsage]
+                .select("id")
+                .eq("user_id", user_id)
+                .eq("generation_job_id", generation_job_id)
+                .eq("action", CreditAction.REFUND.value)
+                .limit(1)
+                .execute()
+            )
+
+        result = await asyncio.to_thread(run)
+        return bool(result.data)
 
     # ---------------------------------------------------------- cap helpers
 
@@ -342,6 +379,8 @@ class CreditLedger:
         }
         if entry.project_id is not None:
             payload["project_id"] = entry.project_id
+        if entry.generation_job_id is not None:
+            payload["generation_job_id"] = entry.generation_job_id
 
         def run() -> Any:
             return self._db._query("credit_ledger").insert(payload).execute()  # pyright: ignore[reportPrivateUsage]
@@ -359,6 +398,9 @@ class CreditLedger:
             id=str(row.get("id", "")),
             user_id=str(row["user_id"]),
             project_id=(str(row["project_id"]) if row.get("project_id") is not None else None),
+            generation_job_id=(
+                str(row["generation_job_id"]) if row.get("generation_job_id") is not None else None
+            ),
             action=CreditAction(action_raw),
             amount=int(row["amount"]),
             reason=str(row.get("reason", "")),

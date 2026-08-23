@@ -14,7 +14,6 @@ and accumulated on the session for billing/analytics, but it does NOT gate.
 from __future__ import annotations
 
 from packages.core.enums import GenerationPackage
-from packages.core.gemini_image import IMAGE_COST_USD
 
 # Per-session fix allowance by tier. PLACEHOLDER values: the real editing-allowance
 # economics are a Stage 5 decision. The counter is independent of WHICH model does
@@ -50,5 +49,10 @@ def has_fixes_remaining(fixes_used: int, package: GenerationPackage) -> bool:
 def session_total_spend_usd(accumulated_cost_usd: float, accumulated_image_count: int) -> float:
     """Total ACTUAL spend recorded for analytics — NOT the cap (the cap is the
     fix counter). Kept because the real per-fix cost is already surfaced."""
+
+    # Imported inside the function so the fix ALLOWANCE (which the API's
+    # /pricing route reads) does not drag google.genai into the API process
+    # just to name a per-image dollar figure only analytics uses.
+    from packages.core.gemini_image import IMAGE_COST_USD
 
     return accumulated_cost_usd + accumulated_image_count * IMAGE_COST_USD

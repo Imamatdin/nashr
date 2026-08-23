@@ -193,6 +193,121 @@ async def manage_share(
     return ShareView(share_token=token)
 
 
+class InterviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    language: Language = Language.UZ
+
+
+class InterviewOptionView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
+    label: str
+    is_default: bool
+
+
+class InterviewQuestionView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_id: str
+    question_text: str
+    question_type: str
+    options: list[InterviewOptionView] | None
+    min_value: int | None
+    max_value: int | None
+    default_value: str | int | None
+    placeholder: str | None
+    help_text: str | None
+
+
+class InterviewView(BaseModel):
+    """The source-derived clarification set, plus what the sources look like."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[InterviewQuestionView]
+    detected_domain: str
+    estimated_slide_count: int
+    available_stats_count: int
+    available_people_count: int
+
+
+@router.post("/{project_id}/interview", response_model=InterviewView)
+async def get_interview(
+    request: Request, project_id: str, body: InterviewRequest, auth: Authenticated
+) -> InterviewView:
+    """Derive the pre-generation interview from the project's PROCESSED sources.
+
+    Zero LLM calls — the engine reads the extracted claims/chunks/metadata and
+    localises a fixed question set off them.
+
+    KNOWN CONTRACT LIMIT (flagged at the P1 gate): the only place processed
+    sources are persisted today is the brain session the WORKER writes after a
+    run. Nothing processes sources before enqueue on the web path, so a
+    first-ever run answers 409 ``sources_not_ready`` and the caller must offer
+    the "decide for me" exit. This route is honest about that rather than
+    inventing a pre-enqueue processing pipeline (out of scope for this run).
+    """
+
+    await _owned_project(request, project_id, str(auth.user_id))
+
+    sources_json = await request.app.state.db.get_brain_session_sources(project_id)
+    if sources_json is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "sources_not_ready"},
+        )
+
+    # Imported lazily: the interview engine drags the presentation package in,
+    # and every other route on this module must stay cheap to import.
+    from packages.bot.sessions.serialization import deserialize_sources
+    from packages.presentation.interview import PresentationInterviewEngine
+
+    sources = deserialize_sources(sources_json, None)
+    if not sources.claims and not sources.chunks:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "sources_not_ready"},
+        )
+
+    script = PresentationInterviewEngine().generate_questions(
+        claims=sources.claims,
+        chunks=sources.chunks,
+        source_metadata=sources.metadata,
+        language=body.language,
+    )
+    return InterviewView(
+        questions=[
+            InterviewQuestionView(
+                question_id=question.question_id,
+                question_text=question.question_text,
+                question_type=question.question_type,
+                options=(
+                    [
+                        InterviewOptionView(
+                            value=option.value, label=option.label, is_default=option.is_default
+                        )
+                        for option in question.options
+                    ]
+                    if question.options is not None
+                    else None
+                ),
+                min_value=question.min_value,
+                max_value=question.max_value,
+                default_value=question.default_value,
+                placeholder=question.placeholder,
+                help_text=question.help_text,
+            )
+            for question in script.questions
+        ],
+        detected_domain=script.detected_domain,
+        estimated_slide_count=script.estimated_slide_count,
+        available_stats_count=script.available_stats_count,
+        available_people_count=script.available_people_count,
+    )
+
+
 @router.get("/{project_id}/provenance", response_model=ProvenanceView)
 async def get_provenance(request: Request, project_id: str, auth: Authenticated) -> ProvenanceView:
     """Owner-only evidence table: extracted claims traced to source files.

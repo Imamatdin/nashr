@@ -9,11 +9,13 @@ contract — what gets sent, and how responses are interpreted.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from packages.platform.config import PlatformConfig
 from packages.platform.database import DatabaseClient
 from packages.platform.jobs import (
     DuplicateActiveJobError,
@@ -22,6 +24,7 @@ from packages.platform.jobs import (
     JobStatus,
     JobType,
 )
+from tests.unit.test_database_client import FakeSupabaseClient
 
 pytestmark = pytest.mark.asyncio
 
@@ -250,3 +253,128 @@ async def test_get_active_job_filters_on_active_statuses() -> None:
 def test_generation_job_tolerates_extra_columns() -> None:
     job = GenerationJob.model_validate({**_JOB_ROW, "estimated_cost_uzs": 0, "novel_col": 1})
     assert job.job_type is JobType.PRESENTATION_GENERATION
+
+
+# ------------------------------------------- get_latest_job over the real fake
+
+
+def _queue_over_supabase() -> tuple[JobQueue, FakeSupabaseClient]:
+    """Drive JobQueue through DatabaseClient against the in-memory Supabase fake.
+
+    ``_FakeDb`` records what was sent but answers every select with the same
+    canned rows, so it cannot tell a scoped query from an unscoped one. The
+    fake below really filters, orders and limits, which is what makes the
+    ``get_latest_job`` scoping assertions below mean anything.
+    """
+
+    cfg = PlatformConfig(
+        supabase_url="https://test.supabase.co",
+        supabase_service_key="test",
+        telegram_bot_token="test",
+    )
+    fake = FakeSupabaseClient()
+    return JobQueue(DatabaseClient(cfg, client=cast(Any, fake))), fake
+
+
+def _seed_job(
+    fake: FakeSupabaseClient,
+    *,
+    job_id: str,
+    created_at: datetime,
+    project_id: str = "p1",
+    job_type: JobType = JobType.PRESENTATION_GENERATION,
+    status: JobStatus = JobStatus.COMPLETED,
+) -> None:
+    rows = fake.tables.setdefault("generation_jobs", [])
+    rows.append(
+        {
+            **_JOB_ROW,
+            "id": job_id,
+            "project_id": project_id,
+            "job_type": job_type.value,
+            "status": status.value,
+            "created_at": created_at.isoformat(),
+        }
+    )
+
+
+_BASE_TS = datetime(2026, 5, 1, tzinfo=UTC)
+
+
+async def test_get_latest_job_returns_newest_created_at_not_last_inserted() -> None:
+    queue, fake = _queue_over_supabase()
+    # Deliberately shuffled insert order: a naive "take the last row" reads
+    # `old`, and a naive "take the first row" reads `middle`.
+    _seed_job(fake, job_id="middle", created_at=_BASE_TS + timedelta(days=2))
+    _seed_job(fake, job_id="newest", created_at=_BASE_TS + timedelta(days=3))
+    _seed_job(fake, job_id="old", created_at=_BASE_TS + timedelta(days=1))
+
+    job = await queue.get_latest_job("p1", JobType.PRESENTATION_GENERATION)
+    assert job is not None and job.id == "newest"
+
+
+async def test_get_latest_job_ignores_newer_row_of_another_job_type() -> None:
+    # Why the route asks for the generation type by name: a conversational fix
+    # runs as presentation_edit, and it must never displace the workspace's
+    # view of the generation run.
+    queue, fake = _queue_over_supabase()
+    _seed_job(
+        fake,
+        job_id="generation",
+        created_at=_BASE_TS,
+        job_type=JobType.PRESENTATION_GENERATION,
+    )
+    _seed_job(
+        fake,
+        job_id="edit",
+        created_at=_BASE_TS + timedelta(days=5),
+        job_type=JobType.PRESENTATION_EDIT,
+    )
+
+    job = await queue.get_latest_job("p1", JobType.PRESENTATION_GENERATION)
+    assert job is not None and job.id == "generation"
+
+    edit = await queue.get_latest_job("p1", JobType.PRESENTATION_EDIT)
+    assert edit is not None and edit.id == "edit"
+
+
+async def test_get_latest_job_is_scoped_by_project() -> None:
+    queue, fake = _queue_over_supabase()
+    _seed_job(fake, job_id="mine", created_at=_BASE_TS, project_id="p1")
+    _seed_job(fake, job_id="theirs", created_at=_BASE_TS + timedelta(days=9), project_id="p2")
+
+    job = await queue.get_latest_job("p1", JobType.PRESENTATION_GENERATION)
+    assert job is not None and job.id == "mine"
+
+
+async def test_get_latest_job_returns_none_when_project_has_no_row_of_type() -> None:
+    queue, fake = _queue_over_supabase()
+    _seed_job(fake, job_id="edit", created_at=_BASE_TS, job_type=JobType.PRESENTATION_EDIT)
+
+    assert await queue.get_latest_job("p1", JobType.PRESENTATION_GENERATION) is None
+    assert await queue.get_latest_job("p-empty", JobType.PRESENTATION_EDIT) is None
+
+
+async def test_get_latest_job_returns_terminal_rows() -> None:
+    # The whole reason the method exists: get_active_job answers only "is
+    # something running", so a finished-or-failed run would be invisible to a
+    # returning user who no longer holds the ?job= URL.
+    queue, fake = _queue_over_supabase()
+    _seed_job(fake, job_id="completed", created_at=_BASE_TS, status=JobStatus.COMPLETED)
+    _seed_job(
+        fake,
+        job_id="cancelled",
+        created_at=_BASE_TS + timedelta(days=1),
+        status=JobStatus.CANCELLED,
+    )
+    _seed_job(
+        fake,
+        job_id="failed",
+        created_at=_BASE_TS + timedelta(days=2),
+        status=JobStatus.FAILED,
+    )
+
+    job = await queue.get_latest_job("p1", JobType.PRESENTATION_GENERATION)
+    assert job is not None
+    assert job.id == "failed"
+    assert job.status is JobStatus.FAILED

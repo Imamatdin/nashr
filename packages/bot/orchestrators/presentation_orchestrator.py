@@ -410,6 +410,8 @@ class PresentationOrchestrator:
         sources: SourceProcessingResult,
         language: str,
         progress: ProgressCallback,
+        *,
+        topic: str | None = None,
     ) -> PresentationInterviewAnswers:
         """Fold raw Mini-App answers into typed preferences.
 
@@ -417,29 +419,40 @@ class PresentationOrchestrator:
         we route through :meth:`PresentationInterviewEngine.apply_defaults`
         instead of forcing the user to answer anything. Whatever path is
         taken, the return type is the same :class:`PresentationInterviewAnswers`.
+
+        ``topic`` is the user's typed brief from the web composer. It is folded
+        onto the answers as ``user_brief`` AFTER the engine resolves everything
+        else, so it can only steer the editorial framing — it never becomes an
+        answer, never changes a default, and never enters the evidence path.
         """
 
         await progress("Applying preferences", 3, TOTAL_STEPS)
 
         try:
             if raw_answers is None:
-                return self._interview_engine.apply_defaults(
+                resolved = self._interview_engine.apply_defaults(
                     claims=sources.claims,
                     source_metadata=getattr(sources, "metadata", []),
                     chunks=sources.chunks,
                     language=language,
                 )
-
-            questions = self._interview_engine.generate_questions(
-                claims=sources.claims,
-                chunks=sources.chunks,
-                source_metadata=getattr(sources, "metadata", []),
-                language=language,
-            )
-            # Cast: the engine's signature accepts the looser Mapping type
-            # the Mini App actually returns (strings, ints, bool, lists).
-            coerced = cast(Mapping[str, str | int | bool | list[str]], raw_answers)
-            return self._interview_engine.apply_answers(questions=questions, answers=coerced)
+            else:
+                questions = self._interview_engine.generate_questions(
+                    claims=sources.claims,
+                    chunks=sources.chunks,
+                    source_metadata=getattr(sources, "metadata", []),
+                    language=language,
+                )
+                # Cast: the engine's signature accepts the looser Mapping type
+                # the Mini App actually returns (strings, ints, bool, lists).
+                coerced = cast(Mapping[str, str | int | bool | list[str]], raw_answers)
+                resolved = self._interview_engine.apply_answers(
+                    questions=questions, answers=coerced
+                )
+            brief = (topic or "").strip()
+            if brief:
+                resolved = resolved.model_copy(update={"user_brief": brief[:2000]})
+            return resolved
         except Exception as exc:
             raise _OrchestratorError("interview", exc) from exc
 
@@ -939,6 +952,7 @@ class PresentationOrchestrator:
         progress: ProgressCallback,
         *,
         package: GenerationPackage,
+        topic: str | None = None,
     ) -> PresentationPipelineResult:
         """Drive the full presentation pipeline end-to-end.
 
@@ -950,6 +964,11 @@ class PresentationOrchestrator:
         ``package`` is the paid tier; it threads through to the image stage to
         set the per-deck generated-image budget. Required keyword-only so a
         caller cannot silently default a paid path (invariant I1).
+
+        ``topic`` is the web composer's typed brief. It reaches the editorial
+        pass as steering context only (see :meth:`apply_interview`); the
+        grounding discipline downstream is unchanged, so a brief the sources
+        cannot support still hard-stops rather than being fabricated to.
         """
 
         formats = requested_formats or [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
@@ -966,6 +985,7 @@ class PresentationOrchestrator:
             sources=sources,
             language=language,
             progress=progress,
+            topic=topic,
         )
         design = await self.generate_design(interview, sources, progress)
         deck_spec = await self.generate_deck_spec(

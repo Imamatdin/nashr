@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
@@ -19,7 +20,7 @@ import pytest
 
 from packages.api.app import create_app
 from packages.api.services.identity import IdentityError
-from packages.api.services.tokens import mint_app_jwt
+from packages.api.services.tokens import mint_app_jwt, verify_app_jwt
 from packages.core.models.identity import TelegramAuthPayload
 from packages.platform.config import PlatformConfig
 
@@ -183,3 +184,46 @@ async def test_protected_route_with_bearer_but_missing_secret_is_503_not_401() -
         response = await client.get("/auth/me", headers={"Authorization": f"Bearer {good}"})
     assert response.status_code == 503
     assert response.json()["detail"] == "server_missing_jwt_secret"
+
+
+@pytest.mark.asyncio
+async def test_refresh_returns_a_usable_session_for_the_same_user() -> None:
+    client, fake = _client()
+    # Short TTL on the incoming bearer so the re-minted session's expiry is
+    # strictly later without the test having to sleep.
+    current = mint_app_jwt(_JWT_SECRET, fake.known_user, 60)
+    async with client:
+        response = await client.post(
+            "/auth/refresh", headers={"Authorization": f"Bearer {current.access_token}"}
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["user_id"] == str(fake.known_user)
+    assert body["token_type"] == "bearer"
+    assert body["access_token"] != current.access_token
+    refreshed_expiry = datetime.fromisoformat(body["expires_at"])
+    assert refreshed_expiry > current.expires_at
+    verified = verify_app_jwt(_JWT_SECRET, body["access_token"])
+    assert verified.user_id == fake.known_user
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_bearer_is_401() -> None:
+    client, _ = _client()
+    async with client:
+        response = await client.post("/auth/refresh")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "missing_bearer_token"
+
+
+@pytest.mark.asyncio
+async def test_refresh_cannot_rescue_an_already_expired_token() -> None:
+    # The documented limitation of a sliding session: there is no second
+    # credential, so a dead token has nothing left to prove identity with and
+    # the web must refresh PROACTIVELY. This test pins that behaviour.
+    client, fake = _client()
+    dead = mint_app_jwt(_JWT_SECRET, fake.known_user, -10).access_token
+    async with client:
+        response = await client.post("/auth/refresh", headers={"Authorization": f"Bearer {dead}"})
+    assert response.status_code == 401
+    assert response.json()["detail"] == "expired"

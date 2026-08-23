@@ -1,0 +1,46 @@
+# Session W — the explicit pathspec every phase commit is scoped to.
+#
+# The working tree is SHARED with Session L, whose in-flight landing/marketing
+# work sits alongside this run's. `git add -A` would silently claim it, so each
+# commit names its files and nothing else. Lines starting with # are comments.
+#
+#   git commit -m "..." -- $(grep -v '^#' scripts/wire_commit_paths.txt | grep .)
+#
+# Session L's territory — NEVER in a Session W commit:
+#   packages/web/app/page.tsx
+#   packages/web/app/(marketing)/**
+#   packages/web/components/marketing/**
+
+# --- P1: backend seams -------------------------------------------------------
+docker-compose.yml
+packages/api/app.py
+packages/api/routes/auth.py
+packages/api/routes/chat.py
+packages/api/routes/credits.py
+packages/api/routes/jobs.py
+packages/api/routes/projects.py
+packages/api/routes/public.py
+packages/bot/orchestrators/presentation_orchestrator.py
+packages/bot/sessions/budget.py
+packages/core/models/presentation.py
+packages/platform/credits.py
+packages/platform/jobs.py
+packages/presentation/editorial.py
+packages/sessions_core
+scripts/worker_run_job.py
+scripts/wire_bundle.py
+scripts/wire_commit_paths.txt
+scripts/wire_p1_curl.sh
+scripts/wire_stub_api.py
+tests/unit/test_api_auth_routes.py
+tests/unit/test_chat_routes.py
+tests/unit/test_credit_ledger.py
+tests/unit/test_credits_routes.py
+tests/unit/test_job_queue.py
+tests/unit/test_jobs_routes.py
+tests/unit/test_projects_routes.py
+tests/unit/test_sessions_core_chat.py
+tests/unit/test_worker_and_backup.py
+review/wire_report.md
+review/wire_p1_bundle.txt
+review/wire_p1_curl.txt

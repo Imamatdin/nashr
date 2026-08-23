@@ -425,6 +425,12 @@ class PresentationInterviewAnswers(BaseModel):
 
     closing_ask: str | None = Field(default=None, max_length=500)
 
+    # The user's own words about what they want from these sources (the web
+    # composer's prompt). STEERING ONLY — emphasis, ordering, framing. It is
+    # never evidence: nothing in it may be asserted on a slide unless a source
+    # claim carries it, and the grounding hard stop stays authoritative.
+    user_brief: str | None = Field(default=None, max_length=2000)
+
     headline_numbers: list[str] = Field(default_factory=list[str], max_length=10)
 
     anchor_source_id: str | None = Field(default=None, max_length=64)

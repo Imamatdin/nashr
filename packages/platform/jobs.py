@@ -63,6 +63,7 @@ class GenerationJob(BaseModel):
     max_attempts: int = 1
     error_message: str | None = None
     created_at: datetime | None = None
+    started_at: datetime | None = None
     claimed_at: datetime | None = None
     heartbeat_at: datetime | None = None
     completed_at: datetime | None = None
@@ -96,6 +97,32 @@ class JobQueue:
                 .eq("project_id", project_id)
                 .eq("job_type", job_type.value)
                 .in_("status", [JobStatus.QUEUED.value, JobStatus.PROCESSING.value])
+                .limit(1)
+                .execute()
+            )
+
+        result = await asyncio.to_thread(run)
+        if not result.data:
+            return None
+        return _row_to_job(cast(dict[str, Any], result.data[0]))
+
+    async def get_latest_job(self, project_id: str, job_type: JobType) -> GenerationJob | None:
+        """Return the project's most recent job of this type, whatever its status.
+
+        The discovery seam a returning web user needs: ``get_active_job`` only
+        answers "is something running", so a finished-or-failed run is
+        invisible to anyone who no longer holds the ``?job=`` URL. Ordered by
+        ``created_at`` because that is the only timestamp every row has (a
+        queued row has no ``started_at``/``completed_at``).
+        """
+
+        def run() -> Any:
+            return (
+                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
+                .select("*")
+                .eq("project_id", project_id)
+                .eq("job_type", job_type.value)
+                .order("created_at", desc=True)
                 .limit(1)
                 .execute()
             )

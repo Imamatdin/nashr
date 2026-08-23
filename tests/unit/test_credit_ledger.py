@@ -48,6 +48,7 @@ def _seed_entry(
     amount: int,
     project_id: str | None = None,
     created_at: datetime | None = None,
+    generation_job_id: str | None = None,
 ) -> None:
     rows = fake.tables.setdefault("credit_ledger", [])
     rows.append(
@@ -55,6 +56,7 @@ def _seed_entry(
             "id": str(uuid.uuid4()),
             "user_id": user_id,
             "project_id": project_id,
+            "generation_job_id": generation_job_id,
             "action": action.value,
             "amount": amount,
             "reason": "test seed",
@@ -406,3 +408,123 @@ async def test_get_ledger_returns_typed_entries_newest_first() -> None:
     assert all(isinstance(e, CreditEntry) for e in entries)
     assert entries[0].action == CreditAction.DEDUCT_ARTICLE
     assert entries[1].action == CreditAction.GRANT_PAID
+
+
+# ------------------------------------------------- refund job-id round trip
+
+
+async def test_refund_with_job_id_writes_the_column() -> None:
+    ledger, fake = _make_ledger()
+    await ledger.refund(
+        user_id="u1",
+        project_id="p1",
+        amount_uzs=10_000,
+        reason="render failed",
+        generation_job_id="job-1",
+    )
+    _, row = fake.inserts[0]
+    assert row["generation_job_id"] == "job-1"
+
+
+async def test_refund_without_job_id_omits_the_column() -> None:
+    # The enqueue route's lost-race refund deliberately passes no job id: it
+    # undoes the LOSING deduction while the winner's charge stands.
+    ledger, fake = _make_ledger()
+    await ledger.refund(
+        user_id="u1", project_id="p1", amount_uzs=10_000, reason="duplicate enqueue"
+    )
+    _, row = fake.inserts[0]
+    assert "generation_job_id" not in row
+
+
+async def test_refund_job_id_round_trips_through_get_ledger() -> None:
+    ledger, _ = _make_ledger()
+    await ledger.refund(
+        user_id="u1",
+        project_id="p1",
+        amount_uzs=10_000,
+        reason="render failed",
+        generation_job_id="job-1",
+    )
+    entries = await ledger.get_ledger("u1", limit=10)
+    assert len(entries) == 1
+    assert entries[0].action == CreditAction.REFUND
+    assert entries[0].generation_job_id == "job-1"
+
+
+async def test_refund_still_writes_the_legacy_reason_value() -> None:
+    # Migration 001 pins credit_ledger.reason to five fixed values, so the
+    # caller's free-text reason is mapped away to "refund" on the way in.
+    # That CHECK constraint is exactly why the job link needed its own column.
+    ledger, fake = _make_ledger()
+    entry = await ledger.refund(
+        user_id="u1",
+        project_id="p1",
+        amount_uzs=10_000,
+        reason="worker timed out",
+        generation_job_id="job-1",
+    )
+    _, row = fake.inserts[0]
+    assert row["reason"] == "refund"
+    assert entry.reason == "worker timed out"
+
+
+# ----------------------------------------------------- has_refund_for_job
+
+
+async def test_has_refund_for_job_true_for_stamped_refund() -> None:
+    ledger, fake = _make_ledger()
+    _seed_entry(
+        fake,
+        user_id="u1",
+        action=CreditAction.REFUND,
+        amount=10_000,
+        generation_job_id="job-1",
+    )
+    assert await ledger.has_refund_for_job("u1", "job-1") is True
+
+
+async def test_has_refund_for_job_false_when_no_row_carries_the_id() -> None:
+    ledger, fake = _make_ledger()
+    _seed_entry(
+        fake,
+        user_id="u1",
+        action=CreditAction.REFUND,
+        amount=10_000,
+        generation_job_id="job-other",
+    )
+    assert await ledger.has_refund_for_job("u1", "job-1") is False
+
+
+async def test_has_refund_for_job_is_scoped_by_user() -> None:
+    ledger, fake = _make_ledger()
+    _seed_entry(
+        fake,
+        user_id="u2",
+        action=CreditAction.REFUND,
+        amount=10_000,
+        generation_job_id="job-1",
+    )
+    assert await ledger.has_refund_for_job("u1", "job-1") is False
+    assert await ledger.has_refund_for_job("u2", "job-1") is True
+
+
+async def test_has_refund_for_job_ignores_non_refund_rows_with_the_same_id() -> None:
+    ledger, fake = _make_ledger()
+    _seed_entry(
+        fake,
+        user_id="u1",
+        action=CreditAction.DEDUCT_PRESENTATION,
+        amount=-10_000,
+        generation_job_id="job-1",
+    )
+    assert await ledger.has_refund_for_job("u1", "job-1") is False
+
+
+async def test_has_refund_for_job_does_not_match_a_null_job_id_row() -> None:
+    # Pinned deliberately, not a defect: refund rows written before the stamp
+    # existed carry NULL, so an old failed job honestly reports refunded:false
+    # rather than being guessed at from timestamps.
+    ledger, fake = _make_ledger()
+    _seed_entry(fake, user_id="u1", action=CreditAction.REFUND, amount=10_000)
+    assert await ledger.has_refund_for_job("u1", "job-1") is False

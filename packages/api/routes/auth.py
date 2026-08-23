@@ -106,6 +106,21 @@ async def link_telegram(
     return LinkTelegramResponse(merged=merged, session=_mint_or_503(service, auth.user_id))
 
 
+@router.post("/refresh", response_model=MintedSession)
+async def refresh_session(request: Request, auth: Authenticated) -> MintedSession:
+    """Re-mint the session token for a caller whose current one is still valid.
+
+    A SLIDING session, not a refresh-token scheme: no second credential is
+    introduced, so the stored-token surface stays exactly one short-lived JWT.
+    The consequence is that this cannot rescue an ALREADY-expired token — the
+    ``Authenticated`` dependency rejects it first — so the web must refresh
+    PROACTIVELY (before ``expires_at``) and treat a 401-triggered attempt as a
+    fallback that will usually fail. Documented rather than papered over.
+    """
+
+    return _mint_or_503(_service(request), auth.user_id)
+
+
 @router.get("/me", response_model=WhoAmIResponse)
 async def whoami(auth: Authenticated) -> WhoAmIResponse:
     """Return the verified identity of the current session."""

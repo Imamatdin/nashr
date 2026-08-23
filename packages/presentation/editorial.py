@@ -1545,6 +1545,20 @@ class EditorialPass:
 
         del arc
         lines: list[str] = []
+        if interview.user_brief:
+            # Framed as an instruction the model may follow only WITHIN the
+            # evidence below it. The claims that follow remain the only things
+            # a slide may assert; a brief asking for something unsupported must
+            # narrow the deck, never invent for it.
+            lines.append(
+                "USER BRIEF (the user's own words about what they want from these "
+                "sources). Use it to choose emphasis, ordering and framing ONLY. "
+                "It is NOT evidence: never assert anything it says unless a claim "
+                "below carries it. If it asks for material the sources do not "
+                "support, cover what they do support and leave the rest out."
+            )
+            lines.append(f"  {interview.user_brief}")
+            lines.append("")
         if interview.headline_numbers:
             lines.append("HEADLINE NUMBERS (each MUST become a hero slide):")
             lines.extend(f"  - {n}" for n in interview.headline_numbers)

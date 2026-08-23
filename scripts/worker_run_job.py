@@ -26,6 +26,7 @@ import os
 import socket
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -77,7 +78,15 @@ async def _refund_job(credits: CreditLedger, job: GenerationJob, reason: str) ->
             json.dumps({"job_id": job.id, "reason": "no product_type or user_id"}),
         )
         return
-    await credits.refund(job.user_id, job.project_id, amount, reason=reason[:200])
+    # Stamped with the job id so GET /jobs can state the refund as a FACT
+    # rather than inferring it from timestamps (JobView.refunded).
+    await credits.refund(
+        job.user_id,
+        job.project_id,
+        amount,
+        reason=reason[:200],
+        generation_job_id=job.id,
+    )
     logger.info(
         "worker_job_refunded %s",
         json.dumps({"job_id": job.id, "amount": amount, "reason": reason[:200]}),
@@ -130,7 +139,12 @@ class JobRunner:
         # Refunds are gated on OUR guarded fail() transition landing: if the
         # reaper already took the row (stalled-but-alive worker), the reaping
         # side owns the refund and ours must not fire — one refund per job.
-        if job.job_type is not JobType.PRESENTATION_GENERATION:
+        #
+        # An EDIT job is never refundable: no credit was taken for it (a fix
+        # spends the tier's fix allowance, not money), so its payload carries no
+        # price and a refund attempt would be a no-op with a misleading log.
+        runner = self._executor_for(job.job_type)
+        if runner is None:
             failed_by_us = await self._queue.fail(
                 job.id,
                 self._worker_id,
@@ -140,8 +154,9 @@ class JobRunner:
             if failed_by_us:
                 await _refund_job(self._credits, job, f"refund:job:{job.id}:unsupported_type")
             return
+        refundable = job.job_type is JobType.PRESENTATION_GENERATION
         try:
-            await self._run_presentation(job)
+            await runner(job)
         except Exception as exc:
             step = getattr(exc, "step", "pipeline")
             original = getattr(exc, "original", exc)
@@ -153,13 +168,125 @@ class JobRunner:
             failed_by_us = await self._queue.fail(
                 job.id, self._worker_id, step=str(step), message=message
             )
-            if failed_by_us:
+            if failed_by_us and refundable:
                 await _refund_job(self._credits, job, f"refund:job:{job.id}:{step}")
-            else:
+            elif not failed_by_us:
                 logger.warning(
                     "worker_refund_suppressed_row_not_ours %s",
                     json.dumps({"job_id": job.id, "step": str(step)}),
                 )
+
+    def _executor_for(self, job_type: JobType) -> Callable[[GenerationJob], Awaitable[None]] | None:
+        """The coroutine that runs this job type, or None when unsupported."""
+
+        if job_type is JobType.PRESENTATION_GENERATION:
+            return self._run_presentation
+        if job_type is JobType.PRESENTATION_EDIT:
+            return self._run_presentation_edit
+        return None
+
+    async def _run_presentation_edit(self, job: GenerationJob) -> None:
+        """Apply a parked Way-2 fix batch and re-render. No charge, no refund.
+
+        The API ran the brain turn and parked the batch (its ``edit_slides``
+        call is still unanswered in the session history); this answers it. The
+        deck-persist and the R2 upload of every re-rendered format both happen
+        inside ``apply_fixes_and_render`` → ``render``, so the web's deck route
+        serves the edited files without any extra wiring here.
+        """
+
+        from aiogram import Bot
+
+        from packages.bot.orchestrators.presentation_orchestrator import (
+            PresentationOrchestrator,
+        )
+        from packages.core.models.presentation import SlideFix
+        from packages.sessions_core import dispatch_fix, park_pending_for_apply
+
+        payload = job.payload
+        call_count = 1
+        raw_count = payload.get("call_count")
+        if isinstance(raw_count, int) and raw_count >= 1:
+            call_count = raw_count
+
+        if payload.get("from_pending") is True:
+            pending = await park_pending_for_apply(self._db, job.project_id)
+            if pending is None:
+                raise RuntimeError("approved change is no longer parked on the session")
+            fixes = list(pending.fixes)
+            call_count = pending.call_count
+        else:
+            raw_fixes = payload.get("fixes")
+            if not isinstance(raw_fixes, list) or not raw_fixes:
+                raise RuntimeError("presentation_edit job carries no fixes")
+            # ALL-OR-NOTHING, matching apply_fixes_and_render's atomic batch
+            # semantics. Skipping malformed entries would apply part of an
+            # approved batch, consume the tier's fix allowance for it, and
+            # report success — the user would pay an edit for a change they
+            # never fully got. A malformed payload is a bug; fail the job.
+            fixes: list[SlideFix] = []
+            for entry in cast(list[Any], raw_fixes):
+                if not isinstance(entry, dict):
+                    raise RuntimeError("presentation_edit job carries a malformed fix entry")
+                fixes.append(SlideFix.model_validate(cast(dict[str, Any], entry)))
+
+        bot = Bot(token=self._config.telegram_bot_token)
+        orchestrator = PresentationOrchestrator(
+            bot=bot,
+            db=self._db,
+            credits=self._credits,
+            storage=self._storage,
+        )
+
+        async def progress(step: str, current: int, total: int) -> None:
+            await self._queue.set_progress(
+                job.id,
+                self._worker_id,
+                {"step": step, "current": current, "total": total},
+            )
+
+        try:
+            result = await dispatch_fix(
+                runner=orchestrator,
+                db=self._db,
+                project_id=job.project_id,
+                fixes=fixes,
+                call_count=call_count,
+                progress=progress,
+            )
+        finally:
+            await bot.session.close()
+
+        if not result.delivered:
+            # dispatch_fix already answered the parked call and persisted, so
+            # the session is coherent; the job row just has to say what happened.
+            failed_by_us = await self._queue.fail(
+                job.id,
+                self._worker_id,
+                step="apply_fixes",
+                message=result.reason or "edit produced no deliverable files",
+            )
+            if not failed_by_us:
+                logger.warning("worker_edit_fail_row_not_ours %s", json.dumps({"job_id": job.id}))
+            return
+
+        completed_by_us = await self._queue.complete(job.id, self._worker_id, telemetry={})
+        if not completed_by_us:
+            logger.warning(
+                "worker_complete_suppressed_row_not_ours %s", json.dumps({"job_id": job.id})
+            )
+            return
+        logger.info(
+            "worker_edit_completed %s",
+            json.dumps(
+                {
+                    "job_id": job.id,
+                    "project_id": job.project_id,
+                    "slides_changed": result.slides_changed,
+                    "warnings": list(result.warnings),
+                }
+            ),
+        )
 
     async def _run_presentation(self, job: GenerationJob) -> None:
         # Imported here so --help / unit tests never pull aiogram + the full
@@ -187,6 +314,8 @@ class JobRunner:
             cast(dict[str, object], answers_raw) if isinstance(answers_raw, dict) else None
         )
         language = str(payload.get("language", "uz"))
+        topic_raw = payload.get("topic")
+        topic = topic_raw if isinstance(topic_raw, str) and topic_raw.strip() else None
         if job.user_id is None:
             raise RuntimeError("job has no user_id; cannot run entitled pipeline")
 
@@ -215,6 +344,7 @@ class JobRunner:
                 requested_formats=formats,
                 progress=progress,
                 package=package,
+                topic=topic,
             )
         finally:
             await bot.session.close()

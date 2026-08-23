@@ -113,9 +113,33 @@ services:
       #     api:8090); it is deliberately NOT a knob so the two can't drift. ---
       APP_JWT_TTL_SECONDS: ${APP_JWT_TTL_SECONDS:-3600}
       WEB_CORS_ORIGINS: ${WEB_CORS_ORIGINS:-}
-    # No vertex-key.json mount / LLM env: the P1 auth routes make no model call,
-    # so the auth tier carries no Google credential (least privilege). The LLM
-    # env + mount are added back when P4 runs web chat turns through this service.
+
+      # --- Cloudflare R2 ---
+      # NOT new to Session W: POST /sources/presign and GET /projects/{id}/deck
+      # have signed R2 objects since P3, and without these the API silently
+      # falls back to local-filesystem storage — presigned uploads and deck
+      # URLs that point at a path inside the container. Added here because the
+      # phase depends on them; flagged in review/wire_report.md as an operator
+      # action (compose changes need a `docker compose up -d`).
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
+      R2_SECRET_KEY: ${R2_SECRET_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-nashr-files}
+
+      # --- LLM (Vertex) ---
+      # Session W turns POST /projects/{id}/chat into a real Gemini turn inside
+      # this service, so the auth tier now DOES make a model call and needs the
+      # credential the note here previously said it did not. The expensive half
+      # (apply + re-render) still runs in the worker.
+      LLM_TRANSPORT: ${LLM_TRANSPORT:-vertex}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_BRAIN_CACHE: ${GEMINI_BRAIN_CACHE:-1}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/vertex-key.json
+      VERTEX_PROJECT: nashr-prod
+      VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
+    volumes:
+      - ./vertex-key.json:/app/vertex-key.json:ro
     networks:
       - nashr-net
 
