@@ -34,14 +34,31 @@ export const NAV: ReadonlyArray<{ href: string; label: string }> = [
 ];
 
 // sanitizeReturnTo (lib/return-to.ts) drops anything over 512 characters to
-// /projects, which would lose both the topic and the destination. A topic long
-// enough to threaten that cap is a paragraph, not a topic.
+// /projects — losing the topic AND the destination, which is worse than never
+// carrying the topic at all. The cap applies to the DECODED return path, and
+// encodeURIComponent turns one Cyrillic letter into six characters, so a
+// Russian or Karakalpak topic reaches it at about eighty letters. Both limits
+// are enforced below, the second against the encoded length.
 const MAX_TOPIC = 200;
+const MAX_RETURN_PATH = 480;
+
+const doorHref = (returnTo: string): string =>
+  `${APP.login}?returnTo=${encodeURIComponent(returnTo)}`;
+
+const targetFor = (topic: string): string =>
+  `${APP.create}?topic=${encodeURIComponent(topic)}`;
 
 /** Where every marketing CTA points: the door, carrying /new as its return. */
 export function startHref(topic?: string): string {
   const trimmed = topic?.trim();
-  if (!trimmed) return `${APP.login}?returnTo=${encodeURIComponent(APP.create)}`;
-  const target = `${APP.create}?topic=${encodeURIComponent(trimmed.slice(0, MAX_TOPIC))}`;
-  return `${APP.login}?returnTo=${encodeURIComponent(target)}`;
+  if (!trimmed) return doorHref(APP.create);
+
+  // Truncate the topic, never the encoded string: slicing that would cut a
+  // %XX escape in half and the sanitizer would reject the whole path.
+  let value = trimmed.slice(0, MAX_TOPIC);
+  while (value.length > 0 && targetFor(value).length > MAX_RETURN_PATH) {
+    value = value.slice(0, -1);
+  }
+  if (!value) return doorHref(APP.create);
+  return doorHref(targetFor(value));
 }
