@@ -59,6 +59,7 @@ html:has([data-marketing-root]) {
 
 /* A page hero already carries its own bottom space; the band under it does not
    get to add a second one. */
+.mkt-intro + section,
 .mkt-phero + section {
   padding-top: clamp(28px, 3.5vw, 48px);
 }
@@ -522,6 +523,55 @@ html:has([data-marketing-root]) {
   background: var(--accent);
 }
 
+/* ------------------------------------------------- interior intro (/maqola) */
+
+.mkt-intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.88fr);
+  gap: clamp(28px, 4vw, 56px);
+  align-items: center;
+  padding-top: clamp(40px, 5vw, 72px);
+  padding-bottom: clamp(40px, 5vw, 64px);
+}
+
+.mkt-plate {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 0.92;
+}
+
+.mkt-plate-poster,
+.mkt-plate-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.mkt-plate-poster {
+  object-fit: contain;
+  transition: opacity 700ms ease;
+}
+
+.mkt-plate-poster[data-swapped="true"] {
+  opacity: 0;
+}
+
+.mkt-plate-canvas {
+  animation: fade-in 700ms ease both;
+}
+
+@media (max-width: 979px) {
+  .mkt-intro {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mkt-intro-visual {
+    width: min(100%, 420px);
+    margin-inline: auto;
+  }
+}
+
 /* --------------------------------------------------------------- page hero */
 
 .mkt-phero {
@@ -533,6 +583,7 @@ html:has([data-marketing-root]) {
   display: inline-flex;
   flex-direction: column;
   gap: 10px;
+  min-height: 2px;
   font-family: var(--font-mono);
   font-size: 0.75rem;
   font-weight: 500;
@@ -612,6 +663,13 @@ html:has([data-marketing-root]) {
 }
 
 /* --------------------------------------------------- claim + visual rhythm */
+
+/* A ruled band already drew the line above its first claim; the claim must not
+   draw a second, shorter one under it. */
+.mkt-ruled > .mkt-wrap > .mkt-claim:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
 
 .mkt-claim {
   display: grid;

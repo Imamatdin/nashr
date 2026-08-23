@@ -9,22 +9,8 @@
 
 import Image from "next/image";
 import { useEffect, useRef, useState, type ComponentType } from "react";
+import { afterLoadWhenIdle, motionEligible } from "../motion-gate";
 import type { RingCanvasProps } from "./ring-canvas";
-
-const MIN_WIDTH = 768;
-
-interface SaveDataConnection {
-  saveData?: boolean;
-}
-
-function eligible(): boolean {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
-  if (window.innerWidth < MIN_WIDTH) return false;
-  const connection = (navigator as Navigator & { connection?: SaveDataConnection }).connection;
-  if (connection?.saveData) return false;
-  const probe = document.createElement("canvas");
-  return typeof probe.getContext === "function" && Boolean(probe.getContext("2d"));
-}
 
 export function HeroRing({
   tiles,
@@ -41,34 +27,20 @@ export function HeroRing({
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host || !eligible()) return;
+    if (!host || !motionEligible()) return;
 
     let cancelled = false;
-    let idle = 0;
-
-    function load(): void {
-      void import("./ring-canvas").then((module) => {
-        if (!cancelled) setRing(() => module.default);
-      });
-    }
-
-    // After the page has finished loading, and then only when the browser is
-    // idle: the ring must never compete with the LCP paint for bandwidth.
-    const idleSupported = typeof window.requestIdleCallback === "function";
-
-    function schedule(): void {
-      if (cancelled) return;
-      idle = idleSupported
-        ? window.requestIdleCallback(load, { timeout: 2500 })
-        : window.setTimeout(load, 800);
-    }
+    let cancelIdle: (() => void) | null = null;
 
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
-        if (document.readyState === "complete") schedule();
-        else window.addEventListener("load", schedule, { once: true });
+        cancelIdle = afterLoadWhenIdle(() => {
+          void import("./ring-canvas").then((module) => {
+            if (!cancelled) setRing(() => module.default);
+          });
+        });
       },
       { rootMargin: "200px" },
     );
@@ -77,9 +49,7 @@ export function HeroRing({
     return () => {
       cancelled = true;
       observer.disconnect();
-      window.removeEventListener("load", schedule);
-      if (idleSupported) window.cancelIdleCallback(idle);
-      else window.clearTimeout(idle);
+      cancelIdle?.();
     };
   }, []);
 

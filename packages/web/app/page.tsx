@@ -22,9 +22,9 @@ import { ArrowLink, Band, CloseCta, FounderCopy, SectionHead } from "@/component
 import { MarketingShell } from "@/components/marketing/shell";
 
 export const metadata: Metadata = {
-  title: "Nashr — manbaga asoslangan taqdimotlar",
+  title: "Nashr: manbaga asoslangan taqdimotlar",
   description:
-    "Nashr har bir fikrni manbaga bog‘laydi: yuklangan hujjatlardan bir urinishda nashr sifatidagi taqdimot. HTML, PDF va PPTX — uchala format ham asosiy.",
+    "Nashr har bir fikrni manbaga bog‘laydi. Yuklangan hujjatlardan bir urinishda nashr sifatidagi taqdimot chiqadi: HTML, PDF va PPTX.",
 };
 
 const RING_SLOTS = 12;
@@ -43,26 +43,23 @@ function ringTiles(): string[] {
 const STEPS = [
   {
     key: "manba",
-    n: "01",
     title: "Manba yuklaysiz",
-    body: "PDF, DOCX, PPTX yoki rasm. Fayl tekshiruvdan o‘tadi va bo‘laklarga ajratiladi.",
+    body: "PDF, DOCX, PPTX yoki rasm. Fayl tekshiruvdan o‘tadi va o‘qiladigan bo‘laklarga ajraladi.",
     slot: "Manba yuklash: fayllar ro‘yxati va tekshiruv holati",
     file: "public/marketing/shots/step-sources.png",
   },
   {
     key: "savol",
-    n: "02",
     title: "Savollarga javob berasiz",
-    body: "Dvigatel yetishmayotgan joyni so‘raydi. Javobingiz dalil sifatida ishga kiradi.",
-    slot: "Savol-javob: dvigatel so‘raydi, javob saqlanadi",
+    body: "Manbada yetishmagan joyni so‘raydi. Javobingiz keyingi bosqichda ishlatiladi.",
+    slot: "Savol-javob ekrani: savol va saqlangan javob",
     file: "public/marketing/shots/step-interview.png",
   },
   {
     key: "taqdimot",
-    n: "03",
     title: "Dalilga tayangan taqdimot olasiz",
-    body: "HTML, PDF va PPTX bitta ishdan chiqadi — har bir slayd manbasi bilan.",
-    slot: "Tayyor taqdimot: slayd va uning manbasi",
+    body: "Bitta ishdan HTML, PDF va PPTX chiqadi. Har bir slayd o‘z manbasini ko‘rsatadi.",
+    slot: "Tayyor taqdimot va uning manbalar ro‘yxati",
     file: "public/marketing/shots/step-deck.png",
   },
 ] as const;
@@ -72,9 +69,9 @@ const FAQ = [
     q: "Bu aldash emasmi?",
     a: (
       <>
-        Nashr siz o‘rningizga o‘ylab bermaydi: u faqat siz bergan manbadan yozadi va har bir gapning
-        qayerdan kelganini ko‘rsatadi. Ishni topshirish va uning mazmuni uchun javobgarlik sizda
-        qoladi.
+        Nashr siz uchun o‘ylab qo‘ymaydi. U faqat siz yuklagan hujjatdan yozadi va har bir gapning
+        qayerdan kelganini ochiq ko‘rsatadi, shuning uchun uni tekshirish ham oson. Topshirilgan
+        ish uchun javobgarlik sizda qoladi.
       </>
     ),
   },
@@ -82,8 +79,8 @@ const FAQ = [
     q: "Manbam bo‘lmasa nima bo‘ladi?",
     a: (
       <>
-        Manbasiz ish boshlanmaydi. Hujjatingiz bo‘lmasa, avval uni yuklang — dvigatel o‘zidan dalil
-        to‘qimaydi.
+        Manbasiz ish boshlanmaydi. Nashr o‘zidan dalil to‘qimaydi, shuning uchun avval hujjat
+        kerak: ma’ruza matni, maqola, kitob bobi yoki hisobot.
       </>
     ),
   },
@@ -95,8 +92,8 @@ const FAQ = [
     q: "Qanday fayllar chiqadi?",
     a: (
       <>
-        Uchtasi ham: interaktiv HTML, chop etishga tayyor PDF va PowerPointda ochiladigan PPTX.
-        Yuklab olish havolasi yetti kun amal qiladi.
+        Interaktiv HTML, chop etishga tayyor PDF va PowerPointda ochiladigan PPTX. Yuklab olish
+        havolasi yetti kun amal qiladi.
       </>
     ),
   },
@@ -104,8 +101,8 @@ const FAQ = [
     q: "Narxi qancha?",
     a: (
       <>
-        Bitta taqdimot 5 000 so‘mdan boshlanadi; farq AI rasmlar va tahrirlar sonida.{" "}
-        <Link href={ROUTES.pricing}>Narxlar sahifasi</Link> hammasini ochiq yozadi.
+        Bitta taqdimot 5 000 so‘mdan boshlanadi. Paketlar faqat AI rasmlar va tahrirlar soni bilan
+        farq qiladi, buni <Link href={ROUTES.pricing}>narxlar sahifasi</Link> to‘liq yozib qo‘ygan.
       </>
     ),
   },
@@ -113,8 +110,8 @@ const FAQ = [
     q: "Ustozim tekshira oladimi?",
     a: (
       <>
-        Ha. Ulashish havolasini yuborasiz: ishni brauzerda ochadi va har bir da’vo yonida uning
-        manbasini ko‘radi.
+        Ha. Unga ulashish havolasini yuborasiz. Havola ishni brauzerda ochadi va har bir da’vo
+        yonida uning manbasi turadi.
       </>
     ),
   },
@@ -134,14 +131,14 @@ export default function HomePage() {
             </span>
           </h1>
           <p className="mkt-hero-sub mkt-rise mkt-rise-2">
-            Nashr har bir fikrni manbaga bog‘laydi. Ustoz so‘raganda — javob tayyor.
+            Nashr har bir fikrni manbaga bog‘laydi. Ustoz so‘raganda javob tayyor turadi.
           </p>
           <div className="mkt-rise mkt-rise-3">
             <PromptTeaser />
           </div>
           <p className="mkt-hero-foot mkt-rise mkt-rise-4">
-            <span className="mkt-hero-cite">1</span> Har bir slayd o‘z manbasiga havola qiladi — bu
-            odob emas, dastur darajasidagi talab.
+            <span className="mkt-hero-cite">1</span> Har bir slayd qaysi hujjatning qaysi
+            bo‘lagidan chiqqanini ko‘rsatadi.
           </p>
         </div>
 
@@ -157,26 +154,19 @@ export default function HomePage() {
       <Band tight ruled>
         <AssetSlot
           label="Ish stoli: manbalar chapda, yig‘ilayotgan taqdimot o‘ngda"
-          note="Asset: public/marketing/proof-workspace.png — muallif Session W (P2) dan keyin beradi"
-          url="nashr.uz/projects/…"
-          caption="Ish stolida nima bo‘layotgani ochiq turadi: qaysi manba o‘qildi, qaysi slayd yig‘ildi."
+          note="Asset: public/marketing/proof-workspace.png"
+          caption="Manbalar, ajratilgan bo‘laklar va yig‘ilayotgan slaydlar bitta ekranda turadi."
         />
       </Band>
 
       <Band tone="inset" tight>
-        <SectionHead folio="I." title="Uch qadam" />
+        <SectionHead title="Uch qadam" />
         <div className="mkt-steps">
           {STEPS.map((step) => (
             <div key={step.key} className="mkt-step">
-              <span className="mkt-step-n">{step.n}</span>
               <h3 className="mkt-step-title">{step.title}</h3>
               <p className="mkt-step-body">{step.body}</p>
-              <AssetSlot
-                variant="plate"
-                ratio="16 / 10"
-                label={step.slot}
-                note={`Asset: ${step.file}`}
-              />
+              <AssetSlot ratio="16 / 10" label={step.slot} note={"Asset: " + step.file} />
             </div>
           ))}
         </div>
@@ -185,15 +175,14 @@ export default function HomePage() {
       <Band tight>
         <div className="mkt-claim">
           <div className="mkt-claim-text">
-            <span className="mkt-folio">II.</span>
             <h2 className="mkt-claim-title">Nashr faqat siz bergan dalilga tayanadi.</h2>
             <p className="mkt-claim-body">
-              Slaydga chiqqan har bir raqam, ta’rif va iqtibos yuklangan hujjatning aniq bo‘lagidan
-              keladi. Bog‘lanmagan gap chiqishga yetib bormaydi.
+              Slaydga chiqqan raqam, ta’rif va iqtibos yuklangan hujjatning aniq bo‘lagidan keladi.
+              Manbaga bog‘lanmagan gap chiqishga yetib bormaydi.
             </p>
             <p className="mkt-claim-body">
-              Ichki tekshiruvchi manbada yo‘q raqamni yoki mavjud bo‘lmagan adabiyotni topsa, uni
-              o‘tkazmaydi: bo‘limni qaytaradi va qayta yozdiradi.
+              Ichki tekshiruvchi manbada yo‘q raqamni yoki mavjud bo‘lmagan adabiyotni topsa,
+              bo‘limni qaytaradi va qayta yozdiradi.
             </p>
             <p className="mkt-claim-note">
               <ArrowLink href={ROUTES.presentations}>Mexanizm qanday ishlaydi</ArrowLink>
@@ -206,11 +195,7 @@ export default function HomePage() {
       </Band>
 
       <Band tone="inset" tight>
-        <SectionHead
-          folio="III."
-          title="Narxlar"
-          lede="Uchta paket, bitta farq: nechta AI rasm va nechta tahrir."
-        />
+        <SectionHead title="Narxlar" lede="Uchta paket. Farq faqat AI rasmlar va tahrirlar sonida." />
         <TierCards />
         <p className="mkt-caption">
           <ArrowLink href={ROUTES.pricing}>To‘liq taqqoslash</ArrowLink>
@@ -218,7 +203,7 @@ export default function HomePage() {
       </Band>
 
       <Band tight>
-        <SectionHead folio="IV." title="Savollar" />
+        <SectionHead title="Savollar" />
         {/* COPY:FOUNDER — javoblar muallif ko‘rigini kutmoqda, ayniqsa birinchisi */}
         <FounderCopy>
           <Faq items={FAQ} />

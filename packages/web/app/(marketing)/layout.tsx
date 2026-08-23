@@ -12,8 +12,8 @@ import { MarketingShell } from "@/components/marketing/shell";
 
 export const metadata: Metadata = {
   title: {
-    default: "Nashr — manbaga asoslangan taqdimotlar",
-    template: "%s — Nashr",
+    default: "Nashr: manbaga asoslangan taqdimotlar",
+    template: "%s | Nashr",
   },
 };
 

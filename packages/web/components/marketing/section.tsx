@@ -38,14 +38,15 @@ export function PageHero({
   lede,
   children,
 }: {
-  eyebrow: string;
+  /** Only when it says something the headline does not. Usually it does not. */
+  eyebrow?: string;
   title: ReactNode;
   lede?: ReactNode;
   children?: ReactNode;
 }) {
   return (
     <section className="mkt-wrap mkt-phero">
-      <p className="mkt-eyebrow mkt-rise">{eyebrow}</p>
+      <p className="mkt-eyebrow mkt-rise">{eyebrow ? <span>{eyebrow}</span> : null}</p>
       <h1 className="mkt-page-title mkt-rise mkt-rise-2">{title}</h1>
       {lede ? <p className="mkt-lede mkt-rise mkt-rise-3">{lede}</p> : null}
       {children ? <div className="mkt-phero-cta mkt-rise mkt-rise-4">{children}</div> : null}
@@ -53,7 +54,11 @@ export function PageHero({
   );
 }
 
-/** Folio numbers are the manuscript motif: I., II., III. — never decoration. */
+/**
+ * A folio number is the manuscript motif, and it earns its place only where the
+ * sections are genuinely a sequence. Numbering every section on every page is
+ * decoration, and decoration that looks like structure is worse than neither.
+ */
 export function SectionHead({
   folio,
   title,

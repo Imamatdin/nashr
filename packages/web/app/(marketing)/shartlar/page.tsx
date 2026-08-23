@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 export default function TermsPage() {
   return (
     <>
-      <PageHero eyebrow="Huquqiy" title="Foydalanish shartlari" />
+      <PageHero title="Foydalanish shartlari" />
 
       <Band tight ruled>
         <div className="mkt-prose">
@@ -44,8 +44,9 @@ export default function TermsPage() {
 
           <h2>Akademik javobgarlik</h2>
           <p>
-            Nashr manbaga bog‘lanmagan da’vo chiqarmaslikka qurilgan, lekin topshirilayotgan ishning
-            javobgari — siz. O‘quv muassasangizning qoidalariga rioya qilish sizning zimmangizda.
+            Nashr manbaga bog‘lanmagan da’vo chiqarmaslikka qurilgan, lekin topshirilayotgan ish
+            uchun javobgarlik sizda. O‘quv muassasangiz qoidalariga rioya qilish ham sizning
+            zimmangizda.
           </p>
 
           {/* COPY:FOUNDER — huquqiy matn: xizmat kafolatlari chegarasi, taqiqlangan foydalanish, shartlar o‘zgarishi */}

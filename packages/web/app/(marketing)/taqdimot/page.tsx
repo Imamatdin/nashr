@@ -1,9 +1,11 @@
-// /taqdimot — the presentations product page. Claim, visual, repeat.
+// /taqdimot — the presentations product page. One claim, one visual, repeat.
+// The folio numbers stay on this page only: here the sections really are a
+// sequence, so the numbers carry information instead of decorating.
 
 import type { Metadata } from "next";
 import Link from "next/link";
 import { AssetSlot } from "@/components/marketing/asset-slot";
-import { startHref, ROUTES } from "@/components/marketing/links";
+import { ROUTES, startHref } from "@/components/marketing/links";
 import { TierCards } from "@/components/marketing/pricing-cards";
 import {
   ArrowLink,
@@ -19,7 +21,7 @@ import {
 export const metadata: Metadata = {
   title: "Taqdimot",
   description:
-    "Yuklangan manbadan chiqqan taqdimot: har bir da’vo hujjatning aniq bo‘lagiga bog‘lanadi. HTML, PDF va PPTX bitta buyurtmadan.",
+    "Yuklangan hujjatdan chiqqan taqdimot. Har bir da’vo manba bo‘lagiga bog‘lanadi, HTML, PDF va PPTX bitta buyurtmadan chiqadi.",
 };
 
 const FORMATS = [
@@ -27,7 +29,7 @@ const FORMATS = [
     key: "html",
     n: "HTML",
     title: "Interaktiv",
-    body: "Brauzerda ochiladi, klaviatura bilan boshqariladi, savol-javob slaydlari ishlaydi. Bitta fayl — internetsiz ham ochiladi.",
+    body: "Brauzerda ochiladi, klaviatura bilan boshqariladi, savol slaydlari ishlaydi. Bitta fayl, internetsiz ham ochiladi.",
   },
   {
     key: "pdf",
@@ -47,44 +49,45 @@ export default function PresentationsPage() {
   return (
     <>
       <PageHero
-        eyebrow="Taqdimot"
         title="Manbadan chiqqan taqdimot"
-        lede="Hujjatlaringizni yuklaysiz — Nashr ulardan taqdimot yig‘adi. Slaydga chiqqan har bir raqam, ta’rif va iqtibos siz bergan hujjatning aniq bo‘lagidan keladi."
+        lede="Hujjatlaringizni yuklaysiz, Nashr ulardan taqdimot yig‘adi. Slaydga chiqqan raqam, ta’rif va iqtibos siz bergan hujjatning aniq bo‘lagidan keladi."
       >
         <Link href={startHref()} className="mkt-btn mkt-btn-lg">
           Boshlash
         </Link>
-        <ArrowLink href={ROUTES.pricing}>Narxlarni ko‘rish</ArrowLink>
+        <ArrowLink href={ROUTES.pricing}>Narxlar</ArrowLink>
       </PageHero>
 
       <Band tight ruled>
-        <SectionHead
+        <Claim
           folio="I."
-          title="Manba — boshlanish nuqtasi"
-          lede="PDF, DOCX, PPTX, jadval yoki rasm. Fayl avval turini aniqlash tekshiruvidan o‘tadi, so‘ng bo‘laklarga ajratiladi: dvigatel keyin aynan shu bo‘laklarga iqtibos qiladi."
+          title="Manbadan boshlanadi"
+          body={[
+            "PDF, DOCX, PPTX, jadval yoki rasm yuklaysiz. Fayl turi tekshiriladi, matn esa bo‘laklarga ajratiladi.",
+            "Keyingi bosqichlar aynan shu bo‘laklarga murojaat qiladi. Bo‘lak bo‘lmasa, da’vo ham bo‘lmaydi.",
+          ]}
+          visual={
+            <AssetSlot
+              label="Manba yuklash ekrani: fayllar va ajratilgan bo‘laklar"
+              note="Asset: public/marketing/shots/sources.png"
+            />
+          }
         />
-        <AssetSlot
-          label="Ish stolida manba yuklanmoqda: fayl ro‘yxati va ajratilgan bo‘laklar"
-          note="Asset: public/marketing/shots/sources.png — muallif taqdim etadi"
-          url="nashr.uz/new"
-        />
-      </Band>
 
-      <Band tight>
-        {/* COPY:FOUNDER — mexanizm bloklari: uchta da’vo, har biriga bitta vizual */}
+        {/* COPY:FOUNDER — intervyu bosqichi: nima so‘raladi va javob nimani o‘zgartiradi */}
         <FounderCopy>
           <Claim
             folio="II."
-            title="Savol beriladi, keyin yoziladi"
+            title="Savol beriladi"
+            flip
             body={[
-              "Dvigatel mavzuni o‘zicha to‘ldirmaydi. Manbada yetishmayotgan joy bo‘lsa, u siz bilan aniqlashtiradi va javobingiz ishga kiradi.",
-              "Bu blok muallif matnini kutmoqda: intervyu bosqichi nima so‘raydi va javob taqdimotni qanday o‘zgartiradi.",
+              "Manbada yetishmagan joy bo‘lsa, Nashr uni siz bilan aniqlashtiradi.",
+              "Bu blok muallif matnini kutmoqda: qanday savollar beriladi va javob tayyor ishga qanday ta’sir qiladi.",
             ]}
             visual={
               <AssetSlot
-                label="Ish stoli: dvigatel savol beradi, javob dalil sifatida saqlanadi"
+                label="Savol-javob ekrani: savol va saqlangan javob"
                 note="Asset: public/marketing/shots/interview.png"
-                url="nashr.uz/projects/…"
               />
             }
           />
@@ -92,18 +95,16 @@ export default function PresentationsPage() {
 
         <Claim
           folio="III."
-          title="Har bir slayd o‘z manbasini olib yuradi"
-          flip
+          title="Manba slayd bilan birga yuradi"
           body={[
-            "Tayyor ishda har bir da’vo yonida uning manbasi turadi: qaysi hujjat, qaysi bo‘lak, qanday iqtibos. Ustoz so‘raganda ochib ko‘rsatasiz.",
-            "Manbada bo‘lmagan raqam yoki mavjud bo‘lmagan adabiyot chiqishga yetib bormaydi — ichki tekshiruv uni qaytaradi.",
+            "Tayyor ishda har bir da’vo yonida uning manbasi turadi: qaysi hujjat, qaysi bo‘lak, qanday iqtibos.",
+            "Manbada yo‘q raqam yoki mavjud bo‘lmagan adabiyot chiqishga yetib bormaydi. Ichki tekshiruv uni qaytaradi.",
           ]}
-          note="Provenans ro‘yxati loyiha sahifasida ochiq turadi va ulashish havolasi bilan birga yuboriladi."
+          note="Manbalar ro‘yxati loyiha sahifasida ochiq turadi va ulashish havolasi bilan birga ketadi."
           visual={
             <AssetSlot
-              label="Provenans jadvali: da’vo, iqtibos, manba fayli va bo‘lak raqami"
+              label="Manbalar jadvali: da’vo, iqtibos, fayl nomi va bo‘lak raqami"
               note="Asset: public/marketing/shots/provenance.png"
-              url="nashr.uz/projects/…"
             />
           }
         />
@@ -111,15 +112,15 @@ export default function PresentationsPage() {
         <Claim
           folio="IV."
           title="Tahrir suhbat orqali"
+          flip
           body={[
-            "Tayyor taqdimotni qayta buyurtma qilmaysiz: nima o‘zgarishi kerakligini yozasiz va dvigatel o‘sha joyni qayta yig‘adi.",
-            "Har bir paket bilan bir nechta tahrir keladi — Oddiy bilan bitta, Premium bilan uchta.",
+            "Tayyor taqdimotni qayta buyurtma qilmaysiz. Nima o‘zgarishi kerakligini yozasiz, Nashr o‘sha joyni qayta yig‘adi.",
+            "Har bir paketda tahrirlar soni belgilangan: Oddiyda bitta, Standartda ikkita, Premiumda uchta.",
           ]}
           visual={
             <AssetSlot
-              label="Ish stoli: tahrir so‘rovi va qayta yig‘ilgan slayd"
+              label="Tahrir so‘rovi va qayta yig‘ilgan slayd"
               note="Asset: public/marketing/shots/fix.png"
-              url="nashr.uz/projects/…"
             />
           }
         />
@@ -127,9 +128,8 @@ export default function PresentationsPage() {
 
       <Band tone="inset" tight>
         <SectionHead
-          folio="V."
           title="Uchala format ham asosiy"
-          lede="Biri ikkinchisining o‘rnini bosuvchi emas: bitta ishdan uchala fayl ham chiqadi va yuklab olish havolalari yetti kun amal qiladi."
+          lede="Bitta ishdan uchala fayl chiqadi. Yuklab olish havolalari yetti kun amal qiladi."
         />
         <CellGrid
           cells={FORMATS.map((format) => ({
@@ -142,27 +142,24 @@ export default function PresentationsPage() {
       </Band>
 
       <Band tight>
-        <SectionHead
-          folio="VI."
-          title="Namunalar"
-          lede="Dvigatelning haqiqiy chiqishi — qo‘l tegmagan holda."
-        />
+        <SectionHead title="Namunalar" lede="Nashr chiqargan ishlar, qo‘l tegmagan holda." />
         <div className="mkt-pair">
           <AssetSlot
-            variant="plate"
-            label="Namuna taqdimot: muqova va bitta ma’lumot slaydi"
+            label="Namuna: muqova va ma’lumot slaydi"
             note="Asset: public/marketing/decks/example-1.png"
           />
           <AssetSlot
-            variant="plate"
-            label="Namuna taqdimot: interaktiv savol slaydi"
+            label="Namuna: interaktiv savol slaydi"
             note="Asset: public/marketing/decks/example-2.png"
           />
         </div>
       </Band>
 
       <Band tight ruled>
-        <SectionHead folio="VII." title="Paketlar" lede="Farq faqat AI rasmlar soni va tahrirlar sonida. Manbaga bog‘lash va uchala format hamma paketda bor." />
+        <SectionHead
+          title="Paketlar"
+          lede="Manbaga bog‘lash, manbalar ro‘yxati va uchala format hamma paketda bor."
+        />
         <TierCards />
         <p className="mkt-caption">
           <ArrowLink href={ROUTES.pricing}>To‘liq taqqoslash va savollar</ArrowLink>

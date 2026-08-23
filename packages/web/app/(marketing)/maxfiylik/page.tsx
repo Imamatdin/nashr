@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 export default function PrivacyPage() {
   return (
     <>
-      <PageHero eyebrow="Huquqiy" title="Maxfiylik siyosati" />
+      <PageHero title="Maxfiylik siyosati" />
 
       <Band tight ruled>
         <div className="mkt-prose">
@@ -22,23 +22,23 @@ export default function PrivacyPage() {
 
           <h2>Qanday ma’lumot to‘planadi</h2>
           <p>
-            Kirish uchun: Telegram hisobingiz identifikatori yoki elektron pochta manzilingiz
-            (Google orqali kirsangiz — Google bergan manzil). Ishlash uchun: siz yuklagan hujjatlar,
-            yozgan mavzuingiz va tayyor bo‘lgan fayllar. Hisob uchun: to‘lov va yechim yozuvlari.
+            Kirish uchun Telegram hisobingiz identifikatori yoki elektron pochta manzilingiz
+            olinadi. Ishlash uchun siz yuklagan hujjatlar, yozgan mavzuingiz va tayyor bo‘lgan
+            fayllar saqlanadi. Hisob uchun to‘lov va yechim yozuvlari yuritiladi.
           </p>
 
           <h2>Yuklangan hujjatlar</h2>
           <p>
-            Hujjatlar yopiq saqlanadi va ularga faqat siz kirasiz. Ular taqdimot yoki maqola
-            yaratish uchun ishlatiladi: matn bo‘laklarga ajratiladi, so‘ng da’volarni manbaga
-            bog‘lash uchun o‘qiladi. Hujjat mazmuni buyruq sifatida bajarilmaydi — u faqat
-            ma’lumot.
+            Hujjatlar yopiq saqlanadi va ularga faqat siz kirasiz. Ular ish yaratish uchun
+            ishlatiladi: matn bo‘laklarga ajratiladi, so‘ng da’volarni manbaga bog‘lash uchun
+            o‘qiladi. Hujjat mazmuni buyruq sifatida bajarilmaydi, u faqat ma’lumot.
           </p>
 
           <h2>Yuklab olish havolalari</h2>
           <p>
-            Tayyor fayllar imzolangan, muddatli havola orqali beriladi: havola yetti kundan keyin
-            ishlamaydi. Ulashish havolasini siz o‘zingiz yaratasiz va u faqat o‘sha ishni ko‘rsatadi.
+            Tayyor fayllar imzolangan, muddatli havola orqali beriladi va havola yetti kundan
+            keyin ishlamaydi. Ulashish havolasini siz o‘zingiz yaratasiz, u faqat o‘sha ishni
+            ko‘rsatadi.
           </p>
 
           {/* COPY:FOUNDER — huquqiy matn: saqlash muddati, o‘chirish tartibi, uchinchi tomon xizmatlari, aloqa */}

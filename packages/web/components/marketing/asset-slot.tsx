@@ -1,18 +1,18 @@
-// Asset slots. Every screenshot the founder still owes has a designed frame
-// standing in for it: the frame is the final chrome, the hatched interior says
-// in Uzbek what the image will show. When the file lands, the same component
-// renders it — nothing around it moves.
+// Asset slots. Every screenshot the founder still owes has a frame standing in
+// for it, and the frame says in plain Uzbek what the image will show.
+//
+// Deliberately NOT a mock browser window: fake traffic lights over a fake
+// address bar are a drawing of a screenshot, which is worse than an empty frame
+// that admits what it is. When the file lands the same component renders it and
+// nothing around it moves.
 
 import Image from "next/image";
 
 export interface AssetSlotProps {
   /** What the finished image shows, in the reader language. */
   label: string;
-  /** Where the file goes, for the founder. Rendered small, under the label. */
+  /** Where the file goes, for the founder. */
   note?: string;
-  /** Fake address bar text — only for the browser variant. */
-  url?: string;
-  variant?: "browser" | "plate";
   /** Aspect ratio of the interior, e.g. "16 / 9". */
   ratio?: string;
   /** When present the slot renders the real asset instead of the placeholder. */
@@ -27,8 +27,6 @@ export interface AssetSlotProps {
 export function AssetSlot({
   label,
   note,
-  url,
-  variant = "browser",
   ratio = "16 / 9",
   src,
   alt,
@@ -40,17 +38,6 @@ export function AssetSlot({
   return (
     <figure className="mkt-slot-figure-wrap">
       <div className="mkt-slot">
-        {variant === "browser" ? (
-          <div className="mkt-slot-bar">
-            <span className="mkt-slot-dots" aria-hidden>
-              <i />
-              <i />
-              <i />
-            </span>
-            <span className="mkt-slot-url">{url ?? "nashr.uz"}</span>
-          </div>
-        ) : null}
-
         {src ? (
           <Image
             className="mkt-slot-figure"
@@ -63,7 +50,6 @@ export function AssetSlot({
           />
         ) : (
           <div className="mkt-slot-body" style={{ aspectRatio: ratio }}>
-            <span className="mkt-slot-tag">Asset</span>
             <p className="mkt-slot-label">{label}</p>
             {note ? <p className="mkt-slot-note">{note}</p> : null}
           </div>

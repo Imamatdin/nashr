@@ -32,7 +32,7 @@ export const TIERS: ReadonlyArray<MarketingTier> = [
     id: "presentation_basic",
     name: "Oddiy",
     price: 5000,
-    desc: "AI rasmsiz — toza tipografik dizayn",
+    desc: "AI rasmsiz, toza tipografik dizayn",
     aiImages: 0,
     fixes: 1,
     includes: [
@@ -67,7 +67,7 @@ export const TIERS: ReadonlyArray<MarketingTier> = [
     includes: [
       "Manbaga bog‘langan slaydlar",
       "HTML, PDF va PPTX",
-      "5 tagacha AI rasm — butun taqdimot bo‘ylab bitta uslub",
+      "5 tagacha AI rasm, butun taqdimot bo‘ylab bitta uslub",
       "3 ta tahrir",
     ],
   },

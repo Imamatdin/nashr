@@ -1,8 +1,9 @@
 // /maqola — the article product page. The revenue product, and the one that is
-// not delivered yet: the page says so in the first screen rather than the last.
+// not delivered yet: the page says so on the first screen rather than the last.
 
 import type { Metadata } from "next";
 import { AssetSlot } from "@/components/marketing/asset-slot";
+import { DeskPlate } from "@/components/marketing/desk-plate";
 import { ROUTES, startHref } from "@/components/marketing/links";
 import {
   ArrowLink,
@@ -18,80 +19,83 @@ import {
 export const metadata: Metadata = {
   title: "Maqola",
   description:
-    "Dalil jadvaliga tayangan ilmiy matn: har bir da’vo manbaga bog‘lanadi, iqtiboslar OAK va IEEE talablariga muvofiq rasmiylashtiriladi. Tez kunda.",
+    "Dalil jadvaliga tayangan ilmiy matn. Har bir da’vo manbaga bog‘lanadi, iqtiboslar bitta uslubda rasmiylashtiriladi. Tez kunda.",
 };
 
 const STRUCTURES = [
   {
     key: "referat",
-    n: "I.",
     title: "Referat",
-    body: "Kirish, asosiy qism, xulosa, adabiyotlar ro‘yxati — so‘ralgan hajmda.",
+    body: "Kirish, asosiy qism, xulosa va adabiyotlar ro‘yxati. So‘ralgan hajmda.",
   },
   {
     key: "kurs",
-    n: "II.",
     title: "Kurs ishi",
     body: "Mundarija, nazariy bob, amaliy bob, xulosa, adabiyotlar va ilovalar.",
   },
   {
     key: "ilmiy",
-    n: "III.",
     title: "Ilmiy maqola",
-    body: "Annotatsiya, adabiyotlar sharhi, metodika, natijalar, muhokama, xulosa.",
+    body: "Annotatsiya, adabiyotlar sharhi, metodika, natijalar, muhokama va xulosa.",
   },
   {
     key: "hisobot",
-    n: "IV.",
     title: "Hisobot",
-    body: "Kirish, tahlil, natijalar, tavsiyalar — tekshiriladigan tuzilmada.",
+    body: "Kirish, tahlil, natijalar va tavsiyalar. Tekshirilishi mumkin bo‘lgan tuzilmada.",
   },
 ] as const;
 
 export default function ArticlesPage() {
   return (
     <>
-      <PageHero
-        eyebrow="Maqola"
-        title="Ish sizniki — biz tuzilmani beramiz."
-        lede="Maqola matni dalil jadvalidan o‘sadi: avval qaysi da’vo qaysi manbaga tayanishi aniqlanadi, keyin bo‘limlar yoziladi. Manbasiz jumla matnga kirmaydi."
-      >
-        <span className="mkt-chip">Tez kunda</span>
-        <ArrowLink href={ROUTES.presentations}>Hozircha taqdimotdan boshlang</ArrowLink>
-      </PageHero>
+      <section className="mkt-wrap mkt-intro">
+        <div className="mkt-intro-text">
+          <p className="mkt-eyebrow mkt-rise">
+            <span>Tez kunda</span>
+          </p>
+          <h1 className="mkt-page-title mkt-rise mkt-rise-2">Ish sizniki. Tuzilmani biz beramiz.</h1>
+          <p className="mkt-lede mkt-rise mkt-rise-3">
+            Maqola matni dalil jadvalidan o‘sadi. Avval qaysi da’vo qaysi manbaga tayanishi
+            aniqlanadi, keyin bo‘limlar yoziladi. Manbasiz jumla matnga kirmaydi.
+          </p>
+          <div className="mkt-phero-cta mkt-rise mkt-rise-4">
+            <ArrowLink href={ROUTES.presentations}>Hozircha taqdimotdan boshlang</ArrowLink>
+          </div>
+        </div>
+
+        <div className="mkt-intro-visual mkt-rise mkt-rise-2">
+          <DeskPlate />
+        </div>
+      </section>
 
       <Band tight ruled>
         <Claim
-          folio="I."
-          title="Dalil jadvali — asosiy ob’ekt"
+          title="Dalil jadvali"
           body={[
-            "Maqolaning yadrosi matn emas, dalil jadvali: har bir da’vo, uni tasdiqlovchi manba bo‘lagi va o‘sha bo‘lakdagi aniq iqtibos bitta qatorda turadi.",
-            "Bo‘limlar shu jadvaldan yoziladi. Qator bo‘sh bo‘lsa, da’vo matnga chiqmaydi — u savol bo‘lib qoladi.",
+            "Maqolaning yadrosi matn emas, dalil jadvali. Har bir da’vo, uni tasdiqlovchi manba bo‘lagi va o‘sha bo‘lakdagi iqtibos bitta qatorda turadi.",
+            "Bo‘limlar shu jadvaldan yoziladi. Qator bo‘sh bo‘lsa, da’vo matnga chiqmaydi va savol bo‘lib qoladi.",
           ]}
           visual={
             <AssetSlot
               label="Dalil jadvali: da’vo, manba, iqtibos va holat ustunlari"
               note="Asset: public/marketing/shots/evidence-matrix.png"
-              url="nashr.uz/projects/…"
             />
           }
         />
 
-        {/* COPY:FOUNDER — iqtibos intizomi: OAK/GOST va IEEE haqidagi asosiy argument */}
+        {/* COPY:FOUNDER — iqtibos intizomi: qaysi uslublar va ular qanday tekshiriladi */}
         <FounderCopy>
           <Claim
-            folio="II."
             title="Iqtibos intizomi"
             flip
             body={[
-              "O‘zbek universitetlari talab qiladigan rasmiylashtirish qoidalari va xalqaro jurnallarning talablari bir xil emas. Nashr ikkalasini ham biladi va bittasini tanlab, oxirigacha unga rioya qiladi.",
-              "Bu blok muallif matnini kutmoqda: qaysi uslublar qo‘llab-quvvatlanadi va ular qanday tekshiriladi.",
+              "O‘zbek universitetlari talab qiladigan rasmiylashtirish qoidalari xalqaro jurnallarnikidan farq qiladi. Nashr ikkalasini ham biladi va tanlangan uslubga oxirigacha rioya qiladi.",
+              "Bu blok muallif matnini kutmoqda: qaysi uslublar qo‘llab-quvvatlanadi va havolalar qanday tekshiriladi.",
             ]}
             visual={
               <AssetSlot
-                label="Adabiyotlar ro‘yxati: bitta uslubda, matndagi havolalar bilan bog‘langan"
+                label="Adabiyotlar ro‘yxati: bitta uslubda, matndagi havolalar bilan"
                 note="Asset: public/marketing/shots/bibliography.png"
-                variant="plate"
               />
             }
           />
@@ -100,14 +104,12 @@ export default function ArticlesPage() {
 
       <Band tone="inset" tight>
         <SectionHead
-          folio="III."
           title="To‘rtta akademik tuzilma"
-          lede="Har biri o‘z bo‘limlari va o‘z talablari bilan — universitet qabul qiladigan shaklda."
+          lede="Har biri o‘z bo‘limlari va talablari bilan, universitet qabul qiladigan shaklda."
         />
         <CellGrid
           cells={STRUCTURES.map((entry) => ({
             key: entry.key,
-            n: entry.n,
             title: entry.title,
             body: entry.body,
           }))}
@@ -116,26 +118,27 @@ export default function ArticlesPage() {
       </Band>
 
       <Band tight>
-        <SectionHead folio="IV." title="Hozirgi holat" />
+        <SectionHead title="Hozirgi holat" />
         <div className="mkt-prose">
           <p>
-            Maqola dvigateli hali ochilmagan. Biz uni taqdimotlar bilan bir xil qoidada quramiz:
-            manbasiz da’vo yo‘q, to‘qilgan adabiyot yo‘q. Ochilganda bu sahifada yozib qo‘yamiz.
+            Maqola dvigateli hali ochilmagan. Uni taqdimotlar bilan bir xil qoidada quramiz:
+            manbasiz da’vo yo‘q, to‘qilgan adabiyot yo‘q. Ochilgan kuni shu sahifada yozib
+            qo‘yamiz.
           </p>
           <p>
-            Shu vaqtgacha taqdimot dvigateli ishlaydi va u ham xuddi shu qoidada ishlaydi —
-            mexanizmni o‘sha yerda ko‘rib olsangiz bo‘ladi.
+            Shu vaqtgacha taqdimot dvigateli ishlaydi va u ham shu qoidaga bo‘ysunadi. Mexanizmni
+            o‘sha yerda ko‘rib olishingiz mumkin.
           </p>
         </div>
       </Band>
 
       <CloseCta
-        line="Ish sizniki. Tuzilma bizdan."
-        sub="Maqola ochilgunicha taqdimotdan boshlang — dalilga bog‘lash mexanizmi bir xil."
+        line="Manba tayyor bo‘lsa, ish ham boshlanadi."
+        sub="Maqola ochilgunicha taqdimotdan boshlang. Manbaga bog‘lash mexanizmi bir xil."
         primaryHref={startHref()}
-        primaryLabel="Taqdimotdan boshlash"
+        primaryLabel="Boshlash"
         secondaryHref={ROUTES.presentations}
-        secondaryLabel="Taqdimot haqida"
+        secondaryLabel="Taqdimot"
       />
     </>
   );

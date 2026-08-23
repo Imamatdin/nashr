@@ -17,7 +17,7 @@ const START = [
     q: "Qanday boshlanadi?",
     a: (
       <>
-        Kirasiz, mavzuni yozasiz va manba hujjatlaringizni biriktirasiz. Buyurtma tasdiqlangach ish
+        Kirasiz, mavzuni yozasiz va hujjatlaringizni biriktirasiz. Buyurtmani tasdiqlagach ish
         boshlanadi va uni ish stolida kuzatasiz.
       </>
     ),
@@ -37,21 +37,21 @@ const OUTPUT = [
     q: "Qanday fayllar chiqadi?",
     a: (
       <>
-        Bitta ishdan uchtasi ham: brauzerda ochiladigan interaktiv HTML, chop etishga tayyor PDF va
-        PowerPointda ochiladigan PPTX.
+        Brauzerda ochiladigan interaktiv HTML, chop etishga tayyor PDF va PowerPointda
+        ochiladigan PPTX. Uchalasi bitta ishdan chiqadi.
       </>
     ),
   },
   {
     q: "Yuklab olish havolasi qancha turadi?",
-    a: <>Yetti kun. Muddat tugasa, loyihadan qayta yuklab olasiz.</>,
+    a: <>Yetti kun. Muddat tugasa, loyiha sahifasidan qayta yuklab olasiz.</>,
   },
   {
     q: "Ishni boshqalarga qanday ko‘rsataman?",
     a: (
       <>
-        Loyihadan ulashish havolasini olasiz. Havolani ochgan odam taqdimotni brauzerda ko‘radi;
-        tahrirlay olmaydi.
+        Loyihadan ulashish havolasini olasiz. Havolani ochgan odam ishni brauzerda ko‘radi,
+        lekin tahrirlay olmaydi.
       </>
     ),
   },
@@ -59,8 +59,8 @@ const OUTPUT = [
     q: "Natija yoqmasa nima qilaman?",
     a: (
       <>
-        Nima o‘zgarishi kerakligini yozasiz va dvigatel o‘sha joyni qayta yig‘adi. Har bir paketda
-        belgilangan sondagi tahrir bor.
+        Nima o‘zgarishi kerakligini yozasiz va Nashr o‘sha joyni qayta yig‘adi. Har bir
+        paketda tahrirlar soni belgilangan.
       </>
     ),
   },
@@ -71,7 +71,7 @@ const MONEY = [
     q: "To‘lov qanday amalga oshadi?",
     a: (
       <>
-        Hozircha hisobni Telegram bot orqali to‘ldirasiz; har bir buyurtma shu hisobdan yechiladi.
+        Hisobni Telegram bot orqali to‘ldirasiz va har bir buyurtma shu hisobdan yechiladi.
       </>
     ),
   },
@@ -85,23 +85,22 @@ export default function HelpPage() {
   return (
     <>
       <PageHero
-        eyebrow="Yordam"
         title="Savollar va javoblar"
         lede="Ko‘p so‘raladigan savollar. Ro‘yxatda yo‘q savolni Telegramda yozsangiz, javob beramiz."
       />
 
       <Band tight ruled>
-        <SectionHead folio="I." title="Boshlash" />
+        <SectionHead title="Boshlash" />
         <Faq items={START} />
       </Band>
 
       <Band tight>
-        <SectionHead folio="II." title="Natija va formatlar" />
+        <SectionHead title="Natija va formatlar" />
         <Faq items={OUTPUT} />
       </Band>
 
       <Band tone="inset" tight>
-        <SectionHead folio="III." title="To‘lov" />
+        <SectionHead title="To‘lov" />
         <Faq items={MONEY} />
         <p className="mkt-caption">
           Batafsil:{" "}
@@ -113,7 +112,7 @@ export default function HelpPage() {
 
       <CloseCta
         line="Javob topilmadimi?"
-        sub="Telegramda yozing — odam javob beradi."
+        sub="Telegramda yozing, odam javob beradi."
         primaryHref={SOCIAL.telegram}
         primaryLabel="Telegramda yozish"
         secondaryHref={startHref()}
