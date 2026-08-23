@@ -1,14 +1,15 @@
 import Link from "next/link";
+import "./doors.css";
 
 export default function NotFound() {
   return (
-    <div className="dark notfound">
+    <div className="theme-light notfound-shell">
       <Link href="/" className="notfound-brand">
         Nashr
       </Link>
-      <p className="notfound-folio">404</p>
+      <p className="notfound-code">404</p>
       <div className="notfound-rule" aria-hidden />
-      <p className="notfound-line">Bu sahifa nashrda yo&apos;q.</p>
+      <p className="notfound-msg">Bu sahifa nashrda yo&apos;q.</p>
       <div className="notfound-actions">
         <Link href="/projects" className="btn btn-primary">
           Loyihalarga qaytish

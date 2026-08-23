@@ -9,6 +9,7 @@ import { useRouter } from "next/navigation";
 import { emailExchange, ApiError } from "@/lib/api";
 import { consumeReturnTo } from "@/lib/return-to";
 import { createAnonClient } from "@/lib/supabase";
+import "../../doors.css";
 
 export default function AuthCallbackPage() {
   const router = useRouter();
@@ -53,15 +54,15 @@ export default function AuthCallbackPage() {
   }, [router]);
 
   return (
-    <div className="dark auth-min">
-      <Link href="/" className="auth-min-brand">
+    <div className="theme-light auth-shell">
+      <Link href="/" className="auth-brand">
         Nashr
       </Link>
 
-      <div className="auth-min-form">
-        <div className="card">
+      <div className="auth-body">
+        <div className="auth-card">
           {error ? (
-            <div className="state state-error" style={{ padding: "var(--sp-4) 0" }}>
+            <div className="state state-blank">
               <h3>Kirish amalga oshmadi</h3>
               <p>{error}</p>
               <a className="btn btn-ghost" href="/login">
@@ -69,10 +70,10 @@ export default function AuthCallbackPage() {
               </a>
             </div>
           ) : (
-            <div className="state" style={{ padding: "var(--sp-4) 0" }}>
+            <div className="state state-blank">
               <div
                 className="skeleton"
-                style={{ height: "1.4rem", width: "60%", margin: "0 auto var(--sp-4)" }}
+                style={{ height: "1.4rem", width: "60%", margin: "0 auto 16px" }}
               />
               <p>Kirilmoqda…</p>
             </div>

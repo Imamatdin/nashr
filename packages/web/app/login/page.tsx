@@ -15,6 +15,7 @@ import { DEFAULT_RETURN_TO, sanitizeReturnTo, stashReturnTo } from "@/lib/return
 import { loadSession } from "@/lib/session";
 import { createAnonClient } from "@/lib/supabase";
 import { readInitData } from "@/lib/telegram";
+import "../doors.css";
 
 type Status =
   | { kind: "idle" }
@@ -95,22 +96,22 @@ export default function LoginPage() {
   const working = status.kind === "working";
 
   return (
-    <div className="dark auth-min">
+    <div className="theme-light auth-shell">
       <Script
         src="https://telegram.org/js/telegram-web-app.js"
         onReady={() => setBridgeReady(true)}
       />
-      <Link href="/" className="auth-min-brand">
+      <Link href="/" className="auth-brand">
         Nashr
       </Link>
 
-      <div className="auth-min-form">
-        <div className="page-head">
-          <h1 className="page-title">Kirish</h1>
-          <p className="page-sub">Loyihalaringiz va taqdimotlaringizga qaytish.</p>
+      <div className="auth-body">
+        <div className="auth-head">
+          <h1 className="auth-title">Kirish</h1>
+          <p className="auth-sub">Loyihalaringiz va taqdimotlaringizga qaytish.</p>
         </div>
 
-        <div className="card">
+        <div className="auth-card">
           {status.kind === "error" && (
             <p className="auth-status" data-danger="true" role="alert">
               {status.message}
@@ -136,7 +137,7 @@ export default function LoginPage() {
                 Google bilan kirish
               </Button>
 
-              <div className="divider">yoki email orqali</div>
+              <div className="auth-divider">yoki email orqali</div>
 
               <div className="field">
                 <label htmlFor="email" className="field-label">
@@ -160,11 +161,11 @@ export default function LoginPage() {
             </>
           )}
         </div>
-      </div>
 
-      <p className="auth-foot">
-        Kirish orqali manbaga asoslangan nashr qoidalariga rozilik bildirasiz.
-      </p>
+        <p className="auth-foot">
+          Kirish orqali manbaga asoslangan nashr qoidalariga rozilik bildirasiz.
+        </p>
+      </div>
     </div>
   );
 }

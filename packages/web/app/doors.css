@@ -1,0 +1,300 @@
+/* The standalone pages that render outside the app chrome: the auth doors and
+   the 404 are light (the visitor is not in the product yet); the public share
+   viewer is dark (it frames the deck engine's own dark output). Each page
+   forces its ground with .theme-light / .dark on its own root, so a visitor's
+   system or stored preference cannot flip a door. Only what the shared
+   component classes (.btn/.field/.state/.skeleton) cannot express lives here. */
+
+/* ============================================================ light doors */
+
+.auth-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100dvh;
+  padding: 28px 20px 24px;
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+.auth-brand {
+  align-self: flex-start;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.auth-brand:hover {
+  text-decoration: none;
+}
+
+.auth-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: 380px;
+  padding: 24px 0;
+}
+
+.auth-head {
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.auth-title {
+  font-family: var(--font-display);
+  font-size: clamp(1.9rem, 4vw, 2.4rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.auth-sub {
+  margin-top: 8px;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.auth-status {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--ink-2);
+}
+
+.auth-status[data-danger="true"] {
+  color: var(--red);
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--line);
+}
+
+.auth-foot {
+  margin-top: 20px;
+  max-width: 340px;
+  text-align: center;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+/* ================================================================== 404 */
+
+.notfound-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px 20px;
+  text-align: center;
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+.notfound-brand {
+  position: absolute;
+  top: 28px;
+  left: 24px;
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.notfound-brand:hover {
+  text-decoration: none;
+}
+
+.notfound-code {
+  font-family: var(--font-display);
+  font-size: clamp(4rem, 12vw, 7rem);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--ink);
+}
+
+.notfound-rule {
+  width: 64px;
+  height: 1px;
+  margin: 22px 0;
+  background: var(--line-strong);
+}
+
+.notfound-msg {
+  font-size: 1.0625rem;
+  color: var(--ink-2);
+}
+
+.notfound-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 26px;
+}
+
+.notfound-quiet {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+/* ======================================================== dark share view */
+
+.share-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+.share-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.share-wordmark {
+  flex: 0 0 auto;
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.share-wordmark:hover {
+  text-decoration: none;
+}
+
+.share-doc {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  padding: 24px 20px;
+}
+
+.share-stage {
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.share-frame {
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--flexoki-base-950);
+  box-shadow: var(--shadow-hairline);
+  aspect-ratio: 16 / 9;
+}
+
+.share-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.share-caption {
+  margin-top: 12px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+
+.share-error {
+  max-width: 520px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.share-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 16px 20px;
+  border-top: 1px solid var(--line);
+}
+
+.share-made {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.875rem;
+  color: var(--ink-2);
+}
+
+.share-made:hover {
+  text-decoration: none;
+  color: var(--ink);
+}
+
+.share-made-mark {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-chip);
+  background: var(--ink);
+  color: var(--canvas);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .share-frame {
+    aspect-ratio: 4 / 3;
+  }
+
+  .share-foot {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

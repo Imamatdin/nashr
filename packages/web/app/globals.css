@@ -613,6 +613,16 @@
     cursor: progress;
   }
 
+  /* Tailwind preflight sets svg { display: block }, which would drop a button
+     icon onto its own line; the label is a centred flex row so the icon and
+     text sit together. */
+  .btn-label {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
   .btn-loading .btn-label {
     opacity: 0;
   }

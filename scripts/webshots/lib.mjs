@@ -229,10 +229,20 @@ const API_PATHS = new Set([
   "/projects/p-1/deck",
   "/projects/p-1/provenance",
   "/projects/p-1/share",
+  "/public/decks/share-stub-token",
   "/sources",
   "/sources/presign",
   "/r2-stub",
 ]);
+
+// The public share view resolves a token to a short-TTL signed URL. Opt in with
+// mockApi(page, {shareState: "deck" | "error" | "loading"}); default routes fall
+// through untouched so the existing shots are unaffected.
+const SHARED_DECK_VIEW = {
+  title: "Yoritish davri: aql-idrok asrining tug'ilishi",
+  html_url: "about:blank",
+  expires_in: 604800,
+};
 
 // A delivered deck: the chrome around the viewer is what these shots are for,
 // so the iframe points at a blank document rather than a real render.
@@ -345,6 +355,18 @@ export async function mockApi(page, options = {}) {
         return;
       }
       await fulfillJson(route, 404, { detail: "deck_not_ready" });
+      return;
+    }
+    if (url.pathname === "/public/decks/share-stub-token") {
+      if (options.shareState === "error") {
+        await fulfillJson(route, 404, { detail: "share_not_found" });
+        return;
+      }
+      if (options.shareState === "loading") {
+        // Never fulfilled: leaves the page on its skeleton for the shot.
+        return;
+      }
+      await fulfillJson(route, 200, SHARED_DECK_VIEW);
       return;
     }
     await fulfillJson(route, 200, options.deckReady ? PROVENANCE_VIEW : { rows: [], total_claims: 0 });
