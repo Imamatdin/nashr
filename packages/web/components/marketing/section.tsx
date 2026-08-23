@@ -97,7 +97,7 @@ export function Claim({
     <div className={flip ? "mkt-claim mkt-claim-flip" : "mkt-claim"}>
       <div className="mkt-claim-text">
         {folio ? <span className="mkt-folio">{folio}</span> : null}
-        <h3 className="mkt-claim-title">{title}</h3>
+        <h2 className="mkt-claim-title">{title}</h2>
         {body.map((paragraph, index) => (
           <p key={index} className="mkt-claim-body">
             {paragraph}

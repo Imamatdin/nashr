@@ -75,6 +75,7 @@ export default function PricingPage() {
       />
 
       <Band tight>
+        <SectionHead title="Paketlar" />
         <TierCards />
       </Band>
 

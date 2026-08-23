@@ -811,6 +811,16 @@ html:has([data-marketing-root]) {
   color: var(--ink-3);
 }
 
+/* Colour alone does not distinguish a link inside running text. */
+.mkt-caption a:not(.mkt-linkarrow),
+.mkt-prose a,
+.mkt-faq-a a,
+.mkt-tier-desc a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+
 .mkt-caption {
   margin-top: 14px;
   font-size: 0.875rem;
