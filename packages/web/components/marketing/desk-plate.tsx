@@ -12,7 +12,7 @@ import { afterLoadWhenIdle, motionEligible } from "./motion-gate";
 import type { DeskSceneProps } from "./plate/desk-scene";
 
 const POSTER = "/marketing/plates/desk-poster.png";
-const LABEL = "Chiroq ostidagi qog‘oz dastasi: Nashr ish stolining plastikasi";
+const LABEL = "Chiroq ostidagi qog‘oz dastasi";
 
 export function DeskPlate() {
   const hostRef = useRef<HTMLDivElement | null>(null);

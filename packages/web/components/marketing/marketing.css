@@ -963,9 +963,15 @@ html:has([data-marketing-root]) {
   line-height: 1.5;
 }
 
+/* A hairline tick, not a typographic dash: the list marker belongs to the same
+   rule grammar as the rest of the page. */
 .mkt-tier-list li::before {
-  content: "—";
-  color: var(--ink-3);
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 1px;
+  margin-top: 0.65em;
+  background: var(--line-strong);
 }
 
 .mkt-tier-foot {
