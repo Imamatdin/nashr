@@ -38,24 +38,45 @@ async function readDetail(response: Response): Promise<string> {
     .catch(() => "unknown");
 }
 
-async function postJson<T>(path: string, body: unknown, token?: string): Promise<T> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+// No request may hang forever: a fetch with no AbortSignal is exactly how the
+// "eternal skeleton" states happen — the UI cannot distinguish a slow network
+// from a dead one, so it shows a spinner until the tab is closed.
+const REQUEST_TIMEOUT_MS = 20_000;
+
+async function request<T>(
+  path: string,
+  init: RequestInit,
+  token?: string,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const headers: Record<string, string> = { ...((init.headers as Record<string, string>) ?? {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${apiBase()}${path}`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) throw new ApiError(response.status, await readDetail(response));
-  return (await response.json()) as T;
+  try {
+    const response = await fetch(`${apiBase()}${path}`, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new ApiError(response.status, await readDetail(response));
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function postJson<T>(path: string, body: unknown, token?: string): Promise<T> {
+  return request<T>(
+    path,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    token,
+  );
 }
 
 async function getJson<T>(path: string, token?: string): Promise<T> {
-  const headers: Record<string, string> = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${apiBase()}${path}`, { method: "GET", headers });
-  if (!response.ok) throw new ApiError(response.status, await readDetail(response));
-  return (await response.json()) as T;
+  return request<T>(path, { method: "GET" }, token);
 }
 
 function toSession(wire: MintedSessionWire): AppSession {
@@ -164,6 +185,15 @@ export interface JobView {
   progress: { step?: string; current?: number; total?: number };
   error_message: string | null;
   existing: boolean;
+  created_at: string | null;
+  started_at: string | null;
+  heartbeat_at: string | null;
+  completed_at: string | null;
+  /** The tier actually charged, authoritative over projects.package_tier. */
+  package: string | null;
+  deducted_amount: number | null;
+  /** A FACT from the job-stamped ledger row, never inferred from timestamps. */
+  refunded: boolean;
 }
 
 export function enqueueJob(
@@ -175,12 +205,27 @@ export function enqueueJob(
   // JSON.stringify drops the undefined key, so the body carries no package.
   packageName?: string,
   language = "uz",
+  // The typed topic finally reaches the generator (G1); answers carry the
+  // interview when the user gave one (G2). Both are dropped from the body when
+  // undefined, so an omitted answer set still means "decide for me".
+  topic?: string,
+  answers?: Record<string, unknown>,
 ): Promise<JobView> {
   return postJson<JobView>(
     "/jobs",
-    { project_id: projectId, package: packageName, sources, language },
+    { project_id: projectId, package: packageName, sources, language, topic, answers },
     token,
   );
+}
+
+/**
+ * The project's latest generation job, whatever its status — the route that
+ * lets a returning user see a run they no longer hold a `?job=` for (G3/G5).
+ * 404 means "this project has never been generated", which is a STATE, not an
+ * error; callers map it to `no_job`.
+ */
+export function getLatestJob(projectId: string, token: string): Promise<JobView> {
+  return getJson<JobView>(`/jobs?project_id=${encodeURIComponent(projectId)}`, token);
 }
 
 export function getJob(jobId: string, token: string): Promise<JobView> {
@@ -214,7 +259,9 @@ export function manageShare(
 export interface SharedDeckView {
   title: string;
   html_url: string;
+  /** SIGNED-URL lifetime in seconds — NOT the share link's, which never expires. */
   expires_in: number;
+  downloads: Array<{ format: string; url: string; expires_in: number }>;
 }
 
 export function resolveSharedDeck(shareToken: string): Promise<SharedDeckView> {
@@ -238,4 +285,191 @@ export interface ProvenanceView {
 
 export function getProvenance(projectId: string, token: string): Promise<ProvenanceView> {
   return getJson<ProvenanceView>(`/projects/${projectId}/provenance`, token);
+}
+
+// ----------------------------------------------------------------- session
+
+export interface MintedSessionView {
+  access_token: string;
+  expires_at: string;
+  user_id: string;
+}
+
+/**
+ * Slide the session forward. A sliding window, not a refresh token: this needs
+ * a token that is still VALID, so it cannot rescue an already-expired one. The
+ * client must therefore refresh proactively (see lib/session.ts); a
+ * 401-triggered attempt is a fallback that will usually fail.
+ */
+export async function refreshSession(token: string): Promise<AppSession> {
+  const wire = await postJson<MintedSessionWire>("/auth/refresh", {}, token);
+  const session = toSession(wire);
+  saveSession(session);
+  return session;
+}
+
+// ----------------------------------------------------------------- credits
+
+export interface BalanceView {
+  balance: number;
+  currency: string;
+}
+
+export interface LedgerEntryView {
+  id: string;
+  amount: number;
+  action: "grant_free" | "grant_paid" | "deduct_article" | "deduct_presentation" | "refund";
+  reason: string;
+  project_id: string | null;
+  generation_job_id: string | null;
+  created_at: string;
+}
+
+export interface LedgerView {
+  balance: number;
+  entries: LedgerEntryView[];
+}
+
+export function getBalance(token: string): Promise<BalanceView> {
+  return getJson<BalanceView>("/credits", token);
+}
+
+export function getLedger(token: string, limit = 25): Promise<LedgerView> {
+  return getJson<LedgerView>(`/credits/ledger?limit=${limit}`, token);
+}
+
+export interface PricingEntryView {
+  package: string;
+  price: number;
+  ai_images: number;
+  fix_allowance: number;
+}
+
+export interface PricingView {
+  currency: string;
+  packages: PricingEntryView[];
+  free_credit_value: number;
+  free_daily_cap: number;
+  free_weekly_cap: number;
+  free_project_cap: number;
+}
+
+/** Server truth for prices, image budgets and edit allowances. Unauthenticated. */
+export function getPricing(): Promise<PricingView> {
+  return getJson<PricingView>("/pricing");
+}
+
+// --------------------------------------------------------------- interview
+
+export interface InterviewOptionView {
+  value: string;
+  label: string;
+  is_default: boolean;
+}
+
+export interface InterviewQuestionView {
+  question_id: string;
+  question_text: string;
+  question_type: string;
+  options: InterviewOptionView[] | null;
+  min_value: number | null;
+  max_value: number | null;
+  default_value: string | number | null;
+  placeholder: string | null;
+  help_text: string | null;
+}
+
+export interface InterviewView {
+  questions: InterviewQuestionView[];
+  detected_domain: string;
+  estimated_slide_count: number;
+  available_stats_count: number;
+  available_people_count: number;
+}
+
+/**
+ * The source-derived clarification set. 409 `sources_not_ready` is the normal
+ * answer on a FIRST run — sources are processed during generation, so the
+ * questions exist from the second run on. Callers treat that as "offer to
+ * decide for them", never as an error.
+ */
+export function getInterview(
+  projectId: string,
+  token: string,
+  language = "uz",
+): Promise<InterviewView> {
+  return postJson<InterviewView>(`/projects/${projectId}/interview`, { language }, token);
+}
+
+// -------------------------------------------------------------------- chat
+
+export interface ChatFixView {
+  slide_id: string;
+  instruction: string;
+}
+
+export interface ChatPendingView {
+  reason: string;
+  fixes: ChatFixView[];
+}
+
+export interface ChatMessageView {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface ChatHistoryView {
+  can_edit: boolean;
+  messages: ChatMessageView[];
+  pending_action: ChatPendingView | null;
+  fixes_used: number;
+  fix_limit: number;
+  fixes_remaining: number;
+  package: string | null;
+  slide_count: number;
+  /** An edit job is re-rendering the deck right now. */
+  applying_job_id: string | null;
+}
+
+export interface ChatTurnView {
+  kind: "reply" | "approval_required" | "fix_ready";
+  reply: string | null;
+  pending_action: ChatPendingView | null;
+  /** Present for `fix_ready`: the presentation_edit job to watch. */
+  job_id: string | null;
+  fixes_used: number;
+  fix_limit: number;
+  fixes_remaining: number;
+}
+
+export function getChat(projectId: string, token: string): Promise<ChatHistoryView> {
+  return getJson<ChatHistoryView>(`/projects/${projectId}/chat`, token);
+}
+
+/**
+ * One brain turn. A plain answer returns inline; an edit the user asked for
+ * comes back as `fix_ready` with a job id. Never charges — editing a deck the
+ * user already paid for is not a second sale.
+ *
+ * The turn calls a model, so it is slower than any other request here.
+ */
+export function postChat(
+  projectId: string,
+  message: string,
+  token: string,
+): Promise<ChatTurnView> {
+  return request<ChatTurnView>(
+    `/projects/${projectId}/chat`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) },
+    token,
+    90_000,
+  );
+}
+
+export function approvePending(projectId: string, token: string): Promise<ChatTurnView> {
+  return postJson<ChatTurnView>(`/projects/${projectId}/chat/approve`, {}, token);
+}
+
+export function rejectPending(projectId: string, token: string): Promise<ChatTurnView> {
+  return postJson<ChatTurnView>(`/projects/${projectId}/chat/reject`, {}, token);
 }
