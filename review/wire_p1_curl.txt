@@ -1,0 +1,192 @@
+Nashr API — Session W / P1 route transcript
+generated: 2026-08-23T18:48:33Z
+server:    scripts/wire_stub_api.py (real routers, in-memory Supabase/R2/ledger/queue)
+bearer:    throwaway JWT minted by the stub; signs nothing outside this process
+
+==============================================================================
+# 1.1 GET /jobs?project_id — latest job for a READY project (SUCCESS)
+$ curl http://127.0.0.1:8099/jobs?project_id=aaaaaaaa-0000-0000-0000-00000000000a -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"id":"bbbbbbbb-0000-0000-0000-00000000000a","project_id":"aaaaaaaa-0000-0000-0000-00000000000a","job_type":"presentation_generation","status":"completed","progress":{"step":"Rendering presentation","current":7,"total":7},"error_message":null,"existing":false,"created_at":"2026-08-23T18:28:32.485962Z","started_at":"2026-08-23T18:29:32.485962Z","heartbeat_at":"2026-08-23T18:33:32.485962Z","completed_at":"2026-08-23T18:33:32.485962Z","package":"presentation_premium","deducted_amount":15000,"refunded":false}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.1 GET /jobs?project_id — FAILED project: refunded fact + timestamps (SUCCESS)
+$ curl http://127.0.0.1:8099/jobs?project_id=aaaaaaaa-0000-0000-0000-00000000000b -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"id":"bbbbbbbb-0000-0000-0000-00000000000b","project_id":"aaaaaaaa-0000-0000-0000-00000000000b","job_type":"presentation_generation","status":"failed","progress":{"step":"Choosing design direction","current":4,"total":7},"error_message":"editorial: RuntimeError: grounding hard stop","existing":false,"created_at":"2026-08-22T18:48:32.485962Z","started_at":"2026-08-22T18:48:32.485962Z","heartbeat_at":"2026-08-22T18:51:32.485962Z","completed_at":"2026-08-22T18:51:32.485962Z","package":"presentation_standard","deducted_amount":10000,"refunded":true}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.1 GET /jobs?project_id — project with no job (FAILURE: 404 job_not_found)
+$ curl http://127.0.0.1:8099/jobs?project_id=aaaaaaaa-0000-0000-0000-00000000000c -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"detail":"job_not_found"}
+<< HTTP 404 >>
+
+==============================================================================
+# 1.1 GET /jobs?project_id — someone else's project (FAILURE: 404 project_not_found)
+$ curl http://127.0.0.1:8099/jobs?project_id=aaaaaaaa-0000-0000-0000-00000000000d -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"detail":"project_not_found"}
+<< HTTP 404 >>
+
+==============================================================================
+# 1.1 GET /jobs/{id} — extended JobView on a completed run (SUCCESS)
+$ curl http://127.0.0.1:8099/jobs/bbbbbbbb-0000-0000-0000-00000000000a -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"id":"bbbbbbbb-0000-0000-0000-00000000000a","project_id":"aaaaaaaa-0000-0000-0000-00000000000a","job_type":"presentation_generation","status":"completed","progress":{"step":"Rendering presentation","current":7,"total":7},"error_message":null,"existing":false,"created_at":"2026-08-23T18:28:32.485962Z","started_at":"2026-08-23T18:29:32.485962Z","heartbeat_at":"2026-08-23T18:33:32.485962Z","completed_at":"2026-08-23T18:33:32.485962Z","package":"presentation_premium","deducted_amount":15000,"refunded":false}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.1 GET /jobs/{id} — failed run, refunded=true (SUCCESS)
+$ curl http://127.0.0.1:8099/jobs/bbbbbbbb-0000-0000-0000-00000000000b -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"id":"bbbbbbbb-0000-0000-0000-00000000000b","project_id":"aaaaaaaa-0000-0000-0000-00000000000b","job_type":"presentation_generation","status":"failed","progress":{"step":"Choosing design direction","current":4,"total":7},"error_message":"editorial: RuntimeError: grounding hard stop","existing":false,"created_at":"2026-08-22T18:48:32.485962Z","started_at":"2026-08-22T18:48:32.485962Z","heartbeat_at":"2026-08-22T18:51:32.485962Z","completed_at":"2026-08-22T18:51:32.485962Z","package":"presentation_standard","deducted_amount":10000,"refunded":true}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.4 POST /jobs — topic rides the enqueue payload (SUCCESS)
+$ curl -X POST http://127.0.0.1:8099/jobs -H Authorization: Bearer <TOKEN> -H Content-Type: application/json -d {"project_id":"aaaaaaaa-0000-0000-0000-00000000000c","package":"presentation_standard",
+ "sources":[{"storage_key":"sources/aaaaaaaa-0000-0000-0000-00000000000c/aral-sea-2019.pdf","filename":"aral-sea-2019.pdf"}],
+ "language":"uz",
+ "topic":"2019 va 2023 yil suv sarfini solishtir, siyosiy tavsiya bilan yakunla"} 
+------------------------------------------------------------------------------
+{"id":"3a42b7cd-ed12-45f6-ba11-c74c07370463","project_id":"aaaaaaaa-0000-0000-0000-00000000000c","job_type":"presentation_generation","status":"queued","progress":{},"error_message":null,"existing":false,"created_at":"2026-08-23T18:48:35.032092Z","started_at":null,"heartbeat_at":null,"completed_at":null,"package":"presentation_standard","deducted_amount":10000,"refunded":false}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.4 POST /jobs — unregistered source key (FAILURE: 422 unregistered_source)
+$ curl -X POST http://127.0.0.1:8099/jobs -H Authorization: Bearer <TOKEN> -H Content-Type: application/json -d {"project_id":"aaaaaaaa-0000-0000-0000-00000000000c","sources":[{"storage_key":"sources/forged/x.pdf","filename":"x.pdf"}]} 
+------------------------------------------------------------------------------
+{"id":"3a42b7cd-ed12-45f6-ba11-c74c07370463","project_id":"aaaaaaaa-0000-0000-0000-00000000000c","job_type":"presentation_generation","status":"queued","progress":{},"error_message":null,"existing":true,"created_at":"2026-08-23T18:48:35.032092Z","started_at":null,"heartbeat_at":null,"completed_at":null,"package":"presentation_standard","deducted_amount":10000,"refunded":false}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.4 POST /projects/{id}/interview — source-derived questions (SUCCESS)
+$ curl -X POST http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000a/interview -H Authorization: Bearer <TOKEN> -H Content-Type: application/json -d {"language":"uz"} 
+------------------------------------------------------------------------------
+{"questions":[{"question_id":"audience","question_text":"Kim uchun tayyorlanmoqda?","question_type":"single_select","options":[{"value":"school","label":"Maktab o'quvchilari (9-11 sinf)","is_default":false},{"value":"undergraduate","label":"Bakalavr talabalari","is_default":false},{"value":"graduate","label":"Magistratura talabalari","is_default":false},{"value":"academic_conference","label":"Akademik konferentsiya","is_default":false},{"value":"mixed_academic_industry","label":"Akademik va sanoat aralash","is_default":false},{"value":"professional","label":"Mutaxassis / biznes","is_default":false},{"value":"general_public","label":"Keng jamoatchilik","is_default":false},{"value":"decide_for_me","label":"O'zingiz tanlang","is_default":true}],"min_value":null,"max_value":null,"default_value":null,"placeholder":null,"help_text":null},{"question_id":"duration","question_text":"Taqdimot davomiyligi (daqiqalarda)?","question_type":"slider","options":null,"min_value":5,"max_value":45,"default_value":15,"placeholder":null,"help_text":"Bir daqiqaga bir slayd — yaxshi qoida"},{"question_id":"emphasis","question_text":"Taqdimot nimaga ko'proq urg'u bersin?","question_type":"multi_select","options":[{"value":"problem_framing","label":"Muammoni shakllantirish","is_default":false},{"value":"technical_mechanism","label":"Texnik mexanizm","is_default":false},{"value":"methodology","label":"Metodologiya","is_default":false},{"value":"results_numbers","label":"Natijalar / raqamlar","is_default":false},{"value":"roadmap_scalability","label":"Yo'l xaritasi / miqyoslash","is_default":false},{"value":"decide_for_me","label":"O'zingiz tanlang","is_default":true}],"min_value":null,"max_value":null,"default_value":null,"placeholder":null,"help_text":null},{"question_id":"title_style","question_text":"Sarlavha uslubi","question_type":"single_select","options":[{"value":"topic","label":"Qisqa mavzu sarlavhalari ('Metodologiya', 'Natijalar')","is_default":false},{"value":"takeaway","label":"Xulosa sarlavhalari ('Sietlda 94% suv tejaldi')","is_default":false},{"value":"decide_for_me","label":"O'zingiz tanlang","is_default":true}],"min_value":null,"max_value":null,"default_value":null,"placeholder":null,"help_text":null},{"question_id":"include_interactive","question_text":"Interaktiv o'quv elementlarini qo'shasizmi?","question_type":"single_select","options":[{"value":"yes","label":"Ha — viktorina, juftlash, mashqlar","is_default":false},{"value":"no","label":"Yo'q — faqat kontent","is_default":false},{"value":"decide_for_me","label":"O'zingiz tanlang","is_default":true}],"min_value":null,"max_value":null,"default_value":null,"placeholder":null,"help_text":null},{"question_id":"theme","question_text":"Vizual mavzu","question_type":"single_select","options":[{"value":"light","label":"Yorug' fon","is_default":false},{"value":"dark","label":"Qora fon","is_default":false},{"value":"decide_for_me","label":"O'zingiz tanlang","is_default":true}],"min_value":null,"max_value":null,"default_value":null,"placeholder":null,"help_text":null},{"question_id":"speaker_notes","question_text":"Notiq uchun izohlar qo'shilsinmi?","question_type":"single_select","options":[{"value":"full_script","label":"Ha — har slaydga to'liq matn","is_default":false},{"value":"brief_talking_points","label":"Qisqacha tezislar","is_default":false},{"value":"no_notes","label":"Yo'q","is_default":false},{"value":"decide_for_me","label":"O'zingiz tanlang","is_default":true}],"min_value":null,"max_value":null,"default_value":null,"placeholder":null,"help_text":null},{"question_id":"closing_ask","question_text":"Yakuniy taklif yoki call-to-action nima?","question_type":"text_input","options":null,"min_value":null,"max_value":null,"default_value":null,"placeholder":"masalan, hyperscaler X bilan pilot, hammuallif taklifi","help_text":"CTA bo'lmasa bo'sh qoldiring"}],"detected_domain":"agriculture","estimated_slide_count":6,"available_stats_count":0,"available_people_count":0}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.4 POST /projects/{id}/interview — no processed sources (FAILURE: 409 sources_not_ready)
+$ curl -X POST http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000c/interview -H Authorization: Bearer <TOKEN> -H Content-Type: application/json -d {"language":"uz"} 
+------------------------------------------------------------------------------
+{"detail":{"reason":"sources_not_ready"}}
+<< HTTP 409 >>
+
+==============================================================================
+# 1.2 GET /projects/{id}/chat — empty thread, allowance intact (SUCCESS)
+$ curl http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000a/chat -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"can_edit":true,"messages":[],"pending_action":null,"fixes_used":0,"fix_limit":3,"fixes_remaining":3,"package":"presentation_premium","slide_count":3,"applying_job_id":null}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.2 POST /projects/{id}/chat — a fix turn queues a presentation_edit job (SUCCESS)
+$ curl -X POST http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000a/chat -H Authorization: Bearer <TOKEN> -H Content-Type: application/json -d {"message":"3-slayddagi sanani 2010 ga tuzat"} 
+------------------------------------------------------------------------------
+{"kind":"fix_ready","reply":"3-slayddagi sanani tuzatdim.","pending_action":null,"job_id":"362beb2b-97ef-4106-87cb-ff1f1242e26a","fixes_used":0,"fix_limit":3,"fixes_remaining":3}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.2 POST /projects/{id}/chat — second turn while the edit job runs (FAILURE: 409 brain_busy)
+$ curl -X POST http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000a/chat -H Authorization: Bearer <TOKEN> -H Content-Type: application/json -d {"message":"yana bitta tuzatish"} 
+------------------------------------------------------------------------------
+{"detail":{"reason":"brain_busy","job_id":"362beb2b-97ef-4106-87cb-ff1f1242e26a","job_type":"presentation_edit"}}
+<< HTTP 409 >>
+
+==============================================================================
+# 1.2 GET /projects/{id}/chat — thread after the fix turn; applying_job_id set (SUCCESS)
+$ curl http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000a/chat -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"can_edit":true,"messages":[{"role":"user","text":"3-slayddagi sanani 2010 ga tuzat"},{"role":"assistant","text":"3-slayddagi sanani tuzatdim."}],"pending_action":null,"fixes_used":0,"fix_limit":3,"fixes_remaining":3,"package":"presentation_premium","slide_count":3,"applying_job_id":"362beb2b-97ef-4106-87cb-ff1f1242e26a"}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.2 GET /projects/{id}/chat — project with no brain session: can_edit=false (SUCCESS)
+$ curl http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000c/chat -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"can_edit":false,"messages":[],"pending_action":null,"fixes_used":0,"fix_limit":0,"fixes_remaining":0,"package":null,"slide_count":0,"applying_job_id":null}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.2 POST /projects/{id}/chat/approve — nothing parked (FAILURE: 409 no_pending_action)
+$ curl -X POST http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000c/chat/approve -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"detail":{"reason":"brain_busy","job_id":"3a42b7cd-ed12-45f6-ba11-c74c07370463","job_type":"presentation_generation"}}
+<< HTTP 409 >>
+
+==============================================================================
+# 1.2 POST /projects/{id}/chat — someone else's project (FAILURE: 404 project_not_found)
+$ curl -X POST http://127.0.0.1:8099/projects/aaaaaaaa-0000-0000-0000-00000000000d/chat -H Authorization: Bearer <TOKEN> -H Content-Type: application/json -d {"message":"salom"} 
+------------------------------------------------------------------------------
+{"detail":"project_not_found"}
+<< HTTP 404 >>
+
+==============================================================================
+# 1.3 GET /credits — balance (SUCCESS)
+$ curl http://127.0.0.1:8099/credits -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"balance":30000,"currency":"UZS"}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.3 GET /credits — no bearer (FAILURE: 401 missing_bearer_token)
+$ curl http://127.0.0.1:8099/credits 
+------------------------------------------------------------------------------
+{"detail":"missing_bearer_token"}
+<< HTTP 401 >>
+
+==============================================================================
+# 1.3 GET /credits/ledger?limit=5 — refunds and learning rewards visible (SUCCESS)
+$ curl http://127.0.0.1:8099/credits/ledger?limit=5 -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"balance":30000,"entries":[{"id":"ledger-6","amount":-10000,"action":"deduct_presentation","reason":"generation:presentation_standard","project_id":"aaaaaaaa-0000-0000-0000-00000000000c","generation_job_id":null,"created_at":"2026-08-23T18:48:35.032051Z"},{"id":"ledger-5","amount":10000,"action":"refund","reason":"refund","project_id":"aaaaaaaa-0000-0000-0000-00000000000b","generation_job_id":"bbbbbbbb-0000-0000-0000-00000000000b","created_at":"2026-08-22T19:48:32.485671Z"},{"id":"ledger-4","amount":-10000,"action":"deduct_presentation","reason":"generation:presentation_standard","project_id":"aaaaaaaa-0000-0000-0000-00000000000b","generation_job_id":null,"created_at":"2026-08-22T18:48:32.485671Z"},{"id":"ledger-2","amount":5000,"action":"grant_free","reason":"learning_reward","project_id":"aaaaaaaa-0000-0000-0000-00000000000a","generation_job_id":null,"created_at":"2026-08-21T18:48:32.485671Z"},{"id":"ledger-3","amount":-15000,"action":"deduct_presentation","reason":"generation:presentation_premium","project_id":"aaaaaaaa-0000-0000-0000-00000000000a","generation_job_id":null,"created_at":"2026-08-21T18:48:32.485671Z"}]}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.3 GET /credits/ledger?limit=0 (FAILURE: 422 out of range)
+$ curl http://127.0.0.1:8099/credits/ledger?limit=0 -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"detail":[{"type":"greater_than_equal","loc":["query","limit"],"msg":"Input should be greater than or equal to 1","input":"0","ctx":{"ge":1}}]}
+<< HTTP 422 >>
+
+==============================================================================
+# 1.3 GET /pricing — the single source of truth, no auth (SUCCESS)
+$ curl http://127.0.0.1:8099/pricing 
+------------------------------------------------------------------------------
+{"currency":"UZS","packages":[{"package":"presentation_basic","price":5000,"ai_images":0,"fix_allowance":1},{"package":"presentation_standard","price":10000,"ai_images":2,"fix_allowance":2},{"package":"presentation_premium","price":15000,"ai_images":5,"fix_allowance":3}],"free_credit_value":5000,"free_daily_cap":3,"free_weekly_cap":10,"free_project_cap":5}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.5 POST /auth/refresh — slides a live session forward (SUCCESS)
+$ curl -X POST http://127.0.0.1:8099/auth/refresh -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"access_token":"<JWT redacted>","token_type":"bearer","expires_at":"2026-08-23T19:48:39Z","user_id":"11111111-1111-1111-1111-111111111111"}
+<< HTTP 200 >>
+
+==============================================================================
+# 1.5 POST /auth/refresh — already-expired token (FAILURE: 401 expired)
+$ curl -X POST http://127.0.0.1:8099/auth/refresh -H Authorization: Bearer <TOKEN> 
+------------------------------------------------------------------------------
+{"detail":"expired"}
+<< HTTP 401 >>
+
+==============================================================================
+# G19 GET /public/decks/{token} — recipients get downloads[] (SUCCESS)
+$ curl http://127.0.0.1:8099/public/decks/wire-stub-share-token-abcdefgh 
+------------------------------------------------------------------------------
+{"title":"Orol dengizi qurishi","html_url":"https://r2.stub.local/generated/aaaaaaaa-0000-0000-0000-00000000000a/deck.html?X-Amz-Expires=900&X-Amz-Signature=stub","expires_in":900,"downloads":[{"format":"pptx","url":"https://r2.stub.local/generated/aaaaaaaa-0000-0000-0000-00000000000a/deck.pptx?X-Amz-Expires=3600&X-Amz-Signature=stub","expires_in":3600},{"format":"pdf","url":"https://r2.stub.local/generated/aaaaaaaa-0000-0000-0000-00000000000a/deck.pdf?X-Amz-Expires=3600&X-Amz-Signature=stub","expires_in":3600}]}
+<< HTTP 200 >>
+
+==============================================================================
+# G19 GET /public/decks/{token} — unknown token (FAILURE: 404 not_found)
+$ curl http://127.0.0.1:8099/public/decks/wire-stub-share-token-DEADBEEF 
+------------------------------------------------------------------------------
+{"detail":"not_found"}
+<< HTTP 404 >>
+
+==============================================================================
+end of transcript
