@@ -1,14 +1,16 @@
 "use client";
 
-// The start-a-generation flow (P3.6). One page, three progressive steps —
-// this is where the Telegram bot's button lands, so it is built for a 390px
-// webview first: single column, one action per step, nothing that scrolls
-// sideways. The gilded moment of the view is the final "Taqdimotni boshlash".
+// The creation surface. One prompt box carries the whole flow: the topic is
+// the prompt, sources are attachments on it, tier and language are pickers
+// inside it, and the price-bearing confirm is an approval card underneath.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { FileText, GraduationCap, Presentation } from "lucide-react";
 import { AppChrome } from "@/components/chrome";
-import { Button, DataText, ErrorState, FileField } from "@/components/ui";
+import { ApprovalCard, PromptBar, ToolChips } from "@/components/bui";
+import type { PromptPicker, PromptSource, ToolRow } from "@/components/bui";
+import { ErrorState } from "@/components/ui";
 import {
   ApiError,
   type SourceView,
@@ -18,57 +20,37 @@ import {
   registerSource,
   uploadToR2,
 } from "@/lib/api";
+import {
+  DEFAULT_LANGUAGE,
+  DEFAULT_PACKAGE,
+  LANGUAGES,
+  type LanguageCode,
+  PACKAGES,
+  type PackageId,
+  isLanguageCode,
+  languageName,
+  packageOf,
+  soum,
+} from "@/lib/packages";
 import { type AppSession, loadSession } from "@/lib/session";
+
+import "./new.css";
 
 const ACCEPTED = ".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv";
 const MAX_SOURCES = 10;
+const NETWORK_ERROR = "Tarmoqda uzilish — qayta urinib ko‘ring";
 
-const LANGUAGES = [
-  { code: "uz", name: "O'zbekcha" },
-  { code: "kaa", name: "Qaraqalpaqsha" },
-  { code: "ru", name: "Русский" },
-  { code: "en", name: "English" },
-] as const;
+const COMMANDS = [
+  { key: "manba", name: "/manba", desc: "Manba biriktirish" },
+  { key: "til", name: "/til", desc: "Chiqish tilini tanlash" },
+  { key: "paket", name: "/paket", desc: "Paketni tanlash" },
+];
 
-type LanguageCode = (typeof LANGUAGES)[number]["code"];
-
-const PACKAGES = [
-  {
-    id: "presentation_basic",
-    name: "Oddiy",
-    price: 5000,
-    desc: "AI rasmsiz — toza tipografik dizayn",
-  },
-  {
-    id: "presentation_standard",
-    name: "Standart",
-    price: 10000,
-    desc: "Muqova + asosiy vizual (2 AI rasm)",
-  },
-  {
-    id: "presentation_premium",
-    name: "Premium",
-    price: 15000,
-    desc: "5 tagacha AI rasm",
-  },
-] as const;
-
-type PackageId = (typeof PACKAGES)[number]["id"];
-
-function soum(amount: number): string {
-  return `${amount.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} so'm`;
-}
-
-function isLanguageCode(value: string): value is LanguageCode {
-  return LANGUAGES.some((entry) => entry.code === value);
-}
-
-function languageName(code: LanguageCode): string {
-  return LANGUAGES.find((entry) => entry.code === code)?.name ?? code;
-}
-
-function packageOf(id: PackageId): (typeof PACKAGES)[number] {
-  return PACKAGES.find((entry) => entry.id === id) ?? PACKAGES[1];
+interface UploadRow {
+  key: string;
+  filename: string;
+  state: "pending" | "done" | "failed";
+  note: string;
 }
 
 type EnqueueFailure =
@@ -101,20 +83,19 @@ function toEnqueueFailure(error: unknown): EnqueueFailure {
     if (error.status === 429) return { kind: "limit" };
     return { kind: "other", message: error.reason };
   }
-  return { kind: "other", message: "Tarmoqda uzilish — qayta urinib ko'ring" };
+  return { kind: "other", message: NETWORK_ERROR };
 }
 
-/** A colophon line: label left, machine fact right, hairline between. */
+function reasonOf(error: unknown): string {
+  return error instanceof ApiError ? error.reason : "tarmoq xatosi";
+}
+
 function SummaryRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="summary-row">
-      <span className="summary-label">{label}</span>
-      {mono ? (
-        <DataText className="summary-value">{value}</DataText>
-      ) : (
-        <span className="summary-value">{value}</span>
-      )}
-    </div>
+    <span className="new-summary-row">
+      <span className="new-summary-key">{label}</span>
+      <span className={mono ? "new-summary-value data-text" : "new-summary-value"}>{value}</span>
+    </span>
   );
 }
 
@@ -122,22 +103,22 @@ export default function NewProjectPage() {
   const router = useRouter();
   const [session, setSession] = useState<AppSession | null>(null);
 
-  const [title, setTitle] = useState("");
-  const [language, setLanguage] = useState<LanguageCode>("uz");
-  const [packageId, setPackageId] = useState<PackageId>("presentation_standard");
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [topic, setTopic] = useState("");
+  const [language, setLanguage] = useState<LanguageCode>(DEFAULT_LANGUAGE);
+  const [packageId, setPackageId] = useState<PackageId>(DEFAULT_PACKAGE);
+
   const [projectId, setProjectId] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; danger?: boolean } | null>(null);
 
-  const [sources, setSources] = useState<SourceView[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadNote, setUploadNote] = useState<{ text: string; danger?: boolean } | null>(null);
-  const [sourcesConfirmed, setSourcesConfirmed] = useState(false);
-  const [clearSignal, setClearSignal] = useState(0);
-  const fileInput = useRef<HTMLInputElement | null>(null);
+  const [uploads, setUploads] = useState<UploadRow[]>([]);
+  const [registered, setRegistered] = useState<SourceView[]>([]);
 
-  const [enqueueing, setEnqueueing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [enqueueError, setEnqueueError] = useState<EnqueueFailure | null>(null);
+  const enqueuing = useRef(false);
+  const uploadSeq = useRef(0);
 
   useEffect(() => {
     const active = loadSession();
@@ -148,92 +129,139 @@ export default function NewProjectPage() {
     }
     setSession(active);
     // Read on the client only: useSearchParams would force a Suspense
-    // boundary around the whole flow for one prefill.
+    // boundary around the whole surface for one prefill.
     const requested = new URLSearchParams(window.location.search).get("lang");
     if (requested && isLanguageCode(requested)) setLanguage(requested);
   }, [router]);
 
-  const stage = projectId === null ? 1 : sourcesConfirmed ? 3 : 2;
-  const chosenPackage = packageOf(packageId);
-  const full = sources.length >= MAX_SOURCES;
+  const chosen = packageOf(packageId);
+  const uploading = uploads.some((row) => row.state === "pending");
+  const allFailed = uploads.length > 0 && registered.length === 0 && !uploading;
+  const hasTopic = topic.trim().length > 0;
 
-  function stepClass(step: number): string {
-    if (stage > step) return "flow-step flow-step-done";
-    if (stage < step) return "flow-step flow-step-locked";
-    return "flow-step";
-  }
+  const patch = useCallback((key: string, next: Partial<UploadRow>) => {
+    setUploads((current) => current.map((row) => (row.key === key ? { ...row, ...next } : row)));
+  }, []);
 
-  async function onCreate() {
-    if (!session || creating || !title.trim()) return;
-    setCreating(true);
-    setCreateError(null);
-    try {
-      const project = await createProject(title.trim(), session.accessToken, language);
+  // The project is the parent every source hangs off, so it is created at the
+  // first attach and reused by the submit; a second call would orphan the
+  // sources already registered against the first id.
+  const ensureProject = useCallback(
+    async (active: AppSession): Promise<string> => {
+      if (projectId) return projectId;
+      const project = await createProject(topic.trim(), active.accessToken, language);
       setProjectId(project.id);
-    } catch (error) {
-      setCreateError(
-        error instanceof ApiError ? error.reason : "Tarmoqda uzilish — qayta urinib ko'ring",
-      );
-    } finally {
-      setCreating(false);
-    }
-  }
+      return project.id;
+    },
+    [projectId, topic, language],
+  );
 
-  async function onUpload() {
-    if (!session || !projectId || uploading) return;
-    const input = fileInput.current;
-    const chosen = input?.files ? Array.from(input.files) : [];
-    if (chosen.length === 0) {
-      setUploadNote({ text: "Avval fayl tanlang", danger: true });
+  async function onAttach(files: File[]) {
+    if (!session) return;
+    if (!hasTopic) {
+      setNote({ text: "Avval mavzuni yozing — keyin manba biriktirasiz.", danger: true });
       return;
     }
-    const batch = chosen.slice(0, MAX_SOURCES - sources.length);
-    setUploading(true);
-    setUploadNote(null);
-    const failed: string[] = [];
-    let reason = "";
-    for (const file of batch) {
+    const room = Math.max(0, MAX_SOURCES - uploads.length);
+    const batch = files.slice(0, room);
+    if (batch.length === 0) {
+      setNote({ text: `Bir loyihaga ${MAX_SOURCES} tagacha manba.`, danger: true });
+      return;
+    }
+    const rows: UploadRow[] = batch.map((file) => {
+      uploadSeq.current += 1;
+      return {
+        key: `u-${uploadSeq.current}`,
+        filename: file.name,
+        state: "pending",
+        note: "Yuklanmoqda…",
+      };
+    });
+    setUploads((current) => [...current, ...rows]);
+    setNote(null);
+    setBusy(true);
+
+    let pid: string;
+    try {
+      pid = await ensureProject(session);
+    } catch (error) {
+      const text = reasonOf(error);
+      for (const row of rows) patch(row.key, { state: "failed", note: text });
+      setNote({ text: "Loyiha yaratilmadi — qayta urinib ko‘ring", danger: true });
+      setBusy(false);
+      return;
+    }
+
+    for (const [index, file] of batch.entries()) {
+      const row = rows[index];
       try {
-        const presign = await presignUpload(
-          projectId,
-          file.name,
-          file.size,
-          session.accessToken,
-        );
+        const presign = await presignUpload(pid, file.name, file.size, session.accessToken);
         await uploadToR2(presign, file);
-        const registered = await registerSource(
-          projectId,
+        const source = await registerSource(
+          pid,
           presign.storage_key,
           file.name,
           session.accessToken,
         );
-        setSources((current) => [...current, registered]);
+        setRegistered((current) => [...current, source]);
+        patch(row.key, { state: "done", note: `${source.file_type} · ro‘yxatdan o‘tdi` });
       } catch (error) {
-        failed.push(file.name);
-        if (!reason) reason = error instanceof ApiError ? error.reason : "tarmoq xatosi";
+        patch(row.key, { state: "failed", note: `Yuklanmadi — ${reasonOf(error)}` });
       }
     }
-    if (input) input.value = "";
-    setClearSignal((value) => value + 1);
-    setUploading(false);
-    if (failed.length > 0) {
-      setUploadNote({ text: `${failed.join(", ")} yuklanmadi — ${reason}`, danger: true });
-    } else if (batch.length < chosen.length) {
-      setUploadNote({
-        text: `Bir loyihaga ${MAX_SOURCES} tagacha manba — ortiqchasi yuklanmadi`,
+    setBusy(false);
+  }
+
+  function onRemoveAttachment(index: number) {
+    const row = uploads[index];
+    if (!row || row.state === "pending") return;
+    setUploads((current) => current.filter((_, i) => i !== index));
+    // The source row stays on the server; dropping it here simply keeps it out
+    // of the enqueue payload, which is what decides what the worker reads.
+    setRegistered((current) => current.filter((source) => source.filename !== row.filename));
+  }
+
+  async function onSend() {
+    if (!session || busy || confirming) return;
+    if (!hasTopic) {
+      setNote({ text: "Avval mavzuni yozing.", danger: true });
+      return;
+    }
+    if (uploading) {
+      setNote({ text: "Manbalar hali yuklanmoqda — bir lahza kuting.", danger: true });
+      return;
+    }
+    if (allFailed) {
+      setNote({
+        text: "Hech bir manba ro‘yxatdan o‘tmadi — qayta biriktiring yoki chiplarni olib tashlang.",
         danger: true,
       });
+      return;
+    }
+    setBusy(true);
+    setNote(null);
+    try {
+      await ensureProject(session);
+      setEnqueueError(null);
+      setConfirming(true);
+    } catch (error) {
+      setNote({
+        text: error instanceof ApiError ? error.reason : NETWORK_ERROR,
+        danger: true,
+      });
+    } finally {
+      setBusy(false);
     }
   }
 
-  async function onEnqueue() {
-    if (!session || !projectId || enqueueing) return;
-    setEnqueueing(true);
+  async function onConfirm() {
+    if (!session || !projectId || enqueuing.current) return;
+    enqueuing.current = true;
     setEnqueueError(null);
     try {
       const view = await enqueueJob(
         projectId,
-        sources.map((source) => ({
+        registered.map((source) => ({
           storage_key: source.storage_key,
           filename: source.filename,
         })),
@@ -244,235 +272,212 @@ export default function NewProjectPage() {
       router.push(`/projects/${projectId}?job=${view.id}`);
     } catch (error) {
       setEnqueueError(toEnqueueFailure(error));
-      setEnqueueing(false);
+      // The card latches "sent" the moment it fires; remount it so a refused
+      // job shows the question again instead of a green confirmation.
+      setAttempt((current) => current + 1);
+      enqueuing.current = false;
     }
+  }
+
+  const attachRow: PromptSource = {
+    key: "attach",
+    name: "Fayl qo‘shish",
+    desc: hasTopic ? "Kompyuteringizdan yuklang" : "Avval mavzuni yozing",
+    icon: "clip",
+    attach: true,
+  };
+
+  const sources: PromptSource[] = [
+    attachRow,
+    ...registered.map((source) => ({
+      key: source.id,
+      name: source.filename,
+      desc: `${source.file_type} · biriktirilgan`,
+      icon: "file" as const,
+    })),
+  ];
+
+  const pickers: PromptPicker[] = [
+    {
+      key: "paket",
+      label: "Paket",
+      value: packageId,
+      options: PACKAGES.map((entry) => ({
+        key: entry.id,
+        name: entry.name,
+        tag: soum(entry.price),
+      })),
+      onChange: (key) => setPackageId(key as PackageId),
+    },
+    {
+      key: "til",
+      label: "Til",
+      value: language,
+      options: LANGUAGES.map((entry) => ({ key: entry.code, name: entry.name })),
+      onChange: (key) => setLanguage(key as LanguageCode),
+    },
+  ];
+
+  const toolRows: ToolRow[] = uploads.map((row) => ({
+    key: row.key,
+    icon: "file",
+    label: "Manba",
+    chip: row.filename,
+    mono: true,
+    state: row.state,
+    detail: [{ text: row.note, ...(row.state === "failed" ? { tone: "error" as const } : {}) }],
+  }));
+
+  const doneCount = uploads.filter((row) => row.state === "done").length;
+
+  function focusComposer() {
+    document.querySelector<HTMLTextAreaElement>("[data-promptbar] textarea")?.focus();
   }
 
   return (
     <AppChrome active="new">
-      <div className="page-head">
-        <h1 className="page-title">Yangi taqdimot</h1>
-        <p className="page-sub">
-          Uch qadam: loyihani nomlang, manbalarni yuklang, generatsiyani boshlang. Taqdimot
-          faqat siz yuklagan hujjatlardagi faktlarga tayanadi.
-        </p>
-      </div>
-
-      <section className={stepClass(1)}>
-        <div className="flow-step-head">
-          <span className="folio">I</span>
-          <h2>Loyiha</h2>
-        </div>
-
-        {stage === 1 ? (
-          <>
-            <div className="field">
-              <label htmlFor="title" className="field-label">
-                Mavzu yoki sarlavha
-              </label>
-              <input
-                id="title"
-                name="title"
-                className="input"
-                type="text"
-                autoComplete="off"
-                maxLength={200}
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                placeholder="Masalan, «Yoritish davri va uning merosi»"
-              />
-            </div>
-
-            <fieldset className="fieldset">
-              <legend className="field-label">Til</legend>
-              <div className="choice-grid">
-                {LANGUAGES.map((entry) => (
-                  <label key={entry.code} className="choice" htmlFor={`language-${entry.code}`}>
-                    <input
-                      id={`language-${entry.code}`}
-                      name="language"
-                      type="radio"
-                      autoComplete="off"
-                      value={entry.code}
-                      checked={language === entry.code}
-                      onChange={() => setLanguage(entry.code)}
-                    />
-                    <span className="choice-name">{entry.name}</span>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset className="fieldset">
-              <legend className="field-label">Paket</legend>
-              <div className="choice-grid">
-                {PACKAGES.map((entry) => (
-                  <label key={entry.id} className="choice" htmlFor={`package-${entry.id}`}>
-                    <input
-                      id={`package-${entry.id}`}
-                      name="package"
-                      type="radio"
-                      autoComplete="off"
-                      value={entry.id}
-                      checked={packageId === entry.id}
-                      onChange={() => setPackageId(entry.id)}
-                    />
-                    <span className="choice-name">{entry.name}</span>
-                    <span className="choice-desc">{entry.desc}</span>
-                    <DataText className="choice-price">{soum(entry.price)}</DataText>
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <Button
-              onClick={() => void onCreate()}
-              loading={creating}
-              disabled={!session || !title.trim()}
-            >
-              Loyihani boshlash
-            </Button>
-
-            {createError && (
-              <ErrorState
-                title="Loyiha yaratilmadi"
-                message={createError}
-                onRetry={() => void onCreate()}
-              />
-            )}
-          </>
-        ) : (
-          <p className="flow-summary">
-            {title} · {languageName(language)} · {chosenPackage.name}
+      <div className="new-stage">
+        <div className="new-head">
+          <h1 className="new-title">Nima yaratamiz?</h1>
+          <p className="new-sub">
+            Mavzuni yozing yoki manba biriktiring — Nashr faqat siz bergan dalilga tayanadi.
           </p>
-        )}
-      </section>
-
-      <section className={stepClass(2)}>
-        <div className="flow-step-head">
-          <span className="folio">II</span>
-          <h2>Manbalar</h2>
         </div>
 
-        {stage === 1 ? (
-          <p className="flow-locked-note">Loyiha nomlangach ochiladi.</p>
-        ) : (
-          <>
-            {sources.length === 0 ? (
-              <p className="flow-summary">
-                Manbasiz slayd yozilmaydi — har bir da'vo siz yuklagan hujjatga bog'lanadi. PDF,
-                DOCX yoki PPTX yuklang.
-              </p>
-            ) : (
-              <div className="source-list">
-                {sources.map((source) => (
-                  <div key={source.id} className="source-row">
-                    <span className="file-chip">{source.file_type}</span>
-                    <span className="source-name">{source.filename}</span>
-                  </div>
-                ))}
+        <div className="new-composer">
+          <PromptBar
+            value={topic}
+            onChange={(next) => {
+              setTopic(next);
+              if (note) setNote(null);
+            }}
+            onSend={() => void onSend()}
+            placeholder="Mavzu yoki sarlavhani yozing… @ bilan manba qo‘shing"
+            tall
+            maxLength={200}
+            accept={ACCEPTED}
+            maxAttachments={MAX_SOURCES}
+            attachments={uploads.map((row) => row.filename)}
+            onAttach={(files) => void onAttach(files)}
+            onRemoveAttachment={onRemoveAttachment}
+            sources={sources}
+            commands={COMMANDS}
+            onCommand={() => undefined}
+            pickers={pickers}
+            disabled={confirming}
+            busy={busy}
+          />
+
+          {!confirming && (
+            <p className="new-note" data-danger={note?.danger ? "true" : undefined}>
+              {note
+                ? note.text
+                : uploads.length > 0
+                  ? `${chosen.name} · ${soum(chosen.price)}`
+                  : `PDF, DOCX, PPTX — ${MAX_SOURCES} tagacha. Manbasiz ham boshlash mumkin.`}
+            </p>
+          )}
+        </div>
+
+        {uploads.length > 0 && (
+          <div className="new-uploads">
+            <ToolChips
+              header={uploading ? "Manbalar yuklanmoqda" : `${doneCount} ta manba tayyor`}
+              rows={toolRows}
+            />
+          </div>
+        )}
+
+        {confirming ? (
+          <div className="new-confirm">
+            <ApprovalCard
+              key={attempt}
+              questions={[
+                {
+                  q: "Generatsiyani boshlaymizmi?",
+                  type: "radio",
+                  options: [{ label: "Ha, boshlash", hint: "Odatda 3-6 daqiqa" }],
+                },
+              ]}
+              summary={
+                <span className="new-summary">
+                  <SummaryRow label="Mavzu" value={topic.trim()} />
+                  <SummaryRow label="Til" value={languageName(language)} />
+                  <SummaryRow label="Paket" value={chosen.name} />
+                  <SummaryRow label="Narx" value={soum(chosen.price)} mono />
+                  <SummaryRow label="Manbalar" value={`${registered.length} ta`} mono />
+                </span>
+              }
+              sentLabel="Boshlanmoqda"
+              onSubmitted={() => void onConfirm()}
+            />
+            <button type="button" className="new-cancel" onClick={() => setConfirming(false)}>
+              Bekor qilish
+            </button>
+            {enqueueError && (
+              <div className="new-errors">
+                {enqueueError.kind === "credit" && (
+                  <ErrorState
+                    title="Kredit yetarli emas"
+                    message={`Hisobingizda ${soum(enqueueError.balance)}, bu paket uchun ${soum(
+                      enqueueError.required,
+                    )} kerak. To‘lov Telegram bot orqali amalga oshiriladi.`}
+                  />
+                )}
+                {enqueueError.kind === "limit" && (
+                  <ErrorState
+                    title="Kunlik limit"
+                    message="Kunlik limitga yetdingiz — ertaga qayta urinib ko‘ring."
+                  />
+                )}
+                {enqueueError.kind === "other" && (
+                  <ErrorState
+                    title="Generatsiya boshlanmadi"
+                    message={enqueueError.message}
+                    onRetry={() => void onConfirm()}
+                  />
+                )}
               </div>
             )}
-
-            {stage === 2 && (
-              <>
-                <div className="upload-row">
-                  <FileField
-                    inputRef={fileInput}
-                    id="sources"
-                    name="sources"
-                    accept={ACCEPTED}
-                    multiple
-                    disabled={uploading || full}
-                    clearSignal={clearSignal}
-                    label="Fayllarni tanlash"
-                    hint={`PDF, DOCX, PPTX — ${MAX_SOURCES} tagacha`}
-                  />
-                  <Button
-                    variant="ghost"
-                    onClick={() => void onUpload()}
-                    loading={uploading}
-                    disabled={full}
-                  >
-                    {uploading ? "Yuklanmoqda" : "Yuklash"}
-                  </Button>
-                </div>
-
-                <p className="field-help" data-danger={uploadNote?.danger ? "true" : undefined}>
-                  {uploading ? (
-                    "Fayllar navbat bilan yuklanmoqda…"
-                  ) : uploadNote ? (
-                    uploadNote.text
-                  ) : (
-                    <>
-                      <DataText>
-                        {sources.length}/{MAX_SOURCES}
-                      </DataText>{" "}
-                      manba
-                    </>
-                  )}
-                </p>
-
-                <Button
-                  onClick={() => setSourcesConfirmed(true)}
-                  disabled={sources.length === 0 || uploading}
-                >
-                  Davom etish
-                </Button>
-              </>
-            )}
-          </>
-        )}
-      </section>
-
-      <section className={stepClass(3)}>
-        <div className="flow-step-head">
-          <span className="folio">III</span>
-          <h2>Tasdiqlash</h2>
-        </div>
-
-        {stage < 3 ? (
-          <p className="flow-locked-note">Manbalar tasdiqlangach ochiladi.</p>
+          </div>
         ) : (
-          <>
-            <div className="summary">
-              <SummaryRow label="Mavzu" value={title || "—"} />
-              <SummaryRow label="Til" value={languageName(language)} />
-              <SummaryRow label="Paket" value={chosenPackage.name} />
-              <SummaryRow label="Narx" value={soum(chosenPackage.price)} mono />
-              <SummaryRow label="Manbalar" value={`${sources.length} ta`} mono />
+          <div className="new-templates">
+            <button
+              type="button"
+              className="new-template"
+              aria-pressed="true"
+              onClick={focusComposer}
+            >
+              <span className="new-template-icon" aria-hidden>
+                <Presentation size={17} strokeWidth={1.75} />
+              </span>
+              <span className="new-template-name">Taqdimot</span>
+              <span className="new-template-line">Manbaga bog‘langan slaydlar, uch formatda.</span>
+            </button>
+            <div className="new-template" data-soon="true">
+              <span className="new-template-icon" aria-hidden>
+                <FileText size={17} strokeWidth={1.75} />
+              </span>
+              <span className="new-template-name">
+                Maqola
+                <span className="new-template-soon">tez kunda</span>
+              </span>
+              <span className="new-template-line">Dalillar matritsasi va tekshirilgan iqtiboslar.</span>
             </div>
-
-            <Button gilded size="lg" onClick={() => void onEnqueue()} loading={enqueueing}>
-              Taqdimotni boshlash
-            </Button>
-
-            <p className="field-help">Odatda 3–6 daqiqa. Jarayonni loyiha sahifasida kuzatasiz.</p>
-
-            {enqueueError?.kind === "credit" && (
-              <ErrorState
-                title="Kredit yetarli emas"
-                message={`Hisobingizda ${soum(enqueueError.balance)}, bu paket uchun ${soum(
-                  enqueueError.required,
-                )} kerak. To'lov Telegram bot orqali amalga oshiriladi.`}
-              />
-            )}
-            {enqueueError?.kind === "limit" && (
-              <ErrorState
-                title="Kunlik limit"
-                message="Kunlik limitga yetdingiz — ertaga qayta urinib ko'ring."
-              />
-            )}
-            {enqueueError?.kind === "other" && (
-              <ErrorState
-                title="Generatsiya boshlanmadi"
-                message={enqueueError.message}
-                onRetry={() => void onEnqueue()}
-              />
-            )}
-          </>
+            <div className="new-template" data-soon="true">
+              <span className="new-template-icon" aria-hidden>
+                <GraduationCap size={17} strokeWidth={1.75} />
+              </span>
+              <span className="new-template-name">
+                Dissertatsiya
+                <span className="new-template-soon">tez kunda</span>
+              </span>
+              <span className="new-template-line">Uzun shakl, boblar va adabiyotlar ro‘yxati.</span>
+            </div>
+          </div>
         )}
-      </section>
+
+      </div>
     </AppChrome>
   );
 }

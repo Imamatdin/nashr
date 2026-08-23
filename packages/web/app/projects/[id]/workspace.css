@@ -1,0 +1,312 @@
+/* The project workspace. The app panel is already the sheet, so the column is
+   built from hairline-separated sections rather than cards on cards; the ported
+   primitives keep their own surfaces. Every class is `ws-` prefixed because the
+   App Router loads per-view CSS globally. */
+
+.ws {
+  max-width: 880px;
+  margin-inline: auto;
+  padding-bottom: 8px;
+}
+
+/* -------------------------------------------------------------------- head */
+
+.ws-head {
+  padding-bottom: 20px;
+}
+
+.ws-head-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ws-title {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+  color: var(--ink);
+}
+
+.ws-meta {
+  margin-top: 6px;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+.ws-head-skeleton {
+  height: 2rem;
+  width: 60%;
+}
+
+.ws-row-skeleton {
+  height: 2.75rem;
+  width: 100%;
+}
+
+/* ---------------------------------------------------------------- sections */
+
+.ws-section {
+  padding: 24px 0;
+  border-top: 1px solid var(--line);
+}
+
+.ws-section:last-child {
+  padding-bottom: 8px;
+}
+
+.ws-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.ws-section-head h2 {
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+
+.ws-count {
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+.ws-lede {
+  max-width: 62ch;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+
+.ws-fine {
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+/* ----------------------------------------------------------------- sources */
+
+.ws-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0;
+  margin: 0 0 16px;
+  list-style: none;
+}
+
+.ws-source {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: var(--inset);
+  box-shadow: var(--shadow-hairline);
+}
+
+.ws-source-badge {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  box-shadow: var(--shadow-hairline);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--ink-2);
+}
+
+.ws-source-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  color: var(--ink);
+}
+
+.ws-upload {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.ws-upload .filefield {
+  flex: 1 1 auto;
+}
+
+.ws-upload > .btn {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+/* -------------------------------------------------------------- generation */
+
+.ws-start {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.ws-wait {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 0 4px;
+}
+
+/* The live step line: StreamingText's own caret carries the "now" signal, so
+   the line needs nothing but room above the ledger. */
+.ws-live {
+  margin-bottom: 14px;
+}
+
+.ws-live p {
+  font-size: 0.9375rem;
+}
+
+/* The ported rows cap themselves at 440px; the Uzbek step labels want the
+   whole column. */
+.ws-steps > div,
+.ws-trace > div {
+  max-width: 100%;
+}
+
+.ws-trace {
+  margin-top: 18px;
+}
+
+.ws-failed {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: var(--radius-control);
+  background: var(--red-tint);
+  box-shadow: var(--shadow-hairline);
+}
+
+.ws-failed-note {
+  font-size: 0.875rem;
+  color: var(--ink);
+}
+
+/* -------------------------------------------------------------------- deck */
+
+.ws-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ws-download {
+  padding: 0.35rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+
+/* The deck renders on its own dark ground in both themes, so the frame states
+   that ground explicitly. base-950 is the palette's darkest surface, taken from
+   the --flexoki-* block rather than written as a raw hex. */
+.ws-deck {
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--flexoki-base-950);
+  box-shadow: var(--shadow-hairline);
+  aspect-ratio: 16 / 10;
+}
+
+.ws-deck iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+/* ------------------------------------------------------------------- share */
+
+.ws-share {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.ws-share-url {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 8px 12px;
+  border-radius: var(--radius-control);
+  background: var(--inset);
+  box-shadow: var(--shadow-hairline);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--accent-ink);
+}
+
+/* -------------------------------------------------------------- provenance */
+
+/* ContextCards is a 380px column by design; the workspace has room for a
+   two-up grid with the component's own header spanning it. */
+.ws-provenance > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 10px;
+  max-width: 100%;
+}
+
+.ws-provenance > div > :first-child {
+  grid-column: 1 / -1;
+}
+
+/* The claim and its quote share one string; the quote gets the quieter line. */
+.ws-provenance > div > div > p {
+  white-space: pre-line;
+}
+
+/* The chunk reference is a machine fact. */
+.ws-provenance .primitive-card-bar > span:last-child {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+
+/* --------------------------------------------------------------- narrow */
+
+@media (max-width: 719px) {
+  .ws-title {
+    font-size: 24px;
+  }
+
+  .ws-head-line {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .ws-upload {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ws-upload > .btn {
+    margin-top: 0;
+  }
+
+  .ws-deck {
+    aspect-ratio: 4 / 3;
+  }
+}

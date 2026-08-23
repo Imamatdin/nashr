@@ -1,28 +1,41 @@
 "use client";
 
-// Project workspace (P3 item 2, moved into the P3.6 chrome): upload sources, enqueue,
-// watch progress by polling, then the delivered deck inline with downloads,
-// share controls and the provenance table. Reads ride RLS (sources list);
-// every mutation and signed-URL mint goes through the API.
+// Project workspace: upload sources, enqueue, watch progress by polling, then the
+// delivered deck inline with downloads, share controls and the provenance trail.
+// Reads ride RLS (project row, sources list); every mutation and signed-URL mint
+// goes through the API. The presentation is a single hairline-separated column;
+// the pipeline is the ported TaskRows (#06) with ThinkingState (#02) as its
+// trace, LoadingState (#01) for the indeterminate wait, StreamingText (#03) for
+// the live step line and ContextCards (#10) for provenance.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppChrome } from "@/components/chrome";
+import {
+  ContextCards,
+  LoadingState,
+  StreamingText,
+  TaskRows,
+  ThinkingState,
+  type ContextChunk,
+  type TaskRow,
+} from "@/components/bui";
 import {
   Button,
   DataText,
   EmptyState,
   ErrorState,
   FileField,
-  Skeleton,
   StatusBadge,
   Toast,
 } from "@/components/ui";
 import { stepStates } from "@/lib/steps";
+import { soum, tierOf } from "@/lib/packages";
 import {
   ApiError,
   type DeckAccessView,
   type JobView,
+  type ProvenanceRow,
   type ProvenanceView,
   enqueueJob,
   getDeckAccess,
@@ -35,12 +48,16 @@ import {
 } from "@/lib/api";
 import { type AppSession, loadSession } from "@/lib/session";
 import { createRlsClient } from "@/lib/supabase";
+import "./workspace.css";
 
 interface ProjectRow {
   id: string;
   title: string;
   status: string;
   share_token: string | null;
+  // Migration 010 may be unapplied, so the column is never named in the select
+  // and arrives as undefined on older databases.
+  package_tier?: string | null;
 }
 
 interface SourceRow {
@@ -52,6 +69,42 @@ interface SourceRow {
 
 const POLL_INTERVAL_MS = 3000;
 const ACCEPTED = ".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv";
+
+const TONE_BY_EXT: Record<string, ContextChunk["tone"]> = {
+  pdf: "red",
+  docx: "accent",
+  doc: "accent",
+  pptx: "accent",
+  csv: "green",
+  xlsx: "green",
+};
+
+function extensionOf(filename: string | null): string {
+  if (!filename) return "";
+  const dot = filename.lastIndexOf(".");
+  return dot === -1 ? "" : filename.slice(dot + 1).toLowerCase();
+}
+
+/** The claim's opening words carry the card; the full text sits in the body. */
+function headline(claim: string): string {
+  const words = claim.trim().split(/\s+/);
+  return words.length <= 6 ? claim.trim() : `${words.slice(0, 6).join(" ")}…`;
+}
+
+function toChunk(row: ProvenanceRow, index: number): ContextChunk {
+  const ext = extensionOf(row.source_filename);
+  return {
+    key: `claim-${index}`,
+    title: headline(row.claim_text),
+    meta: row.chunk_index === null ? "" : `bo‘lak ${row.chunk_index}`,
+    // ContextChunk.body is a plain string, so the quote rides a second line
+    // that workspace.css renders with pre-line and a quieter colour.
+    body: row.quote ? `${row.claim_text}\n«${row.quote}»` : row.claim_text,
+    source: row.source_filename ?? "Manba noma’lum",
+    badge: ext ? ext.toUpperCase() : "MNB",
+    tone: TONE_BY_EXT[ext] ?? "orange",
+  };
+}
 
 export default function ProjectPage() {
   const router = useRouter();
@@ -70,6 +123,7 @@ export default function ProjectPage() {
   const [deck, setDeck] = useState<DeckAccessView | null>(null);
   const [shareToken, setShareToken] = useState<string | null>(null);
   const [provenance, setProvenance] = useState<ProvenanceView | null>(null);
+  const [traceOpen, setTraceOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const pollTimer = useRef<number | null>(null);
   const toastTimer = useRef<number | null>(null);
@@ -86,7 +140,7 @@ export default function ProjectPage() {
       const supabase = createRlsClient(activeSession.accessToken);
       supabase
         .from("projects")
-        .select("id,title,status,share_token")
+        .select("*")
         .eq("id", projectId)
         .single()
         .then(({ data, error: queryError }) => {
@@ -231,9 +285,9 @@ export default function ProjectPage() {
       setShareToken(view.share_token);
       notify(
         action === "disable"
-          ? "Havola o'chirildi"
+          ? "Havola o‘chirildi"
           : action === "rotate"
-            ? "Yangi havola yaratildi — eskisi bekor bo'ldi"
+            ? "Yangi havola yaratildi. Eskisi bekor bo‘ldi."
             : "Ommaviy havola yoqildi",
       );
     } catch (shareError) {
@@ -246,12 +300,30 @@ export default function ProjectPage() {
       await navigator.clipboard.writeText(url);
       notify("Havola nusxalandi");
     } catch {
-      notify("Nusxalab bo'lmadi — havolani qo'lda belgilang", true);
+      notify("Nusxalab bo‘lmadi. Havolani qo‘lda belgilang.", true);
     }
   }
 
-  const running = job !== null && (job.status === "queued" || job.status === "processing");
+  const status = job?.status ?? null;
+  const queued = status === "queued";
+  const processing = status === "processing";
+  const running = queued || processing;
   const progress = job?.progress ?? {};
+  const steps = stepStates(progress, status ?? "queued");
+  const activeIndex = steps.findIndex(
+    (entry) => entry.state === "running" || entry.state === "failed",
+  );
+  const runningLabel = activeIndex >= 0 ? steps[activeIndex].label : "";
+  const taskRows: TaskRow[] = steps.map((entry, index) => ({
+    key: entry.key,
+    index: index + 1,
+    label: entry.label,
+    meta: `${index + 1}/7`,
+    status: entry.state,
+  }));
+  const traceVisible =
+    status === "failed" ? Math.max(activeIndex, 0) : processing ? activeIndex + 1 : steps.length;
+  const tier = tierOf(project?.package_tier);
   const shareUrl =
     shareToken && typeof window !== "undefined"
       ? `${window.location.origin}/p/${shareToken}`
@@ -269,145 +341,181 @@ export default function ProjectPage() {
     );
   }
 
+  const trace = status !== null && !queued && (
+    <div className="ws-trace">
+      <ThinkingState
+        working={processing}
+        activeLabel="Jarayon tafsiloti"
+        doneLabel="Jarayon tafsiloti"
+        rows={steps.map((entry) => ({ primary: entry.label }))}
+        visible={traceVisible}
+        expanded={traceOpen}
+        onToggle={setTraceOpen}
+      />
+    </div>
+  );
+
   return (
     <AppChrome active="projects">
-      {project === null ? (
-        <div
-          className="skeleton"
-          style={{ height: "2.2rem", width: "40%", marginBottom: "var(--sp-5)" }}
-        />
-      ) : (
-        <div className="page-bar">
-          <div className="page-head">
-            <p className="kicker">Loyiha</p>
-            <h1 className="page-title">{project.title}</h1>
-          </div>
-          <StatusBadge status={running ? "processing" : project.status} />
-        </div>
-      )}
-
-      <div className="card">
-        <div className="card-title">
-          <h2>Manbalar</h2>
-          {sources !== null && sources.length > 0 && (
-            <DataText className="page-count">{sources.length} ta</DataText>
-          )}
-        </div>
-        {sources === null && <Skeleton lines={2} />}
-        {sources !== null && sources.length === 0 && (
-          <EmptyState
-            title="Manba yuklanmagan"
-            hint="Taqdimot faqat siz yuklagan fayllardagi faktlarga tayanadi. PDF, DOCX yoki PPTX yuklang (maks. 20 MB)."
-          />
-        )}
-        {sources !== null && sources.length > 0 && (
-          <div className="source-list">
-            {sources.map((s) => (
-              <div key={s.id} className="source-row">
-                <span className="file-chip">{s.file_type}</span>
-                <span className="source-name">{s.filename}</span>
+      <div className="ws">
+        <header className="ws-head">
+          {project === null ? (
+            <div className="skeleton ws-head-skeleton" />
+          ) : (
+            <>
+              <div className="ws-head-line">
+                <h1 className="ws-title">{project.title}</h1>
+                <StatusBadge status={running && status ? status : project.status} />
               </div>
-            ))}
+              <p className="ws-meta">
+                {tier.name} · <DataText>{soum(tier.price)}</DataText>
+              </p>
+            </>
+          )}
+        </header>
+
+        <section className="ws-section">
+          <div className="ws-section-head">
+            <h2>Manbalar</h2>
+            {sources !== null && sources.length > 0 && (
+              <DataText className="ws-count">{sources.length} ta</DataText>
+            )}
           </div>
-        )}
-        <div className="upload-row">
-          <FileField
-            inputRef={fileInput}
-            id="source-file"
-            name="source-file"
-            accept={ACCEPTED}
-            disabled={uploading}
-            clearSignal={clearSignal}
-            label="Fayl tanlash"
-            hint="PDF, DOCX, PPTX — maks. 20 MB"
-          />
-          <Button variant="ghost" onClick={() => void onUpload()} loading={uploading}>
-            {uploading ? "Yuklanmoqda" : "Yuklash"}
-          </Button>
-        </div>
-      </div>
 
-      <div className="card">
-        <div className="card-title">
-          <h2>Generatsiya</h2>
-          {/* While the press runs, the step line states the status better than a
-              stamp — and the header already carries one. */}
-          {job && !running && <StatusBadge status={job.status} />}
-        </div>
+          {sources === null && <div className="skeleton ws-row-skeleton" />}
 
-        {!job && (
-          <>
-            <p className="card-lede">
-              Manbalar tayyor bo'lgach, taqdimotni buyurtma qiling. Odatda 3–6 daqiqa davom etadi.
-            </p>
-            <Button
-              gilded
-              size="lg"
-              onClick={() => void onEnqueue()}
-              loading={enqueueing}
-              disabled={!sources || sources.length === 0}
-            >
-              Taqdimot yaratish
+          {sources !== null && sources.length === 0 && (
+            <EmptyState
+              title="Manba yuklanmagan"
+              hint="Taqdimot faqat siz yuklagan fayllardagi faktlarga tayanadi. PDF, DOCX yoki PPTX yuklang (maks. 20 MB)."
+            />
+          )}
+
+          {sources !== null && sources.length > 0 && (
+            <ul className="ws-sources">
+              {sources.map((source) => (
+                <li key={source.id} className="ws-source">
+                  <span className="ws-source-badge">{source.file_type.toUpperCase()}</span>
+                  <span className="ws-source-name">{source.filename}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="ws-upload">
+            <FileField
+              inputRef={fileInput}
+              id="source-file"
+              name="source-file"
+              accept={ACCEPTED}
+              disabled={uploading}
+              clearSignal={clearSignal}
+              label="Fayl tanlash"
+              hint="PDF, DOCX, PPTX. Maks. 20 MB."
+            />
+            <Button variant="ghost" onClick={() => void onUpload()} loading={uploading}>
+              {uploading ? "Yuklanmoqda" : "Yuklash"}
             </Button>
-          </>
-        )}
+          </div>
+        </section>
 
-        {running && (
-          <ol className="steps">
-            {stepStates(progress, job?.status ?? "queued").map((entry) => (
-              <li key={entry.key} data-state={entry.state}>
-                {entry.label}
-              </li>
-            ))}
-          </ol>
-        )}
+        <section className="ws-section">
+          <div className="ws-section-head">
+            <h2>Generatsiya</h2>
+            {job && !running && <StatusBadge status={job.status} />}
+          </div>
 
-        {job?.status === "failed" && (
-          <ErrorState
-            title="Generatsiya muvaffaqiyatsiz tugadi"
-            message={job.error_message ?? "Noma'lum xato. Kredit qaytarildi."}
-            onRetry={() => void onEnqueue()}
-          />
-        )}
+          {!job && (
+            <div className="ws-start">
+              <p className="ws-lede">
+                Manbalar tayyor bo‘lgach, taqdimotni buyurtma qiling. Odatda 3-6 daqiqa davom
+                etadi.
+              </p>
+              <Button
+                size="lg"
+                onClick={() => void onEnqueue()}
+                loading={enqueueing}
+                disabled={!sources || sources.length === 0}
+              >
+                Taqdimot yaratish
+              </Button>
+              <p className="ws-fine">
+                Hisobdan {tier.name} paketi yechiladi: <DataText>{soum(tier.price)}</DataText>
+              </p>
+            </div>
+          )}
 
-        {job?.status === "completed" && (
-          <p className="card-lede card-lede-ok">Taqdimot tayyor — quyida ko'ring.</p>
-        )}
-      </div>
+          {queued && (
+            <div className="ws-wait">
+              <LoadingState label="Navbatda" />
+              <p className="ws-fine">Ish navbatga qo‘yildi. Birinchi bosqich boshlanmoqda.</p>
+            </div>
+          )}
 
-      {deck && (
-        <>
-          <div className="card">
-            <div className="card-title">
+          {processing && (
+            <div className="ws-live">
+              <StreamingText text={runningLabel} active fill />
+            </div>
+          )}
+
+          {(processing || status === "failed") && (
+            <div className="ws-steps">
+              <TaskRows rows={taskRows} onRetry={() => void onEnqueue()} />
+            </div>
+          )}
+
+          {status === "failed" && (
+            <div className="ws-failed">
+              <p className="ws-failed-note">
+                {job?.error_message ?? "Noma’lum xato. Kredit qaytarildi."}
+              </p>
+              <Button variant="ghost" onClick={() => void onEnqueue()} loading={enqueueing}>
+                Qayta urinish
+              </Button>
+            </div>
+          )}
+
+          {status === "completed" && !deck && (
+            <p className="ws-lede">Taqdimot tayyor. Fayllar tayyorlanmoqda.</p>
+          )}
+
+          {trace}
+        </section>
+
+        {deck && (
+          <section className="ws-section">
+            <div className="ws-section-head">
               <h2>Taqdimot</h2>
-              <div className="btn-row">
-                {deck.downloads.map((d) => (
-                  <a key={d.format} href={d.url} download className="btn btn-ghost">
-                    {d.format.toUpperCase()}
+              <div className="ws-actions">
+                {deck.downloads.map((download) => (
+                  <a
+                    key={download.format}
+                    href={download.url}
+                    download
+                    className="btn btn-ghost ws-download"
+                  >
+                    <span className="btn-label">{download.format.toUpperCase()}</span>
                   </a>
                 ))}
               </div>
             </div>
-            <iframe
-              className="viewer-frame"
-              src={deck.html_url}
-              sandbox="allow-scripts"
-              title="Taqdimot"
-            />
-          </div>
+            <div className="ws-deck">
+              <iframe src={deck.html_url} sandbox="allow-scripts" title="Taqdimot" />
+            </div>
+          </section>
+        )}
 
-          <div className="card">
-            <div className="card-title">
+        {deck && (
+          <section className="ws-section">
+            <div className="ws-section-head">
               <h2>Ulashish</h2>
             </div>
             {shareUrl ? (
-              <>
-                <p className="share-url">
-                  <a href={shareUrl} target="_blank" rel="noreferrer">
-                    {shareUrl}
-                  </a>
-                </p>
-                <div className="btn-row">
+              <div className="ws-share">
+                <a className="ws-share-url" href={shareUrl} target="_blank" rel="noreferrer">
+                  {shareUrl}
+                </a>
+                <div className="ws-actions">
                   <Button variant="ghost" onClick={() => void copyShareUrl(shareUrl)}>
                     Nusxalash
                   </Button>
@@ -415,61 +523,32 @@ export default function ProjectPage() {
                     Havolani yangilash
                   </Button>
                   <Button variant="danger" onClick={() => void onShare("disable")}>
-                    O'chirish
+                    O‘chirish
                   </Button>
                 </div>
-              </>
+              </div>
             ) : (
-              <>
-                <p className="card-lede">
-                  Ommaviy havola taqdimotni istalgan kishiga — kirmasdan — ko'rsatadi. Havolani
-                  yangilasangiz, eskisi darhol bekor bo'ladi.
+              <div className="ws-share">
+                <p className="ws-lede">
+                  Ommaviy havola taqdimotni istalgan kishiga, kirmasdan, ko‘rsatadi. Havolani
+                  yangilasangiz eskisi darhol bekor bo‘ladi.
                 </p>
                 <Button onClick={() => void onShare("enable")}>Ommaviy havola yaratish</Button>
-              </>
+              </div>
             )}
-          </div>
-        </>
-      )}
+          </section>
+        )}
 
-      {provenance && provenance.rows.length > 0 && (
-        <div className="card">
-          <div className="card-title">
-            <h2>Dalillar</h2>
-            <DataText className="page-count">{provenance.total_claims} ta da'vo</DataText>
-          </div>
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Da'vo</th>
-                  <th>Iqtibos</th>
-                  <th>Manba</th>
-                  <th>Bo'lak</th>
-                </tr>
-              </thead>
-              <tbody>
-                {provenance.rows.map((row, index) => (
-                  <tr key={index}>
-                    <td>{row.claim_text}</td>
-                    <td className="table-quiet">{row.quote ?? "—"}</td>
-                    <td>{row.source_filename ?? "—"}</td>
-                    <td>
-                      {row.chunk_index === null ? (
-                        "—"
-                      ) : (
-                        <span className="cite-mark" style={{ verticalAlign: "baseline" }}>
-                          {row.chunk_index}
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+        {provenance && provenance.rows.length > 0 && (
+          <section className="ws-section ws-provenance">
+            <ContextCards
+              title="Dalillar"
+              count={provenance.total_claims}
+              chunks={provenance.rows.map(toChunk)}
+            />
+          </section>
+        )}
+      </div>
 
       {toast && <Toast message={toast.message} danger={toast.danger} />}
     </AppChrome>
