@@ -227,6 +227,237 @@
   max-width: 27rem;
 }
 
+/* --------------------------------------------------------------- uploads */
+
+.new-uploads-head {
+  margin-bottom: 8px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.new-files {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.new-file {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+
+.new-file[data-state="failed"] {
+  box-shadow: 0 0 0 1.5px var(--red);
+}
+
+.new-file-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.new-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: 0.8125rem;
+}
+
+.new-file-meta {
+  flex-shrink: 0;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+}
+
+/* The bar is the point of the XHR upload: a 20 MB file used to sit behind an
+   indeterminate label with no way to tell progress from a stall. */
+.new-file-bar {
+  display: block;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--inset);
+  overflow: hidden;
+}
+
+.new-file-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+
+.new-file-line {
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.new-file[data-state="failed"] .new-file-line {
+  color: var(--red);
+}
+
+.new-file-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.new-file-action {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.new-file-action:hover {
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------ clarification turn */
+
+.new-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+}
+
+.new-step-lead {
+  max-width: 46ch;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.new-cardwrap {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.new-cardwrap > div {
+  max-width: 27rem;
+}
+
+.new-exits {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* What gets decided FOR the user, said out loud — the audit's complaint was
+   silence, not the defaults themselves. */
+.new-decision {
+  width: 100%;
+  max-width: 27rem;
+  padding: 12px 14px;
+  border-radius: var(--radius-card);
+  background: var(--inset);
+  box-shadow: var(--shadow-hairline);
+}
+
+.new-decision-lead {
+  color: var(--ink);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.new-decision-list {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+/* ---------------------------------------------------------------- errors */
+
+.new-inline-error {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 14px;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: 0 0 0 1.5px var(--red);
+}
+
+.new-inline-error[data-tone="info"] {
+  box-shadow: var(--shadow-card);
+}
+
+.new-inline-title {
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.new-inline-message,
+.new-fine {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.new-fine a {
+  color: var(--accent-ink);
+  text-decoration: underline;
+}
+
+.new-inline-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.new-detail {
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+.new-detail summary {
+  cursor: pointer;
+}
+
+.new-detail code {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: var(--radius-chip);
+  background: var(--inset);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.new-summary-note {
+  margin-top: 6px;
+  color: var(--ink-2);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
 @media (max-width: 640px) {
   .new-stage {
     gap: 22px;
@@ -238,6 +469,8 @@
   }
 
   .new-confirm > div,
+  .new-cardwrap > div,
+  .new-decision,
   .new-errors {
     max-width: 100%;
   }

@@ -162,6 +162,45 @@ export async function uploadToR2(presign: PresignView, file: File): Promise<void
   if (!response.ok) throw new ApiError(response.status, "r2_upload_failed");
 }
 
+/**
+ * The same PUT, reporting bytes as they leave (G30).
+ *
+ * `fetch` cannot report upload progress — there is no readable stream for the
+ * request body in any shipping browser — so a 20 MB file spends its whole life
+ * behind an indeterminate "Yuklanmoqda…". XHR still exposes `upload.progress`,
+ * which is the only reason this variant exists; `uploadToR2` above stays the
+ * path for callers that do not draw a bar.
+ */
+export function uploadToR2WithProgress(
+  presign: PresignView,
+  file: File,
+  onProgress: (fraction: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("PUT", presign.upload_url, true);
+    // Must match what the presign signed, or R2 refuses the object.
+    request.setRequestHeader("Content-Type", presign.content_type);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(Math.min(1, event.loaded / event.total));
+      }
+    };
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(1);
+        resolve();
+      } else {
+        reject(new ApiError(request.status, "r2_upload_failed"));
+      }
+    };
+    request.onerror = () => reject(new ApiError(0, "r2_upload_failed"));
+    request.ontimeout = () => reject(new ApiError(0, "r2_upload_failed"));
+    request.onabort = () => reject(new ApiError(0, "r2_upload_failed"));
+    request.send(file);
+  });
+}
+
 export function registerSource(
   projectId: string,
   storageKey: string,

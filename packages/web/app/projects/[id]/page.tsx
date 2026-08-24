@@ -688,8 +688,10 @@ export default function ProjectPage() {
               src={deck.html_url}
               sandbox="allow-scripts"
               title="Taqdimot"
-              // A rotted signed URL is recoverable: re-mint rather than
-              // leaving a dead frame on screen (G20).
+              // Opportunistic only: an iframe does not fire onError for an
+              // HTTP error inside it (R2 serves its own body and the frame
+              // counts as loaded). The DECK_REFRESH_MS interval above is what
+              // actually keeps the signed URL from rotting (G20).
               onError={() => void loadDeck()}
             />
           </div>

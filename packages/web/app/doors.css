@@ -246,6 +246,59 @@
   color: var(--ink-3);
 }
 
+.share-take {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
+}
+
+.share-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.share-download {
+  padding: 0.35rem 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+
+.share-fine {
+  max-width: 46ch;
+  text-align: center;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+.share-detail {
+  margin-top: 12px;
+  font-size: 0.8125rem;
+  color: var(--ink-3);
+}
+
+.share-detail summary {
+  cursor: pointer;
+}
+
+.share-detail code {
+  display: block;
+  overflow-x: auto;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .share-error {
   max-width: 520px;
   margin: 0 auto;
@@ -297,4 +350,30 @@
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+/* A share link left open on a projector outlives its signed URL (~15 min), and
+   an iframe cannot tell us it went stale. This is the viewer's own recovery. */
+.share-refresh {
+  margin-top: 10px;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.share-refresh-btn {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--ink-2);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.share-refresh-btn:hover {
+  color: var(--ink);
 }
