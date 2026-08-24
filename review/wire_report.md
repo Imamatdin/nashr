@@ -527,7 +527,166 @@ what a value-level test cannot see:
 
 ---
 
+## GAP → COMMIT MAP
+
+Every G-number from `review/coherence_audit.md`. "Closed" means the behaviour the
+row describes no longer happens; where a row had two halves, both are named.
+
+| G | Sev | Where it closed | Note |
+|---|---|---|---|
+| G1 topic never reaches the generator | S1 | `ebb7386` + `66d3cb0` | `EnqueueRequest.topic` → `user_brief` → editorial prompt, steering only |
+| G2 no clarification turn | S1 | `ebb7386` + `66d3cb0` | interview route + `/new` questions; first run uses "decide for me" by founder decision |
+| G3 running job only via `?job=` | S1 | `639dc2c` + `c3c22cd` | state derived from PROJECT + LATEST JOB |
+| G4 no iteration after delivery | S1 | `ebb7386` + `c3c22cd` | chat routes + split-view thread |
+| G5 failed project shows nothing | S1 | `639dc2c` + `c3c22cd` | same state machine as G3 |
+| G6 one failed poll ends the run | S1 | `639dc2c` + `c3c22cd` | backoff that never stops; proactive refresh |
+| G7 completed-no-deck is permanent | S1 | `c3c22cd` | designed wait; Realtime keeps listening for the deck row |
+| G8 money moment dead-ends | S1 | `ebb7386` + `4d23aca` | balance chip, `/hisob`, honest bot hand-off |
+| G9 sourceless run invited then rejected | S1 | `66d3cb0` | one rule drives hint, guard and copy |
+| G10 raw machine strings (22 sites) | S1 | `639dc2c` | `lib/errors.ts`; unknown codes still get human copy |
+| G11 retry is a new paid job; refund unstated | S1 | `ebb7386` + `c3c22cd` | job-stamped refund fact; price on the button |
+| G12 unreachable = eternal skeleton | S1 | `4d23aca` | root cause was NOT a missing `.catch` — supabase-js resolves on a dead network |
+| G13 article priced as a presentation | S1 | `639dc2c` + `c3c22cd` | `article_project` state, no price |
+| G14 decisions never shown | S1 | P3 | `deck_json` had no read route at all |
+| G15 session expiry only at mount | S1 | `ebb7386` + `639dc2c` | proactive refresh; 401 → door with returnTo |
+| G16 no cancel | S2 | **DEFERRED** | backend has no `cancel()` transition; explicitly out of scope |
+| G17 no elapsed / stall detection | S2 | `ebb7386` + `c3c22cd` | timestamps on `JobView`; 45 s stall banner |
+| G18 artifact at the bottom of a form | S2 | `c3c22cd` | split view; tabs below 1024px |
+| G19 share view gives nothing | S2 | `ebb7386` + `66d3cb0` | `downloads[]`, three distinct failures, honest expiry |
+| G20 signed URLs rot | S2 | `c3c22cd` + `66d3cb0` | 10-min re-mint + a visible control; `onError` alone does not work |
+| G21 Realtime unused | S2 | `c3c22cd` + `4d23aca` | one channel per surface; polling demoted to fallback |
+| G22 tier guessed | S2 | `ebb7386` + `c3c22cd` | job payload is authoritative over the project column |
+| G23 `existing:true` never read | S2 | `c3c22cd` | "joined the running job, not charged again" |
+| G24 learning rewards invisible | S2 | `4d23aca` | benefit-first copy per SPEC §3.6 |
+| G25 folio carries no live state | S2 | `4d23aca` | folio half closed; **sidebar recents half open** |
+| G26 identity link has no UI | S2 | P3 | Telegram payer and Google user are two accounts |
+| G27 UI hardcoded Uzbek | S2 | **DEFERRED** | i18n layer explicitly out of scope; catalog shaped for it |
+| G28 doors mislead and strand | S2 | P3 | |
+| G29 landing captures no intent | S2 | **SESSION L** | `app/page.tsx` is not this run's territory |
+| G30 uploads: no progress, serial | S2 | `66d3cb0` | XHR progress, parallel, per-row retry, held-file fix |
+| G31 approval card prices but does not explain | S2 | `66d3cb0` | tier contents from `GET /pricing` |
+| G32 429 detail discarded | S2 | `639dc2c` | says WHEN it resets and names the per-IP case |
+| G33 missing project → PostgREST sentence | S2 | `4d23aca` + `2d02df7` | mapped; CTA survives the error state |
+| G34 sources have no state or delete | S2 | `c3c22cd` + P3 | "deck predates this file" note shipped; delete route in P3 |
+| G35 `/til` `/paket` no-ops | S3 | `66d3cb0` | removed — the honest option of the two offered |
+| G36 provenance display-only | S3 | `c3c22cd` + P3 | strength + empty state shipped; drill-through in P3 |
+| G37 archived opens a purchasable workspace | S3 | `639dc2c` + P3 | read-only state shipped; leaving archive in P3 |
+| G38 CTA decided by a URL param | S3 | `639dc2c` + P3 | versioning stays absent by design (migration 003) |
+| G39 step list is a client-side fiction | S3 | `639dc2c` | honours `progress.total`; unknown steps shown honestly |
+| G40 bot decks not web-servable | S3 | P3 | the one permitted bot-side edit |
+| G41 folio/404/returnTo/theme polish | S4 | `4d23aca` + P3 | folio + 404 shipped; theme-across-doors in P3 |
+
+Standing deferrals, all explicitly out of scope for this run: **G16** (needs a
+cancel transition the queue does not have), **G27** (i18n), the payments purchase
+flow (merchant question open), the article surface beyond the honest guard, and
+`SOURCE_PROCESSING` pre-enqueue wiring (founder's decision at the P1 gate).
+
+---
+
 ## PHASE 3 — COHERENCE SWEEP
+
+Commits: `e65314a` · `e340f96` · `49179c4` · `e4efe57` · `86c909c`
+
+### G14 (S1) — the deck explains itself · `e340f96`
+
+The last open S1. `decks.deck_json` has carried the design direction, the
+binding plan and the resolved interview preferences since the pipeline shipped,
+and no route returned any of it — so "Jarayon tafsiloti" could only expand to
+the same seven step labels already on screen.
+
+`GET /projects/{id}/decisions` serves that record as a typed view. The drawer
+shows the thesis, each section with the CLAIM it argues, the palette as real
+colour, the font pairing, and the four things `apply_defaults` decides for a
+user who answered nothing — with a line saying plainly that Nashr chose them.
+The audit's complaint was never that defaults exist; it is that they were
+silent.
+
+Two defects caught by tooling, not by review:
+
+* **`DeckSpec.plan` is optional** (pyright). Decks generated before the planner
+  became binding carry none, so reading `plan.thesis` would have 500'd on
+  exactly the oldest decks. The argument half is nullable and degrades to
+  design + roster.
+* **The roster cap was dead code** (pytest). `DeckSpec.slides` is already bounded
+  at 50 by the model, so a route-level cap of 60 advertised a ceiling that was
+  not the real one. Removed; the test asserts the model's own bound.
+
+### G40 — the audit's diagnosis was wrong · `49179c4`
+
+G40 says the bot writes local paths into `generated_files`, leaving Telegram
+decks unopenable from the web. The code did — but both bot paths already reach
+`PresentationOrchestrator.render()` **with** `project_id`, and its
+`_upload_rendered()` uploads every format to the migration-007 stable R2 key and
+UPSERTs the row.
+
+So the handler's `_register_outputs` was a second, contradictory writer. Post-007
+its plain INSERT violated the very unique constraint the upsert targets, raised,
+was swallowed by its own `except`, and logged a warning on **every delivery**.
+The obvious fix — adding an R2 upload to the handler — would have created a
+third writer for bytes already uploaded. Deleting the duplicate was correct.
+
+One existing test asserted the removed behaviour. It is re-pointed at the
+corrected contract, with a comment recording what it used to require and why
+that was wrong — not deleted.
+
+### G28 + G26 — doors · `e65314a`, `e4efe57`
+
+Sent-state that echoes the address and offers a cooled-down resend instead of
+replacing the form; every auth failure through the shared catalog with machine
+text collapsed; a deadline on the callback; returnTo carried through a failed
+exchange; and the forward-if-signed-in no longer gated on a third-party script
+loading. G26's merge is offered at the one moment it can work — inside the
+Telegram webview, where `initData` exists — and never rendered in a browser tab
+that could not honour it.
+
+Verified in a browser: the sent state renders with the address echoed, a live
+`Qayta yuborish (59s)` cooldown and an exit, with **zero console errors**.
+
+### Founder additions
+
+**Fonts — already correct, nothing to change.** `app/layout.tsx` loads all three
+families through `next/font/google` (self-hosted at build, served from our
+origin), every one with `display: "swap"`, and subsets `latin`, `latin-ext`,
+`cyrillic`, `cyrillic-ext` — which is what Uzbek `oʻ/gʻ`, Russian and Karakalpak
+actually need. Dropping a subset here would break the product's own languages.
+Reported rather than changed.
+
+**LCP — measured, passes by >8×.** Local production server, cold context, 5 runs,
+median:
+
+| Route | LCP |
+|---|---|
+| `/maxfiylik` | **284 ms** (target < 2500 ms) |
+| `/narxlar` | 368 ms |
+| `/` | 712 ms |
+
+Caveat stated with the number: a localhost production server has no network
+latency, so this is a **floor**. It can prove a regression; it cannot prove a
+field number. A pre-change run measured 168 ms for `/maxfiylik`; the difference
+is server warm-state between runs, not a regression — marketing got strictly
+lighter (see below). The "19 JS requests" a probe reports includes Next
+prefetching linked routes *after* load, not initial-load cost.
+
+**Theme scoping — the ask was real and unmet.** A first look suggested Next had
+already split the theme out, because the 20.8 kB theme chunk is not referenced
+by any marketing page. That was wrong: the **root layout chunk** (2.3 kB) carried
+`ThemeProvider` to every route, and the 366-char no-flash script ran inline in
+`<head>` on every static marketing page — for a preference those pages never read.
+
+Fixed with a route group. `app/(app)/` now owns the theme; the root layout keeps
+only fonts and metadata. Route groups change no URLs, so every path still
+resolves exactly as before. Verified at the chunk level:
+
+```
+MARKETING (must be zero)        APP (must keep it)
+/maxfiylik  chunks: NONE        /login     layout chunk + 366-char inline
+/narxlar    chunks: NONE        /projects  theme chunk + layout + inline
+/           chunks: NONE        /hisob     theme chunk + layout + inline
+/haqida     chunks: NONE
+            inline : NONE
+```
+
+Marketing now references 8 chunks where it referenced 9.
 
 Audit long tail in severity order, excluding the standing deferrals (G16 cancel
 backend, i18n G27, payments purchase flow, article surface beyond the guard,
@@ -550,3 +709,65 @@ onto it — the same order as the rest of the run.
 ## PHASE 3 — COHERENCE SWEEP
 
 _(not started)_
+
+### P3 gate
+
+| Check | Result |
+|---|---|
+| `python -m pytest tests/unit` | **1802 passed, 9 skipped** |
+| `npx vitest run` | **200 passed** |
+| `npx tsc --noEmit` | clean, across app + marketing together |
+| `npx next build` | **20/20 routes**, both sessions' work compiling |
+| Theme probe | dark at DOMContentLoaded on app routes; ignored on marketing |
+| Chunk audit | zero theme JS on 4/4 marketing routes; present on 3/3 app routes |
+| `packages/web` marketing files touched | **0** |
+
+### What P3 leaves open, deliberately
+
+| Row | Why |
+|---|---|
+| **G16** cancel | `JobQueue` has no `cancel()` transition to call. Backend work, out of scope. |
+| **G27** i18n | Explicitly deferred. The error catalog is shaped as one locale file so a second is a lookup, not a refactor. |
+| Payments purchase flow | Merchant question open. The web can see money and still cannot spend it. |
+| Article surface | Beyond the honest "tez kunda" guard. |
+| `SOURCE_PROCESSING` pre-enqueue | Founder's decision at the P1 gate. Keeps the interview's first run on "decide for me". |
+| **G25** sidebar recents | Folio rows carry live status; the sidebar's twelve titles still do not. `chrome.tsx` was owned by another lane when the folio work landed. |
+| **G29** landing | Session L's territory. |
+| **G34** delete-source UI | The route was not built; the workspace states the "deck predates this file" fact instead. |
+| **G36** drill-through | Provenance shows strength and an honest empty state; reaching the source chunk needs a chunk-text route that does not exist. |
+| **G37** leaving archive | The read-only state is honest; there is no unarchive path in the backend to call. |
+| Deck versioning (**G38**) | Absent by design — migration 003 keeps one deck row per project. |
+
+Each of these is a **missing backend capability or an explicit deferral**, not
+an unfinished UI. Where the backend could not support an action, the surface
+says so rather than rendering a dead button.
+
+---
+
+## MERGE
+
+**Session W does not merge.** Merge is human-gated after the architect read and
+the Codex/adversarial pass.
+
+The brief's order was reversed mid-run: `site/landing` merged to `main` first,
+so `wire/coherence` was **rebased onto `origin/main`** rather than merged ahead
+of it. The branch now sits directly on `7c1d35f` with no marketing commit of its
+own — verified by replaying all commits with zero conflicts, on a measured-empty
+file overlap.
+
+Before merging, the reviewer should know:
+
+1. **`docker compose up -d` is required.** The `api` service gained R2
+   credentials (absent since P3, so `/sources/presign` and
+   `/projects/{id}/deck` have been silently falling back to local-filesystem
+   storage) and the Vertex credentials the chat route now genuinely needs.
+   `vertex-key.json` must exist at the repo root on the host.
+2. **No migration is needed.** `credit_ledger.generation_job_id` and
+   `generation_jobs.started_at` both already exist (001, 006).
+3. **`npm ci` must not be run in this checkout** while Session L's worktree
+   junctions its `node_modules` here.
+4. **Nothing live has been proven.** No real model turn, no real
+   `presentation_edit` job, no real refund row, and no Realtime socket — the
+   stub environment has no websocket, so every "live" shot arrived through the
+   polling fallback. Those remain human gates, the same boundary every prior
+   phase drew.
