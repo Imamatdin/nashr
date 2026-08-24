@@ -478,7 +478,17 @@ Commits: `d15ccf6` · `154cde0` · `8092f73` · `c1d4811` · `2d02df7`
 | `python -m pytest tests/unit` | **1797 passed, 9 skipped** |
 | `npx tsc --noEmit` | clean (filtered of `.next/types` cache for routes that live in the other worktree) |
 | Shot matrix | **62 shots, 62 OK**, `review/wire_shots/` |
+| Shot matrix (re-run AFTER the route-group move) | **70 shots, 70 OK** |
 | `packages/web` marketing files touched | **0** |
+
+A note on that re-run, because the first attempt looked like a regression and
+was not. Three surfaces failed — both dynamic routes and the share view — and
+the cause was entirely operational: the dev server had been running without the
+stub environment, because a `pkill` matched the `npx` wrapper rather than the
+Next process, so the restart lost the port silently and every subsequent probe
+hit the stale server. Pinning the env in a gitignored `.env.local` and killing
+by PID took it to 70/70. The move itself was never implicated: every file is a
+100 %-identical rename and `next build` had already emitted all 20 routes.
 
 Shots are untracked, matching every prior run's convention
 (`review/coherence_shots/`, `review/redesign_shots/` are likewise local).
