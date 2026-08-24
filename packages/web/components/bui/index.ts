@@ -1,5 +1,8 @@
 export { default as GlideMenu } from "./glide-menu";
 
+export { ChatThread, default as ChatThreadDefault } from "./chat-thread";
+export type { ChatPendingDecision, ChatThreadMessage, ChatThreadProps } from "./chat-thread";
+
 export { PromptBar, default as PromptBarDefault } from "./prompt-bar";
 export type {
   PromptBarProps,
