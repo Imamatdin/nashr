@@ -240,6 +240,57 @@ const LEDGER_VIEW = {
   ],
 };
 
+const DECISIONS_VIEW = {
+  title: "Yoritish davri: aql-idrok asrining tug'ilishi",
+  language: "uz",
+  thesis:
+    "Yoritish davri dogmani emas, dalilni hokimiyat manbaiga aylantirdi va shu bilan zamonaviy siyosiy tartibni tayyorladi.",
+  audience_takeaway:
+    "Tinglovchi aql-idrok asrining markaziy da'vosini va uning bugungi institutlarga ta'sirini ayta oladi.",
+  sections: [
+    {
+      section_name: "Kelib chiqishi",
+      thesis: "Harakat merosiy dogmaga qarshi aniq reaktsiya sifatida boshlandi.",
+      phase: "hook",
+    },
+    {
+      section_name: "Fikr markazi",
+      thesis: "Aql va tajriba an'ana o'rniga dalil mezoni sifatida qo'yildi.",
+      phase: "core",
+    },
+    {
+      section_name: "Merosi",
+      thesis: "Uning g'oyalari bugun ham turgan institutlarni shakllantirdi.",
+      phase: "close",
+    },
+  ],
+  mood: "warm_historical",
+  palette: {
+    background: "#1A120B",
+    surface: "#D4C5A9",
+    text: "#F5F0E8",
+    accent: "#C4923A",
+    text_secondary: "#A89F91",
+  },
+  heading_font: "Playfair Display",
+  body_font: "EB Garamond",
+  background_treatment: "dark",
+  image_style_prefix: "18th century engraving, sepia toned, no text in image, ",
+  image_cohesion_note: "Bitta davrga xos gravyura uslubi butun taqdimotda saqlanadi.",
+  audience: "undergraduate",
+  talk_duration_minutes: 15,
+  narrative_emphasis: "problem_framing",
+  include_interactive: true,
+  slide_count: 11,
+  slides: [
+    { slide_number: 1, slide_id: "slide_001", slide_type: "title_hero", title: "Yoritish davri" },
+    { slide_number: 2, slide_id: "slide_002", slide_type: "section_break", title: "Kelib chiqishi" },
+    { slide_number: 3, slide_id: "slide_003", slide_type: "data_emphasis", title: "1687: Principia" },
+    { slide_number: 4, slide_id: "slide_004", slide_type: "section_break", title: "Fikr markazi" },
+    { slide_number: 5, slide_id: "slide_005", slide_type: "quote", title: "Volter matbuot erkinligi haqida" },
+  ],
+};
+
 const CHAT_VIEW = {
   can_edit: true,
   messages: [
@@ -394,6 +445,7 @@ const API_PATHS = new Set([
   "/projects/p-1/chat/approve",
   "/projects/p-1/chat/reject",
   "/projects/p-1/interview",
+  "/projects/p-1/decisions",
 ]);
 
 // The public share view resolves a token to a short-TTL signed URL. Opt in with
@@ -572,6 +624,25 @@ export async function mockApi(page, options = {}) {
         expires_at: new Date(Date.now() + 3_600_000).toISOString(),
         user_id: "u-stub",
       });
+      return;
+    }
+    if (url.pathname === "/projects/p-1/decisions") {
+      // 404 until a deck exists: the decisions ARE the deck's own record.
+      if (!options.deckReady) {
+        await fulfillJson(route, 404, { detail: "deck_not_ready" });
+        return;
+      }
+      if (options.decisions === "no_plan") {
+        await fulfillJson(route, 200, {
+          ...DECISIONS_VIEW,
+          thesis: null,
+          audience_takeaway: null,
+          image_cohesion_note: null,
+          sections: [],
+        });
+        return;
+      }
+      await fulfillJson(route, 200, DECISIONS_VIEW);
       return;
     }
     if (url.pathname === "/projects/p-1/interview") {

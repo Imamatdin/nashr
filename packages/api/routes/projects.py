@@ -308,6 +308,146 @@ async def get_interview(
     )
 
 
+class PaletteView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    background: str
+    surface: str
+    text: str
+    accent: str
+    text_secondary: str
+
+
+class SectionView(BaseModel):
+    """One movement of the deck's argument, with the claim it argues."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    section_name: str
+    thesis: str
+    phase: str
+
+
+class RosterSlideView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slide_number: int
+    slide_id: str
+    slide_type: str
+    title: str
+
+
+class DecisionsView(BaseModel):
+    """What the pipeline DECIDED, as opposed to which step it was on.
+
+    Every field here was already persisted in ``decks.deck_json`` and had no
+    read route, so the workspace could only ever repeat the seven step labels
+    back at the user (G14). This is the deck explaining itself: the argument it
+    commits to, the look it chose, and the slides it produced.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    language: str
+    # --- the argument -------------------------------------------------------
+    # Null for a deck generated before the planner became binding: the design
+    # and the roster still exist, so the view degrades rather than 404s.
+    thesis: str | None
+    audience_takeaway: str | None
+    sections: list[SectionView]
+    # --- the look -----------------------------------------------------------
+    mood: str
+    palette: PaletteView
+    heading_font: str
+    body_font: str
+    background_treatment: str
+    image_style_prefix: str
+    image_cohesion_note: str | None
+    # --- what was decided FOR the user when they did not answer -------------
+    audience: str
+    talk_duration_minutes: int
+    narrative_emphasis: str
+    include_interactive: bool
+    # --- the result ---------------------------------------------------------
+    slide_count: int
+    slides: list[RosterSlideView]
+
+
+@router.get("/{project_id}/decisions", response_model=DecisionsView)
+async def get_decisions(request: Request, project_id: str, auth: Authenticated) -> DecisionsView:
+    """The deck's own record of what it decided (owner only).
+
+    ``decks.deck_json`` has carried the design direction, the binding plan, the
+    resolved interview preferences and the slide roster since the pipeline
+    shipped, and nothing has ever been able to read it. Without this the answer
+    to "why does my deck look like this, and what is it arguing?" existed only
+    in the database.
+    """
+
+    await _owned_project(request, project_id, str(auth.user_id))
+
+    row = await request.app.state.db.get_deck(project_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="deck_not_ready")
+
+    # Imported lazily: DeckSpec drags the presentation package in, and every
+    # other route on this module must stay cheap to import.
+    from packages.core.models.presentation import DeckSpec
+
+    deck = DeckSpec.model_validate(row["deck_json"])
+    design = deck.design
+    plan = deck.plan
+    interview = deck.interview
+
+    return DecisionsView(
+        title=deck.title,
+        language=deck.language.value,
+        thesis=plan.thesis if plan is not None else None,
+        audience_takeaway=plan.audience_takeaway if plan is not None else None,
+        sections=[
+            SectionView(
+                section_name=section.section_name,
+                thesis=section.thesis,
+                phase=section.phase.value,
+            )
+            for section in (plan.sections if plan is not None else [])
+        ],
+        mood=design.mood.value,
+        palette=PaletteView(
+            background=design.palette.background,
+            surface=design.palette.surface,
+            text=design.palette.text,
+            accent=design.palette.accent,
+            text_secondary=design.palette.text_secondary,
+        ),
+        heading_font=design.heading_font,
+        body_font=design.body_font,
+        background_treatment=design.background_treatment.value,
+        image_style_prefix=design.image_style_prefix,
+        image_cohesion_note=plan.image_cohesion_note if plan is not None else None,
+        audience=interview.audience.value,
+        talk_duration_minutes=interview.talk_duration_minutes,
+        narrative_emphasis=interview.narrative_emphasis.value,
+        include_interactive=interview.include_interactive,
+        slide_count=len(deck.slides),
+        slides=[
+            RosterSlideView(
+                slide_number=slide.slide_index + 1,
+                slide_id=slide.slide_id,
+                slide_type=slide.slide_type.value,
+                title=slide.content.title,
+            )
+            # No cap here on purpose. DeckSpec.slides is already bounded at 50
+            # by the model, so a second looser limit would advertise a ceiling
+            # that is not the real one — and the deck cannot even validate past
+            # the model's bound. The provenance route caps because claims are
+            # unbounded; a roster is not.
+            for slide in deck.slides
+        ],
+    )
+
+
 @router.get("/{project_id}/provenance", response_model=ProvenanceView)
 async def get_provenance(request: Request, project_id: str, auth: Authenticated) -> ProvenanceView:
     """Owner-only evidence table: extracted claims traced to source files.

@@ -39,6 +39,7 @@ class _FakeDb:
         self.share_token: str | None = None
         self.files: list[dict[str, Any]] = []
         self.sources_json: dict[str, Any] | None = None
+        self.deck_row: dict[str, Any] | None = None
         self.project_sources: list[dict[str, Any]] = [{"id": _SOURCE_ID, "filename": "manba.pdf"}]
         self.share_writes: list[tuple[str, str | None]] = []
         self.created_projects: list[dict[str, Any]] = []
@@ -78,6 +79,9 @@ class _FakeDb:
 
     async def get_brain_session_sources(self, project_id: str) -> dict[str, Any] | None:
         return self.sources_json
+
+    async def get_deck(self, project_id: str) -> dict[str, Any] | None:
+        return self.deck_row
 
 
 class _FakeStorage:
@@ -491,3 +495,176 @@ async def test_interview_threads_the_requested_language_to_the_engine() -> None:
     assert ru_text["audience"] == "Для кого готовится?"
     assert uz_text["audience"] == "Kim uchun tayyorlanmoqda?"
     assert all(ru_text[question_id] != uz_text[question_id] for question_id in uz_text)
+
+
+# ----------------------------------------------------------------- decisions
+
+
+def _decisions_deck(*, with_plan: bool = True) -> dict[str, Any]:
+    """A deck_json row shaped like the pipeline really persists one.
+
+    Built through the real DeckSpec so a field rename in the model breaks this
+    test rather than silently changing what the route can serve.
+    """
+
+    from packages.core.enums import (
+        AudienceType,
+        BackgroundTreatment,
+        NarrativePhase,
+        PresentationMood,
+        SlideType,
+    )
+    from packages.core.models.presentation import (
+        ColorPalette,
+        DeckPlan,
+        DeckSpec,
+        DesignDirectionSpec,
+        PlannedSection,
+        PresentationInterviewAnswers,
+        SlideContent,
+        SlideSpec,
+    )
+
+    plan = (
+        DeckPlan(
+            thesis="Suv olib qo'yish Orol dengizini o'lchab bo'ladigan darajada qisqartirdi.",
+            audience_takeaway="Tinglovchi qisqarishning sababi va ko'lamini ayta oladi.",
+            sections=[
+                PlannedSection(
+                    section_name="Sabab",
+                    thesis="Sug'orish kanallari daryo oqimini dengizdan burdi.",
+                    phase=NarrativePhase.HOOK,
+                ),
+                PlannedSection(
+                    section_name="Oqibat",
+                    thesis="Suv sathi o'nlab metrga tushdi va port shaharlar quridi.",
+                    phase=NarrativePhase.CLOSE,
+                ),
+            ],
+            image_cohesion_note="Bitta izchil hujjatli fotografiya uslubi.",
+        )
+        if with_plan
+        else None
+    )
+    deck = DeckSpec(
+        project_id=_PROJECT_ID,
+        title="Orol dengizi qurishi",
+        design=DesignDirectionSpec(
+            mood=PresentationMood.WARM_HISTORICAL,
+            palette=ColorPalette(
+                background="#1A120B",
+                surface="#D4C5A9",
+                text="#F5F0E8",
+                accent="#C4923A",
+                text_secondary="#A89F91",
+            ),
+            heading_font="Playfair Display",
+            body_font="EB Garamond",
+            image_style_prefix="documentary photography, no text in image, ",
+            background_treatment=BackgroundTreatment.DARK,
+        ),
+        interview=PresentationInterviewAnswers(audience=AudienceType.UNDERGRADUATE),
+        plan=plan,
+        slides=[
+            SlideSpec(
+                slide_index=0,
+                slide_type=SlideType.TITLE_HERO,
+                content=SlideContent(title="Orol dengizi qurishi"),
+            ),
+            SlideSpec(
+                slide_index=1,
+                slide_type=SlideType.SECTION_BREAK,
+                content=SlideContent(title="Sabab"),
+            ),
+        ],
+    )
+    return {"deck_json": deck.model_dump(mode="json")}
+
+
+async def test_decisions_returns_the_argument_and_the_look() -> None:
+    client, db, _limiter = _client()
+    db.deck_row = _decisions_deck()
+
+    response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    # The argument the deck commits to — the thing "Jarayon tafsiloti" could
+    # never show because no route returned deck_json (G14).
+    assert body["thesis"].startswith("Suv olib qo'yish")
+    assert [s["section_name"] for s in body["sections"]] == ["Sabab", "Oqibat"]
+    assert all(s["thesis"] != s["section_name"] for s in body["sections"])
+    # The look, including the palette as real colours.
+    assert body["heading_font"] == "Playfair Display"
+    assert body["palette"]["accent"] == "#C4923A"
+    # What was decided FOR the user when they answered nothing.
+    assert body["audience"] == "undergraduate"
+    assert body["talk_duration_minutes"] > 0
+    # The roster, 1-based for display.
+    assert body["slide_count"] == 2
+    assert [s["slide_number"] for s in body["slides"]] == [1, 2]
+
+
+async def test_decisions_degrades_for_a_deck_that_predates_the_planner() -> None:
+    # DeckSpec.plan is optional, so a deck generated before the planner became
+    # binding has no argument to report. The design and the roster still exist,
+    # so the route serves those rather than 404ing or inventing a thesis.
+    client, db, _limiter = _client()
+    db.deck_row = _decisions_deck(with_plan=False)
+
+    response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["thesis"] is None
+    assert body["audience_takeaway"] is None
+    assert body["image_cohesion_note"] is None
+    assert body["sections"] == []
+    assert body["heading_font"] == "Playfair Display"
+    assert body["slide_count"] == 2
+
+
+async def test_decisions_without_a_deck_is_404() -> None:
+    client, db, _limiter = _client()
+    db.deck_row = None
+
+    response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "deck_not_ready"
+
+
+async def test_decisions_is_owner_only() -> None:
+    client, db, _limiter = _client()
+    db.deck_row = _decisions_deck()
+    db.project_owner = str(uuid4())
+
+    response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "project_not_found"
+
+
+async def test_decisions_roster_is_bounded_by_the_model_not_the_route() -> None:
+    # The route deliberately does NOT cap the roster: DeckSpec.slides is capped
+    # at 50 by the model, so a deck carrying more cannot exist to be served. An
+    # extra route-level cap would name a ceiling that is not the real one.
+    from packages.core.models.presentation import DeckSpec
+
+    field = DeckSpec.model_fields["slides"]
+    bound = next(m for m in field.metadata if hasattr(m, "max_length")).max_length
+
+    client, db, _limiter = _client()
+    row = _decisions_deck()
+    one = row["deck_json"]["slides"][1]
+    row["deck_json"]["slides"] = [
+        {**one, "slide_index": i, "slide_id": f"slide_{i:03d}"} for i in range(bound)
+    ]
+    db.deck_row = row
+
+    response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["slide_count"] == bound
+    assert len(body["slides"]) == bound

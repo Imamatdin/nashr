@@ -241,6 +241,41 @@ await shoot(browser, {
   },
 });
 
+// ------------------------------------------------------- decisions (G14)
+//
+// The last of the audit's S1 rows: the pipeline persisted its own design
+// direction, binding plan and resolved preferences, and no route returned any
+// of it, so the trace could only repeat step labels.
+
+for (const theme of ["light", "dark"]) {
+  await shoot(browser, {
+    name: `ws-decisions-${theme}-1440`,
+    url: P1,
+    theme,
+    api: { jobStatus: "completed", deckReady: true },
+    waitFor: ".ws-drawer",
+    act: async (page) => {
+      const drawer = page.locator('.ws-drawer:has(> summary:text-is("Nima qaror qilindi"))');
+      await drawer.locator("summary").click();
+      await page.waitForTimeout(400);
+    },
+  });
+}
+
+// A deck generated before the planner became binding has no argument to show;
+// the design and the roster still do.
+await shoot(browser, {
+  name: "ws-decisions-no-plan-light-1440",
+  url: P1,
+  api: { jobStatus: "completed", deckReady: true, decisions: "no_plan" },
+  waitFor: ".ws-drawer",
+  act: async (page) => {
+    const drawer = page.locator('.ws-drawer:has(> summary:text-is("Nima qaror qilindi"))');
+    await drawer.locator("summary").click();
+    await page.waitForTimeout(400);
+  },
+});
+
 // ------------------------------------------------------------ the money moment
 
 for (const theme of ["light", "dark"]) {

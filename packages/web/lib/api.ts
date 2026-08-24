@@ -540,3 +540,54 @@ export function approvePending(projectId: string, token: string): Promise<ChatTu
 export function rejectPending(projectId: string, token: string): Promise<ChatTurnView> {
   return postJson<ChatTurnView>(`/projects/${projectId}/chat/reject`, {}, token);
 }
+
+// --------------------------------------------------------------- decisions
+
+export interface DecisionSectionView {
+  section_name: string;
+  thesis: string;
+  phase: string;
+}
+
+export interface DecisionsView {
+  title: string;
+  language: string;
+  /** Null for a deck generated before the planner became binding. */
+  thesis: string | null;
+  audience_takeaway: string | null;
+  sections: DecisionSectionView[];
+  mood: string;
+  palette: {
+    background: string;
+    surface: string;
+    text: string;
+    accent: string;
+    text_secondary: string;
+  };
+  heading_font: string;
+  body_font: string;
+  background_treatment: string;
+  image_style_prefix: string;
+  image_cohesion_note: string | null;
+  audience: string;
+  talk_duration_minutes: number;
+  narrative_emphasis: string;
+  include_interactive: boolean;
+  slide_count: number;
+  slides: Array<{
+    slide_number: number;
+    slide_id: string;
+    slide_type: string;
+    title: string;
+  }>;
+}
+
+/**
+ * What the pipeline DECIDED — the argument, the look, and the roster.
+ *
+ * All of it has been persisted in decks.deck_json since the pipeline shipped
+ * and had no read route, so the workspace could only repeat step labels (G14).
+ */
+export function getDecisions(projectId: string, token: string): Promise<DecisionsView> {
+  return getJson<DecisionsView>(`/projects/${projectId}/decisions`, token);
+}

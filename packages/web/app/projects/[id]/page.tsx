@@ -48,12 +48,14 @@ import {
   ApiError,
   type ChatHistoryView,
   type DeckAccessView,
+  type DecisionsView,
   type PricingView,
   type ProvenanceRow,
   type ProvenanceView,
   approvePending,
   enqueueJob,
   getChat,
+  getDecisions,
   getDeckAccess,
   getPricing,
   getProvenance,
@@ -71,6 +73,14 @@ import {
   rateLimitCopy,
   reasonOf,
 } from "@/lib/errors";
+import {
+  backgroundLabel,
+  decidedFor,
+  hasArgument,
+  moodLabel,
+  phaseLabel,
+  swatches,
+} from "@/lib/decisions";
 import { useAppSession } from "@/lib/use-session";
 import { useLiveJob } from "@/lib/use-live-job";
 import {
@@ -161,6 +171,7 @@ export default function ProjectPage() {
   const [sourcesError, setSourcesError] = useState<unknown>(null);
   const [deck, setDeck] = useState<DeckAccessView | null>(null);
   const [provenance, setProvenance] = useState<ProvenanceView | null>(null);
+  const [decisions, setDecisions] = useState<DecisionsView | null>(null);
   const [pricing, setPricing] = useState<PricingView | null>(null);
   const [shareToken, setShareToken] = useState<string | null>(null);
 
@@ -218,13 +229,23 @@ export default function ProjectPage() {
     }
   }, [projectId, withAuth]);
 
+  const loadDecisions = useCallback(async () => {
+    try {
+      setDecisions(await withAuth((token) => getDecisions(projectId, token)));
+    } catch {
+      // 404 until a deck exists. Best-effort like provenance: a missing
+      // record of decisions must never cost the user the deck itself.
+    }
+  }, [projectId, withAuth]);
+
   const onDeckChanged = useCallback(() => {
     void loadDeck();
     void loadProvenance();
+    void loadDecisions();
     void withAuth((token) => getChat(projectId, token))
       .then((view) => view && setChat(view))
       .catch(() => undefined);
-  }, [loadDeck, loadProvenance, projectId, withAuth]);
+  }, [loadDeck, loadProvenance, loadDecisions, projectId, withAuth]);
 
   const { job, state: jobState, error: jobError, live, refresh } = useLiveJob({
     projectId,
@@ -283,6 +304,7 @@ export default function ProjectPage() {
     refreshSources();
     void loadDeck();
     void loadProvenance();
+    void loadDecisions();
     void withAuth((token) => getChat(projectId, token))
       .then((view) => view && setChat(view))
       .catch(() => undefined);
@@ -292,7 +314,16 @@ export default function ProjectPage() {
     return () => {
       if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
     };
-  }, [session, projectId, loadProject, refreshSources, loadDeck, loadProvenance, withAuth]);
+  }, [
+    session,
+    projectId,
+    loadProject,
+    refreshSources,
+    loadDeck,
+    loadProvenance,
+    loadDecisions,
+    withAuth,
+  ]);
 
   // Re-mint the signed deck URL before it expires (G20).
   useEffect(() => {
@@ -878,6 +909,85 @@ export default function ProjectPage() {
                       </Button>
                     </div>
                   )}
+                </div>
+              </details>
+            )}
+
+            {decisions !== null && (
+              <details className="ws-drawer">
+                <summary>Nima qaror qilindi</summary>
+                <div className="ws-drawer-body">
+                  {hasArgument(decisions) ? (
+                    <>
+                      <p className="ws-decide-thesis">{decisions.thesis}</p>
+                      {decisions.audience_takeaway !== null && (
+                        <p className="ws-fine">
+                          Tinglovchi nima bilan chiqadi: {decisions.audience_takeaway}
+                        </p>
+                      )}
+                      <ol className="ws-decide-sections">
+                        {decisions.sections.map((section, index) => (
+                          <li key={`${section.section_name}-${index}`}>
+                            <span className="ws-decide-section-name">
+                              {section.section_name}
+                            </span>
+                            <span className="ws-decide-phase">{phaseLabel(section.phase)}</span>
+                            <span className="ws-decide-section-thesis">{section.thesis}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </>
+                  ) : (
+                    <p className="ws-fine">
+                      Bu taqdimot reja mexanizmi joriy qilinishidan oldin yaratilgan, shuning
+                      uchun uning yozma argumenti saqlanmagan. Dizayn va slaydlar ro‘yxati
+                      quyida.
+                    </p>
+                  )}
+
+                  <div className="ws-decide-look">
+                    <div className="ws-swatches" aria-label="Rang palitrasi">
+                      {swatches(decisions).map((swatch) => (
+                        <span key={swatch.name} className="ws-swatch" title={`${swatch.name} ${swatch.hex}`}>
+                          <span
+                            className="ws-swatch-chip"
+                            style={{ background: swatch.hex }}
+                            aria-hidden
+                          />
+                          <span className="ws-swatch-name">{swatch.name}</span>
+                        </span>
+                      ))}
+                    </div>
+                    <p className="ws-fine">
+                      {moodLabel(decisions.mood)} · {backgroundLabel(decisions.background_treatment)}{" "}
+                      · {decisions.heading_font} / {decisions.body_font}
+                    </p>
+                    {decisions.image_cohesion_note !== null && (
+                      <p className="ws-fine">{decisions.image_cohesion_note}</p>
+                    )}
+                  </div>
+
+                  <dl className="ws-decide-facts">
+                    {decidedFor(decisions).map((fact) => (
+                      <div key={fact.label}>
+                        <dt>{fact.label}</dt>
+                        <dd>{fact.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  <p className="ws-fine">
+                    Savollarga javob bermagan bo‘lsangiz, bu tanlovlarni manbalaringiz
+                    asosida Nashr o‘zi qildi.
+                  </p>
+
+                  <ol className="ws-decide-roster">
+                    {decisions.slides.map((slide) => (
+                      <li key={slide.slide_id}>
+                        <span className="ws-decide-num data-text">{slide.slide_number}</span>
+                        <span>{slide.title}</span>
+                      </li>
+                    ))}
+                  </ol>
                 </div>
               </details>
             )}
