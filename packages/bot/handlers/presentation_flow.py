@@ -489,7 +489,6 @@ async def start_generation(
         return
 
     _stash_outputs(project_id, result.render)
-    await _register_outputs(db, project_id, result.render)
     try:
         await db.update_project_status(project_id, "ready")
     except Exception as exc:
@@ -523,25 +522,22 @@ def _stash_outputs(project_id: str, files: PresentationRenderResult) -> None:
         slot["warnings"] = list(files.warnings)
 
 
-async def _register_outputs(
-    db: DatabaseClient, project_id: str, files: PresentationRenderResult
-) -> None:
-    """Persist a generated_files row per rendered output."""
-
-    for ext, path in files.by_extension().items():
-        try:
-            size = path.stat().st_size if path.exists() else 0
-            await db.create_generated_file(
-                project_id=project_id,
-                file_type=ext,
-                storage_path=str(path),
-                file_size=size,
-            )
-        except Exception as exc:
-            logger.warning(
-                "presentation_register_output_failed",
-                extra={"project_id": project_id, "format": ext, "error_type": type(exc).__name__},
-            )
+# NOTE (G40): this module used to carry _register_outputs, which INSERTed a
+# generated_files row per format carrying the LOCAL rendered path. It was both
+# redundant and wrong:
+#
+#   * redundant — PresentationOrchestrator.render() is called with project_id on
+#     both bot paths (first delivery and the Way-2 fix re-delivery), and its
+#     _upload_rendered() already uploads each format to the migration-007 stable
+#     R2 key and UPSERTs the row against uq_generated_files_project_type;
+#   * wrong — a local /tmp path is not something GET /projects/{id}/deck can
+#     sign, so any row that did land made a deck unopenable from the web.
+#
+# Post-007 the INSERT could not even succeed: it violated the unique constraint
+# the orchestrator's upsert targets, raised, and was swallowed into a warning on
+# every single delivery. Registration belongs to whoever uploaded the bytes, and
+# that is the orchestrator. _stash_outputs is untouched — Telegram delivery
+# genuinely does serve the local files.
 
 
 async def _open_brain_session(
@@ -1071,7 +1067,6 @@ async def _dispatch_fix(
     session.accumulated_cost_usd += result.estimated_cost_usd  # analytics, not the cap
     session.accumulated_image_count += result.image_count
     _stash_outputs(session.project_id, result.render)
-    await _register_outputs(db, session.project_id, result.render)
     _append_fix_result(
         session,
         {

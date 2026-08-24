@@ -268,8 +268,13 @@ async def test_start_generation_caches_outputs_and_advances_state(
     cache = _PROJECT_CACHE.get("proj_x") or {}
     assert cache["files"]["html"] == str(html)
     assert cache["files"]["pptx"] == str(pptx)
-    # Two generated_files rows: html + pptx.
-    assert db_spy.create_generated_file.await_count == 2
+    # The handler caches the LOCAL paths (Telegram delivery serves those files)
+    # and writes NO generated_files row (G40). Registration belongs to whoever
+    # uploaded the bytes: the orchestrator's render() already upserts the stable
+    # R2 key. This assertion previously required the opposite — two rows written
+    # here, carrying local /tmp paths that GET /projects/{id}/deck cannot sign
+    # and that violate migration 007's unique constraint anyway.
+    assert db_spy.create_generated_file.await_count == 0
     db_spy.update_project_status.assert_awaited_with("proj_x", "ready")
 
 
