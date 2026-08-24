@@ -12,6 +12,7 @@
 // scope for this run (G27).
 
 import { ApiError } from "./api";
+import { STEP_LABELS } from "./steps";
 
 export type ErrorTone = "error" | "warn" | "info";
 
@@ -338,4 +339,43 @@ function formatReset(at: Date): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours} soatda`;
   return at.toLocaleDateString("uz-UZ", { day: "numeric", month: "long" });
+}
+
+/**
+ * Copy for a failed generation, from the worker's own `error_message`.
+ *
+ * The worker writes `"{step}: {ExceptionType}: {detail}"`
+ * (scripts/worker_run_job.py). Rendering that verbatim is the §4 ledger's row 8
+ * — a raw Python exception shown to a teacher. But discarding it and printing
+ * "something went wrong" throws away the one genuinely useful fact in it: WHICH
+ * STEP stopped. A run that died choosing a design direction is a different
+ * event to one that died reading the sources, and the user can act on the
+ * difference (a scanned PDF, an unsupported topic).
+ *
+ * So the step is recovered and named in human terms; everything after it goes
+ * to the collapsible detail.
+ */
+export function describeJobFailure(errorMessage: string | null): FriendlyError {
+  const base: FriendlyError = {
+    title: "Generatsiya to‘xtadi",
+    message: "Jarayon tugamadi.",
+    tone: "error",
+    detail: errorMessage ?? undefined,
+    reason: "job_failed",
+  };
+  if (!errorMessage) {
+    return { ...base, message: "Jarayon tugamadi. Sababi qayd etilmagan." };
+  }
+
+  const separator = errorMessage.indexOf(":");
+  const stepKey = separator === -1 ? errorMessage.trim() : errorMessage.slice(0, separator).trim();
+  const known = STEP_LABELS.find((entry) => entry.key === stepKey);
+  if (known) {
+    return {
+      ...base,
+      message: `«${known.label}» bosqichida to‘xtadi.`,
+    };
+  }
+  // An unrecognised step name is still not an excuse to print the exception.
+  return base;
 }

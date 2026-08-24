@@ -64,10 +64,17 @@ import {
   rejectPending,
   uploadToR2,
 } from "@/lib/api";
-import { creditCopy, describeError, rateLimitCopy, reasonOf } from "@/lib/errors";
+import {
+  creditCopy,
+  describeError,
+  describeJobFailure,
+  rateLimitCopy,
+  reasonOf,
+} from "@/lib/errors";
 import { useAppSession } from "@/lib/use-session";
 import { useLiveJob } from "@/lib/use-live-job";
 import {
+  badgeStatusFor,
   deriveWorkspaceState,
   elapsedMs,
   formatElapsed,
@@ -170,7 +177,11 @@ export default function ProjectPage() {
   const [enqueueing, setEnqueueing] = useState(false);
   const [enqueueError, setEnqueueError] = useState<unknown>(null);
   const [traceOpen, setTraceOpen] = useState(false);
-  const [pane, setPane] = useState<Pane>("deck");
+  // Defaulting to the deck pane hides the run panel behind a tab, so on a
+  // phone a queued/processing/failed project opened from the folio showed an
+  // empty deck placeholder and nothing about its actual state. The artifact
+  // leads only once there IS one; until then the work does.
+  const [pane, setPane] = useState<Pane | null>(null);
   // Not read: this exists only to re-render once a second so the elapsed
   // clock and the stall check re-evaluate against a fresh Date.now().
   const [, setTick] = useState(0);
@@ -319,6 +330,8 @@ export default function ProjectPage() {
       fixes: entry?.fix_allowance ?? null,
     };
   }, [pricing, job?.package, job?.deducted_amount, tier]);
+
+  const activePane: Pane = pane ?? (deck !== null ? "deck" : "chat");
 
   const progress = job?.progress ?? {};
   const steps = stepStates(progress, job?.status ?? "queued");
@@ -597,7 +610,7 @@ export default function ProjectPage() {
 
       {workspace.kind === "failed" && job && (
         <div className="ws-failed">
-          <p className="ws-failed-note">{describeError(new ApiError(500, job.error_message ?? "unknown")).message}</p>
+          <p className="ws-failed-note">{describeJobFailure(job.error_message).message}</p>
           {/* The refund is a FACT off the job-stamped ledger row, not a guess.
               When it is false we say nothing rather than asserting a negative:
               jobs that failed before the stamp existed carry no evidence. */}
@@ -727,7 +740,7 @@ export default function ProjectPage() {
             <>
               <div className="ws-head-line">
                 <h1 className="ws-title">{project.title}</h1>
-                <StatusBadge status={job ? job.status : project.status} />
+                <StatusBadge status={badgeStatusFor(workspace.kind, project.status)} />
               </div>
               <p className="ws-meta">
                 {tier.name} · <DataText>{soum(priced.price)}</DataText>
@@ -744,7 +757,7 @@ export default function ProjectPage() {
           <button
             type="button"
             role="tab"
-            aria-selected={pane === "chat"}
+            aria-selected={activePane === "chat"}
             onClick={() => setPane("chat")}
           >
             Suhbat
@@ -752,14 +765,14 @@ export default function ProjectPage() {
           <button
             type="button"
             role="tab"
-            aria-selected={pane === "deck"}
+            aria-selected={activePane === "deck"}
             onClick={() => setPane("deck")}
           >
             Taqdimot
           </button>
         </div>
 
-        <div className="ws-split" data-pane={pane}>
+        <div className="ws-split" data-pane={activePane}>
           <section className="ws-rail" aria-label="Suhbat va jarayon">
             <div className="ws-run">{runPanel}</div>
             <ChatThread

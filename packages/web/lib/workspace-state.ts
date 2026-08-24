@@ -145,3 +145,35 @@ export function formatElapsed(ms: number): string {
   if (minutes === 0) return `${seconds}s`;
   return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
+
+/**
+ * The badge status, derived from the SAME state the body renders from.
+ *
+ * `projects.status` is a denormalised column that drifts: a project row can say
+ * "ready" while its latest job says otherwise, or while it has no job at all.
+ * Reading it directly put "Tayyor" above "order a presentation" — a header and
+ * a body disagreeing on the same screen, which is the whole class of defect
+ * this phase exists to remove.
+ */
+export function badgeStatusFor(kind: WorkspaceStateKind, projectStatus: string): string {
+  switch (kind) {
+    case "no_job":
+      return "draft";
+    case "queued":
+      return "queued";
+    case "processing":
+      // Files are still being written; the run is not over.
+      return "processing";
+    case "completed_no_deck":
+      return "processing";
+    case "failed":
+      return "failed";
+    case "ready":
+      return "completed";
+    case "archived":
+      return "archived";
+    default:
+      // article_project / loading: the project's own status is the only fact.
+      return projectStatus;
+  }
+}

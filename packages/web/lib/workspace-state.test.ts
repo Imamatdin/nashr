@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { JobView } from "./api";
 import {
+  badgeStatusFor,
   deriveWorkspaceState,
   elapsedMs,
   formatElapsed,
@@ -162,5 +163,32 @@ describe("isStalled", () => {
 
   it("cannot stall on a row that never beat", () => {
     expect(isStalled(job({ heartbeat_at: null }), beat + 10 * STALL_AFTER_MS)).toBe(false);
+  });
+});
+
+describe("badgeStatusFor — the header cannot contradict the body", () => {
+  it("never shows a delivered badge over a project with no run", () => {
+    // The stale projects.status column said "ready" while the body offered to
+    // start a first generation; the header must follow the derived state.
+    expect(badgeStatusFor("no_job", "ready")).toBe("draft");
+  });
+
+  it("keeps a completed-but-deckless run reading as still working", () => {
+    expect(badgeStatusFor("completed_no_deck", "ready")).toBe("processing");
+  });
+
+  it.each([
+    ["queued", "queued"],
+    ["processing", "processing"],
+    ["failed", "failed"],
+    ["ready", "completed"],
+    ["archived", "archived"],
+  ] as const)("maps %s to %s regardless of the project column", (kind, expected) => {
+    expect(badgeStatusFor(kind, "draft")).toBe(expected);
+  });
+
+  it("falls back to the project's own status where no job state applies", () => {
+    expect(badgeStatusFor("article_project", "sourcing")).toBe("sourcing");
+    expect(badgeStatusFor("loading", "draft")).toBe("draft");
   });
 });

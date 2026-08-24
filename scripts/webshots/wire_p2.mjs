@@ -318,7 +318,19 @@ await shoot(browser, { name: "projects-many-light-1440", url: "/projects", supab
 
 // Session expiry: no stored session at all, so the guard must route to a door
 // carrying returnTo rather than stranding the visitor.
-await shoot(browser, { name: "ws-session-expired-light-1440", url: P1, noSession: true, waitFor: "main" });
+await shoot(browser, {
+  name: "ws-session-expired-light-1440",
+  url: P1,
+  noSession: true,
+  // The guard redirects to a door; the shot exists to prove it carries
+  // returnTo rather than stranding the visitor on /projects.
+  waitFor: "form, .door-shell, input[type=email]",
+  act: async (page) => {
+    const url = page.url();
+    if (!url.includes("returnTo")) console.log(`    !! login URL lost returnTo: ${url}`);
+    else console.log(`    returnTo carried: ${decodeURIComponent(url.split("returnTo=")[1] ?? "")}`);
+  },
+});
 
 // ------------------------------------------------------------- share view
 

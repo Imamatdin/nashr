@@ -184,11 +184,14 @@ export function AppChrome({
             <Link
               href="/hisob"
               data-active={active === "hisob" ? "true" : undefined}
-              className="flex items-center gap-1.5"
+              // whitespace-nowrap + shrink-0: the topbar is a flex row, and a
+              // three-word amount ("35 000 so'm") otherwise wraps onto three
+              // lines at 390px and doubles the bar's height.
+              className="flex shrink-0 items-center gap-1.5 whitespace-nowrap"
               title={`Hisob: ${soum(balance)}`}
             >
               <Wallet size={15} strokeWidth={1.75} aria-hidden />
-              <span className="data-text">{soum(balance)}</span>
+              <span className="data-text whitespace-nowrap">{soum(balance)}</span>
             </Link>
           )}
           <ThemeToggle compact />

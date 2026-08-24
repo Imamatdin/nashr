@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "./api";
-import { creditCopy, describeError, fieldsOf, rateLimitCopy, reasonOf } from "./errors";
+import { STEP_LABELS } from "./steps";
+import {
+  creditCopy,
+  describeError,
+  describeJobFailure,
+  fieldsOf,
+  rateLimitCopy,
+  reasonOf,
+} from "./errors";
 
 const soum = (n: number) => `${n} so'm`;
 
@@ -149,4 +157,32 @@ describe("designed states are not styled as failures", () => {
       expect(describeError(structured(409, { reason })).tone).toBe("info");
     },
   );
+});
+
+describe("describeJobFailure names the step, never the exception", () => {
+  it("recovers the pipeline step from the worker's message", () => {
+    const friendly = describeJobFailure(
+      "Choosing design direction: RuntimeError: grounding hard stop",
+    );
+    // Asserted against the label itself, not a retyped copy: the first version
+    // of this test failed only because it used a typographic apostrophe.
+    const label = STEP_LABELS.find((e) => e.key === "Choosing design direction")!.label;
+    expect(friendly.message).toContain(label);
+    // The exception itself is available, but only in the collapsible detail.
+    expect(friendly.message).not.toContain("RuntimeError");
+    expect(friendly.detail).toContain("RuntimeError");
+  });
+
+  it("keeps the raw text out of the message for an unrecognised step", () => {
+    const raw = "psycopg.errors.UndefinedColumn: column does not exist";
+    const friendly = describeJobFailure(raw);
+    expect(friendly.message).not.toContain("psycopg");
+    expect(friendly.detail).toBe(raw);
+  });
+
+  it("is honest when the worker recorded no reason at all", () => {
+    const friendly = describeJobFailure(null);
+    expect(friendly.message).toContain("qayd etilmagan");
+    expect(friendly.detail).toBeUndefined();
+  });
 });

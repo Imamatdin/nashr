@@ -586,7 +586,10 @@ export async function mockApi(page, options = {}) {
     }
     if (url.pathname === "/projects/p-1/chat") {
       if (request.method() === "GET") {
-        if (options.chat === "no_session") {
+        // A project that has never been generated has no brain session: the
+        // worker creates one only after a run. A fixture that hands back an
+        // editable thread here would shoot a screen production cannot reach.
+        if (options.chat === "no_session" || options.noJob || options.jobStatus === "queued") {
           await fulfillJson(route, 200, {
             ...CHAT_VIEW,
             can_edit: false,
