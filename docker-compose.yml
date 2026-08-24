@@ -140,6 +140,29 @@ services:
       VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
     volumes:
       - ./vertex-key.json:/app/vertex-key.json:ro
+    # The bot's liveness probe is declared once in the Dockerfile, so every
+    # service inherited it — and only the bot touches that file. api, worker,
+    # backup and caddy were therefore permanently "unhealthy", which trained us
+    # to ignore the one signal that would show a real outage. Each service now
+    # gets a probe that means something, or none at all.
+    #
+    # urllib rather than curl: the image has Python, not necessarily curl.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          try:
+              with urllib.request.urlopen("http://127.0.0.1:8090/health", timeout=5) as r:
+                  sys.exit(0 if r.status == 200 else 1)
+          except Exception:
+              sys.exit(1)
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
     networks:
       - nashr-net
 
@@ -170,10 +193,20 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /app/vertex-key.json
       VERTEX_PROJECT: nashr-prod
       VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
+      NASHR_LIVENESS_FILE: /tmp/nashr-worker-liveness
     volumes:
       - nashr-temp:/tmp/nashr
       - ./debug:/app/debug
       - ./vertex-key.json:/app/vertex-key.json:ro
+    # The inherited script is right; it was only ever pointed at the wrong file.
+    # NASHR_LIVENESS_FILE redirects it at the marker the claim loop and the
+    # heartbeat touch, so the probe reports "still cycling", not "process exists".
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
     networks:
       - nashr-net
 
@@ -197,6 +230,10 @@ services:
       R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
       R2_SECRET_KEY: ${R2_SECRET_KEY:-}
       R2_BUCKET: ${R2_BUCKET:-nashr-files}
+    # Honest silence beats a red light that means nothing: this container has
+    # nothing meaningful to probe.
+    healthcheck:
+      disable: true
     networks:
       - nashr-net
 
@@ -218,6 +255,10 @@ services:
       - caddy-config:/config
     depends_on:
       - api
+    # Honest silence beats a red light that means nothing: this container has
+    # nothing meaningful to probe.
+    healthcheck:
+      disable: true
     networks:
       - nashr-net
 

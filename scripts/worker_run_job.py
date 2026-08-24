@@ -43,6 +43,7 @@ from packages.platform.jobs import (
     JobQueue,
     JobType,
 )
+from packages.platform.liveness import LivenessFile
 from packages.platform.storage import FileStorage
 
 logger = logging.getLogger("nashr.worker")
@@ -104,6 +105,7 @@ class JobRunner:
         credits: CreditLedger,
         storage: FileStorage,
         worker_id: str,
+        liveness: LivenessFile | None = None,
     ) -> None:
         self._config = config
         self._db = db
@@ -111,6 +113,7 @@ class JobRunner:
         self._credits = credits
         self._storage = storage
         self._worker_id = worker_id
+        self._liveness = liveness if liveness is not None else LivenessFile()
 
     async def run(self, job: GenerationJob) -> None:
         heartbeat = asyncio.create_task(self._heartbeat_forever(job.id))
@@ -124,6 +127,9 @@ class JobRunner:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
             try:
                 alive = await self._queue.heartbeat(job_id, self._worker_id)
+                # Same tick, same evidence: the container is healthy exactly
+                # when the worker is still talking to the queue.
+                self._liveness.touch()
                 if not alive:
                     logger.warning(
                         "worker_heartbeat_lost %s",
@@ -409,8 +415,17 @@ async def _amain(args: argparse.Namespace) -> int:
     credits = CreditLedger(db, dev_mode=config.dev_mode)
     storage = FileStorage(config)
     worker_id = _worker_id()
-    runner = JobRunner(config, db, queue, credits, storage, worker_id)
-    logger.info("worker_started %s", json.dumps({"worker_id": worker_id, "loop": args.loop}))
+    liveness = LivenessFile()
+    runner = JobRunner(config, db, queue, credits, storage, worker_id, liveness)
+    logger.info(
+        "worker_started %s",
+        json.dumps(
+            {"worker_id": worker_id, "loop": args.loop, "liveness_file": str(liveness.path)}
+        ),
+    )
+    # Mark alive at startup so the container is not reported dead for one whole
+    # poll interval every time it restarts.
+    liveness.touch()
 
     if args.job_id:
         claimed = await queue.claim_job(args.job_id, worker_id)
@@ -428,6 +443,11 @@ async def _amain(args: argparse.Namespace) -> int:
 
     while True:
         await _reap(queue, credits, args.stale_seconds)
+        # Touched per cycle, BEFORE the claim: the file then proves the loop is
+        # turning even when the queue is empty, which is the worker's normal
+        # state. Touching only on a claimed job would report an idle worker as
+        # dead.
+        liveness.touch()
         try:
             job = await queue.claim_next(worker_id)
         except Exception as exc:

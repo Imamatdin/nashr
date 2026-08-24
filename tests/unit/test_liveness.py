@@ -265,3 +265,73 @@ def test_script_exits_1_for_stale_file(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
+
+
+# ---------------------------------------------------------------- worker file
+
+
+class TestWorkerLivenessFile:
+    """The marker a non-HTTP service uses to prove it is still cycling.
+
+    Every service except the bot inherited the bot's liveness probe from the
+    Dockerfile and could never touch its file, so api/worker/backup/caddy
+    reported unhealthy for their whole lifetime. A permanently-red signal is
+    worse than none — it is the signal step 2c of a live verification reads to
+    tell "I killed the worker" from "the worker is fine".
+    """
+
+    def test_touch_creates_the_file(self, tmp_path: Path) -> None:
+        from packages.platform.liveness import LivenessFile
+
+        marker = tmp_path / "worker-liveness"
+        assert LivenessFile(marker).touch() is True
+        assert marker.exists()
+
+    def test_touch_refreshes_an_existing_file(self, tmp_path: Path) -> None:
+        from packages.platform.liveness import LivenessFile
+
+        marker = tmp_path / "worker-liveness"
+        marker.touch()
+        os.utime(marker, (1_000_000, 1_000_000))
+        stale = marker.stat().st_mtime
+
+        LivenessFile(marker).touch()
+
+        assert marker.stat().st_mtime > stale
+
+    def test_env_var_selects_the_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # This is the whole mechanism by which the worker's inherited probe is
+        # pointed at the worker's own marker instead of the bot's.
+        from packages.platform.liveness import LIVENESS_FILE_ENV, LivenessFile
+
+        chosen = tmp_path / "from-env"
+        monkeypatch.setenv(LIVENESS_FILE_ENV, str(chosen))
+        assert LivenessFile().path == chosen
+
+    def test_default_is_not_the_bot_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Sharing the bot's path would let a dead worker look alive because the
+        # BOT was still touching it.
+        from packages.bot.middleware.liveness import DEFAULT_LIVENESS_FILE as BOT_FILE
+        from packages.platform.liveness import (
+            DEFAULT_WORKER_LIVENESS_FILE,
+            LIVENESS_FILE_ENV,
+            LivenessFile,
+        )
+
+        monkeypatch.delenv(LIVENESS_FILE_ENV, raising=False)
+        assert DEFAULT_WORKER_LIVENESS_FILE != BOT_FILE
+        # Compared as Paths, not strings: the constants are POSIX container
+        # paths and this suite also runs on Windows.
+        assert LivenessFile().path == Path(DEFAULT_WORKER_LIVENESS_FILE)
+
+    def test_touch_failure_is_swallowed_and_reported(self, tmp_path: Path) -> None:
+        # A health-probe side effect must never take down the work it reports
+        # on; an unwritable marker goes stale, which is the correct signal.
+        from packages.platform.liveness import LivenessFile
+
+        unwritable = tmp_path / "no-such-dir" / "marker"
+        live = LivenessFile(unwritable)
+        assert live.touch() is False
+        assert live.touch() is False  # log-once, still no raise
