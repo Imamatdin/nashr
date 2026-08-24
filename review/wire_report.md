@@ -3,9 +3,39 @@
 Branch `wire/coherence`, off `main` @ `c9a84cd`.
 Ground truth for every G-number: `review/coherence_audit.md`.
 
-**Merge instruction (for the human gate): Session W merges to `main` FIRST;
-Session L rebases onto `main` after.** Not merged by the builder — merge is
-human-gated after the architect read and the Codex/adversarial pass.
+**⚠ MERGE ORDER WAS REVERSED MID-RUN.** The brief said Session W merges to
+`main` first and Session L rebases after. That is no longer what happened:
+Session L relayed a founder decision that `site/landing` merged **first**, and
+Session W verified it independently rather than taking the relay on trust —
+`origin/main` moved from `c9a84cd` to **`7c1d35f`** (a `--no-ff` merge of the
+marketing site), with `c9a84cd` still an ancestor, so main moved forward and was
+not rewritten.
+
+Consequence for this run: **Session W rebases onto `origin/main` before its
+final push**, instead of the other way round. Merge to `main` remains
+human-gated — the builder does not merge.
+
+The predicted conflict surface (`packages/web/package.json` /
+`package-lock.json`, where the marketing site added `three` and `@types/three`
+for one lazily-loaded scene on `/maqola`) turns out to be **empty**. Measured,
+not assumed:
+
+```
+git diff --name-only c9a84cd..origin/main      -> 33 files
+git diff --name-only c9a84cd..wire/coherence   -> 54 files
+comm -12 (both, sorted)                        -> 0 files
+```
+
+The two branches touch entirely disjoint paths — Session W never opened
+`package.json` — so the rebase should replay without a single conflict. If one
+appears anyway, that is new information and the rule is to stop and look, not to
+resolve it by reflex.
+
+**⚠ OPERATIONAL CONSTRAINT — do not run `npm ci` in this checkout.**
+`packages/web/node_modules` in Session L's worktree (`../nashr-landing`) is a
+Windows junction to **this** tree's install. `npm ci` prunes it and would delete
+`three`, breaking the landing branch's build until an install is re-run there.
+`npm install` is safe; `npm ci` is the one to avoid.
 
 ### ⚠ Shared working tree — read before reviewing any commit
 
@@ -27,8 +57,14 @@ Consequences for the reviewer and the merge:
 
 * **`a2426ad` is not Session W's work and must not be read as such.** Nothing
   of W's is inside it; W's phase commits sit *on top of* it.
-* Because of that, **the stated merge order cannot be achieved by merging this
-  branch as-is** — merging `wire/coherence` into `main` would drag L's
+* **RESOLVED by the founder at the P1 gate.** `wire/coherence` was reset to
+  `c9a84cd` and Session W's two commits cherry-picked onto it, so the pushed
+  branch contains W's work ONLY and the stated merge order holds. L's commit
+  is preserved on `wire-backup-p1` and `session-l-rescue/a2426ad`, and Session
+  L has since moved to its own git worktree (`../nashr-landing` on
+  `site/landing`), which ends the shared-HEAD collision structurally.
+  Historical note, since it explains the branch's shape: before that fix,
+  **the merge order could not be achieved by merging this branch as-is** — merging `wire/coherence` into `main` would drag L's
   unreviewed marketing commit in first. The clean resolution at the human gate
   is to **cherry-pick Session W's phase commits onto `main`**, or to
   fast-forward `site/landing` to `a2426ad` and reset `wire/coherence` back to
@@ -68,9 +104,13 @@ rule is STOP and report, not merge by hand.
 
 ## PHASE 1 — BACKEND SEAMS
 
-Commit: **`e942c2f`** — `feat(api): wire (P1) — backend seams for job discovery,
+Commit: **`fd38073`** — `feat(api): wire (P1) — backend seams for job discovery,
 chat editing, credits` (30 files, **0** under `packages/web`)
-Remote ref: _(filled after push)_
+Commit: **`0842ec4`** — `docs(review): wire (P1) gate report, architect bundle,
+route transcript`
+Remote ref (verified with `git ls-remote origin wire/coherence`):
+`0842ec484bd2a17146f2db4902466d7c4d7348c9  refs/heads/wire/coherence` —
+identical to the local tip.
 Bundle for the architect: `review/wire_p1_bundle.txt` (30 files, 14 556 lines)
 Curl transcript: `review/wire_p1_curl.txt` (26 calls, every new/changed route,
 success **and** failure)
@@ -379,9 +419,131 @@ edit job (from `GET /chat.applying_job_id`) overlays `ready` — the deck stays
 on screen while a fix re-renders. That is why 1.1's discovery route is scoped
 to the generation job type.
 
-### 2.x build order
+### Founder decisions taken at the P1 gate
 
-_(not started)_
+**Interview (2.3) — decided: ship the current behaviour.** First run offers
+"Decide for me", honestly labelled with what was decided; the interview appears
+on subsequent runs, when the brain session holds processed sources.
+`SOURCE_PROCESSING` pre-enqueue wiring is **deferred to the next run and must
+not be built here.** The 409 `sources_not_ready` path is therefore a designed
+state, not a failure: P2.3 routes it into "Decide for me" rather than an error.
+
+### 2.x commits
+
+| Commit | Scope |
+|---|---|
+| `d15ccf6` | 2.0 foundation — state model, error map, session refresh, API client |
+| `154cde0` | 2.1 workspace — split view, chat spine, Realtime, live state |
+| `8092f73` | 2.3 + G19 — clarification turn on `/new`, share view that gives |
+| _(pending)_ | 2.4 money visibility · 2.6 folio resilience · shot matrix |
+
+### What P2 changed, against the audit's own framing
+
+**The enqueue CTA is now unreachable from the wrong states.** Not "fixed" —
+unreachable. `deriveWorkspaceState` returns `canEnqueue` true in exactly one
+state, and the page has no other path to a priced button. G3 and G5 were one
+defect with two symptoms; both close here.
+
+**The conversation exists.** The audit's bar B2 ("conversation is the spine")
+scored zero: no chat on web at all, while the entire Way-2 engine shipped
+bot-side. `/projects/[id]` is now a split view with the thread beside the
+artifact, and a fix is a message. G4 closes; 5A/5B/5C/5D's inventory becomes
+reachable.
+
+**Errors stopped being machine output.** The §4 ledger's 22 sites route through
+`lib/errors.ts`. The rule the tests enforce is that a raw string can never reach
+a title or message, even for a reason code the catalog has never seen.
+
+**Two honesty corrections that were not on the gap list**, both found while
+building and both worth naming because they are the kind of thing a green build
+hides:
+
+* `{someUnknownError && <JSX/>}` renders `unknown`, which React rejects. It was
+  in all four of the workspace's error guards. tsc caught one; the other three
+  were the same bug waiting for a different state.
+* An `<iframe onError>` was commented as recovering a rotted signed URL. It does
+  not — an iframe does not fire `onError` for an HTTP error inside it, because
+  R2 serves its own body and the frame counts as loaded. The comment was wrong
+  on two surfaces. Both are corrected, and the share view gained the visible
+  "Yangilash" control the recovery actually needs. The agent that built that
+  surface flagged its own work here rather than letting the comment stand.
+
+### P2 gate
+
+Commits: `d15ccf6` · `154cde0` · `8092f73` · `c1d4811` · `2d02df7`
+
+| Check | Result |
+|---|---|
+| `npx vitest run` (packages/web) | **169 passed** |
+| `python -m pytest tests/unit` | **1797 passed, 9 skipped** |
+| `npx tsc --noEmit` | clean (filtered of `.next/types` cache for routes that live in the other worktree) |
+| Shot matrix | **62 shots, 62 OK**, `review/wire_shots/` |
+| `packages/web` marketing files touched | **0** |
+
+Shots are untracked, matching every prior run's convention
+(`review/coherence_shots/`, `review/redesign_shots/` are likewise local).
+
+**Matrix contents.** All eight workspace states × light/dark × 1440/390
+(`no_job`, `queued`, `processing`, `failed`+refund, `completed_no_deck`,
+`ready`, plus `article_project` and `archived`); the chat thread, the inline
+approval card, an applying edit, the locked-no-deck state, a fix-turn
+round-trip and a spent allowance; `/hisob` in four combinations plus empty and
+unreachable; `/new` empty and with the clarification turn, plus the
+first-run "decide for me" path; 402, 429, an unreachable folio, and
+session-expiry; the share view with downloads and its 404.
+
+### What the shot matrix caught that the tests could not
+
+All four were disagreements *between parts of a screen*, which is precisely
+what a value-level test cannot see:
+
+1. **The mobile default pane hid the work.** Below 1024px the deck tab was the
+   default, so a phone user opening a running or failed project saw an empty
+   deck placeholder while the run panel sat behind an unpressed tab.
+2. **The header contradicted the body** — "Tayyor" above "order a
+   presentation", because the badge read the denormalised `projects.status`
+   column instead of the derived state.
+3. **The failure copy discarded its one useful fact.** A grounding hard stop at
+   the design step read as generic "our fault, try again"; the step name was
+   available and thrown away.
+4. **The balance chip wrapped onto three lines at 390px.** The agent that built
+   it reported honestly that it had run `tsc` and `vitest` but never rendered
+   the surface.
+
+### What P2 does NOT prove
+
+* **Realtime was never exercised end to end.** The stub environment has no
+  websocket, so every shot's live state arrived via the polling fallback. The
+  channel idiom, the payload mapping and the fallback's backoff are unit-tested
+  and structurally identical to the proven pattern, but the socket path is
+  verified by construction, not by observation. The brief asks for a recording
+  of a step transition arriving without a poll; that needs a real Supabase and
+  is a **human gate**.
+* **No real model turn, no real edit job, no real refund row.** The chat
+  surface is shot against a scripted driver.
+* **Deck iframes point at `about:blank`** in every fixture, so the black frames
+  in deck shots are fixture artifacts, not findings — the same caveat the
+  original audit recorded.
+
+---
+
+## PHASE 3 — COHERENCE SWEEP
+
+Audit long tail in severity order, excluding the standing deferrals (G16 cancel
+backend, i18n G27, payments purchase flow, article surface beyond the guard,
+and now `SOURCE_PROCESSING` pre-enqueue).
+
+**Added to P3 by the founder at the P1 gate:**
+
+* Scope `ThemeProvider` and the theme no-flash script to **app routes only** —
+  the `(marketing)` route group must ship **zero theme JS**.
+* Audit root-layout font loading: subsetting and `display: swap`.
+* Re-measure `/maxfiylik` LCP; **target < 2.5 s**.
+
+These touch `app/layout.tsx` and the theme module, which are shared with the
+marketing route group Session L owns. Sequencing note: L now lives in its own
+worktree on `site/landing`, so this work lands on `wire/coherence` and L rebases
+onto it — the same order as the rest of the run.
 
 ---
 
