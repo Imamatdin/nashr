@@ -1,0 +1,239 @@
+/* The ledger surface: one quiet column, the balance as its headline, the
+   history as a plain list of sentences. Tokens only. */
+
+.hisob {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  width: 100%;
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 8px 0 64px;
+}
+
+.hisob-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hisob-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+
+.hisob-balance {
+  font-family: var(--font-display);
+  font-size: var(--text-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--ink);
+}
+
+/* Same box the balance will occupy, so the headline does not jump when the
+   figure lands. */
+.hisob-balance-skeleton {
+  width: 9ch;
+  height: 2.2rem;
+}
+
+.hisob-sub {
+  max-width: 52ch;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.hisob-topup {
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  background: var(--inset);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.hisob-topup a {
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.hisob-section {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------- list */
+
+.hisob-list {
+  display: flex;
+  flex-direction: column;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.hisob-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "main amount"
+    "main date";
+  align-items: start;
+  column-gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.hisob-row:first-child {
+  border-top: 1px solid var(--line);
+}
+
+.hisob-row-main {
+  grid-area: main;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.hisob-row-label {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.hisob-row-note {
+  max-width: 46ch;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.hisob-row-link {
+  align-self: flex-start;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+
+.hisob-row-amount {
+  grid-area: amount;
+  justify-self: end;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.hisob-row-amount[data-sign="plus"] {
+  color: var(--green);
+}
+
+.hisob-row-date {
+  grid-area: date;
+  justify-self: end;
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* A reward is the one row the product wants read, not skimmed. */
+.hisob-row[data-tone="reward"] .hisob-row-note {
+  color: var(--ink);
+}
+
+/* ---------------------------------------------------------- loading ghosts */
+
+.hisob-row-ghost {
+  align-items: center;
+}
+
+.hisob-ghost-label {
+  width: 42%;
+  height: 0.95rem;
+}
+
+.hisob-ghost-note {
+  width: 78%;
+  height: 0.8rem;
+}
+
+.hisob-ghost-amount {
+  grid-area: amount;
+  justify-self: end;
+  width: 7ch;
+  height: 0.95rem;
+}
+
+/* ------------------------------------------------------------------ error */
+
+.hisob-error {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border-radius: var(--radius-control);
+  background: var(--red-tint);
+}
+
+.hisob-error-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--red);
+}
+
+.hisob-error-message {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.hisob-error-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.hisob-detail {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: var(--ink-3);
+}
+
+.hisob-detail summary {
+  cursor: pointer;
+}
+
+.hisob-detail code {
+  display: block;
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: var(--radius-chip);
+  background: var(--inset);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  color: var(--ink-2);
+}
+
+@media (max-width: 559px) {
+  .hisob-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "main amount"
+      "date date";
+  }
+
+  .hisob-row-date {
+    justify-self: start;
+  }
+}

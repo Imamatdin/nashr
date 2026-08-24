@@ -75,6 +75,7 @@ import {
   startedAtMs,
 } from "@/lib/workspace-state";
 import { createRlsClient } from "@/lib/supabase";
+import { supabaseFailure } from "@/lib/folio";
 import "./workspace.css";
 
 interface ProjectRow {
@@ -98,6 +99,9 @@ const ACCEPTED = ".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.cs
 // The deck's signed HTML URL lives 15 minutes (DECK_HTML_TTL_SECONDS). Re-mint
 // comfortably inside that so a deck left open on screen never rots (G20).
 const DECK_REFRESH_MS = 10 * 60 * 1000;
+// A read with no deadline is how the audit's eternal skeletons happen: the
+// UI cannot tell a slow network from a dead one.
+const SUPABASE_TIMEOUT_MS = 15_000;
 
 const TONE_BY_EXT: Record<string, ContextChunk["tone"]> = {
   pdf: "red",
@@ -228,16 +232,20 @@ export default function ProjectPage() {
       .from("projects")
       .select("*")
       .eq("id", projectId)
+      .abortSignal(AbortSignal.timeout(SUPABASE_TIMEOUT_MS))
       .single()
-      .then(({ data, error }) => {
-        // A PostgREST sentence is not user copy (§4 ledger row 6).
-        if (error) setProjectError(new ApiError(404, "project_not_found"));
+      .then(({ data, error, status }) => {
+        // A PostgREST sentence is not user copy (§4 ledger row 6) — but neither
+        // is a hardcoded 404. supabase-js RESOLVES on a dead network with
+        // status 0, so collapsing every failure onto "project_not_found" told a
+        // user with a dropped connection that their project did not exist.
+        if (error) setProjectError(supabaseFailure(error, status));
         else {
           const row = data as ProjectRow;
           setProject(row);
           setShareToken(row.share_token);
         }
-      });
+      }, setProjectError);
   }, [projectId, session]);
 
   const refreshSources = useCallback(() => {
@@ -249,12 +257,13 @@ export default function ProjectPage() {
       .select("id,filename,file_type,storage_key,created_at")
       .eq("project_id", projectId)
       .order("created_at", { ascending: true })
-      .then(({ data, error }) => {
+      .abortSignal(AbortSignal.timeout(SUPABASE_TIMEOUT_MS))
+      .then(({ data, error, status }) => {
         // The old code toasted the raw PostgREST message for 4s and left the
         // list a permanent skeleton with the CTA disabled and no reason (G33).
-        if (error) setSourcesError(new ApiError(500, "sources_unavailable"));
+        if (error) setSourcesError(supabaseFailure(error, status));
         else setSources((data ?? []) as SourceRow[]);
-      });
+      }, setSourcesError);
   }, [projectId, session]);
 
   useEffect(() => {

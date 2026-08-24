@@ -153,6 +153,12 @@ const SOURCE_ROWS = [
   },
 ];
 
+// Timestamps are relative so the elapsed clock and the stall check render
+// something real in a shot instead of a frozen zero.
+function minutesAgo(n) {
+  return new Date(Date.now() - n * 60_000).toISOString();
+}
+
 const JOB_VIEW = {
   id: "job-stub",
   project_id: "p-1",
@@ -161,6 +167,145 @@ const JOB_VIEW = {
   progress: { step: "Choosing design direction", current: 4, total: 7 },
   error_message: null,
   existing: false,
+  created_at: minutesAgo(3),
+  started_at: minutesAgo(2.6),
+  heartbeat_at: new Date(Date.now() - 4_000).toISOString(),
+  completed_at: null,
+  package: "presentation_standard",
+  deducted_amount: 10_000,
+  refunded: false,
+};
+
+const PRICING_VIEW = {
+  currency: "UZS",
+  packages: [
+    { package: "presentation_basic", price: 5_000, ai_images: 0, fix_allowance: 1 },
+    { package: "presentation_standard", price: 10_000, ai_images: 2, fix_allowance: 2 },
+    { package: "presentation_premium", price: 15_000, ai_images: 5, fix_allowance: 3 },
+  ],
+  free_credit_value: 5_000,
+  free_daily_cap: 3,
+  free_weekly_cap: 10,
+  free_project_cap: 5,
+};
+
+const LEDGER_VIEW = {
+  balance: 35_000,
+  entries: [
+    {
+      id: "l-5",
+      amount: 10_000,
+      action: "refund",
+      reason: "refund",
+      project_id: "p-5",
+      generation_job_id: "job-failed",
+      created_at: minutesAgo(60),
+    },
+    {
+      id: "l-4",
+      amount: -10_000,
+      action: "deduct_presentation",
+      reason: "generation:presentation_standard",
+      project_id: "p-5",
+      generation_job_id: null,
+      created_at: minutesAgo(75),
+    },
+    {
+      id: "l-3",
+      amount: 5_000,
+      action: "grant_free",
+      reason: "source_upload",
+      project_id: "p-1",
+      generation_job_id: null,
+      created_at: minutesAgo(2_880),
+    },
+    {
+      id: "l-2",
+      amount: -10_000,
+      action: "deduct_presentation",
+      reason: "generation:presentation_standard",
+      project_id: "p-1",
+      generation_job_id: null,
+      created_at: minutesAgo(2_900),
+    },
+    {
+      id: "l-1",
+      amount: 50_000,
+      action: "grant_paid",
+      reason: "payment",
+      project_id: null,
+      generation_job_id: null,
+      created_at: minutesAgo(4_320),
+    },
+  ],
+};
+
+const CHAT_VIEW = {
+  can_edit: true,
+  messages: [
+    { role: "user", text: "3-slayddagi sanani 2010 ga to'g'rila" },
+    {
+      role: "assistant",
+      text: "3-slaydda sana 2010 ga o'zgartirildi va manbadagi raqam bilan solishtirildi.",
+    },
+  ],
+  pending_action: null,
+  fixes_used: 1,
+  fix_limit: 2,
+  fixes_remaining: 1,
+  package: "presentation_standard",
+  slide_count: 11,
+  applying_job_id: null,
+};
+
+const INTERVIEW_VIEW = {
+  detected_domain: "history",
+  estimated_slide_count: 11,
+  available_stats_count: 4,
+  available_people_count: 5,
+  questions: [
+    {
+      question_id: "audience",
+      question_text: "Kim uchun tayyorlanmoqda?",
+      question_type: "single_select",
+      options: [
+        { value: "school", label: "Maktab o'quvchilari (9-11 sinf)", is_default: false },
+        { value: "undergraduate", label: "Bakalavr talabalari", is_default: true },
+        { value: "academic_conference", label: "Akademik konferentsiya", is_default: false },
+      ],
+      min_value: null,
+      max_value: null,
+      default_value: null,
+      placeholder: null,
+      help_text: null,
+    },
+    {
+      question_id: "emphasis",
+      question_text: "Taqdimot nimaga ko'proq urg'u bersin?",
+      question_type: "multi_select",
+      options: [
+        { value: "problem_framing", label: "Muammoni shakllantirish", is_default: false },
+        { value: "results_numbers", label: "Natijalar va raqamlar", is_default: true },
+        { value: "roadmap", label: "Keyingi qadamlar", is_default: false },
+      ],
+      min_value: null,
+      max_value: null,
+      default_value: null,
+      placeholder: null,
+      help_text: null,
+    },
+    {
+      question_id: "closing_ask",
+      question_text: "Yakuniy slaydda nima so'ralsin?",
+      question_type: "text",
+      options: null,
+      min_value: null,
+      max_value: null,
+      default_value: null,
+      placeholder: "Masalan: siyosat tavsiyasi",
+      help_text: null,
+    },
+  ],
 };
 
 function wantsSingle(request) {
@@ -181,6 +326,13 @@ export async function mockSupabase(page, options = {}) {
   const { emptyProjects = false, manyProjects = false } = options;
   await page.route(`${SUPABASE_ORIGIN}/**`, async (route) => {
     const request = route.request();
+    // `unreachable` is a dead backend, not a slow one: the connection is
+    // refused rather than answered. The whole point of G12 is that this must
+    // NOT render as the loading state.
+    if (options.unreachable) {
+      await route.abort("connectionrefused");
+      return;
+    }
     if (request.method() === "OPTIONS") {
       await fulfillPreflight(route);
       return;
@@ -233,6 +385,15 @@ const API_PATHS = new Set([
   "/sources",
   "/sources/presign",
   "/r2-stub",
+  // Session W (P1) seams the workspace, /new and the chrome now depend on.
+  "/credits",
+  "/credits/ledger",
+  "/pricing",
+  "/auth/refresh",
+  "/projects/p-1/chat",
+  "/projects/p-1/chat/approve",
+  "/projects/p-1/chat/reject",
+  "/projects/p-1/interview",
 ]);
 
 // The public share view resolves a token to a short-TTL signed URL. Opt in with
@@ -241,7 +402,13 @@ const API_PATHS = new Set([
 const SHARED_DECK_VIEW = {
   title: "Yoritish davri: aql-idrok asrining tug'ilishi",
   html_url: "about:blank",
-  expires_in: 604800,
+  // The real signed-URL TTL, not a link lifetime: a fixture carrying 7 days
+  // here is what let the wrong "7 KUNDAN" caption look correct in a shot.
+  expires_in: 900,
+  downloads: [
+    { format: "pptx", url: "about:blank", expires_in: 3600 },
+    { format: "pdf", url: "about:blank", expires_in: 3600 },
+  ],
 };
 
 // A delivered deck: the chrome around the viewer is what these shots are for,
@@ -262,18 +429,21 @@ const PROVENANCE_VIEW = {
     {
       claim_text: "Yoritish davri XVII–XVIII asrlarda Yevropada shakllangan.",
       quote: "The Enlightenment took shape across the long eighteenth century.",
+      strength: "strong",
       source_filename: "yoritish-davri-tarixi.pdf",
       chunk_index: 12,
     },
     {
       claim_text: "Monteskyoning hokimiyatlar bo'linishi g'oyasi konstitutsiyalarga kirdi.",
       quote: null,
+      strength: "moderate",
       source_filename: "volter-va-monteskye-tahlil.docx",
       chunk_index: 4,
     },
     {
       claim_text: "Volter matbuot erkinligini asosiy shart deb bilgan.",
       quote: "Freedom of the press is the first of freedoms.",
+      strength: "strong",
       source_filename: "volter-va-monteskye-tahlil.docx",
       chunk_index: 9,
     },
@@ -292,6 +462,13 @@ export async function mockApi(page, options = {}) {
     ...JOB_VIEW,
     ...(options.jobStatus ? { status: options.jobStatus } : {}),
     ...(options.jobError !== undefined ? { error_message: options.jobError } : {}),
+    ...(options.jobRefunded ? { refunded: true } : {}),
+    ...(options.jobStalled
+      ? { heartbeat_at: new Date(Date.now() - 120_000).toISOString() }
+      : {}),
+    ...(options.jobStatus === "completed"
+      ? { completed_at: new Date(Date.now() - 30_000).toISOString() }
+      : {}),
   };
   await page.route(`${API_ORIGIN}/**`, async (route) => {
     const request = route.request();
@@ -332,17 +509,153 @@ export async function mockApi(page, options = {}) {
       return;
     }
     if (url.pathname === "/jobs") {
-      // The refusal paths the flow has to dress: no credit (402, detail is an
-      // object the client parses) and the daily cap (429).
+      // GET /jobs?project_id= is the DISCOVERY route the workspace derives its
+      // whole state from; POST /jobs is the enqueue. `noJob` is how a shot asks
+      // for "this project has never been generated", which is the only state
+      // that may show a priced start button.
+      if (request.method() === "GET") {
+        if (options.noJob) {
+          await fulfillJson(route, 404, { detail: "job_not_found" });
+          return;
+        }
+        await fulfillJson(route, 200, job);
+        return;
+      }
+      // The refusal paths the flow has to dress: no credit (402, structured so
+      // the client can state the real shortfall) and the cap (429, carrying the
+      // counter state so the copy can say WHEN it resets).
       if (options.enqueue === "credit") {
-        await fulfillJson(route, 402, { detail: { balance: 4000, required: 10000 } });
+        await fulfillJson(route, 402, {
+          detail: { reason: "insufficient_balance", balance: 4000, required: 10000 },
+        });
         return;
       }
       if (options.enqueue === "limit") {
-        await fulfillJson(route, 429, { detail: "daily_job_limit" });
+        await fulfillJson(route, 429, {
+          detail: {
+            reason: "rate_limited",
+            scope: "user",
+            count: 11,
+            limit: 10,
+            resets_at: new Date(Date.now() + 20 * 60_000).toISOString(),
+          },
+        });
         return;
       }
-      await fulfillJson(route, 200, job);
+      await fulfillJson(route, 200, { ...job, existing: Boolean(options.enqueueExisting) });
+      return;
+    }
+    if (url.pathname === "/credits") {
+      if (options.creditsDown) {
+        await fulfillJson(route, 500, { detail: "ledger_unavailable" });
+        return;
+      }
+      await fulfillJson(route, 200, { balance: LEDGER_VIEW.balance, currency: "UZS" });
+      return;
+    }
+    if (url.pathname === "/credits/ledger") {
+      if (options.creditsDown) {
+        await fulfillJson(route, 500, { detail: "ledger_unavailable" });
+        return;
+      }
+      await fulfillJson(route, 200, options.ledgerEmpty ? { balance: 0, entries: [] } : LEDGER_VIEW);
+      return;
+    }
+    if (url.pathname === "/pricing") {
+      await fulfillJson(route, 200, PRICING_VIEW);
+      return;
+    }
+    if (url.pathname === "/auth/refresh") {
+      await fulfillJson(route, 200, {
+        access_token: "stub-token",
+        token_type: "bearer",
+        expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        user_id: "u-stub",
+      });
+      return;
+    }
+    if (url.pathname === "/projects/p-1/interview") {
+      // 409 is the DESIGNED first-run answer, not a failure: sources are only
+      // processed during generation.
+      if (options.interview === "not_ready") {
+        await fulfillJson(route, 409, { detail: { reason: "sources_not_ready" } });
+        return;
+      }
+      await fulfillJson(route, 200, INTERVIEW_VIEW);
+      return;
+    }
+    if (url.pathname === "/projects/p-1/chat") {
+      if (request.method() === "GET") {
+        if (options.chat === "no_session") {
+          await fulfillJson(route, 200, {
+            ...CHAT_VIEW,
+            can_edit: false,
+            messages: [],
+            fixes_used: 0,
+            slide_count: 0,
+          });
+          return;
+        }
+        if (options.chat === "pending") {
+          await fulfillJson(route, 200, {
+            ...CHAT_VIEW,
+            pending_action: {
+              reason: "Manbadagi raqam slayd bilan mos kelmadi — ikkalasini moslashtiraman.",
+              fixes: [
+                { slide_id: "slide_03", instruction: "Sanani 2010 ga to'g'rila" },
+                { slide_id: "slide_07", instruction: "Xulosadagi raqamni yangila" },
+              ],
+            },
+          });
+          return;
+        }
+        if (options.chat === "applying") {
+          await fulfillJson(route, 200, { ...CHAT_VIEW, applying_job_id: "job-edit" });
+          return;
+        }
+        if (options.chat === "exhausted") {
+          await fulfillJson(route, 200, { ...CHAT_VIEW, fixes_used: 2, fixes_remaining: 0 });
+          return;
+        }
+        await fulfillJson(route, 200, CHAT_VIEW);
+        return;
+      }
+      if (options.chatTurn === "exhausted") {
+        await fulfillJson(route, 409, {
+          detail: { reason: "fixes_exhausted", fix_limit: 2, fixes_used: 2 },
+        });
+        return;
+      }
+      if (options.chatTurn === "busy") {
+        await fulfillJson(route, 409, {
+          detail: { reason: "brain_busy", job_id: "job-edit", job_type: "presentation_edit" },
+        });
+        return;
+      }
+      await fulfillJson(route, 200, {
+        kind: options.chatTurn === "fix" ? "fix_ready" : "reply",
+        reply:
+          options.chatTurn === "fix"
+            ? "3-slayddagi sanani tuzatdim — taqdimot qayta yig'ilmoqda."
+            : "Bu taqdimotda 11 ta slayd bor; 3-slayd Volterga bag'ishlangan.",
+        pending_action: null,
+        job_id: options.chatTurn === "fix" ? "job-edit" : null,
+        fixes_used: 1,
+        fix_limit: 2,
+        fixes_remaining: 1,
+      });
+      return;
+    }
+    if (url.pathname === "/projects/p-1/chat/approve" || url.pathname === "/projects/p-1/chat/reject") {
+      await fulfillJson(route, 200, {
+        kind: url.pathname.endsWith("approve") ? "fix_ready" : "reply",
+        reply: null,
+        pending_action: null,
+        job_id: url.pathname.endsWith("approve") ? "job-edit" : null,
+        fixes_used: 1,
+        fix_limit: 2,
+        fixes_remaining: 1,
+      });
       return;
     }
     if (url.pathname === "/projects/p-1/share") {
