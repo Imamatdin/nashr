@@ -103,6 +103,34 @@ export async function emailExchange(supabaseAccessToken: string): Promise<AppSes
   return session;
 }
 
+export interface LinkTelegramResult {
+  /** True when a separate Telegram-side account was folded into this one. */
+  merged: boolean;
+  session: AppSession;
+}
+
+/**
+ * Attach a proven Telegram identity to the signed-in user (G26).
+ *
+ * A person who paid inside the bot and then signed in with Google on the web
+ * holds two accounts: one folio and balance in each. This is the merge — but it
+ * needs initData, which only exists inside the Telegram Mini App webview, so
+ * the only place it can be offered is a page opened from Telegram.
+ *
+ * The response re-mints the session for the SAME user; saving it keeps the
+ * caller on a fresh token after the merge.
+ */
+export async function linkTelegram(initData: string, token: string): Promise<LinkTelegramResult> {
+  const wire = await postJson<{ merged: boolean; session: MintedSessionWire }>(
+    "/auth/link/telegram",
+    { init_data: initData },
+    token,
+  );
+  const session = toSession(wire.session);
+  saveSession(session);
+  return { merged: wire.merged, session };
+}
+
 // ---------------------------------------------------------------- projects
 
 export interface ProjectView {
