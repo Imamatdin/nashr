@@ -380,6 +380,48 @@ for (const theme of ["light", "dark"]) {
 await shoot(browser, { name: "share-deck-light-390", url: "/p/share-stub-token", width: P, waitFor: ".share-take" });
 await shoot(browser, { name: "share-404-light-1440", url: "/p/share-stub-token", api: { shareState: "error" }, waitFor: ".share-error" });
 
+// ------------------------------------------------------------- doors (G28)
+
+for (const theme of ["light", "dark"]) {
+  await shoot(browser, {
+    name: `login-idle-${theme}-1440`,
+    url: "/login",
+    theme,
+    noSession: true,
+    waitFor: ".auth-card",
+  });
+}
+
+// The magic-link sent state: address echoed, resend on a cooldown, a way back.
+// The old version replaced the whole form and left a typo uncorrectable.
+await shoot(browser, {
+  name: "login-sent-light-1440",
+  url: "/login",
+  noSession: true,
+  waitFor: "#email",
+  act: async (page) => {
+    await page.fill("#email", "oqituvchi@universitet.uz");
+    await page.click('button:has-text("Havola yuborish")');
+    await page.waitForTimeout(1200);
+  },
+});
+
+await shoot(browser, {
+  name: "login-light-390",
+  url: "/login",
+  width: P,
+  noSession: true,
+  waitFor: ".auth-card",
+});
+
+// The callback with no auth evidence in the URL — a designed failure, mapped.
+await shoot(browser, {
+  name: "callback-no-evidence-light-1440",
+  url: "/auth/callback",
+  noSession: true,
+  waitFor: ".auth-fail",
+});
+
 await browser.close();
 
 const bad = results.filter((r) => r.status !== "OK");

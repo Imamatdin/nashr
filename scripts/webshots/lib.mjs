@@ -389,6 +389,17 @@ export async function mockSupabase(page, options = {}) {
       return;
     }
     const url = new URL(request.url());
+    // GoTrue lives under /auth/v1 on the same origin. Without it the magic-link
+    // door can only ever be shot in its FAILURE state, which is exactly the
+    // state the sent-state fix (G28a) is not.
+    if (url.pathname.startsWith("/auth/v1/")) {
+      if (options.otp === "fail") {
+        await fulfillJson(route, 400, { error: "invalid_request", error_description: "bad email" });
+        return;
+      }
+      await fulfillJson(route, 200, {});
+      return;
+    }
     if (url.pathname === "/rest/v1/projects") {
       const id = eqValue(url.searchParams, "id");
       const source = emptyProjects ? [] : manyProjects ? MANY_PROJECT_ROWS : PROJECT_ROWS;
