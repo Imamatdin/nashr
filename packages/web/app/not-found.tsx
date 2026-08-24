@@ -9,7 +9,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { loadSession } from "@/lib/session";
-import "./doors.css";
+import "./(app)/doors.css";
 
 export default function NotFound() {
   const [signedIn, setSignedIn] = useState(false);
