@@ -55,7 +55,31 @@ export interface ChatThreadProps {
   applying?: ReactNode;
   /** Rendered above the composer: allowance, errors, hints. */
   footer?: ReactNode;
+  copy?: {
+    placeholder: string;
+    emptyTitle: string;
+    emptyHint: string;
+    approvalLabel: string;
+    approvalTitle: string;
+    approve: string;
+    reject: string;
+    messageLabel: string;
+    sendLabel: string;
+  };
 }
+
+const DEFAULT_COPY = {
+  placeholder: "Nimani o‘zgartiramiz?",
+  emptyTitle: "Taqdimot ustida gaplashamiz",
+  emptyHint:
+    "«3-slayddagi sanani to‘g‘rila» yoki «xulosani qisqartir» deb yozing. Nashr faqat siz yuklagan manbalardagi faktlarga tayanadi.",
+  approvalLabel: "Tasdiqlash",
+  approvalTitle: "Bu o‘zgarishni qo‘llaymizmi?",
+  approve: "Qo‘llash",
+  reject: "Kerak emas",
+  messageLabel: "Xabar",
+  sendLabel: "Yuborish",
+};
 
 export function ChatThread({
   messages,
@@ -64,13 +88,14 @@ export function ChatThread({
   onSend,
   busy = false,
   disabledReason = null,
-  placeholder = "Nimani o‘zgartiramiz?",
+  placeholder,
   pending = null,
   onApprove,
   onReject,
   approving = false,
   applying,
   footer,
+  copy = DEFAULT_COPY,
 }: ChatThreadProps) {
   const scroller = useRef<HTMLDivElement | null>(null);
   const box = useRef<HTMLTextAreaElement | null>(null);
@@ -101,16 +126,15 @@ export function ChatThread({
         ref={scroller}
         onScroll={(event) => {
           const node = event.currentTarget;
-          setAtBottom(node.scrollHeight - node.scrollTop - node.clientHeight < 48);
+          setAtBottom(
+            node.scrollHeight - node.scrollTop - node.clientHeight < 48,
+          );
         }}
       >
         {messages.length === 0 && !pending && (
           <div className="chat-blank">
-            <p className="chat-blank-title">Taqdimot ustida gaplashamiz</p>
-            <p className="chat-blank-hint">
-              «3-slayddagi sanani to‘g‘rila» yoki «xulosani qisqartir» deb yozing. Nashr faqat
-              siz yuklagan manbalardagi faktlarga tayanadi.
-            </p>
+            <p className="chat-blank-title">{copy.emptyTitle}</p>
+            <p className="chat-blank-hint">{copy.emptyHint}</p>
           </div>
         )}
 
@@ -126,13 +150,21 @@ export function ChatThread({
         ))}
 
         {pending && (
-          <div className="chat-approval" role="group" aria-label="Tasdiqlash">
-            <p className="chat-approval-title">Bu o‘zgarishni qo‘llaymizmi?</p>
-            {pending.reason && <p className="chat-approval-reason">{pending.reason}</p>}
+          <div
+            className="chat-approval"
+            role="group"
+            aria-label={copy.approvalLabel}
+          >
+            <p className="chat-approval-title">{copy.approvalTitle}</p>
+            {pending.reason && (
+              <p className="chat-approval-reason">{pending.reason}</p>
+            )}
             <ul className="chat-approval-fixes">
               {pending.fixes.map((fix, index) => (
                 <li key={`${fix.slide_id}-${index}`}>
-                  <span className="chat-approval-slide data-text">{fix.slide_id}</span>
+                  <span className="chat-approval-slide data-text">
+                    {fix.slide_id}
+                  </span>
                   <span>{fix.instruction}</span>
                 </li>
               ))}
@@ -146,7 +178,7 @@ export function ChatThread({
                 aria-busy={approving || undefined}
               >
                 <span className="btn-label">
-                  <Check size={15} strokeWidth={2} aria-hidden /> Qo‘llash
+                  <Check size={15} strokeWidth={2} aria-hidden /> {copy.approve}
                 </span>
               </button>
               <button
@@ -156,7 +188,7 @@ export function ChatThread({
                 disabled={approving}
               >
                 <span className="btn-label">
-                  <X size={15} strokeWidth={2} aria-hidden /> Kerak emas
+                  <X size={15} strokeWidth={2} aria-hidden /> {copy.reject}
                 </span>
               </button>
             </div>
@@ -177,8 +209,8 @@ export function ChatThread({
             className="chat-input"
             value={value}
             rows={1}
-            placeholder={placeholder}
-            aria-label="Xabar"
+            placeholder={placeholder ?? copy.placeholder}
+            aria-label={copy.messageLabel}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
@@ -192,7 +224,7 @@ export function ChatThread({
             className="chat-send"
             onClick={onSend}
             disabled={!canSend}
-            aria-label="Yuborish"
+            aria-label={copy.sendLabel}
           >
             <ArrowUp size={16} strokeWidth={2.25} aria-hidden />
           </button>

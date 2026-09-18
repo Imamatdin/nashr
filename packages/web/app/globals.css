@@ -64,7 +64,11 @@
 
   --ink: var(--flexoki-base-950);
   --ink-2: var(--flexoki-base-700);
-  --ink-3: color-mix(in srgb, var(--flexoki-base-600) 60%, var(--flexoki-base-700));
+  --ink-3: color-mix(
+    in srgb,
+    var(--flexoki-base-600) 60%,
+    var(--flexoki-base-700)
+  );
 
   --accent: var(--flexoki-blue-600);
   --accent-ink: var(--flexoki-blue-600);
@@ -75,7 +79,11 @@
   --green-tint: color-mix(in srgb, var(--green) 12%, var(--canvas));
   --red: var(--flexoki-red-600);
   --red-tint: color-mix(in srgb, var(--red) 10%, var(--canvas));
-  --orange: color-mix(in srgb, var(--flexoki-orange-600) 90%, var(--flexoki-base-950));
+  --orange: color-mix(
+    in srgb,
+    var(--flexoki-orange-600) 90%,
+    var(--flexoki-base-950)
+  );
   --orange-tint: color-mix(in srgb, var(--orange) 10%, var(--canvas));
 
   --tooltip-bg: var(--flexoki-base-950);
@@ -109,7 +117,11 @@
 
   --ink: var(--flexoki-base-200);
   --ink-2: var(--flexoki-base-300);
-  --ink-3: color-mix(in srgb, var(--flexoki-base-400) 50%, var(--flexoki-base-300));
+  --ink-3: color-mix(
+    in srgb,
+    var(--flexoki-base-400) 50%,
+    var(--flexoki-base-300)
+  );
 
   --accent: var(--flexoki-blue-400);
   --accent-ink: var(--flexoki-blue-300);
@@ -120,7 +132,11 @@
   --green-tint: color-mix(in srgb, var(--green) 12%, var(--canvas));
   --red: var(--flexoki-red-300);
   --red-tint: color-mix(in srgb, var(--red) 12%, var(--canvas));
-  --orange: color-mix(in srgb, var(--flexoki-orange-400) 90%, var(--flexoki-base-200));
+  --orange: color-mix(
+    in srgb,
+    var(--flexoki-orange-400) 90%,
+    var(--flexoki-base-200)
+  );
   --orange-tint: color-mix(in srgb, var(--orange) 12%, var(--canvas));
 
   --tooltip-bg: var(--flexoki-base-100);
@@ -742,7 +758,12 @@
 
   .skeleton {
     border-radius: var(--radius-chip);
-    background: linear-gradient(90deg, var(--inset) 0%, var(--hover) 40%, var(--inset) 80%);
+    background: linear-gradient(
+      90deg,
+      var(--inset) 0%,
+      var(--hover) 40%,
+      var(--inset) 80%
+    );
     background-size: 200% 100%;
     animation: shimmer-text 1600ms linear infinite;
   }
@@ -998,6 +1019,24 @@
     .app-panel {
       margin: 12px;
       padding: 16px;
+    }
+  }
+
+  @media (max-width: 600px) {
+    .app-topbar {
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      padding: 8px 12px;
+    }
+
+    .app-topbar-links {
+      width: 100%;
+      margin-left: 0;
+      flex-wrap: wrap;
+    }
+
+    .app-topbar-links .n-language {
+      max-width: 105px;
     }
   }
 

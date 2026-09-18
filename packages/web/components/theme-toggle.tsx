@@ -2,16 +2,16 @@
 
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useTheme } from "@/components/theme-provider";
+import { useLocale } from "@/components/locale-provider";
 import type { ThemePreference } from "@/lib/theme";
 
 const OPTIONS: ReadonlyArray<{
   value: ThemePreference;
-  label: string;
   Icon: typeof Monitor;
 }> = [
-  { value: "system", label: "Tizim", Icon: Monitor },
-  { value: "light", label: "Yorug‘", Icon: Sun },
-  { value: "dark", label: "Qorong‘i", Icon: Moon },
+  { value: "system", Icon: Monitor },
+  { value: "light", Icon: Sun },
+  { value: "dark", Icon: Moon },
 ];
 
 export function ThemeToggle({
@@ -23,16 +23,23 @@ export function ThemeToggle({
   vertical?: boolean;
 }) {
   const { theme, setTheme } = useTheme();
+  const { locale } = useLocale();
+  const copy = {
+    en: { group: "Theme", system: "System", light: "Light", dark: "Dark" },
+    ru: { group: "Тема", system: "Система", light: "Светлая", dark: "Тёмная" },
+    uz: { group: "Mavzu", system: "Tizim", light: "Yorug‘", dark: "Qorong‘i" },
+  }[locale];
 
   return (
     <div
       role="group"
-      aria-label="Mavzu"
+      aria-label={copy.group}
       className={`flex items-center gap-0.5 rounded-control bg-inset p-0.5 ${
         vertical ? "flex-col" : ""
       }`}
     >
-      {OPTIONS.map(({ value, label, Icon }) => {
+      {OPTIONS.map(({ value, Icon }) => {
+        const label = copy[value];
         const active = theme === value;
         return (
           <button

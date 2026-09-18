@@ -1,4 +1,5 @@
 "use client";
+import { LOCALE_KEY, resolveLocale } from "@/lib/locale";
 
 // The creation surface. One prompt box carries the whole flow: the topic is
 // the prompt, sources are attachments on it, tier and language are pickers
@@ -11,8 +12,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { FileText, GraduationCap, Presentation } from "lucide-react";
 import { AppChrome } from "@/components/chrome";
+import { useLocale } from "@/components/locale-provider";
+import { NEW_PROJECT_COPY } from "@/components/new-project-copy";
 import { ApprovalCard, PromptBar } from "@/components/bui";
-import type { ApprovalAnswer, PromptPicker, PromptSource } from "@/components/bui";
+import type {
+  ApprovalAnswer,
+  PromptPicker,
+  PromptSource,
+} from "@/components/bui";
 import { Button } from "@/components/ui";
 import {
   type PricingEntryView,
@@ -23,18 +30,24 @@ import {
   getBalance,
   getInterview,
   getPricing,
+  initializeArticle,
   presignUpload,
   registerSource,
   uploadToR2WithProgress,
 } from "@/lib/api";
-import { creditCopy, describeError, rateLimitCopy, reasonOf } from "@/lib/errors";
+import {
+  creditCopy,
+  describeError,
+  rateLimitCopy,
+  reasonOf,
+} from "@/lib/errors";
 import { useAppSession } from "@/lib/use-session";
 import {
   type AnswerValue,
-  CHARGE_NOTE,
   type DecisionSummary,
   type PreparedQuestion,
   buildAnswers,
+  chargeNote,
   decisionSummary,
   planRows,
   prepareQuestions,
@@ -55,12 +68,14 @@ import {
 
 import "./new.css";
 
-const ACCEPTED = ".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv";
+const ACCEPTED =
+  ".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv";
 const MAX_SOURCES = 10;
 const BOT_URL = "https://t.me/nashr_ai_bot";
 
 type Stage = "compose" | "questions" | "confirm";
 type InterviewState = "loading" | "ready" | "not_ready" | "error";
+type WorkType = "presentation" | "article";
 
 interface UploadRow {
   key: string;
@@ -96,13 +111,15 @@ function InlineError({
   money?: boolean;
   rate?: boolean;
 }) {
+  const { locale } = useLocale();
+  const t = NEW_PROJECT_COPY[locale];
   const reason = reasonOf(error);
   const friendly =
     money && reason === "insufficient_balance"
-      ? creditCopy(error, soum)
+      ? creditCopy(error, soum, locale)
       : rate && reason === "rate_limited"
-        ? rateLimitCopy(error)
-        : describeError(error);
+        ? rateLimitCopy(error, locale)
+        : describeError(error, locale);
 
   return (
     <div className="new-inline-error" data-tone={friendly.tone} role="alert">
@@ -110,22 +127,22 @@ function InlineError({
       <p className="new-inline-message">{friendly.message}</p>
       {friendly.action?.kind === "topup" && (
         <p className="new-fine">
-          To‘lov hozircha Telegram botda:{" "}
+          {t.topUp}{" "}
           <a href={BOT_URL} target="_blank" rel="noreferrer">
-            botni ochish
+            {t.openBot}
           </a>
         </p>
       )}
       {onRetry && friendly.action?.kind !== "topup" && (
         <div className="new-inline-actions">
           <Button variant="ghost" onClick={onRetry}>
-            {retryLabel ?? friendly.action?.label ?? "Qayta urinish"}
+            {retryLabel ?? friendly.action?.label ?? t.retry}
           </Button>
         </div>
       )}
       {friendly.detail && (
         <details className="new-detail">
-          <summary>Texnik tafsilot</summary>
+          <summary>{t.technical}</summary>
           <code>{friendly.detail}</code>
         </details>
       )}
@@ -149,25 +166,33 @@ function DecisionPanel({ summary }: { summary: DecisionSummary }) {
 export default function NewProjectPage() {
   const router = useRouter();
   const { session, withAuth } = useAppSession();
+  const { locale } = useLocale();
+  const t = NEW_PROJECT_COPY[locale];
 
   const [topic, setTopic] = useState("");
   const [language, setLanguage] = useState<LanguageCode>(DEFAULT_LANGUAGE);
   const [packageId, setPackageId] = useState<PackageId>(DEFAULT_PACKAGE);
+  const [workType, setWorkType] = useState<WorkType>("presentation");
 
   const [projectId, setProjectId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<{ text: string; danger?: boolean } | null>(null);
+  const [note, setNote] = useState<{ text: string; danger?: boolean } | null>(
+    null,
+  );
 
   const [uploads, setUploads] = useState<UploadRow[]>([]);
   /** Files picked before a topic existed. Held, never discarded (G30). */
   const [held, setHeld] = useState<File[]>([]);
 
   const [stage, setStage] = useState<Stage>("compose");
-  const [interviewState, setInterviewState] = useState<InterviewState>("loading");
+  const [interviewState, setInterviewState] =
+    useState<InterviewState>("loading");
   const [interview, setInterview] = useState<InterviewView | null>(null);
   const [prepared, setPrepared] = useState<PreparedQuestion[]>([]);
   const [interviewError, setInterviewError] = useState<unknown>(null);
-  const [answers, setAnswers] = useState<Record<string, AnswerValue> | undefined>(undefined);
+  const [answers, setAnswers] = useState<
+    Record<string, AnswerValue> | undefined
+  >(undefined);
   const [decided, setDecided] = useState<DecisionSummary | null>(null);
 
   const [pricing, setPricing] = useState<PricingEntryView[] | null>(null);
@@ -186,12 +211,33 @@ export default function NewProjectPage() {
   topicRef.current = topic;
   const languageRef = useRef(language);
   languageRef.current = language;
+  const workTypeRef = useRef(workType);
+  workTypeRef.current = workType;
 
   useEffect(() => {
     // Read on the client only: useSearchParams would force a Suspense
     // boundary around the whole surface for one prefill.
     const requested = new URLSearchParams(window.location.search).get("lang");
     if (requested && isLanguageCode(requested)) setLanguage(requested);
+    else {
+      let saved: string | null = null;
+      try {
+        saved = localStorage.getItem(LOCALE_KEY);
+      } catch {
+        /* Browser preference remains available. */
+      }
+      setLanguage(resolveLocale(saved, navigator.language));
+    }
+    const requestedTopic = new URLSearchParams(window.location.search).get(
+      "topic",
+    );
+    if (requestedTopic) setTopic(requestedTopic.slice(0, 200));
+    const requestedKind = new URLSearchParams(window.location.search).get(
+      "kind",
+    );
+    if (requestedKind === "article" || requestedKind === "presentation") {
+      setWorkType(requestedKind);
+    }
   }, []);
 
   // Server truth for what the tier buys (G31). A failure here is not worth an
@@ -222,26 +268,46 @@ export default function NewProjectPage() {
   }, [session, refreshBalance]);
 
   const chosen = packageOf(packageId);
-  const tierPricing = pricing?.find((entry) => entry.package === packageId) ?? null;
+  const tierPricing =
+    pricing?.find((entry) => entry.package === packageId) ?? null;
   const uploading = uploads.some((row) => row.state === "pending");
   const ready = uploads.filter((row) => row.state === "done");
   const failedCount = uploads.filter((row) => row.state === "failed").length;
   const hasTopic = topic.trim().length > 0;
-  const blocked = submitBlock({
-    hasTopic,
-    uploading,
-    readyCount: ready.length,
-    failedCount,
-  });
+  const blocked =
+    workType === "article"
+      ? !hasTopic
+        ? t.articleNeedsTopic
+        : uploading
+          ? t.waitUploads
+          : failedCount > 0
+            ? t.failedUploadBlock
+            : null
+      : submitBlock(
+          {
+            hasTopic,
+            uploading,
+            readyCount: ready.length,
+            failedCount,
+          },
+          locale,
+        );
 
   const patch = useCallback((key: string, next: Partial<UploadRow>) => {
-    setUploads((current) => current.map((row) => (row.key === key ? { ...row, ...next } : row)));
+    setUploads((current) =>
+      current.map((row) => (row.key === key ? { ...row, ...next } : row)),
+    );
   }, []);
 
   const ensureProject = useCallback((): Promise<string> => {
     if (!projectPromise.current) {
       projectPromise.current = withAuth((token) =>
-        createProject(topicRef.current.trim(), token, languageRef.current),
+        createProject(
+          topicRef.current.trim(),
+          token,
+          languageRef.current,
+          workTypeRef.current,
+        ),
       )
         .then((project) => {
           if (!project) throw new Error("session_lost");
@@ -261,7 +327,12 @@ export default function NewProjectPage() {
       patch(row.key, { state: "pending", progress: 0, error: null });
       try {
         const source = await withAuth(async (token) => {
-          const presign = await presignUpload(pid, row.file.name, row.file.size, token);
+          const presign = await presignUpload(
+            pid,
+            row.file.name,
+            row.file.size,
+            token,
+          );
           await uploadToR2WithProgress(presign, row.file, (fraction) =>
             patch(row.key, { progress: fraction }),
           );
@@ -308,7 +379,10 @@ export default function NewProjectPage() {
     const room = Math.max(0, MAX_SOURCES - uploads.length - held.length);
     const batch = files.slice(0, room);
     if (batch.length === 0) {
-      setNote({ text: `Bir loyihaga ${MAX_SOURCES} tagacha manba.`, danger: true });
+      setNote({
+        text: t.sourceLimit(MAX_SOURCES),
+        danger: true,
+      });
       return;
     }
     if (!hasTopic) {
@@ -317,8 +391,8 @@ export default function NewProjectPage() {
       setNote({
         text:
           batch.length === 1
-            ? `«${batch[0].name}» saqlandi — mavzuni yozing, keyin darhol yuklanadi.`
-            : `${batch.length} ta fayl saqlandi — mavzuni yozing, keyin darhol yuklanadi.`,
+            ? t.heldOne(batch[0].name)
+            : t.heldMany(batch.length),
       });
       return;
     }
@@ -349,10 +423,12 @@ export default function NewProjectPage() {
       setInterviewState("loading");
       setInterviewError(null);
       try {
-        const view = await withAuth((token) => getInterview(pid, token, languageRef.current));
+        const view = await withAuth((token) =>
+          getInterview(pid, token, languageRef.current),
+        );
         if (!view) return;
         setInterview(view);
-        setPrepared(prepareQuestions(view));
+        setPrepared(prepareQuestions(view, locale));
         setInterviewState(view.questions.length > 0 ? "ready" : "not_ready");
       } catch (error) {
         // 409 sources_not_ready is the DESIGNED first-run answer: sources are
@@ -367,7 +443,7 @@ export default function NewProjectPage() {
         setInterviewState("error");
       }
     },
-    [withAuth],
+    [locale, withAuth],
   );
 
   async function onSend() {
@@ -380,6 +456,13 @@ export default function NewProjectPage() {
     setNote(null);
     try {
       const pid = await ensureProject();
+      if (workType === "article") {
+        const article = await withAuth((token) =>
+          initializeArticle(pid, topic.trim(), `init:${pid}`, token),
+        );
+        if (article) router.push(`/projects/${pid}`);
+        return;
+      }
       setStage("questions");
       await openQuestions(pid);
     } catch (error) {
@@ -390,7 +473,10 @@ export default function NewProjectPage() {
     }
   }
 
-  function toConfirm(next: Record<string, AnswerValue> | undefined, summary: DecisionSummary | null) {
+  function toConfirm(
+    next: Record<string, AnswerValue> | undefined,
+    summary: DecisionSummary | null,
+  ) {
     setAnswers(next && Object.keys(next).length > 0 ? next : undefined);
     setDecided(summary);
     setEnqueueError(null);
@@ -435,8 +521,8 @@ export default function NewProjectPage() {
 
   const attachRow: PromptSource = {
     key: "attach",
-    name: "Fayl qo‘shish",
-    desc: "Kompyuteringizdan yuklang",
+    name: t.addFile,
+    desc: t.addFileHint,
     icon: "clip",
     attach: true,
   };
@@ -446,58 +532,93 @@ export default function NewProjectPage() {
     ...ready.map((row) => ({
       key: row.key,
       name: row.file.name,
-      desc: `${row.source?.file_type ?? "fayl"} · biriktirilgan`,
+      desc: `${row.source?.file_type ?? t.file} · ${t.attached}`,
       icon: "file" as const,
     })),
   ];
 
   const pickers: PromptPicker[] = [
     {
-      key: "paket",
-      label: "Paket",
-      value: packageId,
-      options: PACKAGES.map((entry) => ({
-        key: entry.id,
-        name: entry.name,
-        tag: soum(pricing?.find((row) => row.package === entry.id)?.price ?? entry.price),
-      })),
-      onChange: (key) => setPackageId(key as PackageId),
+      key: "format",
+      label: t.workType,
+      value: workType,
+      options: [
+        { key: "presentation", name: t.presentation },
+        { key: "article", name: t.article },
+      ],
+      onChange: (key) => {
+        if (projectPromise.current) {
+          setNote({
+            text: t.typeLocked,
+            danger: true,
+          });
+          return;
+        }
+        setWorkType(key as WorkType);
+      },
     },
+    ...(workType === "presentation"
+      ? [
+          {
+            key: "paket",
+            label: t.package,
+            value: packageId,
+            options: PACKAGES.map((entry) => ({
+              key: entry.id,
+              name: t.packageNames[entry.id],
+              tag: soum(
+                pricing?.find((row) => row.package === entry.id)?.price ??
+                  entry.price,
+              ),
+            })),
+            onChange: (key) => setPackageId(key as PackageId),
+          } satisfies PromptPicker,
+        ]
+      : []),
     {
       key: "til",
-      label: "Til",
+      label: t.language,
       value: language,
-      options: LANGUAGES.map((entry) => ({ key: entry.code, name: entry.name })),
+      options: LANGUAGES.map((entry) => ({
+        key: entry.code,
+        name: entry.name,
+      })),
       onChange: (key) => setLanguage(key as LanguageCode),
     },
   ];
 
-  const rows = planRows({
-    topic: topic.trim(),
-    languageLabel: languageName(language),
-    packageLabel: chosen.name,
-    sourceCount: ready.length,
-    pricing: tierPricing,
-    fallbackPrice: chosen.price,
-    balance,
-    estimatedSlides: interview?.estimated_slide_count ?? null,
-    soum,
-  });
+  const rows = planRows(
+    {
+      topic: topic.trim(),
+      languageLabel: languageName(language),
+      packageLabel: t.packageNames[chosen.id],
+      sourceCount: ready.length,
+      pricing: tierPricing,
+      fallbackPrice: chosen.price,
+      balance,
+      estimatedSlides: interview?.estimated_slide_count ?? null,
+      soum,
+    },
+    locale,
+  );
 
   function focusComposer() {
-    document.querySelector<HTMLTextAreaElement>("[data-promptbar] textarea")?.focus();
+    document
+      .querySelector<HTMLTextAreaElement>("[data-promptbar] textarea")
+      ?.focus();
   }
 
-  const priceLine = `${chosen.name} · ${soum(tierPricing?.price ?? chosen.price)}`;
+  const priceLine =
+    workType === "article"
+      ? t.articlePrice
+      : `${t.packageNames[chosen.id]} · ${soum(tierPricing?.price ?? chosen.price)}`;
 
   return (
     <AppChrome active="new">
       <div className="new-stage">
         <div className="new-head">
-          <h1 className="new-title">Nima yaratamiz?</h1>
-          <p className="new-sub">
-            Mavzuni yozing va manba biriktiring — Nashr faqat siz bergan dalilga tayanadi.
-          </p>
+          <h1 className="new-title">{t.title}</h1>
+          <p className="new-sub">{t.subtitle}</p>
         </div>
 
         <div className="new-composer">
@@ -508,7 +629,7 @@ export default function NewProjectPage() {
               if (note?.danger) setNote(null);
             }}
             onSend={() => void onSend()}
-            placeholder="Mavzu yoki sarlavhani yozing… @ bilan manba qo‘shing"
+            placeholder={t.placeholder}
             tall
             maxLength={200}
             accept={ACCEPTED}
@@ -523,10 +644,15 @@ export default function NewProjectPage() {
           />
 
           {stage === "compose" && (
-            <p className="new-note" data-danger={note?.danger ? "true" : undefined}>
+            <p
+              className="new-note"
+              data-danger={note?.danger ? "true" : undefined}
+            >
               {note
                 ? note.text
-                : `${priceLine} · PDF, DOCX, PPTX — kamida bitta manba kerak, ${MAX_SOURCES} tagacha.`}
+                : workType === "article"
+                  ? t.articleHint(priceLine)
+                  : t.presentationHint(priceLine, MAX_SOURCES)}
             </p>
           )}
         </div>
@@ -535,17 +661,23 @@ export default function NewProjectPage() {
           <div className="new-uploads">
             <p className="new-uploads-head">
               {uploading
-                ? "Manbalar yuklanmoqda"
-                : `${ready.length} ta manba tayyor${failedCount > 0 ? `, ${failedCount} tasi yuklanmadi` : ""}`}
+                ? t.uploadingSources
+                : t.readySources(ready.length, failedCount)}
             </p>
             <ul className="new-files">
               {uploads.map((row) => {
-                const friendly = row.error ? describeError(row.error) : null;
+                const friendly = row.error
+                  ? describeError(row.error, locale)
+                  : null;
                 return (
                   <li key={row.key} className="new-file" data-state={row.state}>
                     <span className="new-file-head">
-                      <span className="new-file-name data-text">{row.file.name}</span>
-                      <span className="new-file-meta data-text">{humanSize(row.file.size)}</span>
+                      <span className="new-file-name data-text">
+                        {row.file.name}
+                      </span>
+                      <span className="new-file-meta data-text">
+                        {humanSize(row.file.size)}
+                      </span>
                     </span>
                     {row.state === "pending" && (
                       <span
@@ -554,17 +686,21 @@ export default function NewProjectPage() {
                         aria-valuenow={Math.round(row.progress * 100)}
                         aria-valuemin={0}
                         aria-valuemax={100}
-                        aria-label={`${row.file.name} yuklanmoqda`}
+                        aria-label={t.uploadingFile(row.file.name)}
                       >
-                        <i style={{ width: `${Math.max(3, Math.round(row.progress * 100))}%` }} />
+                        <i
+                          style={{
+                            width: `${Math.max(3, Math.round(row.progress * 100))}%`,
+                          }}
+                        />
                       </span>
                     )}
                     <span className="new-file-line">
                       {row.state === "pending"
                         ? `${Math.round(row.progress * 100)}%`
                         : row.state === "done"
-                          ? `${row.source?.file_type ?? "fayl"} · ro‘yxatdan o‘tdi`
-                          : (friendly?.message ?? "Yuklanmadi")}
+                          ? `${row.source?.file_type ?? t.file} · ${t.registered}`
+                          : (friendly?.message ?? t.uploadFailed)}
                     </span>
                     {row.state === "failed" && (
                       <span className="new-file-actions">
@@ -579,22 +715,24 @@ export default function NewProjectPage() {
                               );
                           }}
                         >
-                          Qayta urinish
+                          {t.retry}
                         </button>
                         <button
                           type="button"
                           className="new-file-action"
                           onClick={() =>
-                            setUploads((current) => current.filter((item) => item.key !== row.key))
+                            setUploads((current) =>
+                              current.filter((item) => item.key !== row.key),
+                            )
                           }
                         >
-                          Olib tashlash
+                          {t.remove}
                         </button>
                       </span>
                     )}
                     {row.state === "failed" && friendly?.detail && (
                       <details className="new-detail">
-                        <summary>Texnik tafsilot</summary>
+                        <summary>{t.technical}</summary>
                         <code>{friendly.detail}</code>
                       </details>
                     )}
@@ -608,32 +746,35 @@ export default function NewProjectPage() {
         {stage === "questions" && (
           <div className="new-step">
             {interviewState === "loading" && (
-              <p className="new-step-lead">Manbalaringiz bo‘yicha savollar tayyorlanmoqda…</p>
+              <p className="new-step-lead">{t.preparingQuestions}</p>
             )}
 
             {interviewState === "ready" && interview && (
               <>
-                <p className="new-step-lead">
-                  Bir necha savol — javoblaringiz taqdimotni aniqroq qiladi. Xohlamasangiz,
-                  o‘tkazib yuborishingiz mumkin.
-                </p>
+                <p className="new-step-lead">{t.questionsLead}</p>
                 <div className="new-cardwrap">
                   <ApprovalCard
                     questions={prepared.map((item) => item.card)}
                     allowCustom
-                    sentLabel="Javoblar qabul qilindi"
+                    sentLabel={t.answersAccepted}
+                    copy={t.approval}
                     onSubmitted={onAnswered}
                   />
                 </div>
                 <div className="new-exits">
                   <Button
                     variant="ghost"
-                    onClick={() => toConfirm(undefined, decisionSummary(interview))}
+                    onClick={() =>
+                      toConfirm(undefined, decisionSummary(interview, locale))
+                    }
                   >
-                    O‘zingiz tanlang
+                    {t.decideForMe}
                   </Button>
-                  <Button variant="ghost" onClick={() => toConfirm(undefined, null)}>
-                    Keyinroq
+                  <Button
+                    variant="ghost"
+                    onClick={() => toConfirm(undefined, null)}
+                  >
+                    {t.later}
                   </Button>
                 </div>
               </>
@@ -641,10 +782,14 @@ export default function NewProjectPage() {
 
             {interviewState === "not_ready" && (
               <>
-                <DecisionPanel summary={decisionSummary(interview)} />
+                <DecisionPanel summary={decisionSummary(interview, locale)} />
                 <div className="new-exits">
-                  <Button onClick={() => toConfirm(undefined, decisionSummary(interview))}>
-                    Yaxshi, o‘zingiz tanlang
+                  <Button
+                    onClick={() =>
+                      toConfirm(undefined, decisionSummary(interview, locale))
+                    }
+                  >
+                    {t.acceptDefaults}
                   </Button>
                 </div>
               </>
@@ -659,15 +804,24 @@ export default function NewProjectPage() {
                   }}
                 />
                 <div className="new-exits">
-                  <Button variant="ghost" onClick={() => toConfirm(undefined, decisionSummary(null))}>
-                    Savolsiz davom etish
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      toConfirm(undefined, decisionSummary(null, locale))
+                    }
+                  >
+                    {t.continueWithout}
                   </Button>
                 </div>
               </>
             )}
 
-            <button type="button" className="new-cancel" onClick={() => setStage("compose")}>
-              Orqaga
+            <button
+              type="button"
+              className="new-cancel"
+              onClick={() => setStage("compose")}
+            >
+              {t.back}
             </button>
           </div>
         )}
@@ -679,9 +833,9 @@ export default function NewProjectPage() {
               key={attempt}
               questions={[
                 {
-                  q: "Generatsiyani boshlaymizmi?",
+                  q: t.confirmQuestion,
                   type: "radio",
-                  options: [{ label: "Ha, boshlash", hint: "Odatda 3-6 daqiqa" }],
+                  options: [{ label: t.confirmYes, hint: t.confirmHint }],
                 },
               ]}
               summary={
@@ -690,20 +844,29 @@ export default function NewProjectPage() {
                     <span className="new-summary-row" key={row.label}>
                       <span className="new-summary-key">{row.label}</span>
                       <span
-                        className={row.mono ? "new-summary-value data-text" : "new-summary-value"}
+                        className={
+                          row.mono
+                            ? "new-summary-value data-text"
+                            : "new-summary-value"
+                        }
                       >
                         {row.value}
                       </span>
                     </span>
                   ))}
-                  <span className="new-summary-note">{CHARGE_NOTE}</span>
+                  <span className="new-summary-note">{chargeNote(locale)}</span>
                 </span>
               }
-              sentLabel="Boshlanmoqda"
+              sentLabel={t.starting}
+              copy={t.approval}
               onSubmitted={() => void onConfirm()}
             />
-            <button type="button" className="new-cancel" onClick={() => setStage("compose")}>
-              Bekor qilish
+            <button
+              type="button"
+              className="new-cancel"
+              onClick={() => setStage("compose")}
+            >
+              {t.cancel}
             </button>
             {enqueueError !== null && (
               <div className="new-errors">
@@ -724,7 +887,7 @@ export default function NewProjectPage() {
           <div className="new-errors">
             <InlineError
               error={enqueueError}
-              retryLabel="Qayta urinish"
+              retryLabel={t.retry}
               onRetry={() => {
                 setEnqueueError(null);
                 void onSend();
@@ -738,34 +901,46 @@ export default function NewProjectPage() {
             <button
               type="button"
               className="new-template"
-              aria-pressed="true"
-              onClick={focusComposer}
+              aria-pressed={workType === "presentation"}
+              onClick={() => {
+                if (!projectPromise.current) setWorkType("presentation");
+                focusComposer();
+              }}
             >
               <span className="new-template-icon" aria-hidden>
                 <Presentation size={17} strokeWidth={1.75} />
               </span>
-              <span className="new-template-name">Taqdimot</span>
-              <span className="new-template-line">Manbaga bog‘langan slaydlar, uch formatda.</span>
+              <span className="new-template-name">{t.presentation}</span>
+              <span className="new-template-line">
+                {t.presentationTemplate}
+              </span>
             </button>
-            <div className="new-template" data-soon="true">
+            <button
+              type="button"
+              className="new-template"
+              aria-pressed={workType === "article"}
+              onClick={() => {
+                if (!projectPromise.current) setWorkType("article");
+                focusComposer();
+              }}
+            >
               <span className="new-template-icon" aria-hidden>
                 <FileText size={17} strokeWidth={1.75} />
               </span>
-              <span className="new-template-name">
-                Maqola
-                <span className="new-template-soon">tez kunda</span>
-              </span>
-              <span className="new-template-line">Dalillar matritsasi va tekshirilgan iqtiboslar.</span>
-            </div>
+              <span className="new-template-name">{t.article}</span>
+              <span className="new-template-line">{t.articleTemplate}</span>
+            </button>
             <div className="new-template" data-soon="true">
               <span className="new-template-icon" aria-hidden>
                 <GraduationCap size={17} strokeWidth={1.75} />
               </span>
               <span className="new-template-name">
-                Dissertatsiya
-                <span className="new-template-soon">tez kunda</span>
+                {t.dissertation}
+                <span className="new-template-soon">{t.soon}</span>
               </span>
-              <span className="new-template-line">Uzun shakl, boblar va adabiyotlar ro‘yxati.</span>
+              <span className="new-template-line">
+                {t.dissertationTemplate}
+              </span>
             </div>
           </div>
         )}

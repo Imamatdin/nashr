@@ -7,7 +7,21 @@ from typing import Any, cast
 
 import pytest
 
-from packages.core.models.presentation import SlideFix
+from packages.core.enums import (
+    AudienceType,
+    BackgroundTreatment,
+    PresentationMood,
+    SlideType,
+)
+from packages.core.models.presentation import (
+    ColorPalette,
+    DeckSpec,
+    DesignDirectionSpec,
+    PresentationInterviewAnswers,
+    SlideContent,
+    SlideFix,
+    SlideSpec,
+)
 from packages.platform.credits import CreditLedger
 from packages.platform.jobs import GenerationJob, JobType
 from packages.sessions_core import FixDispatchResult, PendingActionView
@@ -282,10 +296,18 @@ class _FakeOrchestrator:
         self.bot = bot
         self.db = db
         self.pipeline_kwargs: dict[str, Any] = {}
+        self.render_kwargs: dict[str, Any] = {}
 
     async def run_full_pipeline(self, **kwargs: Any) -> _FakePipelineResult:
         self.pipeline_kwargs = kwargs
         return _FakePipelineResult()
+
+    async def render(
+        self, deck: DeckSpec, formats: list[Any], progress: Any, *, project_id: str
+    ) -> _FakeRender:
+        self.render_kwargs = {"deck": deck, "formats": formats, "project_id": project_id}
+        await progress("Rendering presentation", 7, 7)
+        return _FakeRender()
 
 
 def _wired_runner(queue: _FakeQueue, credits: _FakeCredits, db: Any) -> JobRunner:
@@ -341,6 +363,109 @@ def _edit_job(payload: dict[str, Any]) -> GenerationJob:
     return _job(job_type=JobType.PRESENTATION_EDIT.value, payload=payload)
 
 
+def _render_deck() -> DeckSpec:
+    return DeckSpec(
+        project_id="p1",
+        title="Direct design",
+        design=DesignDirectionSpec(
+            mood=PresentationMood.CLEAN_PROFESSIONAL,
+            palette=ColorPalette(
+                background="#FFFCF0",
+                surface="#F2F0E5",
+                text="#100F0F",
+                accent="#205EA6",
+                text_secondary="#575653",
+            ),
+            heading_font="Source Serif 4",
+            body_font="Inter",
+            image_style_prefix="editorial photograph, ",
+            background_treatment=BackgroundTreatment.LIGHT,
+        ),
+        interview=PresentationInterviewAnswers(audience=AudienceType.UNDERGRADUATE),
+        slides=[
+            SlideSpec(
+                slide_index=0,
+                slide_type=SlideType.TITLE_HERO,
+                content=SlideContent(title="Edited without a model"),
+            )
+        ],
+    )
+
+
+class _RenderDb:
+    def __init__(self, deck: DeckSpec) -> None:
+        self.deck = deck
+        self.saved: list[DeckSpec] = []
+
+    async def get_document_revision(
+        self, document_id: str, revision_id: str
+    ) -> dict[str, Any] | None:
+        if (document_id, revision_id) != ("document-1", "revision-1"):
+            return None
+        return {"content": self.deck.model_dump(mode="json")}
+
+    async def save_deck(self, project_id: str, deck: DeckSpec) -> dict[str, Any]:
+        self.saved.append(deck)
+        return {"project_id": project_id}
+
+
+class _VersionedEditDb:
+    def __init__(self, deck: DeckSpec) -> None:
+        self.deck = deck
+        self.commits: list[dict[str, Any]] = []
+
+    async def get_document(self, project_id: str, kind: str) -> dict[str, Any]:
+        assert (project_id, kind) == ("p1", "presentation")
+        return {
+            "id": "document-1",
+            "revision_id": "revision-1",
+            "content": self.deck.model_dump(mode="json"),
+        }
+
+    async def commit_presentation_revision_and_deck(
+        self,
+        document_id: str,
+        base_revision_id: str,
+        content: dict[str, Any],
+        user_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self.commits.append(
+            {
+                "document_id": document_id,
+                "base_revision_id": base_revision_id,
+                "content": content,
+                "user_id": user_id,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        return {"revision_id": "revision-2"}
+
+
+@pytest.mark.asyncio
+async def test_manual_render_uses_exact_revision_and_updates_current_deck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue, credits = _FakeQueue(), _FakeCredits()
+    deck = _render_deck()
+    db = _RenderDb(deck)
+    built = _patch_bot_and_orchestrator(monkeypatch)
+    runner = _wired_runner(queue, credits, cast(Any, db))
+    job = _job(
+        job_type=JobType.PRESENTATION_RENDER.value,
+        payload={"document_id": "document-1", "revision_id": "revision-1"},
+    )
+
+    await runner._run_presentation_render(job)  # pyright: ignore[reportPrivateUsage]
+
+    assert db.saved == [deck]
+    assert queue.completed == [job.id]
+    assert queue.progress[-1]["step"] == "Rendering presentation"
+    assert built[0].render_kwargs["project_id"] == "p1"
+    assert built[0].render_kwargs["deck"] == deck
+    assert credits.refunds == []
+
+
 @pytest.mark.asyncio
 async def test_failed_edit_refunds_nothing_but_failed_generation_does(
     monkeypatch: pytest.MonkeyPatch,
@@ -379,6 +504,7 @@ def test_executor_for_routes_by_job_type() -> None:
     executor_for = runner._executor_for  # pyright: ignore[reportPrivateUsage]
     assert executor_for(JobType.PRESENTATION_GENERATION) == runner._run_presentation  # pyright: ignore[reportPrivateUsage]
     assert executor_for(JobType.PRESENTATION_EDIT) == runner._run_presentation_edit  # pyright: ignore[reportPrivateUsage]
+    assert executor_for(JobType.PRESENTATION_RENDER) == runner._run_presentation_render  # pyright: ignore[reportPrivateUsage]
     assert executor_for(JobType.EXPORT) is None
     assert executor_for(JobType.ARTICLE_GENERATION) is None
 
@@ -426,6 +552,44 @@ async def test_edit_inline_fixes_reach_dispatch_and_complete_the_job(
     assert queue.completed == [job.id]
     assert queue.failed == []
     assert cast(_FakeBot, built[0].bot).session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_versioned_edit_commits_document_and_deck_through_one_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue, credits = _FakeQueue(), _FakeCredits()
+    deck = _render_deck()
+    db = _VersionedEditDb(deck)
+    _patch_bot_and_orchestrator(monkeypatch)
+
+    async def _dispatch(**kwargs: Any) -> FixDispatchResult:
+        await kwargs["persist"](deck)
+        return FixDispatchResult(True, slides_changed=1)
+
+    monkeypatch.setattr("packages.sessions_core.dispatch_fix", _dispatch)
+    runner = _wired_runner(queue, credits, cast(Any, db))
+    job = _edit_job(
+        {
+            "fixes": [{"slide_id": "s1", "instruction": "tighten the title"}],
+            "call_count": 1,
+            "document_id": "document-1",
+            "base_revision_id": "revision-1",
+        }
+    )
+
+    await runner._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
+
+    assert queue.completed == [job.id]
+    assert db.commits == [
+        {
+            "document_id": "document-1",
+            "base_revision_id": "revision-1",
+            "content": deck.model_dump(mode="json"),
+            "user_id": "u1",
+            "idempotency_key": f"chat-edit:{job.id}",
+        }
+    ]
 
 
 @pytest.mark.asyncio

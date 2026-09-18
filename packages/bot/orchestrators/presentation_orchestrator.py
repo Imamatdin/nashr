@@ -68,6 +68,7 @@ from packages.workers.source.pipeline import SourcePipeline
 logger = logging.getLogger("nashr.orchestrator.presentation")
 
 ProgressCallback = Callable[[str, int, int], Awaitable[None]]
+DeckPersistCallback = Callable[[DeckSpec], Awaitable[None]]
 
 # source → matrix → interview → design → editorial → images → render
 TOTAL_STEPS: Final[int] = 7
@@ -447,7 +448,7 @@ class PresentationOrchestrator:
                 # the Mini App actually returns (strings, ints, bool, lists).
                 coerced = cast(Mapping[str, str | int | bool | list[str]], raw_answers)
                 resolved = self._interview_engine.apply_answers(
-                    questions=questions, answers=coerced
+                    questions=questions, answers=coerced, language=language
                 )
             brief = (topic or "").strip()
             if brief:
@@ -673,6 +674,7 @@ class PresentationOrchestrator:
         progress: ProgressCallback,
         *,
         package: GenerationPackage,
+        persist: DeckPersistCallback | None = None,
     ) -> FixAndRenderResult:
         """Apply a batch of slide fixes, persist once, render once.
 
@@ -731,7 +733,10 @@ class PresentationOrchestrator:
             outcomes.append(outcome)
 
         try:
-            await self._db.save_deck(project_id, working)
+            if persist is None:
+                await self._db.save_deck(project_id, working)
+            else:
+                await persist(working)
         except Exception as exc:
             logger.warning(
                 "presentation_edit_persist_failed",

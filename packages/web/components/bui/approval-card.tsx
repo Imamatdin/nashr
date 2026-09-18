@@ -43,7 +43,30 @@ export interface ApprovalCardProps {
   resetLabel?: string;
   allowCustom?: boolean;
   dismissible?: boolean;
+  copy?: {
+    openQuestions: string;
+    close: string;
+    customPlaceholder: string;
+    customLabel: string;
+    back: string;
+    next: string;
+    jump: (index: number) => string;
+    submit: string;
+    nextQuestion: string;
+  };
 }
+
+const DEFAULT_COPY = {
+  openQuestions: "Savollarni ochish",
+  close: "Yopish",
+  customPlaceholder: "O‘z javobingiz…",
+  customLabel: "O‘z javobingiz",
+  back: "Orqaga",
+  next: "Keyingisi",
+  jump: (index: number) => `${index}-savolga o‘tish`,
+  submit: "Javoblarni yuborish",
+  nextQuestion: "Keyingi savol",
+};
 
 function collect(
   questions: ApprovalQuestion[],
@@ -52,7 +75,9 @@ function collect(
 ): ApprovalAnswer[] {
   return questions.map((question, index) => ({
     question: question.q,
-    selected: (answers[index] ?? []).map((i) => question.options[i]?.label ?? ""),
+    selected: (answers[index] ?? []).map(
+      (i) => question.options[i]?.label ?? "",
+    ),
     custom: custom[index]?.trim() ? custom[index].trim() : undefined,
   }));
 }
@@ -66,9 +91,12 @@ export function ApprovalCard({
   resetLabel,
   allowCustom = false,
   dismissible = false,
+  copy = DEFAULT_COPY,
 }: ApprovalCardProps) {
   const [qi, setQi] = useState(0);
-  const [answers, setAnswers] = useState<Record<number, number[]>>(initial ?? {});
+  const [answers, setAnswers] = useState<Record<number, number[]>>(
+    initial ?? {},
+  );
   const [custom, setCustom] = useState<Record<number, string>>({});
   const [sent, setSent] = useState(false);
   const [open, setOpen] = useState(true);
@@ -115,7 +143,7 @@ export function ApprovalCard({
         onClick={() => setOpen(true)}
         className="rounded-control bg-surface px-3 py-2 text-[12.5px] font-medium text-ink shadow-btn transition-colors duration-150 hover:bg-hover"
       >
-        Savollarni ochish
+        {copy.openQuestions}
       </button>
     );
   }
@@ -163,15 +191,23 @@ export function ApprovalCard({
         <div
           key={qi}
           className="primitive-card-pad"
-          style={{ animation: "fade-up 350ms cubic-bezier(0.23,1,0.32,1) both" }}
+          style={{
+            animation: "fade-up 350ms cubic-bezier(0.23,1,0.32,1) both",
+          }}
         >
-          {summary && <div className="mb-2 text-[12px] leading-relaxed text-ink-2">{summary}</div>}
+          {summary && (
+            <div className="mb-2 text-[12px] leading-relaxed text-ink-2">
+              {summary}
+            </div>
+          )}
           <div className="flex items-start justify-between gap-3">
-            <span className="text-[13px] font-medium text-ink">{question.q}</span>
+            <span className="text-[13px] font-medium text-ink">
+              {question.q}
+            </span>
             {dismissible && (
               <button
                 type="button"
-                aria-label="Yopish"
+                aria-label={copy.close}
                 onClick={() => setOpen(false)}
                 className="primitive-icon-button shrink-0
                   text-ink-3 transition-colors duration-100 hover:bg-hover hover:text-ink"
@@ -233,7 +269,9 @@ export function ApprovalCard({
                       {option.label}
                     </span>
                     {option.hint && (
-                      <span className="block text-[11.5px] text-ink-3">{option.hint}</span>
+                      <span className="block text-[11.5px] text-ink-3">
+                        {option.hint}
+                      </span>
                     )}
                   </span>
                 </button>
@@ -245,12 +283,15 @@ export function ApprovalCard({
                 <input
                   value={custom[qi] ?? ""}
                   onChange={(event) => {
-                    setCustom((current) => ({ ...current, [qi]: event.target.value }));
+                    setCustom((current) => ({
+                      ...current,
+                      [qi]: event.target.value,
+                    }));
                     if (question.type === "radio")
                       setAnswers((current) => ({ ...current, [qi]: [] }));
                   }}
-                  placeholder="O‘z javobingiz…"
-                  aria-label="O‘z javobingiz"
+                  placeholder={copy.customPlaceholder}
+                  aria-label={copy.customLabel}
                   className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
                 />
               </label>
@@ -263,7 +304,7 @@ export function ApprovalCard({
           <span className="flex items-center gap-2">
             <button
               type="button"
-              aria-label="Orqaga"
+              aria-label={copy.back}
               disabled={qi === 0 || sent}
               onClick={() => setQi((current) => Math.max(0, current - 1))}
               className="flex size-6 items-center justify-center rounded-[5px] text-ink-3 transition-colors duration-100 enabled:hover:bg-hover enabled:hover:text-ink-2 disabled:opacity-35"
@@ -286,26 +327,36 @@ export function ApprovalCard({
                 <button
                   key={i}
                   type="button"
-                  aria-label={`${i + 1}-savolga o‘tish`}
+                  aria-label={copy.jump(i + 1)}
                   aria-current={i === qi && !sent ? "step" : undefined}
                   disabled={sent}
                   onClick={() => setQi(i)}
                   className="rounded-full transition-[width,height,background-color,border-color,border-width] duration-300 disabled:cursor-default"
                   style={
                     i === qi && !sent
-                      ? { width: 9, height: 9, border: "2.5px solid var(--ink)" }
+                      ? {
+                          width: 9,
+                          height: 9,
+                          border: "2.5px solid var(--ink)",
+                        }
                       : sent || i < qi
                         ? { width: 7, height: 7, background: "var(--ink-3)" }
-                        : { width: 7, height: 7, border: "1.5px solid var(--ink-3)" }
+                        : {
+                            width: 7,
+                            height: 7,
+                            border: "1.5px solid var(--ink-3)",
+                          }
                   }
                 />
               ))}
             </span>
             <button
               type="button"
-              aria-label="Keyingisi"
+              aria-label={copy.next}
               disabled={last || sent}
-              onClick={() => setQi((current) => Math.min(questions.length - 1, current + 1))}
+              onClick={() =>
+                setQi((current) => Math.min(questions.length - 1, current + 1))
+              }
               className="flex size-6 items-center justify-center rounded-[5px] text-ink-3 transition-colors duration-100 enabled:hover:bg-hover enabled:hover:text-ink-2 disabled:opacity-35"
             >
               <svg
@@ -325,7 +376,7 @@ export function ApprovalCard({
           {!sent && (
             <button
               type="button"
-              aria-label={last ? "Javoblarni yuborish" : "Keyingi savol"}
+              aria-label={last ? copy.submit : copy.nextQuestion}
               disabled={!hasAnswer}
               onClick={() => {
                 if (last) {
@@ -339,7 +390,9 @@ export function ApprovalCard({
               style={{
                 background: hasAnswer ? "var(--ink)" : "var(--field)",
                 color: hasAnswer ? "var(--surface)" : "var(--ink-3)",
-                boxShadow: hasAnswer ? "inset 0 1px 0 rgba(255,255,255,0.14)" : "var(--shadow-btn)",
+                boxShadow: hasAnswer
+                  ? "inset 0 1px 0 rgba(255,255,255,0.14)"
+                  : "var(--shadow-btn)",
               }}
             >
               <svg

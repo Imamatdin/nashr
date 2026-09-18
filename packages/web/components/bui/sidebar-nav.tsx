@@ -49,6 +49,29 @@ type SidebarNavProps = {
   /** Rendered in the pinned footer; told whether the rail is collapsed. */
   footer?: (collapsed: boolean) => ReactNode;
   className?: string;
+  copy?: {
+    navigation: string;
+    signOut: string;
+    recentProjects: string;
+    collapse: string;
+    expand: string;
+    search: string;
+    searchHistory: string;
+    closeSearch: string;
+    noProject: string;
+  };
+};
+
+const DEFAULT_COPY = {
+  navigation: "Ish maydoni navigatsiyasi",
+  signOut: "Chiqish",
+  recentProjects: "Oxirgi loyihalar",
+  collapse: "Panelni yig‘ish",
+  expand: "Panelni ochish",
+  search: "Loyihalarni qidirish",
+  searchHistory: "Loyihalar tarixidan qidirish",
+  closeSearch: "Qidiruvni yopish",
+  noProject: "Loyiha topilmadi",
 };
 
 const SIDEBAR_MOTION = {
@@ -131,11 +154,13 @@ function WorkspaceMenu({
   position,
   onClose,
   onSignOut,
+  signOutLabel,
 }: {
   brand: { name: string };
   position: { top: number; left: number };
   onClose: () => void;
   onSignOut: () => void;
+  signOutLabel: string;
 }) {
   return createPortal(
     <div
@@ -181,7 +206,9 @@ function WorkspaceMenu({
           <span className="flex size-5 shrink-0 items-center justify-center text-ink-2">
             <LogOut size={16} strokeWidth={1.75} aria-hidden />
           </span>
-          <span className="min-w-0 flex-1 truncate text-[13.5px] text-ink">Chiqish</span>
+          <span className="min-w-0 flex-1 truncate text-[13.5px] text-ink">
+            {signOutLabel}
+          </span>
         </button>
       </GlideMenu>
     </div>,
@@ -194,14 +221,19 @@ export default function SidebarNav({
   nav,
   activeNav,
   recents,
-  recentsTitle = "Oxirgi loyihalar",
+  recentsTitle,
   onSignOut,
   footer,
   className = "",
+  copy = DEFAULT_COPY,
 }: SidebarNavProps) {
+  const recentHeading = recentsTitle ?? copy.recentProjects;
   const [collapsed, setCollapsed] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const [workspacePosition, setWorkspacePosition] = useState({ top: 0, left: 0 });
+  const [workspacePosition, setWorkspacePosition] = useState({
+    top: 0,
+    left: 0,
+  });
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const workspaceButtonRef = useRef<HTMLButtonElement>(null);
@@ -215,7 +247,10 @@ export default function SidebarNav({
     if (!workspaceOpen) return;
     const close = (event: PointerEvent) => {
       const target = event.target as Element;
-      if (!target.closest("[data-workspace-trigger]") && !target.closest("[data-workspace-menu]")) {
+      if (
+        !target.closest("[data-workspace-trigger]") &&
+        !target.closest("[data-workspace-menu]")
+      ) {
         setWorkspaceOpen(false);
       }
     };
@@ -237,11 +272,13 @@ export default function SidebarNav({
   return (
     <aside
       data-sidebar-collapsed={collapsed}
-      aria-label="Ish maydoni navigatsiyasi"
+      aria-label={copy.navigation}
       className={`relative flex h-full shrink-0 overflow-hidden transition-[width] ${className}`}
       style={
         {
-          width: collapsed ? SIDEBAR_MOTION.collapsedWidth : SIDEBAR_MOTION.expandedWidth,
+          width: collapsed
+            ? SIDEBAR_MOTION.collapsedWidth
+            : SIDEBAR_MOTION.expandedWidth,
           transitionDuration: `${SIDEBAR_MOTION.duration}ms`,
           transitionTimingFunction: SIDEBAR_MOTION.easing,
           "--sidebar-copy-duration": `${SIDEBAR_MOTION.copyDuration}ms`,
@@ -285,12 +322,13 @@ export default function SidebarNav({
               position={workspacePosition}
               onClose={() => setWorkspaceOpen(false)}
               onSignOut={onSignOut}
+              signOutLabel={copy.signOut}
             />
           )}
 
           <button
             type="button"
-            aria-label="Panelni yig‘ish"
+            aria-label={copy.collapse}
             aria-hidden={collapsed}
             tabIndex={collapsed ? -1 : 0}
             onClick={collapse}
@@ -300,13 +338,18 @@ export default function SidebarNav({
           </button>
           <button
             type="button"
-            aria-label="Panelni ochish"
+            aria-label={copy.expand}
             aria-hidden={!collapsed}
             tabIndex={collapsed ? 0 : -1}
             onClick={() => setCollapsed(false)}
             className="sidebar-expand-control absolute left-2 top-0.5 flex size-9 items-center justify-center rounded-[8px] text-ink-3 transition-[opacity,background-color,color] duration-150 hover:bg-hover-2 hover:text-ink"
           >
-            <PanelLeft size={17} strokeWidth={1.75} className="rotate-180" aria-hidden />
+            <PanelLeft
+              size={17}
+              strokeWidth={1.75}
+              className="rotate-180"
+              aria-hidden
+            />
           </button>
         </div>
 
@@ -327,19 +370,21 @@ export default function SidebarNav({
             <div
               aria-hidden={searchOpen}
               className={`absolute inset-0 flex items-center gap-1.5 px-2 text-[12.5px] font-medium text-ink-3 transition-[opacity,transform] ${
-                searchOpen ? "pointer-events-none -translate-x-1 opacity-0" : "translate-x-0 opacity-100"
+                searchOpen
+                  ? "pointer-events-none -translate-x-1 opacity-0"
+                  : "translate-x-0 opacity-100"
               }`}
               style={{
                 transitionDuration: `${CHAT_SEARCH_MOTION.duration}ms`,
                 transitionTimingFunction: CHAT_SEARCH_MOTION.easing,
               }}
             >
-              <span className="truncate">{recentsTitle}</span>
+              <span className="truncate">{recentHeading}</span>
             </div>
 
             <button
               type="button"
-              aria-label="Loyihalarni qidirish"
+              aria-label={copy.search}
               aria-expanded={searchOpen}
               onClick={() => setSearchOpen(true)}
               className={`absolute right-0 top-0 z-10 flex size-8 items-center justify-center rounded-[8px] text-ink-3 transition-[opacity,background-color,color,transform] hover:bg-hover-2 hover:text-ink active:scale-[0.96] ${
@@ -352,7 +397,9 @@ export default function SidebarNav({
 
             <div
               className={`absolute right-0 top-0 z-20 flex h-8 items-center overflow-hidden rounded-[8px] bg-field text-ink-3 shadow-hairline transition-[width,opacity] focus-within:text-ink-2 ${
-                searchOpen ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
+                searchOpen
+                  ? "pointer-events-auto opacity-100"
+                  : "pointer-events-none opacity-0"
               }`}
               style={{
                 width: searchOpen ? "100%" : CHAT_SEARCH_MOTION.closedWidth,
@@ -373,13 +420,13 @@ export default function SidebarNav({
                     setQuery("");
                   }
                 }}
-                placeholder="Loyiha qidirish"
-                aria-label="Loyihalar tarixidan qidirish"
+                placeholder={copy.search}
+                aria-label={copy.searchHistory}
                 className="ml-1.5 min-w-0 flex-1 bg-transparent text-[13px] font-medium text-ink outline-none placeholder:text-ink-3"
               />
               <button
                 type="button"
-                aria-label="Qidiruvni yopish"
+                aria-label={copy.closeSearch}
                 onClick={() => {
                   setSearchOpen(false);
                   setQuery("");
@@ -407,7 +454,7 @@ export default function SidebarNav({
             ))}
             {query && visibleRecents.length === 0 && (
               <div className="sidebar-copy mx-2 px-2 py-2 text-[12.5px] text-ink-3">
-                Loyiha topilmadi
+                {copy.noProject}
               </div>
             )}
           </GlideGroup>

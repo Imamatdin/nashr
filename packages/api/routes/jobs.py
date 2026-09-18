@@ -24,7 +24,7 @@ from postgrest.exceptions import APIError
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
-from packages.core.enums import ExportFormat, GenerationPackage
+from packages.core.enums import ExportFormat, GenerationPackage, Language
 from packages.platform.credits import CreditLedger
 from packages.platform.jobs import (
     DuplicateActiveJobError,
@@ -71,7 +71,7 @@ class EnqueueRequest(BaseModel):
     # nothing, so it can no longer silently downgrade a premium project.
     package: GenerationPackage | None = None
     sources: list[SourceRef] = Field(min_length=1, max_length=_MAX_SOURCES)
-    language: str = Field(default="uz", max_length=8)
+    language: Language = Language.UZ
     formats: list[ExportFormat] | None = None
     answers: dict[str, Any] | None = None
     # The user's own framing of what they want out of these sources. Steering

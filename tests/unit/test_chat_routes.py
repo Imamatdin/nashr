@@ -330,6 +330,43 @@ async def test_user_initiated_fix_becomes_a_presentation_edit_job() -> None:
     ]
 
 
+async def test_fix_job_is_stamped_with_the_design_revision_when_one_exists() -> None:
+    harness = await _harness(script=_fix_script())
+    deck = _make_deck(title="Direct design", audience=AudienceType.UNDERGRADUATE)
+    harness.fake.seed(
+        "documents",
+        [
+            {
+                "id": "document-1",
+                "project_id": _PROJECT_ID,
+                "kind": "presentation",
+                "head_revision_id": "revision-1",
+            }
+        ],
+    )
+    harness.fake.seed(
+        "document_revisions",
+        [
+            {
+                "id": "revision-1",
+                "document_id": "document-1",
+                "content": deck.model_dump(mode="json"),
+            }
+        ],
+    )
+
+    response = await harness.client.post(
+        f"/projects/{_PROJECT_ID}/chat",
+        json={"message": "Shorten the opening title."},
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    payload = harness.queue.enqueued[0]["payload"]
+    assert payload["document_id"] == "document-1"
+    assert payload["base_revision_id"] == "revision-1"
+
+
 async def test_a_fix_turn_never_touches_the_ledger() -> None:
     harness = await _harness(script=_fix_script())
 

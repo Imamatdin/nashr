@@ -194,6 +194,8 @@ class PresentationInterviewEngine:
         self,
         questions: PresentationInterviewQuestions,
         answers: Mapping[str, str | int | bool | list[str]],
+        *,
+        language: str | Language = Language.UZ,
     ) -> PresentationInterviewAnswers:
         """Fold a dictionary of raw user answers into structured preferences."""
 
@@ -208,6 +210,7 @@ class PresentationInterviewEngine:
             claim_count=approx_claims,
             stat_count=stat_count,
             people_count=people_count,
+            language=_resolve_language(language),
         )
 
         audience = _resolve_audience(answers.get("audience"), defaults.audience)

@@ -38,31 +38,54 @@ describe("no raw machine string ever reaches a rendered surface", () => {
   });
 
   it("still produces human copy for a reason code it has never seen", () => {
-    const friendly = describeError(structured(500, { reason: "reactor_meltdown_42" }));
+    const friendly = describeError(
+      structured(500, { reason: "reactor_meltdown_42" }),
+    );
     expect(friendly.reason).toBe("reactor_meltdown_42");
     expect(friendly.message).not.toContain("reactor_meltdown_42");
     expect(friendly.action?.kind).toBe("retry");
   });
 
   it("never throws, whatever it is handed", () => {
-    for (const value of [null, undefined, 42, { nope: true }, new Error("boom")]) {
+    for (const value of [
+      null,
+      undefined,
+      42,
+      { nope: true },
+      new Error("boom"),
+    ]) {
       expect(() => describeError(value)).not.toThrow();
       expect(describeError(value).title.length).toBeGreaterThan(0);
     }
+  });
+
+  it("localizes known and generic failures without leaking Uzbek copy", () => {
+    expect(
+      describeError(new ApiError(404, "project_not_found"), "en").title,
+    ).toBe("Project not found");
+    expect(describeError(new TypeError("offline"), "ru").title).toBe(
+      "Нет подключения",
+    );
   });
 });
 
 describe("reasonOf", () => {
   it("reads a code out of a structured detail", () => {
-    expect(reasonOf(structured(409, { reason: "brain_busy" }))).toBe("brain_busy");
+    expect(reasonOf(structured(409, { reason: "brain_busy" }))).toBe(
+      "brain_busy",
+    );
   });
 
   it("accepts a bare-string detail as the code itself", () => {
-    expect(reasonOf(new ApiError(404, "project_not_found"))).toBe("project_not_found");
+    expect(reasonOf(new ApiError(404, "project_not_found"))).toBe(
+      "project_not_found",
+    );
   });
 
   it("refuses to treat prose as a code", () => {
-    expect(reasonOf(new ApiError(500, "JSON object requested, multiple rows"))).toBeNull();
+    expect(
+      reasonOf(new ApiError(500, "JSON object requested, multiple rows")),
+    ).toBeNull();
   });
 
   it("is null for anything that is not an ApiError", () => {
@@ -85,19 +108,30 @@ describe("network and timeout are not server faults", () => {
 });
 
 describe("401 sends the user to a door", () => {
-  it.each(["expired", "missing_bearer_token", "bad_signature"])("routes %s to login", (reason) => {
-    expect(describeError(new ApiError(401, reason)).action?.kind).toBe("login");
-  });
+  it.each(["expired", "missing_bearer_token", "bad_signature"])(
+    "routes %s to login",
+    (reason) => {
+      expect(describeError(new ApiError(401, reason)).action?.kind).toBe(
+        "login",
+      );
+    },
+  );
 
   it("routes an unrecognised 401 to login too", () => {
-    expect(describeError(new ApiError(401, "who knows")).action?.kind).toBe("login");
+    expect(describeError(new ApiError(401, "who knows")).action?.kind).toBe(
+      "login",
+    );
   });
 });
 
 describe("creditCopy states the actual shortfall", () => {
   it("splices in balance, required and the gap", () => {
     const friendly = creditCopy(
-      structured(402, { reason: "insufficient_balance", balance: 3_000, required: 10_000 }),
+      structured(402, {
+        reason: "insufficient_balance",
+        balance: 3_000,
+        required: 10_000,
+      }),
       soum,
     );
     expect(friendly.message).toContain("3000 so'm");
@@ -108,7 +142,10 @@ describe("creditCopy states the actual shortfall", () => {
   });
 
   it("falls back to catalog copy when the body is not the expected shape", () => {
-    const friendly = creditCopy(structured(402, { reason: "insufficient_balance" }), soum);
+    const friendly = creditCopy(
+      structured(402, { reason: "insufficient_balance" }),
+      soum,
+    );
     expect(friendly.title).toBe("Kredit yetarli emas");
     expect(friendly.message).not.toContain("undefined");
     expect(friendly.message).not.toContain("NaN");
@@ -119,7 +156,13 @@ describe("rateLimitCopy uses the 429 body instead of asserting 'tomorrow'", () =
   it("says when the limit resets", () => {
     const resets = new Date(Date.now() + 20 * 60_000).toISOString();
     const friendly = rateLimitCopy(
-      structured(429, { reason: "rate_limited", scope: "user", count: 11, limit: 10, resets_at: resets }),
+      structured(429, {
+        reason: "rate_limited",
+        scope: "user",
+        count: 11,
+        limit: 10,
+        resets_at: resets,
+      }),
     );
     expect(friendly.message).toContain("20 daqiqada");
     expect(friendly.message).toContain("10 ta");
@@ -128,7 +171,13 @@ describe("rateLimitCopy uses the 429 body instead of asserting 'tomorrow'", () =
 
   it("names the per-IP case so a shared network is not read as the user's fault", () => {
     const friendly = rateLimitCopy(
-      structured(429, { reason: "rate_limited", scope: "ip", count: 41, limit: 40, resets_at: new Date().toISOString() }),
+      structured(429, {
+        reason: "rate_limited",
+        scope: "ip",
+        count: 41,
+        limit: 40,
+        resets_at: new Date().toISOString(),
+      }),
     );
     expect(friendly.message).toContain("tarmoq");
   });
@@ -142,7 +191,10 @@ describe("rateLimitCopy uses the 429 body instead of asserting 'tomorrow'", () =
 
 describe("fieldsOf", () => {
   it("hands back the structured fields for callers that branch on them", () => {
-    expect(fieldsOf(structured(409, { reason: "fixes_exhausted", fix_limit: 2 })).fix_limit).toBe(2);
+    expect(
+      fieldsOf(structured(409, { reason: "fixes_exhausted", fix_limit: 2 }))
+        .fix_limit,
+    ).toBe(2);
   });
 
   it("is an empty object for a bare-string detail", () => {
@@ -151,12 +203,14 @@ describe("fieldsOf", () => {
 });
 
 describe("designed states are not styled as failures", () => {
-  it.each(["sources_not_ready", "brain_busy", "session_not_ready", "job_not_found"])(
-    "%s reads as information, not an error",
-    (reason) => {
-      expect(describeError(structured(409, { reason })).tone).toBe("info");
-    },
-  );
+  it.each([
+    "sources_not_ready",
+    "brain_busy",
+    "session_not_ready",
+    "job_not_found",
+  ])("%s reads as information, not an error", (reason) => {
+    expect(describeError(structured(409, { reason })).tone).toBe("info");
+  });
 });
 
 describe("describeJobFailure names the step, never the exception", () => {
@@ -166,7 +220,9 @@ describe("describeJobFailure names the step, never the exception", () => {
     );
     // Asserted against the label itself, not a retyped copy: the first version
     // of this test failed only because it used a typographic apostrophe.
-    const label = STEP_LABELS.find((e) => e.key === "Choosing design direction")!.label;
+    const label = STEP_LABELS.find(
+      (e) => e.key === "Choosing design direction",
+    )!.label;
     expect(friendly.message).toContain(label);
     // The exception itself is available, but only in the collapsible detail.
     expect(friendly.message).not.toContain("RuntimeError");

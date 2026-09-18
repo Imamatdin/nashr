@@ -3,6 +3,8 @@ import { IBM_Plex_Mono, Literata, Source_Sans_3 } from "next/font/google";
 import type { ReactNode } from "react";
 import "./globals.css";
 import { cn } from "@/lib/utils";
+import { LocaleProvider } from "@/components/locale-provider";
+import "./flexoki.css";
 
 // The only three families that exist: display serif, UI sans, machine mono.
 // Self-hosted via next/font (downloaded at build, served from our origin).
@@ -58,7 +60,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
       suppressHydrationWarning
       className={cn(literata.variable, sourceSans.variable, plexMono.variable, "font-sans")}
     >
-      <body>{children}</body>
+      <body><LocaleProvider>{children}</LocaleProvider></body>
     </html>
   );
 }

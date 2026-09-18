@@ -51,7 +51,9 @@ async function request<T>(
 ): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const headers: Record<string, string> = { ...((init.headers as Record<string, string>) ?? {}) };
+  const headers: Record<string, string> = {
+    ...((init.headers as Record<string, string>) ?? {}),
+  };
   if (token) headers.Authorization = `Bearer ${token}`;
   try {
     const response = await fetch(`${apiBase()}${path}`, {
@@ -59,7 +61,8 @@ async function request<T>(
       headers,
       signal: controller.signal,
     });
-    if (!response.ok) throw new ApiError(response.status, await readDetail(response));
+    if (!response.ok)
+      throw new ApiError(response.status, await readDetail(response));
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   } finally {
@@ -67,10 +70,18 @@ async function request<T>(
   }
 }
 
-async function postJson<T>(path: string, body: unknown, token?: string): Promise<T> {
+async function postJson<T>(
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<T> {
   return request<T>(
     path,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
     token,
   );
 }
@@ -88,13 +99,17 @@ function toSession(wire: MintedSessionWire): AppSession {
 }
 
 export async function telegramLogin(initData: string): Promise<AppSession> {
-  const wire = await postJson<MintedSessionWire>("/auth/telegram", { init_data: initData });
+  const wire = await postJson<MintedSessionWire>("/auth/telegram", {
+    init_data: initData,
+  });
   const session = toSession(wire);
   saveSession(session);
   return session;
 }
 
-export async function emailExchange(supabaseAccessToken: string): Promise<AppSession> {
+export async function emailExchange(
+  supabaseAccessToken: string,
+): Promise<AppSession> {
   const wire = await postJson<MintedSessionWire>("/auth/email/exchange", {
     supabase_access_token: supabaseAccessToken,
   });
@@ -120,7 +135,10 @@ export interface LinkTelegramResult {
  * The response re-mints the session for the SAME user; saving it keeps the
  * caller on a fresh token after the merge.
  */
-export async function linkTelegram(initData: string, token: string): Promise<LinkTelegramResult> {
+export async function linkTelegram(
+  initData: string,
+  token: string,
+): Promise<LinkTelegramResult> {
   const wire = await postJson<{ merged: boolean; session: MintedSessionWire }>(
     "/auth/link/telegram",
     { init_data: initData },
@@ -144,8 +162,254 @@ export function createProject(
   title: string,
   token: string,
   language = "uz",
+  projectType: "presentation" | "article" = "presentation",
 ): Promise<ProjectView> {
-  return postJson<ProjectView>("/projects", { title, language }, token);
+  return postJson<ProjectView>(
+    "/projects",
+    { title, language, project_type: projectType },
+    token,
+  );
+}
+
+export type ArticleBlockType = "paragraph" | "heading" | "quote" | "bullet";
+export interface ArticleCitation {
+  source_id: string;
+  claim_id: string;
+  label: string;
+}
+export interface ArticleBlock {
+  id: string;
+  type: ArticleBlockType;
+  text: string;
+  level: number | null;
+  citations: ArticleCitation[];
+}
+export interface ArticleContent {
+  kind: "article";
+  schema_version: 1;
+  title: string;
+  blocks: ArticleBlock[];
+}
+export interface ArticleDocumentView {
+  document_id: string;
+  revision_id: string;
+  content: ArticleContent;
+  updated_at: string;
+}
+export interface DocumentRevision {
+  id: string;
+  parent_revision_id: string | null;
+  created_by: string | null;
+  content_hash: string;
+  created_at: string;
+}
+
+export function initializeArticle(
+  projectId: string,
+  title: string,
+  idempotencyKey: string,
+  token: string,
+): Promise<ArticleDocumentView> {
+  return postJson<ArticleDocumentView>(
+    `/projects/${projectId}/documents/article`,
+    { title, idempotency_key: idempotencyKey },
+    token,
+  );
+}
+export function getArticle(
+  projectId: string,
+  token: string,
+): Promise<ArticleDocumentView> {
+  return getJson<ArticleDocumentView>(
+    `/projects/${projectId}/documents/article`,
+    token,
+  );
+}
+export async function downloadArticleDocx(
+  projectId: string,
+  token: string,
+): Promise<Blob> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(
+      `${apiBase()}/projects/${projectId}/documents/article/export.docx`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      },
+    );
+    if (!response.ok)
+      throw new ApiError(response.status, await readDetail(response));
+    return await response.blob();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+export function saveArticle(
+  projectId: string,
+  baseRevisionId: string,
+  content: ArticleContent,
+  idempotencyKey: string,
+  token: string,
+): Promise<ArticleDocumentView> {
+  return request<ArticleDocumentView>(
+    `/projects/${projectId}/documents/article`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        base_revision_id: baseRevisionId,
+        idempotency_key: idempotencyKey,
+        content,
+      }),
+    },
+    token,
+  );
+}
+export function getArticleRevisions(
+  projectId: string,
+  token: string,
+): Promise<{ revisions: DocumentRevision[] }> {
+  return getJson<{ revisions: DocumentRevision[] }>(
+    `/projects/${projectId}/documents/article/revisions`,
+    token,
+  );
+}
+export function restoreArticle(
+  projectId: string,
+  revisionId: string,
+  baseRevisionId: string,
+  idempotencyKey: string,
+  token: string,
+): Promise<ArticleDocumentView> {
+  return postJson<ArticleDocumentView>(
+    `/projects/${projectId}/documents/article/restore`,
+    {
+      revision_id: revisionId,
+      base_revision_id: baseRevisionId,
+      idempotency_key: idempotencyKey,
+    },
+    token,
+  );
+}
+
+export interface DesignPalette {
+  background: string;
+  surface: string;
+  text: string;
+  accent: string;
+  text_secondary: string;
+}
+export interface DesignSlideContent {
+  title: string;
+  subtitle?: string | null;
+  body_text?: string | null;
+  bullets?: string[] | null;
+  quote_text?: string | null;
+  quote_attribution?: string | null;
+  speaker_notes?: string | null;
+  stats?: Array<{ value: string; unit?: string; label: string }> | null;
+  background_url?: string | null;
+  [key: string]: unknown;
+}
+export interface DesignSlide {
+  slide_id: string;
+  slide_index: number;
+  slide_type: string;
+  content: DesignSlideContent;
+  accent_override?: string | null;
+  [key: string]: unknown;
+}
+export interface DesignDeck {
+  project_id: string;
+  title: string;
+  subtitle?: string | null;
+  language: string;
+  design: {
+    palette: DesignPalette;
+    heading_font: string;
+    body_font: string;
+    [key: string]: unknown;
+  };
+  slides: DesignSlide[];
+  [key: string]: unknown;
+}
+export interface DesignDocumentView {
+  document_id: string;
+  revision_id: string;
+  content: DesignDeck;
+  updated_at: string;
+}
+export interface DesignRenderView {
+  job_id: string;
+  status: string;
+  existing: boolean;
+}
+
+export function getDesign(
+  projectId: string,
+  token: string,
+): Promise<DesignDocumentView> {
+  return getJson<DesignDocumentView>(`/projects/${projectId}/design`, token);
+}
+export function saveDesign(
+  projectId: string,
+  baseRevisionId: string,
+  content: DesignDeck,
+  idempotencyKey: string,
+  token: string,
+): Promise<DesignDocumentView> {
+  return request<DesignDocumentView>(
+    `/projects/${projectId}/design`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        base_revision_id: baseRevisionId,
+        idempotency_key: idempotencyKey,
+        content,
+      }),
+    },
+    token,
+  );
+}
+export function getDesignRevisions(
+  projectId: string,
+  token: string,
+): Promise<{ revisions: DocumentRevision[] }> {
+  return getJson<{ revisions: DocumentRevision[] }>(
+    `/projects/${projectId}/design/revisions`,
+    token,
+  );
+}
+export function restoreDesign(
+  projectId: string,
+  revisionId: string,
+  baseRevisionId: string,
+  idempotencyKey: string,
+  token: string,
+): Promise<DesignDocumentView> {
+  return postJson<DesignDocumentView>(
+    `/projects/${projectId}/design/restore`,
+    {
+      revision_id: revisionId,
+      base_revision_id: baseRevisionId,
+      idempotency_key: idempotencyKey,
+    },
+    token,
+  );
+}
+export function renderDesign(
+  projectId: string,
+  revisionId: string,
+  token: string,
+): Promise<DesignRenderView> {
+  return postJson<DesignRenderView>(
+    `/projects/${projectId}/design/render`,
+    { revision_id: revisionId },
+    token,
+  );
 }
 
 // ----------------------------------------------------------------- sources
@@ -181,7 +445,10 @@ export function presignUpload(
 
 // The browser PUTs the bytes straight to R2 with the presigned URL; the
 // Content-Type must match what the presign signed or R2 rejects the request.
-export async function uploadToR2(presign: PresignView, file: File): Promise<void> {
+export async function uploadToR2(
+  presign: PresignView,
+  file: File,
+): Promise<void> {
   const response = await fetch(presign.upload_url, {
     method: "PUT",
     headers: { "Content-Type": presign.content_type },
@@ -280,7 +547,14 @@ export function enqueueJob(
 ): Promise<JobView> {
   return postJson<JobView>(
     "/jobs",
-    { project_id: projectId, package: packageName, sources, language, topic, answers },
+    {
+      project_id: projectId,
+      package: packageName,
+      sources,
+      language,
+      topic,
+      answers,
+    },
     token,
   );
 }
@@ -291,8 +565,14 @@ export function enqueueJob(
  * 404 means "this project has never been generated", which is a STATE, not an
  * error; callers map it to `no_job`.
  */
-export function getLatestJob(projectId: string, token: string): Promise<JobView> {
-  return getJson<JobView>(`/jobs?project_id=${encodeURIComponent(projectId)}`, token);
+export function getLatestJob(
+  projectId: string,
+  token: string,
+): Promise<JobView> {
+  return getJson<JobView>(
+    `/jobs?project_id=${encodeURIComponent(projectId)}`,
+    token,
+  );
 }
 
 export function getJob(jobId: string, token: string): Promise<JobView> {
@@ -307,7 +587,10 @@ export interface DeckAccessView {
   downloads: Array<{ format: string; url: string; expires_in: number }>;
 }
 
-export function getDeckAccess(projectId: string, token: string): Promise<DeckAccessView> {
+export function getDeckAccess(
+  projectId: string,
+  token: string,
+): Promise<DeckAccessView> {
   return getJson<DeckAccessView>(`/projects/${projectId}/deck`, token);
 }
 
@@ -338,6 +621,7 @@ export function resolveSharedDeck(shareToken: string): Promise<SharedDeckView> {
 // -------------------------------------------------------------- provenance
 
 export interface ProvenanceRow {
+  source_id?: string | null;
   claim_text: string;
   quote: string | null;
   strength: string;
@@ -350,7 +634,10 @@ export interface ProvenanceView {
   total_claims: number;
 }
 
-export function getProvenance(projectId: string, token: string): Promise<ProvenanceView> {
+export function getProvenance(
+  projectId: string,
+  token: string,
+): Promise<ProvenanceView> {
   return getJson<ProvenanceView>(`/projects/${projectId}/provenance`, token);
 }
 
@@ -385,7 +672,12 @@ export interface BalanceView {
 export interface LedgerEntryView {
   id: string;
   amount: number;
-  action: "grant_free" | "grant_paid" | "deduct_article" | "deduct_presentation" | "refund";
+  action:
+    | "grant_free"
+    | "grant_paid"
+    | "deduct_article"
+    | "deduct_presentation"
+    | "refund";
   reason: string;
   project_id: string | null;
   generation_job_id: string | null;
@@ -465,7 +757,11 @@ export function getInterview(
   token: string,
   language = "uz",
 ): Promise<InterviewView> {
-  return postJson<InterviewView>(`/projects/${projectId}/interview`, { language }, token);
+  return postJson<InterviewView>(
+    `/projects/${projectId}/interview`,
+    { language },
+    token,
+  );
 }
 
 // -------------------------------------------------------------------- chat
@@ -509,7 +805,10 @@ export interface ChatTurnView {
   fixes_remaining: number;
 }
 
-export function getChat(projectId: string, token: string): Promise<ChatHistoryView> {
+export function getChat(
+  projectId: string,
+  token: string,
+): Promise<ChatHistoryView> {
   return getJson<ChatHistoryView>(`/projects/${projectId}/chat`, token);
 }
 
@@ -527,18 +826,36 @@ export function postChat(
 ): Promise<ChatTurnView> {
   return request<ChatTurnView>(
     `/projects/${projectId}/chat`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) },
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    },
     token,
     90_000,
   );
 }
 
-export function approvePending(projectId: string, token: string): Promise<ChatTurnView> {
-  return postJson<ChatTurnView>(`/projects/${projectId}/chat/approve`, {}, token);
+export function approvePending(
+  projectId: string,
+  token: string,
+): Promise<ChatTurnView> {
+  return postJson<ChatTurnView>(
+    `/projects/${projectId}/chat/approve`,
+    {},
+    token,
+  );
 }
 
-export function rejectPending(projectId: string, token: string): Promise<ChatTurnView> {
-  return postJson<ChatTurnView>(`/projects/${projectId}/chat/reject`, {}, token);
+export function rejectPending(
+  projectId: string,
+  token: string,
+): Promise<ChatTurnView> {
+  return postJson<ChatTurnView>(
+    `/projects/${projectId}/chat/reject`,
+    {},
+    token,
+  );
 }
 
 // --------------------------------------------------------------- decisions
@@ -547,6 +864,35 @@ export interface DecisionSectionView {
   section_name: string;
   thesis: string;
   phase: string;
+}
+
+export interface ResearchPaper {
+  title: string;
+  authors: string[];
+  year: number | null;
+  abstract: string | null;
+  doi: string | null;
+  citation_count: number | null;
+  pdf_url: string | null;
+  source_api: string;
+  external_id: string;
+  journal: string | null;
+}
+export interface ResearchView {
+  papers: ResearchPaper[];
+  unavailable_providers: string[];
+  lex_uz_available: boolean;
+}
+export function searchResearch(
+  projectId: string,
+  query: string,
+  token: string,
+): Promise<ResearchView> {
+  return postJson<ResearchView>(
+    `/projects/${projectId}/research`,
+    { query },
+    token,
+  );
 }
 
 export interface DecisionsView {
@@ -588,6 +934,9 @@ export interface DecisionsView {
  * All of it has been persisted in decks.deck_json since the pipeline shipped
  * and had no read route, so the workspace could only repeat step labels (G14).
  */
-export function getDecisions(projectId: string, token: string): Promise<DecisionsView> {
+export function getDecisions(
+  projectId: string,
+  token: string,
+): Promise<DecisionsView> {
   return getJson<DecisionsView>(`/projects/${projectId}/decisions`, token);
 }

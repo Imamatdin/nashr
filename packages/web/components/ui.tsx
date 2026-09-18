@@ -6,6 +6,64 @@
 import type { LucideIcon } from "lucide-react";
 import type { ComponentPropsWithoutRef, ReactNode, RefObject } from "react";
 import { useEffect, useState } from "react";
+import { useLocale } from "./locale-provider";
+
+const UI_COPY = {
+  en: {
+    error: "Something went wrong",
+    retry: "Try again",
+    loading: "Loading",
+    status: {
+      draft: "Draft",
+      sourcing: "Sources",
+      interview: "Interview",
+      generating: "Generating",
+      ready: "Ready",
+      failed: "Failed",
+      archived: "Archived",
+      queued: "Queued",
+      processing: "Processing",
+      completed: "Ready",
+      cancelled: "Cancelled",
+    },
+  },
+  ru: {
+    error: "Что-то пошло не так",
+    retry: "Повторить",
+    loading: "Загрузка",
+    status: {
+      draft: "Черновик",
+      sourcing: "Источники",
+      interview: "Вопросы",
+      generating: "Создаётся",
+      ready: "Готово",
+      failed: "Ошибка",
+      archived: "Архив",
+      queued: "В очереди",
+      processing: "В работе",
+      completed: "Готово",
+      cancelled: "Отменено",
+    },
+  },
+  uz: {
+    error: "Nimadir xato ketdi",
+    retry: "Qayta urinish",
+    loading: "Yuklanmoqda",
+    status: {
+      draft: "Qoralama",
+      sourcing: "Manbalar",
+      interview: "Suhbat",
+      generating: "Yaratilmoqda",
+      ready: "Tayyor",
+      failed: "Xatolik",
+      archived: "Arxiv",
+      queued: "Navbatda",
+      processing: "Jarayonda",
+      completed: "Tayyor",
+      cancelled: "Bekor qilingan",
+    },
+  },
+};
 
 type ButtonVariant = "primary" | "ghost" | "danger";
 type ButtonSize = "md" | "lg";
@@ -82,7 +140,10 @@ export function DataText({
   ...rest
 }: ComponentPropsWithoutRef<"span"> & { className?: string }) {
   return (
-    <span {...rest} className={className ? `data-text ${className}` : "data-text"}>
+    <span
+      {...rest}
+      className={className ? `data-text ${className}` : "data-text"}
+    >
       {children}
     </span>
   );
@@ -114,7 +175,7 @@ export function EmptyState({
 }
 
 export function ErrorState({
-  title = "Nimadir xato ketdi",
+  title,
   message,
   onRetry,
 }: {
@@ -122,13 +183,15 @@ export function ErrorState({
   message: string;
   onRetry?: () => void;
 }) {
+  const { locale } = useLocale();
+  const t = UI_COPY[locale];
   return (
     <div className="state state-note" role="alert">
-      <h3>{title}</h3>
+      <h3>{title ?? t.error}</h3>
       <p>{message}</p>
       {onRetry && (
         <Button variant="ghost" onClick={onRetry}>
-          Qayta urinish
+          {t.retry}
         </Button>
       )}
     </div>
@@ -136,20 +199,31 @@ export function ErrorState({
 }
 
 export function Skeleton({ lines = 3 }: { lines?: number }) {
+  const { locale } = useLocale();
   return (
-    <div aria-busy="true" aria-label="Yuklanmoqda">
+    <div aria-busy="true" aria-label={UI_COPY[locale].loading}>
       {Array.from({ length: lines }, (_, index) => (
         <div
           key={index}
           className="skeleton"
-          style={{ height: "1.1rem", marginBottom: "0.8rem", width: `${100 - index * 12}%` }}
+          style={{
+            height: "1.1rem",
+            marginBottom: "0.8rem",
+            width: `${100 - index * 12}%`,
+          }}
         />
       ))}
     </div>
   );
 }
 
-export function Toast({ message, danger }: { message: string; danger?: boolean }) {
+export function Toast({
+  message,
+  danger,
+}: {
+  message: string;
+  danger?: boolean;
+}) {
   return (
     <div className={danger ? "toast toast-danger" : "toast"} role="status">
       {message}
@@ -158,25 +232,16 @@ export function Toast({ message, danger }: { message: string; danger?: boolean }
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  const label: Record<string, string> = {
-    draft: "Qoralama",
-    sourcing: "Manbalar",
-    interview: "Suhbat",
-    generating: "Yaratilmoqda",
-    ready: "Tayyor",
-    failed: "Xatolik",
-    archived: "Arxiv",
-    queued: "Navbatda",
-    processing: "Jarayonda",
-    completed: "Tayyor",
-    cancelled: "Bekor qilingan",
-  };
+  const { locale } = useLocale();
+  const label = UI_COPY[locale].status as Record<string, string>;
   const cls =
     status === "ready" || status === "completed"
       ? "badge badge-ok"
       : status === "failed" || status === "cancelled"
         ? "badge badge-danger"
-        : status === "generating" || status === "processing" || status === "queued"
+        : status === "generating" ||
+            status === "processing" ||
+            status === "queued"
           ? "badge badge-busy"
           : "badge";
   return <span className={cls}>{label[status] ?? status}</span>;
@@ -226,10 +291,16 @@ export function FileField({
         multiple={multiple}
         disabled={disabled}
         onChange={(event) =>
-          setPicked(Array.from(event.target.files ?? []).map((file) => file.name))
+          setPicked(
+            Array.from(event.target.files ?? []).map((file) => file.name),
+          )
         }
       />
-      <label htmlFor={id} className="filefield-drop" data-disabled={disabled ? "true" : undefined}>
+      <label
+        htmlFor={id}
+        className="filefield-drop"
+        data-disabled={disabled ? "true" : undefined}
+      >
         <span className="filefield-label">{label}</span>
         <span className="filefield-hint">{hint}</span>
       </label>

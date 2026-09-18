@@ -1,0 +1,57 @@
+/* Flexoki by Steph Ango: https://stephango.com/flexoki */
+:root {
+  --fx-paper: #fffcf0;
+  --fx-50: #f2f0e5;
+  --fx-100: #e6e4d9;
+  --fx-200: #cecdc3;
+  --fx-500: #878580;
+  --fx-700: #575653;
+  --fx-900: #282726;
+  --fx-ink: #100f0f;
+  --fx-red: #af3029;
+  --fx-orange: #bc5215;
+  --fx-yellow: #ad8301;
+  --fx-green: #66800b;
+  --fx-cyan: #24837b;
+  --fx-blue: #205ea6;
+  --fx-purple: #5e409d;
+  --fx-magenta: #a02f6f;
+  --fx-red-soft: #ffe1d5;
+  --fx-orange-soft: #ffe7ce;
+  --fx-yellow-soft: #faeec6;
+  --fx-green-soft: #edeecf;
+  --fx-cyan-soft: #ddf1e4;
+  --fx-blue-soft: #e1eceb;
+  --fx-purple-soft: #e8e2ee;
+  --fx-magenta-soft: #f5e2e9;
+  --fx-bg: var(--fx-paper);
+  --fx-bg-2: #fffdf7;
+  --fx-ui-2: var(--fx-200);
+  --fx-tx: var(--fx-ink);
+  --fx-tx-2: var(--fx-700);
+}
+.dark {
+  --fx-bg: var(--fx-ink);
+  --fx-bg-2: var(--fx-900);
+  --fx-ui-2: var(--fx-700);
+  --fx-tx: var(--fx-paper);
+  --fx-tx-2: var(--fx-200);
+}
+.n-language {
+  font: inherit;
+  font-size: 14px;
+  color: inherit;
+  padding: 8px 26px 8px 10px;
+  border: 1px solid var(--fx-200);
+  border-radius: 8px;
+  background: transparent;
+  max-width: 130px;
+}
+.n-language:focus-visible {
+  outline: 3px solid var(--fx-cyan);
+  outline-offset: 3px;
+}
+.dark .n-language option {
+  background: var(--fx-900);
+  color: var(--fx-paper);
+}

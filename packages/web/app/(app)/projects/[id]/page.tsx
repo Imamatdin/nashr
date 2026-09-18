@@ -22,6 +22,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { AppChrome } from "@/components/chrome";
+import { ArticleWorkspace } from "@/components/article-workspace";
+import { EvidenceMap } from "@/components/evidence-graph";
+import { useLocale } from "@/components/locale-provider";
+import { PresentationDesigner } from "@/components/presentation-designer";
+import { ResearchPanel } from "@/components/research-panel";
+import {
+  WORKSPACE_COPY,
+  type WorkspaceCopy,
+} from "@/components/workspace-copy";
 import {
   ChatThread,
   ContextCards,
@@ -97,6 +106,7 @@ import "./workspace.css";
 
 interface ProjectRow {
   id: string;
+  language?: string;
   title: string;
   status: string;
   share_token: string | null;
@@ -112,7 +122,8 @@ interface SourceRow {
   created_at?: string | null;
 }
 
-const ACCEPTED = ".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv";
+const ACCEPTED =
+  ".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.csv";
 // The deck's signed HTML URL lives 15 minutes (DECK_HTML_TTL_SECONDS). Re-mint
 // comfortably inside that so a deck left open on screen never rots (G20).
 const DECK_REFRESH_MS = 10 * 60 * 1000;
@@ -140,19 +151,24 @@ function headline(claim: string): string {
   return words.length <= 6 ? claim.trim() : `${words.slice(0, 6).join(" ")}…`;
 }
 
-function toChunk(row: ProvenanceRow, index: number): ContextChunk {
+function toChunk(
+  row: ProvenanceRow,
+  index: number,
+  copy: WorkspaceCopy,
+): ContextChunk {
   const ext = extensionOf(row.source_filename);
   // strength was dropped entirely before (G36); it is the whole point of an
   // evidence card, so it leads the meta line.
   const strength = row.strength ? row.strength.toUpperCase() : "";
-  const chunk = row.chunk_index === null ? "" : `bo‘lak ${row.chunk_index}`;
+  const chunk =
+    row.chunk_index === null ? "" : `${copy.chunk} ${row.chunk_index}`;
   return {
     key: `claim-${index}`,
     index: index + 1,
     title: headline(row.claim_text),
     meta: [strength, chunk].filter(Boolean).join(" · "),
     body: row.quote ? `${row.claim_text}\n«${row.quote}»` : row.claim_text,
-    source: row.source_filename ?? "Manba noma’lum",
+    source: row.source_filename ?? copy.sourceUnknown,
     badge: ext ? ext.toUpperCase() : "MNB",
     tone: TONE_BY_EXT[ext] ?? "orange",
   };
@@ -164,6 +180,8 @@ export default function ProjectPage() {
   const params = useParams<{ id: string }>();
   const projectId = params.id;
   const { session, withAuth } = useAppSession();
+  const { locale } = useLocale();
+  const t = WORKSPACE_COPY[locale];
 
   const [project, setProject] = useState<ProjectRow | null>(null);
   const [projectError, setProjectError] = useState<unknown>(null);
@@ -182,7 +200,10 @@ export default function ProjectPage() {
   const [chatError, setChatError] = useState<unknown>(null);
   const [optimistic, setOptimistic] = useState<ChatThreadMessage[]>([]);
 
-  const [toast, setToast] = useState<{ message: string; danger?: boolean } | null>(null);
+  const [toast, setToast] = useState<{
+    message: string;
+    danger?: boolean;
+  } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [clearSignal, setClearSignal] = useState(0);
   const [enqueueing, setEnqueueing] = useState(false);
@@ -209,14 +230,15 @@ export default function ProjectPage() {
   // ------------------------------------------------------------ deck + trail
 
   const loadDeck = useCallback(async () => {
-    const view = await withAuth((token) => getDeckAccess(projectId, token)).catch(
-      (deckError: unknown) => {
-        // 404 is "not ready yet", a wait rather than a failure (G7). The live
-        // subscription keeps listening for the decks row.
-        if (deckError instanceof ApiError && deckError.status === 404) return null;
-        throw deckError;
-      },
-    );
+    const view = await withAuth((token) =>
+      getDeckAccess(projectId, token),
+    ).catch((deckError: unknown) => {
+      // 404 is "not ready yet", a wait rather than a failure (G7). The live
+      // subscription keeps listening for the decks row.
+      if (deckError instanceof ApiError && deckError.status === 404)
+        return null;
+      throw deckError;
+    });
     setDeck(view ?? null);
   }, [projectId, withAuth]);
 
@@ -247,7 +269,13 @@ export default function ProjectPage() {
       .catch(() => undefined);
   }, [loadDeck, loadProvenance, loadDecisions, projectId, withAuth]);
 
-  const { job, state: jobState, error: jobError, live, refresh } = useLiveJob({
+  const {
+    job,
+    state: jobState,
+    error: jobError,
+    live,
+    refresh,
+  } = useLiveJob({
     projectId,
     session,
     withAuth,
@@ -342,7 +370,8 @@ export default function ProjectPage() {
   // ------------------------------------------------------------------ state
 
   const workspace = useMemo(
-    () => deriveWorkspaceState(project, job, deck !== null, jobState !== "loading"),
+    () =>
+      deriveWorkspaceState(project, job, deck !== null, jobState !== "loading"),
     [project, job, deck, jobState],
   );
 
@@ -354,7 +383,9 @@ export default function ProjectPage() {
   }, [job?.package, project?.package_tier]);
 
   const priced = useMemo(() => {
-    const entry = pricing?.packages.find((p) => p.package === (job?.package ?? tier.id));
+    const entry = pricing?.packages.find(
+      (p) => p.package === (job?.package ?? tier.id),
+    );
     return {
       price: job?.deducted_amount ?? entry?.price ?? tier.price,
       images: entry?.ai_images ?? null,
@@ -365,8 +396,10 @@ export default function ProjectPage() {
   const activePane: Pane = pane ?? (deck !== null ? "deck" : "chat");
 
   const progress = job?.progress ?? {};
-  const steps = stepStates(progress, job?.status ?? "queued");
-  const activeIndex = steps.findIndex((s) => s.state === "running" || s.state === "failed");
+  const steps = stepStates(progress, job?.status ?? "queued", locale);
+  const activeIndex = steps.findIndex(
+    (s) => s.state === "running" || s.state === "failed",
+  );
   const taskRows: TaskRow[] = steps.map((entry, index) => ({
     key: entry.key,
     index: index + 1,
@@ -383,7 +416,7 @@ export default function ProjectPage() {
   async function onUpload() {
     const file = fileInput.current?.files?.[0];
     if (!file) {
-      notify("Avval fayl tanlang", true);
+      notify(t.chooseFirst, true);
       return;
     }
     setUploading(true);
@@ -393,13 +426,15 @@ export default function ProjectPage() {
       );
       if (!presign) return;
       await uploadToR2(presign, file);
-      await withAuth((token) => registerSource(projectId, presign.storage_key, file.name, token));
+      await withAuth((token) =>
+        registerSource(projectId, presign.storage_key, file.name, token),
+      );
       if (fileInput.current) fileInput.current.value = "";
       setClearSignal((v) => v + 1);
-      notify(`${file.name} yuklandi`);
+      notify(t.uploaded(file.name));
       refreshSources();
     } catch (uploadError) {
-      notify(describeError(uploadError).message, true);
+      notify(describeError(uploadError, locale).message, true);
     } finally {
       setUploading(false);
     }
@@ -413,15 +448,20 @@ export default function ProjectPage() {
       const view = await withAuth((token) =>
         enqueueJob(
           projectId,
-          sources.map((s) => ({ storage_key: s.storage_key, filename: s.filename })),
+          sources.map((s) => ({
+            storage_key: s.storage_key,
+            filename: s.filename,
+          })),
           token,
+          undefined,
+          project?.language ?? "uz",
         ),
       );
       if (!view) return;
       // Typed since P2 and never read until now (G23): the server deduped, so
       // the deduction was refunded and this is the RUNNING job, not a new one.
       if (view.existing) {
-        notify("Bu loyiha allaqachon yaratilmoqda — hisobdan qayta yechilmadi.");
+        notify(t.duplicateRun);
       }
       refresh();
     } catch (error) {
@@ -439,15 +479,19 @@ export default function ProjectPage() {
     setTurnBusy(true);
     // Echo the user's own words immediately; the server thread replaces this
     // on the next read.
-    setOptimistic([{ key: `local-${Date.now()}`, role: "user", text: message }]);
+    setOptimistic([
+      { key: `local-${Date.now()}`, role: "user", text: message },
+    ]);
     try {
-      const turn = await withAuth((token) => postChat(projectId, message, token));
+      const turn = await withAuth((token) =>
+        postChat(projectId, message, token),
+      );
       if (!turn) return;
       const view = await withAuth((token) => getChat(projectId, token));
       if (view) setChat(view);
       setOptimistic([]);
       if (turn.kind === "fix_ready") {
-        notify("Tahrir qo‘llanmoqda — taqdimot qayta yig‘ilmoqda.");
+        notify(t.fixStarting);
         refresh();
       }
     } catch (error) {
@@ -464,7 +508,9 @@ export default function ProjectPage() {
     setChatError(null);
     try {
       const turn = await withAuth((token) =>
-        approve ? approvePending(projectId, token) : rejectPending(projectId, token),
+        approve
+          ? approvePending(projectId, token)
+          : rejectPending(projectId, token),
       );
       if (!turn) return;
       const view = await withAuth((token) => getChat(projectId, token));
@@ -479,27 +525,29 @@ export default function ProjectPage() {
 
   async function onShare(action: "enable" | "rotate" | "disable") {
     try {
-      const view = await withAuth((token) => manageShare(projectId, action, token));
+      const view = await withAuth((token) =>
+        manageShare(projectId, action, token),
+      );
       if (!view) return;
       setShareToken(view.share_token);
       notify(
         action === "disable"
-          ? "Havola o‘chirildi"
+          ? t.shareDisabled
           : action === "rotate"
-            ? "Yangi havola yaratildi. Eskisi bekor bo‘ldi."
-            : "Ommaviy havola yoqildi",
+            ? t.shareRotated
+            : t.shareEnabled,
       );
     } catch (error) {
-      notify(describeError(error).message, true);
+      notify(describeError(error, locale).message, true);
     }
   }
 
   async function copyShareUrl(url: string) {
     try {
       await navigator.clipboard.writeText(url);
-      notify("Havola nusxalandi");
+      notify(t.shareCopied);
     } catch {
-      notify("Nusxalab bo‘lmadi. Havolani qo‘lda belgilang.", true);
+      notify(t.shareCopyFailed, true);
     }
   }
 
@@ -511,7 +559,7 @@ export default function ProjectPage() {
   // ---------------------------------------------------------------- render
 
   if (projectError) {
-    const friendly = describeError(projectError);
+    const friendly = describeError(projectError, locale);
     return (
       <AppChrome active="projects">
         <ErrorState
@@ -521,9 +569,65 @@ export default function ProjectPage() {
         />
         {friendly.action?.kind === "back" && (
           <p className="ws-fine ws-center">
-            <Link href="/projects">Loyihalarga qaytish</Link>
+            <Link href="/projects">{t.backProjects}</Link>
           </p>
         )}
+      </AppChrome>
+    );
+  }
+
+  if (project?.type === "article") {
+    const sourcePanel = (
+      <section className="article-source-card" aria-label={t.sourceLabel}>
+        <header>
+          <strong>{t.sourceTitle}</strong>
+          <span>{sources?.length ?? 0}</span>
+        </header>
+        {sourcesError !== null && (
+          <InlineError error={sourcesError} onRetry={refreshSources} />
+        )}
+        {sources === null && !sourcesError && (
+          <div className="skeleton ws-row-skeleton" />
+        )}
+        {sources !== null && sources.length === 0 && <p>{t.sourceEmpty}</p>}
+        {sources !== null && sources.length > 0 && (
+          <ul>
+            {sources.map((source) => (
+              <li key={source.id}>
+                <span>{source.file_type.toUpperCase()}</span>
+                <strong>{source.filename}</strong>
+              </li>
+            ))}
+          </ul>
+        )}
+        <FileField
+          inputRef={fileInput}
+          id="article-source-file"
+          name="article-source-file"
+          accept={ACCEPTED}
+          disabled={uploading}
+          clearSignal={clearSignal}
+          label={t.sourceChoose}
+          hint={t.sourceHint}
+        />
+        <Button
+          variant="ghost"
+          onClick={() => void onUpload()}
+          loading={uploading}
+        >
+          {uploading ? t.sourceUploading : t.sourceUpload}
+        </Button>
+      </section>
+    );
+    return (
+      <AppChrome active="projects">
+        <ArticleWorkspace
+          projectId={projectId}
+          title={project.title}
+          sourcePanel={sourcePanel}
+          evidenceRows={provenance?.rows ?? []}
+        />
+        {toast && <Toast message={toast.message} danger={toast.danger} />}
       </AppChrome>
     );
   }
@@ -540,22 +644,22 @@ export default function ProjectPage() {
   const chatDisabledReason = (() => {
     if (workspace.kind === "ready" || chat?.can_edit) return null;
     if (workspace.kind === "processing" || workspace.kind === "queued") {
-      return "Taqdimot tayyor bo‘lgach, shu yerda uni tahrirlaysiz.";
+      return t.chatDisabledRunning;
     }
-    return "Suhbat taqdimot tayyor bo‘lgandan keyin ochiladi — u tayyor slaydlar ustida ishlaydi.";
+    return t.chatDisabledEmpty;
   })();
 
   const fixesLeft = chat ? chat.fixes_remaining : (priced.fixes ?? null);
 
   const chatFooter = (
     <>
-      {chatError !== null && <InlineError error={chatError} onRetry={() => setChatError(null)} />}
-      {chat?.applying_job_id && (
-        <p className="ws-fine">Tahrir qo‘llanmoqda — bir necha daqiqa.</p>
+      {chatError !== null && (
+        <InlineError error={chatError} onRetry={() => setChatError(null)} />
       )}
+      {chat?.applying_job_id && <p className="ws-fine">{t.fixApplying}</p>}
       {!chatDisabledReason && fixesLeft !== null && (
         <p className="ws-fine">
-          Qolgan tahrirlar: <DataText>{fixesLeft}</DataText>
+          {t.fixesRemaining}: <DataText>{fixesLeft}</DataText>
           {chat && ` / ${chat.fix_limit}`}
         </p>
       )}
@@ -568,66 +672,59 @@ export default function ProjectPage() {
         <InlineError
           error={jobError}
           onRetry={refresh}
-          note={live ? undefined : "Holat yangilanmayapti — qayta ulanmoqda."}
-        />
-      )}
-
-      {workspace.kind === "article_project" && (
-        <EmptyState
-          title="Maqola — tez kunda"
-          hint="Bu loyiha maqola sifatida boshlangan. Maqola muharriri hali web’da ochilmagan; hozircha uni Telegram botda davom ettirasiz."
+          note={live ? undefined : t.reconnecting}
         />
       )}
 
       {workspace.kind === "archived" && (
-        <EmptyState
-          title="Arxivlangan loyiha"
-          hint="Bu loyiha arxivda. Uni ko‘rish mumkin, lekin yangi generatsiya boshlanmaydi."
-        />
+        <EmptyState title={t.archivedTitle} hint={t.archivedHint} />
       )}
 
       {workspace.kind === "no_job" && (
         <div className="ws-start">
-          <p className="ws-lede">
-            Manbalar tayyor bo‘lgach, taqdimotni buyurtma qiling. Odatda 3-6 daqiqa davom
-            etadi.
-          </p>
+          <p className="ws-lede">{t.startLead}</p>
           <Button
             size="lg"
             onClick={() => void onEnqueue()}
             loading={enqueueing}
             disabled={!sources || sources.length === 0}
           >
-            Taqdimot yaratish
+            {t.createPresentation}
           </Button>
           <p className="ws-fine">
-            Hisobdan {tier.name} paketi yechiladi: <DataText>{soum(priced.price)}</DataText>.
-            Muvaffaqiyatsiz bo‘lsa avtomatik qaytariladi.
+            {t.charge(t.packageNames[tier.id], soum(priced.price))}
           </p>
           {sources !== null && sources.length === 0 && (
-            <p className="ws-fine">Kamida bitta manba kerak — quyida yuklang.</p>
+            <p className="ws-fine">{t.needsSource}</p>
           )}
         </div>
       )}
 
       {workspace.kind === "queued" && (
         <div className="ws-wait">
-          <LoadingState label="Navbatda" startedAt={startedAtMs(job)} />
-          <p className="ws-fine">Ish navbatga qo‘yildi. Birinchi bosqich boshlanmoqda.</p>
+          <LoadingState label={t.queued} startedAt={startedAtMs(job)} />
+          <p className="ws-fine">{t.queuedHint}</p>
         </div>
       )}
 
       {workspace.kind === "processing" && (
         <div className="ws-live">
-          <StreamingText text={steps[activeIndex]?.label ?? "Ishlanmoqda"} active fill />
+          <StreamingText
+            text={steps[activeIndex]?.label ?? t.working}
+            active
+            fill
+          />
           <p className="ws-fine">
-            {elapsed !== null && <>Ketgan vaqt: <DataText>{formatElapsed(elapsed)}</DataText></>}
-            {live ? " · jonli" : " · yangilanmoqda"}
+            {elapsed !== null && (
+              <>
+                {t.elapsed}: <DataText>{formatElapsed(elapsed)}</DataText>
+              </>
+            )}
+            {live ? ` · ${t.live}` : ` · ${t.refreshing}`}
           </p>
           {stalled && (
             <div className="ws-stall" role="status">
-              Ish 45 soniyadan beri javob bermayapti. Odatda o‘zi tiklanadi — tiklanmasa,
-              kredit avtomatik qaytariladi.
+              {t.stalled}
             </div>
           )}
         </div>
@@ -641,13 +738,15 @@ export default function ProjectPage() {
 
       {workspace.kind === "failed" && job && (
         <div className="ws-failed">
-          <p className="ws-failed-note">{describeJobFailure(job.error_message).message}</p>
+          <p className="ws-failed-note">
+            {describeJobFailure(job.error_message, locale).message}
+          </p>
           {/* The refund is a FACT off the job-stamped ledger row, not a guess.
               When it is false we say nothing rather than asserting a negative:
               jobs that failed before the stamp existed carry no evidence. */}
           {job.refunded && (
             <p className="ws-fine">
-              Kredit qaytarildi
+              {t.refunded}
               {job.deducted_amount ? (
                 <>
                   : <DataText>{soum(job.deducted_amount)}</DataText>
@@ -658,24 +757,25 @@ export default function ProjectPage() {
           )}
           {job.error_message && (
             <details className="ws-detail">
-              <summary>Texnik tafsilot</summary>
+              <summary>{t.technical}</summary>
               <code>{job.error_message}</code>
             </details>
           )}
-          <Button variant="ghost" onClick={() => void onEnqueue()} loading={enqueueing}>
-            Qaytadan boshlash — <DataText>{soum(priced.price)}</DataText>
+          <Button
+            variant="ghost"
+            onClick={() => void onEnqueue()}
+            loading={enqueueing}
+          >
+            {t.restart} — <DataText>{soum(priced.price)}</DataText>
           </Button>
-          <p className="ws-fine">
-            Bu yangi generatsiya: jarayon birinchi bosqichdan boshlanadi va hisobdan qayta
-            yechiladi.
-          </p>
+          <p className="ws-fine">{t.restartHint}</p>
         </div>
       )}
 
       {workspace.kind === "completed_no_deck" && (
         <div className="ws-wait">
-          <LoadingState label="Fayllar tayyorlanmoqda" startedAt={startedAtMs(job)} />
-          <p className="ws-fine">Taqdimot yig‘ildi — fayllar hozir joylanmoqda.</p>
+          <LoadingState label={t.preparingFiles} startedAt={startedAtMs(job)} />
+          <p className="ws-fine">{t.preparingFilesHint}</p>
         </div>
       )}
 
@@ -692,9 +792,12 @@ export default function ProjectPage() {
         <div className="ws-trace">
           <ThinkingState
             working={workspace.kind === "processing"}
-            activeLabel="Jarayon tafsiloti"
-            doneLabel="Jarayon tafsiloti"
-            rows={steps.map((entry) => ({ primary: entry.label, secondary: entry.meta }))}
+            activeLabel={t.processDetails}
+            doneLabel={t.processDetails}
+            rows={steps.map((entry) => ({
+              primary: entry.label,
+              secondary: entry.meta,
+            }))}
             visible={
               workspace.kind === "failed"
                 ? Math.max(activeIndex, 0)
@@ -713,48 +816,17 @@ export default function ProjectPage() {
   const artifactPanel = (
     <>
       {deck ? (
-        <>
-          <div className="ws-deck-bar">
-            <div className="ws-actions">
-              {deck.downloads.map((download) => (
-                <a
-                  key={download.format}
-                  href={download.url}
-                  download
-                  className="btn btn-ghost ws-download"
-                >
-                  <span className="btn-label">{download.format.toUpperCase()}</span>
-                </a>
-              ))}
-              <a
-                href={deck.html_url}
-                target="_blank"
-                rel="noreferrer"
-                className="btn btn-ghost ws-download"
-              >
-                <span className="btn-label">To‘liq ekran</span>
-              </a>
-            </div>
-          </div>
-          <div className="ws-deck">
-            <iframe
-              src={deck.html_url}
-              sandbox="allow-scripts"
-              title="Taqdimot"
-              // Opportunistic only: an iframe does not fire onError for an
-              // HTTP error inside it (R2 serves its own body and the frame
-              // counts as loaded). The DECK_REFRESH_MS interval above is what
-              // actually keeps the signed URL from rotting (G20).
-              onError={() => void loadDeck()}
-            />
-          </div>
-        </>
+        <PresentationDesigner
+          projectId={projectId}
+          deck={deck}
+          onRendered={onDeckChanged}
+        />
       ) : (
         <div className="ws-deck-blank">
           {workspace.kind === "processing" || workspace.kind === "queued" ? (
-            <p>Taqdimot shu yerda paydo bo‘ladi.</p>
+            <p>{t.deckAppears}</p>
           ) : (
-            <p>Hali taqdimot yo‘q.</p>
+            <p>{t.noDeck}</p>
           )}
         </div>
       )}
@@ -771,13 +843,24 @@ export default function ProjectPage() {
             <>
               <div className="ws-head-line">
                 <h1 className="ws-title">{project.title}</h1>
-                <StatusBadge status={badgeStatusFor(workspace.kind, project.status)} />
+                <StatusBadge
+                  status={badgeStatusFor(workspace.kind, project.status)}
+                />
               </div>
               <p className="ws-meta">
-                {tier.name} · <DataText>{soum(priced.price)}</DataText>
-                {priced.images !== null && <> · {priced.images} AI rasm</>}
+                {t.packageNames[tier.id]} ·{" "}
+                <DataText>{soum(priced.price)}</DataText>
+                {priced.images !== null && (
+                  <>
+                    {" "}
+                    · {priced.images} {t.aiImages}
+                  </>
+                )}
                 {elapsed !== null && workspace.kind === "ready" && (
-                  <> · <DataText>{formatElapsed(elapsed)}</DataText> ichida tayyorlandi</>
+                  <>
+                    {" "}
+                    · <DataText>{formatElapsed(elapsed)}</DataText> {t.readyIn}
+                  </>
                 )}
               </p>
             </>
@@ -791,7 +874,7 @@ export default function ProjectPage() {
             aria-selected={activePane === "chat"}
             onClick={() => setPane("chat")}
           >
-            Suhbat
+            {t.chat}
           </button>
           <button
             type="button"
@@ -799,12 +882,12 @@ export default function ProjectPage() {
             aria-selected={activePane === "deck"}
             onClick={() => setPane("deck")}
           >
-            Taqdimot
+            {t.presentation}
           </button>
         </div>
 
         <div className="ws-split" data-pane={activePane}>
-          <section className="ws-rail" aria-label="Suhbat va jarayon">
+          <section className="ws-rail" aria-label={t.railLabel}>
             <div className="ws-run">{runPanel}</div>
             <ChatThread
               messages={messages}
@@ -818,31 +901,47 @@ export default function ProjectPage() {
               onReject={() => void onDecision(false)}
               approving={approving}
               footer={chatFooter}
+              copy={{
+                placeholder: t.chatPlaceholder,
+                emptyTitle: t.chatEmptyTitle,
+                emptyHint: t.chatEmptyHint,
+                approvalLabel: t.approvalLabel,
+                approvalTitle: t.approvalTitle,
+                approve: t.approve,
+                reject: t.reject,
+                messageLabel: t.messageLabel,
+                sendLabel: t.sendLabel,
+              }}
             />
           </section>
 
-          <section className="ws-stage" aria-label="Taqdimot">
+          <section className="ws-stage" aria-label={t.presentation}>
             {artifactPanel}
 
             <details className="ws-drawer">
-              <summary>Manbalar {sources ? `· ${sources.length}` : ""}</summary>
+              <summary>
+                {t.sourceTitle} {sources ? `· ${sources.length}` : ""}
+              </summary>
               <div className="ws-drawer-body">
                 {sourcesError !== null && (
                   <InlineError error={sourcesError} onRetry={refreshSources} />
                 )}
-                {sources === null && !sourcesError && <div className="skeleton ws-row-skeleton" />}
+                {sources === null && !sourcesError && (
+                  <div className="skeleton ws-row-skeleton" />
+                )}
                 {sources !== null && sources.length === 0 && (
-                  <EmptyState
-                    title="Manba yuklanmagan"
-                    hint="Taqdimot faqat siz yuklagan fayllardagi faktlarga tayanadi. PDF, DOCX yoki PPTX yuklang (maks. 20 MB)."
-                  />
+                  <EmptyState title={t.noSourceTitle} hint={t.noSourceHint} />
                 )}
                 {sources !== null && sources.length > 0 && (
                   <ul className="ws-sources">
                     {sources.map((source) => (
                       <li key={source.id} className="ws-source">
-                        <span className="ws-source-badge">{source.file_type.toUpperCase()}</span>
-                        <span className="ws-source-name">{source.filename}</span>
+                        <span className="ws-source-badge">
+                          {source.file_type.toUpperCase()}
+                        </span>
+                        <span className="ws-source-name">
+                          {source.filename}
+                        </span>
                       </li>
                     ))}
                   </ul>
@@ -851,10 +950,7 @@ export default function ProjectPage() {
                   // G34: a file added after delivery changes nothing until a
                   // re-run, and saying so is the difference between a quiet
                   // no-op and an honest one.
-                  <p className="ws-fine">
-                    Taqdimot shu manbalar asosida yig‘ilgan. Yangi fayl qo‘shsangiz, uni
-                    qo‘shish uchun qaytadan yaratish kerak.
-                  </p>
+                  <p className="ws-fine">{t.sourceSnapshot}</p>
                 )}
                 <div className="ws-upload">
                   <FileField
@@ -864,11 +960,15 @@ export default function ProjectPage() {
                     accept={ACCEPTED}
                     disabled={uploading}
                     clearSignal={clearSignal}
-                    label="Fayl tanlash"
-                    hint="PDF, DOCX, PPTX. Maks. 20 MB."
+                    label={t.sourceChoose}
+                    hint={t.sourceHint}
                   />
-                  <Button variant="ghost" onClick={() => void onUpload()} loading={uploading}>
-                    {uploading ? "Yuklanmoqda" : "Yuklash"}
+                  <Button
+                    variant="ghost"
+                    onClick={() => void onUpload()}
+                    loading={uploading}
+                  >
+                    {uploading ? t.sourceUploading : t.upload}
                   </Button>
                 </div>
               </div>
@@ -876,36 +976,45 @@ export default function ProjectPage() {
 
             {deck && (
               <details className="ws-drawer">
-                <summary>Ulashish</summary>
+                <summary>{t.sharing}</summary>
                 <div className="ws-drawer-body">
                   {shareUrl ? (
                     <div className="ws-share">
-                      <a className="ws-share-url" href={shareUrl} target="_blank" rel="noreferrer">
+                      <a
+                        className="ws-share-url"
+                        href={shareUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
                         {shareUrl}
                       </a>
-                      <p className="ws-fine">
-                        Havola siz o‘chirmaguningizcha ishlaydi. Yangilasangiz, eskisi darhol
-                        bekor bo‘ladi.
-                      </p>
+                      <p className="ws-fine">{t.shareActiveHint}</p>
                       <div className="ws-actions">
-                        <Button variant="ghost" onClick={() => void copyShareUrl(shareUrl)}>
-                          Nusxalash
+                        <Button
+                          variant="ghost"
+                          onClick={() => void copyShareUrl(shareUrl)}
+                        >
+                          {t.copy}
                         </Button>
-                        <Button variant="ghost" onClick={() => void onShare("rotate")}>
-                          Havolani yangilash
+                        <Button
+                          variant="ghost"
+                          onClick={() => void onShare("rotate")}
+                        >
+                          {t.rotateLink}
                         </Button>
-                        <Button variant="danger" onClick={() => void onShare("disable")}>
-                          O‘chirish
+                        <Button
+                          variant="danger"
+                          onClick={() => void onShare("disable")}
+                        >
+                          {t.disable}
                         </Button>
                       </div>
                     </div>
                   ) : (
                     <div className="ws-share">
-                      <p className="ws-lede">
-                        Ommaviy havola taqdimotni istalgan kishiga, kirmasdan, ko‘rsatadi.
-                      </p>
+                      <p className="ws-lede">{t.shareLead}</p>
                       <Button onClick={() => void onShare("enable")}>
-                        Ommaviy havola yaratish
+                        {t.createShare}
                       </Button>
                     </div>
                   )}
@@ -915,14 +1024,14 @@ export default function ProjectPage() {
 
             {decisions !== null && (
               <details className="ws-drawer">
-                <summary>Nima qaror qilindi</summary>
+                <summary>{t.decisions}</summary>
                 <div className="ws-drawer-body">
                   {hasArgument(decisions) ? (
                     <>
                       <p className="ws-decide-thesis">{decisions.thesis}</p>
                       {decisions.audience_takeaway !== null && (
                         <p className="ws-fine">
-                          Tinglovchi nima bilan chiqadi: {decisions.audience_takeaway}
+                          {t.audienceTakeaway}: {decisions.audience_takeaway}
                         </p>
                       )}
                       <ol className="ws-decide-sections">
@@ -931,24 +1040,28 @@ export default function ProjectPage() {
                             <span className="ws-decide-section-name">
                               {section.section_name}
                             </span>
-                            <span className="ws-decide-phase">{phaseLabel(section.phase)}</span>
-                            <span className="ws-decide-section-thesis">{section.thesis}</span>
+                            <span className="ws-decide-phase">
+                              {phaseLabel(section.phase, locale)}
+                            </span>
+                            <span className="ws-decide-section-thesis">
+                              {section.thesis}
+                            </span>
                           </li>
                         ))}
                       </ol>
                     </>
                   ) : (
-                    <p className="ws-fine">
-                      Bu taqdimot reja mexanizmi joriy qilinishidan oldin yaratilgan, shuning
-                      uchun uning yozma argumenti saqlanmagan. Dizayn va slaydlar ro‘yxati
-                      quyida.
-                    </p>
+                    <p className="ws-fine">{t.legacyPlan}</p>
                   )}
 
                   <div className="ws-decide-look">
-                    <div className="ws-swatches" aria-label="Rang palitrasi">
-                      {swatches(decisions).map((swatch) => (
-                        <span key={swatch.name} className="ws-swatch" title={`${swatch.name} ${swatch.hex}`}>
+                    <div className="ws-swatches" aria-label={t.palette}>
+                      {swatches(decisions, locale).map((swatch) => (
+                        <span
+                          key={swatch.name}
+                          className="ws-swatch"
+                          title={`${swatch.name} ${swatch.hex}`}
+                        >
                           <span
                             className="ws-swatch-chip"
                             style={{ background: swatch.hex }}
@@ -959,7 +1072,8 @@ export default function ProjectPage() {
                       ))}
                     </div>
                     <p className="ws-fine">
-                      {moodLabel(decisions.mood)} · {backgroundLabel(decisions.background_treatment)}{" "}
+                      {moodLabel(decisions.mood, locale)} ·{" "}
+                      {backgroundLabel(decisions.background_treatment, locale)}{" "}
                       · {decisions.heading_font} / {decisions.body_font}
                     </p>
                     {decisions.image_cohesion_note !== null && (
@@ -968,22 +1082,21 @@ export default function ProjectPage() {
                   </div>
 
                   <dl className="ws-decide-facts">
-                    {decidedFor(decisions).map((fact) => (
+                    {decidedFor(decisions, locale).map((fact) => (
                       <div key={fact.label}>
                         <dt>{fact.label}</dt>
                         <dd>{fact.value}</dd>
                       </div>
                     ))}
                   </dl>
-                  <p className="ws-fine">
-                    Savollarga javob bermagan bo‘lsangiz, bu tanlovlarni manbalaringiz
-                    asosida Nashr o‘zi qildi.
-                  </p>
+                  <p className="ws-fine">{t.defaultDecisions}</p>
 
                   <ol className="ws-decide-roster">
                     {decisions.slides.map((slide) => (
                       <li key={slide.slide_id}>
-                        <span className="ws-decide-num data-text">{slide.slide_number}</span>
+                        <span className="ws-decide-num data-text">
+                          {slide.slide_number}
+                        </span>
                         <span>{slide.title}</span>
                       </li>
                     ))}
@@ -992,30 +1105,38 @@ export default function ProjectPage() {
               </details>
             )}
 
+            <ResearchPanel projectId={projectId} />
             <details className="ws-drawer">
               <summary>
-                Dalillar {provenance ? `· ${provenance.total_claims}` : ""}
+                {t.evidence} {provenance ? `· ${provenance.total_claims}` : ""}
               </summary>
               <div className="ws-drawer-body">
-                {provenance === null && <div className="skeleton ws-row-skeleton" />}
+                {provenance === null && (
+                  <div className="skeleton ws-row-skeleton" />
+                )}
                 {provenance !== null && provenance.rows.length === 0 && (
                   // The core promise must not vanish when it is empty (G36).
                   <EmptyState
-                    title="Dalil topilmadi"
-                    hint="Bu taqdimot uchun manbalardan da’vo ajratilmagan. Matnli PDF yoki DOCX yuklasangiz, dalillar shu yerda ko‘rinadi."
+                    title={t.noEvidenceTitle}
+                    hint={t.noEvidenceHint}
                   />
                 )}
                 {provenance !== null && provenance.rows.length > 0 && (
                   <>
+                    <EvidenceMap rows={provenance.rows} />
                     <ContextCards
-                      title="Dalillar"
+                      title={t.evidence}
                       count={provenance.total_claims}
-                      chunks={provenance.rows.map(toChunk)}
+                      chunks={provenance.rows.map((row, index) =>
+                        toChunk(row, index, t),
+                      )}
                     />
                     {provenance.total_claims > provenance.rows.length && (
                       <p className="ws-fine">
-                        {provenance.total_claims} ta da’vodan birinchi{" "}
-                        <DataText>{provenance.rows.length}</DataText> tasi ko‘rsatilgan.
+                        {t.evidenceShown(
+                          provenance.total_claims,
+                          provenance.rows.length,
+                        )}
                       </p>
                     )}
                   </>
@@ -1050,13 +1171,15 @@ function InlineError({
   money?: boolean;
   rate?: boolean;
 }) {
+  const { locale } = useLocale();
+  const t = WORKSPACE_COPY[locale];
   const reason = reasonOf(error);
   const friendly =
     money && reason === "insufficient_balance"
-      ? creditCopy(error, soum)
+      ? creditCopy(error, soum, locale)
       : rate && reason === "rate_limited"
-        ? rateLimitCopy(error)
-        : describeError(error);
+        ? rateLimitCopy(error, locale)
+        : describeError(error, locale);
 
   return (
     <div className="ws-inline-error" data-tone={friendly.tone} role="alert">
@@ -1065,22 +1188,22 @@ function InlineError({
       {note && <p className="ws-fine">{note}</p>}
       {friendly.action?.kind === "topup" && (
         <p className="ws-fine">
-          To‘lov hozircha Telegram botda:{" "}
+          {t.topUp}{" "}
           <a href="https://t.me/nashr_ai_bot" target="_blank" rel="noreferrer">
-            botni ochish
+            {t.openBot}
           </a>
         </p>
       )}
       <div className="ws-inline-actions">
         {onRetry && friendly.action?.kind !== "topup" && (
           <Button variant="ghost" onClick={onRetry}>
-            {friendly.action?.label ?? "Qayta urinish"}
+            {friendly.action?.label ?? t.retry}
           </Button>
         )}
       </div>
       {friendly.detail && (
         <details className="ws-detail">
-          <summary>Texnik tafsilot</summary>
+          <summary>{t.technical}</summary>
           <code>{friendly.detail}</code>
         </details>
       )}

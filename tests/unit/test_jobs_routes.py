@@ -232,6 +232,44 @@ async def test_enqueue_requires_auth() -> None:
     assert response.status_code == 401
 
 
+async def test_research_requires_auth() -> None:
+    """Research must not spend upstream quota for unauthenticated callers."""
+    client, _db, _credits, _queue, limiter = _client()
+    response = await client.post(f"/projects/{_PROJECT_ID}/research", json={"query": "education"})
+    assert response.status_code == 401
+    assert limiter.calls == []
+
+
+async def test_research_non_owner_is_rejected_before_search() -> None:
+    """A project lookup cannot expose another user's research surface."""
+    client, db, _credits, _queue, limiter = _client()
+    db.project_owner = str(uuid4())
+    response = await client.post(
+        f"/projects/{_PROJECT_ID}/research", json={"query": "education"}, headers=_headers()
+    )
+    assert response.status_code == 404
+    assert limiter.calls == []
+
+
+async def test_research_rate_limit_is_enforced_before_search() -> None:
+    """The dedicated research allowance is checked before querying providers."""
+    client, _db, _credits, _queue, limiter = _client()
+    limiter.allowed = False
+    response = await client.post(
+        f"/projects/{_PROJECT_ID}/research", json={"query": "education"}, headers=_headers()
+    )
+    assert response.status_code == 429
+    assert limiter.calls[0]["action"] == "research"
+
+
+async def test_invalid_output_language_is_rejected() -> None:
+    """Unknown language strings cannot silently select a generator default."""
+    client, _db, _credits, _queue, limiter = _client()
+    response = await client.post("/jobs", json=_body(language="unknown"), headers=_headers())
+    assert response.status_code == 422
+    assert limiter.calls == []
+
+
 async def test_over_cap_rejected_visibly_before_any_spend() -> None:
     client, _db, credits, queue, limiter = _client()
     limiter.allowed = False

@@ -230,6 +230,38 @@ async def test_create_then_load_session_reconstructs() -> None:
     assert session.sources.warnings == ["one source skipped"]
 
 
+async def test_session_load_prefers_versioned_presentation_document() -> None:
+    db, fake, deck, _sources = await _provision()
+    edited = deck.model_copy(update={"title": "Edited in the design workspace"})
+    fake.seed(
+        "documents",
+        [
+            {
+                "id": "document-1",
+                "project_id": "proj-1",
+                "kind": "presentation",
+                "head_revision_id": "revision-1",
+            }
+        ],
+    )
+    fake.seed(
+        "document_revisions",
+        [
+            {
+                "id": "revision-1",
+                "document_id": "document-1",
+                "content": edited.model_dump(mode="json"),
+            }
+        ],
+    )
+
+    session = await load_session(db, "proj-1")
+
+    assert session is not None
+    assert session.deck is not None
+    assert session.deck.title == "Edited in the design workspace"
+
+
 async def test_load_session_returns_none_when_absent() -> None:
     db, _fake = _make_db()
     assert await load_session(db, "ghost") is None
@@ -969,4 +1001,3 @@ async def test_redelivered_without_reply_text_stays_label_only() -> None:
     )
     sent = msg.answer.await_args.args[0]
     assert sent == "✅ Updated 2 slide(s). Download:"
-

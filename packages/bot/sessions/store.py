@@ -152,7 +152,11 @@ async def persist_session(db: DatabaseClient, session: BrainSession) -> None:
 
 
 async def _load_deck(db: DatabaseClient, project_id: str) -> DeckSpec | None:
-    """Load the project's current deck as a typed spec, or ``None`` if unsaved."""
+    """Load the editable document head, falling back to the legacy deck row."""
+
+    document = await db.get_document(project_id, "presentation")
+    if document is not None:
+        return DeckSpec.model_validate(document["content"])
 
     deck_row = await db.get_deck(project_id)
     if deck_row is None:

@@ -213,6 +213,146 @@ class DatabaseClient:
             return None
         return cast(dict[str, Any], result.data[0])
 
+    async def create_document_if_missing(
+        self,
+        project_id: str,
+        kind: str,
+        content: dict[str, Any],
+        user_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Atomically create one document and its initial immutable revision."""
+
+        result = await asyncio.to_thread(
+            self.rpc,
+            "create_document_if_missing",
+            {
+                "p_project_id": project_id,
+                "p_kind": kind,
+                "p_schema_version": 1,
+                "p_content": content,
+                "p_created_by": user_id,
+                "p_idempotency_key": idempotency_key,
+            },
+        )
+        return cast(dict[str, Any], result.data[0])
+
+    async def get_document(self, project_id: str, kind: str) -> dict[str, Any] | None:
+        """Read the current immutable revision for one project document."""
+
+        document_result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("documents")
+                .select("*")
+                .eq("project_id", project_id)
+                .eq("kind", kind)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not document_result.data:
+            return None
+        document = cast(dict[str, Any], document_result.data[0])
+        revision_result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("document_revisions")
+                .select("*")
+                .eq("id", str(document["head_revision_id"]))
+                .limit(1)
+                .execute()
+            )
+        )
+        if not revision_result.data:
+            return None
+        revision = cast(dict[str, Any], revision_result.data[0])
+        return {**document, "revision_id": revision["id"], "content": revision["content"]}
+
+    async def commit_document_revision(
+        self,
+        document_id: str,
+        base_revision_id: str,
+        content: dict[str, Any],
+        user_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Commit content only when the caller still targets the current head."""
+
+        result = await asyncio.to_thread(
+            self.rpc,
+            "commit_document_revision",
+            {
+                "p_document_id": document_id,
+                "p_base_revision_id": base_revision_id,
+                "p_content": content,
+                "p_created_by": user_id,
+                "p_idempotency_key": idempotency_key,
+            },
+        )
+        return cast(dict[str, Any], result.data[0])
+
+    async def commit_presentation_revision_and_deck(
+        self,
+        document_id: str,
+        base_revision_id: str,
+        content: dict[str, Any],
+        user_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Atomically advance a presentation document and its deck read model."""
+
+        result = await asyncio.to_thread(
+            self.rpc,
+            "commit_presentation_revision_and_deck",
+            {
+                "p_document_id": document_id,
+                "p_base_revision_id": base_revision_id,
+                "p_content": content,
+                "p_created_by": user_id,
+                "p_idempotency_key": idempotency_key,
+            },
+        )
+        return cast(dict[str, Any], result.data[0])
+
+    async def list_document_revisions(
+        self,
+        document_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return compact revision metadata newest first."""
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("document_revisions")
+                .select("id,parent_revision_id,created_by,content_hash,created_at")
+                .eq("document_id", document_id)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+        )
+        return cast(list[dict[str, Any]], list(result.data))
+
+    async def get_document_revision(
+        self,
+        document_id: str,
+        revision_id: str,
+    ) -> dict[str, Any] | None:
+        """Read one revision while constraining it to the expected document."""
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("document_revisions")
+                .select("*")
+                .eq("document_id", document_id)
+                .eq("id", revision_id)
+                .limit(1)
+                .execute()
+            )
+        )
+        if not result.data:
+            return None
+        return cast(dict[str, Any], result.data[0])
+
     async def get_user_projects(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
         """Get a user's projects, newest first."""
 

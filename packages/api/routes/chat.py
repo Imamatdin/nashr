@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
 from packages.core.models.presentation import SlideFix
+from packages.platform.database import DatabaseClient
 from packages.platform.jobs import DuplicateActiveJobError, JobQueue, JobType
 from packages.platform.rate_limit import CHAT_ACTION, RateLimiter
 from packages.sessions_core import (
@@ -240,6 +241,18 @@ async def _enqueue_edit(
     return job.id
 
 
+async def _design_revision_payload(db: DatabaseClient, project_id: str) -> dict[str, str]:
+    """Stamp an edit when this project already has a versioned design document."""
+
+    design = await db.get_document(project_id, "presentation")
+    if design is None:
+        return {}
+    return {
+        "document_id": str(design["document_id"] if "document_id" in design else design["id"]),
+        "base_revision_id": str(design["revision_id"]),
+    }
+
+
 @router.post("/{project_id}/chat", response_model=ChatTurnView)
 async def post_chat(
     request: Request, project_id: str, body: ChatRequest, auth: Authenticated
@@ -312,6 +325,7 @@ async def post_chat(
                 ],
                 "call_count": result.fix_call_count,
                 "reply_text": result.reply_text,
+                **(await _design_revision_payload(db, project_id)),
             },
         )
     except DuplicateActiveJobError:
@@ -363,7 +377,11 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
             request,
             project_id=project_id,
             user_id=user_id,
-            payload={"from_pending": True, "call_count": pending.call_count},
+            payload={
+                "from_pending": True,
+                "call_count": pending.call_count,
+                **(await _design_revision_payload(db, project_id)),
+            },
         )
     except DuplicateActiveJobError:
         raise HTTPException(

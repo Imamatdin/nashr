@@ -10,21 +10,60 @@
 // one, and an unknown step name is rendered honestly by its number instead of
 // being mapped onto a label that happens to sit at that index.
 
+import type { Locale } from "./locale";
+
 export type StepState = "pending" | "running" | "completed" | "failed";
 
-export const STEP_LABELS: ReadonlyArray<{ key: string; label: string }> = [
-  { key: "Processing sources", label: "Manbalar o'qilmoqda" },
-  { key: "Building evidence matrix", label: "Dalillar jamlanmoqda" },
-  { key: "Applying preferences", label: "Talablar hisobga olinmoqda" },
-  { key: "Choosing design direction", label: "Dizayn yo'nalishi tanlanmoqda" },
-  { key: "Creating slide sequence", label: "Slaydlar ketma-ketligi tuzilmoqda" },
-  { key: "Resolving images", label: "Vizuallar tayyorlanmoqda" },
-  { key: "Rendering presentation", label: "Taqdimot yig'ilmoqda" },
-];
+const STEP_LABELS_BY_LOCALE = {
+  en: [
+    { key: "Processing sources", label: "Reading sources" },
+    { key: "Building evidence matrix", label: "Building the evidence map" },
+    { key: "Applying preferences", label: "Applying your requirements" },
+    { key: "Choosing design direction", label: "Choosing a design direction" },
+    { key: "Creating slide sequence", label: "Structuring the slides" },
+    { key: "Resolving images", label: "Preparing visuals" },
+    { key: "Rendering presentation", label: "Rendering the presentation" },
+  ],
+  ru: [
+    { key: "Processing sources", label: "Читаем источники" },
+    { key: "Building evidence matrix", label: "Собираем карту доказательств" },
+    { key: "Applying preferences", label: "Учитываем ваши требования" },
+    { key: "Choosing design direction", label: "Выбираем направление дизайна" },
+    { key: "Creating slide sequence", label: "Выстраиваем слайды" },
+    { key: "Resolving images", label: "Готовим визуальные материалы" },
+    { key: "Rendering presentation", label: "Собираем презентацию" },
+  ],
+  uz: [
+    { key: "Processing sources", label: "Manbalar o'qilmoqda" },
+    { key: "Building evidence matrix", label: "Dalillar jamlanmoqda" },
+    { key: "Applying preferences", label: "Talablar hisobga olinmoqda" },
+    {
+      key: "Choosing design direction",
+      label: "Dizayn yo'nalishi tanlanmoqda",
+    },
+    {
+      key: "Creating slide sequence",
+      label: "Slaydlar ketma-ketligi tuzilmoqda",
+    },
+    { key: "Resolving images", label: "Vizuallar tayyorlanmoqda" },
+    { key: "Rendering presentation", label: "Taqdimot yig‘ilmoqda" },
+  ],
+} satisfies Record<Locale, ReadonlyArray<{ key: string; label: string }>>;
+
+/** Kept as the Uzbek default for older callers and error-parser tests. */
+export const STEP_LABELS = STEP_LABELS_BY_LOCALE.uz;
+
+export function stepLabels(locale: Locale = "uz") {
+  return STEP_LABELS_BY_LOCALE[locale];
+}
 
 // An edit job re-runs a short chain of its own; its step names are per-fix and
 // not in the list above, so they resolve through the unknown-step path.
-const EDIT_STEP_LABEL = "Tahrir qo'llanmoqda";
+const EDIT_STEP_LABEL: Record<Locale, string> = {
+  en: "Applying the edit",
+  ru: "Применяем правку",
+  uz: "Tahrir qo'llanmoqda",
+};
 
 export interface Progress {
   step?: string;
@@ -40,14 +79,23 @@ export interface StepRow {
   meta: string;
 }
 
-function labelFor(stepName: string | undefined, index: number): string {
+function labelFor(
+  stepName: string | undefined,
+  index: number,
+  locale: Locale,
+): string {
+  const labels = stepLabels(locale);
   // No stepName means "this is not the active row": position is all we know,
   // and the positional label is the right guess.
-  if (stepName === undefined) return STEP_LABELS[index]?.label ?? `Bosqich ${index + 1}`;
+  if (stepName === undefined) {
+    const fallback =
+      locale === "en" ? "Step" : locale === "ru" ? "Этап" : "Bosqich";
+    return labels[index]?.label ?? `${fallback} ${index + 1}`;
+  }
 
-  const known = STEP_LABELS.find((entry) => entry.key === stepName);
+  const known = labels.find((entry) => entry.key === stepName);
   if (known) return known.label;
-  if (stepName.startsWith("Applying fix")) return EDIT_STEP_LABEL;
+  if (stepName.startsWith("Applying fix")) return EDIT_STEP_LABEL[locale];
   // The worker named a step we do not have copy for. Showing it verbatim is
   // ugly; showing the label that happens to sit at this index would be a lie
   // about what the pipeline is doing — which is the defect G39 describes.
@@ -63,14 +111,22 @@ function labelFor(stepName: string | undefined, index: number): string {
  * from our label list, the list is truncated or extended to match it, so the
  * UI never claims seven steps for a run that has three.
  */
-export function stepStates(progress: Progress, status: string): StepRow[] {
-  const total = Math.max(1, progress.total ?? STEP_LABELS.length);
+export function stepStates(
+  progress: Progress,
+  status: string,
+  locale: Locale = "uz",
+): StepRow[] {
+  const labels = stepLabels(locale);
+  const total = Math.max(1, progress.total ?? labels.length);
   const queued = status === "queued";
   const done = status === "completed";
   const failed = status === "failed" || status === "cancelled";
 
-  const named = STEP_LABELS.findIndex((entry) => entry.key === progress.step);
-  const fromCurrent = Math.min(Math.max((progress.current ?? 1) - 1, 0), total - 1);
+  const named = labels.findIndex((entry) => entry.key === progress.step);
+  const fromCurrent = Math.min(
+    Math.max((progress.current ?? 1) - 1, 0),
+    total - 1,
+  );
   const active = named >= 0 ? named : fromCurrent;
 
   return Array.from({ length: total }, (_, index) => {
@@ -82,8 +138,11 @@ export function stepStates(progress: Progress, status: string): StepRow[] {
       else if (index === active) state = failed ? "failed" : "running";
     }
     return {
-      key: STEP_LABELS[index]?.key ?? `step-${index + 1}`,
-      label: index === active ? labelFor(progress.step, index) : labelFor(undefined, index),
+      key: labels[index]?.key ?? `step-${index + 1}`,
+      label:
+        index === active
+          ? labelFor(progress.step, index, locale)
+          : labelFor(undefined, index, locale),
       state,
       meta: `${index + 1}/${total}`,
     };

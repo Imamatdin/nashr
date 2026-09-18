@@ -84,6 +84,7 @@ class FixRunner(Protocol):
         progress: Callable[[str, int, int], Awaitable[None]],
         *,
         package: GenerationPackage,
+        persist: Callable[[Any], Awaitable[None]] | None = None,
     ) -> FixAndRenderResult: ...
 
 
@@ -465,6 +466,7 @@ async def dispatch_fix(
     fixes: Sequence[SlideFix],
     call_count: int,
     progress: Callable[[str, int, int], Awaitable[None]],
+    persist: Callable[[Any], Awaitable[None]] | None = None,
 ) -> FixDispatchResult:
     """Apply a parked fix batch, answer its call, and persist. Worker-side.
 
@@ -497,15 +499,27 @@ async def dispatch_fix(
 
     try:
         await hydrate_figures(db, session)
-        result = await runner.apply_fixes_and_render(
-            session.deck,
-            list(fixes),
-            session.sources,
-            session.project_id,
-            session.formats,
-            progress,
-            package=session.package,
-        )
+        if persist is None:
+            result = await runner.apply_fixes_and_render(
+                session.deck,
+                list(fixes),
+                session.sources,
+                session.project_id,
+                session.formats,
+                progress,
+                package=session.package,
+            )
+        else:
+            result = await runner.apply_fixes_and_render(
+                session.deck,
+                list(fixes),
+                session.sources,
+                session.project_id,
+                session.formats,
+                progress,
+                package=session.package,
+                persist=persist,
+            )
     except Exception as exc:
         logger.warning(
             "chat_fix_chain_failed project=%s error_type=%s",

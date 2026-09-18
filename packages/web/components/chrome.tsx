@@ -8,8 +8,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { FolderOpen, PenLine, Wallet } from "lucide-react";
-import SidebarNav, { type SidebarNavItem, type SidebarRecent } from "@/components/bui/sidebar-nav";
+import SidebarNav, {
+  type SidebarNavItem,
+  type SidebarRecent,
+} from "@/components/bui/sidebar-nav";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { LanguagePicker, useLocale } from "@/components/locale-provider";
 import { getBalance } from "@/lib/api";
 import { soum } from "@/lib/packages";
 import { clearSession, loadSession } from "@/lib/session";
@@ -68,10 +72,12 @@ function BalanceChip({
   balance,
   collapsed,
   active,
+  label,
 }: {
   balance: number;
   collapsed: boolean;
   active: boolean;
+  label: string;
 }) {
   const amount = soum(balance);
   const rest = active ? "bg-hover-2 text-ink" : "text-ink-2";
@@ -79,8 +85,8 @@ function BalanceChip({
     return (
       <Link
         href="/hisob"
-        aria-label={`Hisob: ${amount}`}
-        title={`Hisob: ${amount}`}
+        aria-label={`${label}: ${amount}`}
+        title={`${label}: ${amount}`}
         className={`flex size-8 items-center justify-center rounded-[8px] no-underline
           transition-colors duration-150 hover:bg-hover-2 hover:text-ink hover:no-underline ${rest}`}
       >
@@ -91,12 +97,14 @@ function BalanceChip({
   return (
     <Link
       href="/hisob"
-      title={`Hisob: ${amount}`}
+      title={`${label}: ${amount}`}
       className={`mb-1 flex h-8 items-center gap-1.5 rounded-[8px] px-2 no-underline
         transition-colors duration-150 hover:bg-hover-2 hover:text-ink hover:no-underline ${rest}`}
     >
       <Wallet size={16} strokeWidth={1.75} aria-hidden />
-      <span className="data-text min-w-0 flex-1 truncate text-[13px]">{amount}</span>
+      <span className="data-text min-w-0 flex-1 truncate text-[13px]">
+        {amount}
+      </span>
     </Link>
   );
 }
@@ -109,6 +117,55 @@ export function AppChrome({
   active: "projects" | "new" | "hisob";
 }) {
   const router = useRouter();
+  const { locale } = useLocale();
+  const copy = {
+    uz: {
+      nav: ["Loyihalar", "Yangi"],
+      signOut: "Chiqish",
+      balance: "Hisob",
+      unnamed: "Nomsiz loyiha",
+      navigation: "Ish maydoni navigatsiyasi",
+      recentProjects: "Oxirgi loyihalar",
+      collapse: "Panelni yig‘ish",
+      expand: "Panelni ochish",
+      search: "Loyihalarni qidirish",
+      searchHistory: "Loyihalar tarixidan qidirish",
+      closeSearch: "Qidiruvni yopish",
+      noProject: "Loyiha topilmadi",
+    },
+    ru: {
+      nav: ["Проекты", "Создать"],
+      signOut: "Выйти",
+      balance: "Баланс",
+      unnamed: "Без названия",
+      navigation: "Навигация по рабочему пространству",
+      recentProjects: "Недавние проекты",
+      collapse: "Свернуть панель",
+      expand: "Развернуть панель",
+      search: "Искать проекты",
+      searchHistory: "Искать в истории проектов",
+      closeSearch: "Закрыть поиск",
+      noProject: "Проект не найден",
+    },
+    en: {
+      nav: ["Projects", "Create"],
+      signOut: "Sign out",
+      balance: "Balance",
+      unnamed: "Untitled project",
+      navigation: "Workspace navigation",
+      recentProjects: "Recent projects",
+      collapse: "Collapse sidebar",
+      expand: "Expand sidebar",
+      search: "Search projects",
+      searchHistory: "Search project history",
+      closeSearch: "Close search",
+      noProject: "No project found",
+    },
+  }[locale];
+  const navigation = NAV.map((item, index) => ({
+    ...item,
+    label: copy.nav[index],
+  }));
   const [recents, setRecents] = useState<ReadonlyArray<SidebarRecent>>([]);
   const balance = useBalance();
 
@@ -126,7 +183,7 @@ export function AppChrome({
       setRecents(
         (data as ProjectRow[]).map((row) => ({
           id: row.id,
-          label: row.title?.trim() || "Nomsiz loyiha",
+          label: row.title?.trim() || copy.unnamed,
           href: `/projects/${row.id}`,
         })),
       );
@@ -135,7 +192,7 @@ export function AppChrome({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [copy.unnamed]);
 
   function signOut() {
     clearSession();
@@ -147,10 +204,21 @@ export function AppChrome({
       <div className="app-sidebar">
         <SidebarNav
           brand={{ name: "Nashr" }}
-          nav={NAV}
+          nav={navigation}
           activeNav={active}
           recents={recents}
           onSignOut={signOut}
+          copy={{
+            navigation: copy.navigation,
+            signOut: copy.signOut,
+            recentProjects: copy.recentProjects,
+            collapse: copy.collapse,
+            expand: copy.expand,
+            search: copy.search,
+            searchHistory: copy.searchHistory,
+            closeSearch: copy.closeSearch,
+            noProject: copy.noProject,
+          }}
           footer={(collapsed) => (
             <>
               {balance !== null && (
@@ -158,9 +226,11 @@ export function AppChrome({
                   balance={balance}
                   collapsed={collapsed}
                   active={active === "hisob"}
+                  label={copy.balance}
                 />
               )}
               <ThemeToggle compact={collapsed} vertical={collapsed} />
+              {!collapsed && <LanguagePicker />}
             </>
           )}
         />
@@ -171,7 +241,7 @@ export function AppChrome({
           Nashr
         </Link>
         <nav className="app-topbar-links">
-          {NAV.map((item) => (
+          {navigation.map((item) => (
             <Link
               key={item.key}
               href={item.href}
@@ -188,15 +258,18 @@ export function AppChrome({
               // three-word amount ("35 000 so'm") otherwise wraps onto three
               // lines at 390px and doubles the bar's height.
               className="flex shrink-0 items-center gap-1.5 whitespace-nowrap"
-              title={`Hisob: ${soum(balance)}`}
+              title={`${copy.balance}: ${soum(balance)}`}
             >
               <Wallet size={15} strokeWidth={1.75} aria-hidden />
-              <span className="data-text whitespace-nowrap">{soum(balance)}</span>
+              <span className="data-text whitespace-nowrap">
+                {soum(balance)}
+              </span>
             </Link>
           )}
           <ThemeToggle compact />
+          <LanguagePicker />
           <button type="button" onClick={signOut}>
-            Chiqish
+            {copy.signOut}
           </button>
         </nav>
       </header>

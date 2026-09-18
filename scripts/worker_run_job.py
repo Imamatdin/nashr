@@ -189,7 +189,69 @@ class JobRunner:
             return self._run_presentation
         if job_type is JobType.PRESENTATION_EDIT:
             return self._run_presentation_edit
+        if job_type is JobType.PRESENTATION_RENDER:
+            return self._run_presentation_render
         return None
+
+    async def _run_presentation_render(self, job: GenerationJob) -> None:
+        """Render one immutable manually edited deck revision without model calls."""
+
+        from aiogram import Bot
+
+        from packages.bot.orchestrators.presentation_orchestrator import (
+            PresentationOrchestrator,
+        )
+        from packages.core.models.presentation import DeckSpec
+
+        document_id = job.payload.get("document_id")
+        revision_id = job.payload.get("revision_id")
+        if not isinstance(document_id, str) or not isinstance(revision_id, str):
+            raise RuntimeError("presentation_render job is missing its document revision")
+        revision = await self._db.get_document_revision(document_id, revision_id)
+        if revision is None:
+            raise RuntimeError("presentation_render revision no longer exists")
+        deck = DeckSpec.model_validate(revision["content"])
+        if deck.project_id != job.project_id:
+            raise RuntimeError("presentation_render project does not match its deck")
+
+        bot = Bot(token=self._config.telegram_bot_token)
+        orchestrator = PresentationOrchestrator(
+            bot=bot,
+            db=self._db,
+            credits=self._credits,
+            storage=self._storage,
+        )
+
+        async def progress(step: str, current: int, total: int) -> None:
+            await self._queue.set_progress(
+                job.id,
+                self._worker_id,
+                {"step": step, "current": current, "total": total},
+            )
+
+        try:
+            rendered = await orchestrator.render(
+                deck,
+                [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE, ExportFormat.PDF],
+                progress,
+                project_id=job.project_id,
+            )
+        finally:
+            await bot.session.close()
+
+        if not rendered.by_extension():
+            raise RuntimeError("presentation_render produced no deliverable files")
+        await self._db.save_deck(job.project_id, deck)
+        completed_by_us = await self._queue.complete(
+            job.id,
+            self._worker_id,
+            telemetry={"formats": sorted(rendered.by_extension())},
+        )
+        if not completed_by_us:
+            logger.warning(
+                "worker_render_complete_suppressed_row_not_ours %s",
+                json.dumps({"job_id": job.id}),
+            )
 
     async def _run_presentation_edit(self, job: GenerationJob) -> None:
         """Apply a parked Way-2 fix batch and re-render. No charge, no refund.
@@ -206,8 +268,12 @@ class JobRunner:
         from packages.bot.orchestrators.presentation_orchestrator import (
             PresentationOrchestrator,
         )
-        from packages.core.models.presentation import SlideFix
-        from packages.sessions_core import dispatch_fix, park_pending_for_apply
+        from packages.core.models.presentation import DeckSpec, SlideFix
+        from packages.sessions_core import (
+            abandon_parked_fix,
+            dispatch_fix,
+            park_pending_for_apply,
+        )
 
         payload = job.payload
         call_count = 1
@@ -236,6 +302,40 @@ class JobRunner:
                     raise RuntimeError("presentation_edit job carries a malformed fix entry")
                 fixes.append(SlideFix.model_validate(cast(dict[str, Any], entry)))
 
+        persist: Callable[[DeckSpec], Awaitable[None]] | None = None
+        document_id = payload.get("document_id")
+        base_revision_id = payload.get("base_revision_id")
+        if (document_id is None) != (base_revision_id is None):
+            raise RuntimeError("presentation_edit carries incomplete revision metadata")
+        if isinstance(document_id, str) and isinstance(base_revision_id, str):
+            if job.user_id is None:
+                raise RuntimeError("presentation_edit job has no user_id")
+            edit_user_id = job.user_id
+            current = await self._db.get_document(job.project_id, "presentation")
+            current_document_id = (
+                str(current["document_id"] if "document_id" in current else current["id"])
+                if current is not None
+                else None
+            )
+            if (
+                current is None
+                or current_document_id != document_id
+                or str(current["revision_id"]) != base_revision_id
+            ):
+                await abandon_parked_fix(self._db, job.project_id, call_count=call_count)
+                raise RuntimeError("presentation_edit base revision is stale")
+
+            async def _persist_revision(edited_deck: DeckSpec) -> None:
+                await self._db.commit_presentation_revision_and_deck(
+                    document_id,
+                    base_revision_id,
+                    edited_deck.model_dump(mode="json"),
+                    edit_user_id,
+                    f"chat-edit:{job.id}",
+                )
+
+            persist = _persist_revision
+
         bot = Bot(token=self._config.telegram_bot_token)
         orchestrator = PresentationOrchestrator(
             bot=bot,
@@ -259,6 +359,7 @@ class JobRunner:
                 fixes=fixes,
                 call_count=call_count,
                 progress=progress,
+                persist=persist,
             )
         finally:
             await bot.session.close()

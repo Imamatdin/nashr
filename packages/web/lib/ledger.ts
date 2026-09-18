@@ -16,6 +16,7 @@
 // REFINES the copy when it happens to carry the finer value.
 
 import type { LedgerEntryView } from "./api";
+import type { Locale } from "./locale";
 import { soum } from "./packages";
 
 export type LedgerTone = "reward" | "paid" | "spend" | "refund" | "neutral";
@@ -54,12 +55,28 @@ export function ledgerDate(value: string | null): string {
   return `${pad(when.getDate())}.${pad(when.getMonth() + 1)}.${when.getFullYear()}`;
 }
 
-const ACTION_LABEL: Record<string, string> = {
-  grant_free: "O‘rganish mukofoti",
-  grant_paid: "To‘lov qabul qilindi",
-  deduct_article: "Maqola yaratildi",
-  deduct_presentation: "Taqdimot yaratildi",
-  refund: "Kredit qaytarildi",
+const ACTION_LABEL: Record<Locale, Record<string, string>> = {
+  en: {
+    grant_free: "Research reward",
+    grant_paid: "Payment received",
+    deduct_article: "Article created",
+    deduct_presentation: "Presentation created",
+    refund: "Credit refunded",
+  },
+  ru: {
+    grant_free: "Награда за исследование",
+    grant_paid: "Платёж получен",
+    deduct_article: "Статья создана",
+    deduct_presentation: "Презентация создана",
+    refund: "Средства возвращены",
+  },
+  uz: {
+    grant_free: "O‘rganish mukofoti",
+    grant_paid: "To‘lov qabul qilindi",
+    deduct_article: "Maqola yaratildi",
+    deduct_presentation: "Taqdimot yaratildi",
+    refund: "Kredit qaytarildi",
+  },
 };
 
 const ACTION_TONE: Record<string, LedgerTone> = {
@@ -81,8 +98,38 @@ const ACTION_TONE: Record<string, LedgerTone> = {
  * here promises an incentive the product does not have; the caps live in
  * `GET /pricing` and are the page's business, not this sentence's.
  */
-export function rewardCopy(entry: LedgerEntryView): string {
-  const credit = `va ${soum(Math.abs(entry.amount))} bepul kredit qo‘shildi`;
+export function rewardCopy(
+  entry: LedgerEntryView,
+  locale: Locale = "uz",
+): string {
+  const amount = soum(Math.abs(entry.amount));
+  if (locale === "en") {
+    const credit = `and ${amount} in free credit was added`;
+    const action = {
+      source_upload: `Your source strengthened the evidence base, ${credit}.`,
+      interview_answer: `Your answer made the work fit the topic more precisely, ${credit}.`,
+      contradiction_explain: `Your explanation resolved a source conflict and strengthened the analysis, ${credit}.`,
+      daily_bonus: `Daily bonus: ${credit}.`,
+    } as const;
+    return (
+      action[entry.reason as keyof typeof action] ??
+      `Your research strengthened the evidence base, ${credit}.`
+    );
+  }
+  if (locale === "ru") {
+    const credit = `и начислено ${amount} бесплатного кредита`;
+    const action = {
+      source_upload: `Ваш источник укрепил доказательную базу, ${credit}.`,
+      interview_answer: `Ваш ответ помог точнее адаптировать работу к теме, ${credit}.`,
+      contradiction_explain: `Вы объяснили противоречие между источниками и усилили анализ, ${credit}.`,
+      daily_bonus: `Ежедневный бонус: ${credit}.`,
+    } as const;
+    return (
+      action[entry.reason as keyof typeof action] ??
+      `Ваше исследование укрепило доказательную базу, ${credit}.`
+    );
+  }
+  const credit = `va ${amount} bepul kredit qo‘shildi`;
   switch (entry.reason) {
     case "source_upload":
       return `Yuklagan manbangiz ishning dalil bazasini kuchaytirdi — ${credit}.`;
@@ -98,9 +145,19 @@ export function rewardCopy(entry: LedgerEntryView): string {
 }
 
 /** The sentence under a spend or a refund, when there is one worth saying. */
-function noteFor(entry: LedgerEntryView): string | null {
-  if (entry.action === "grant_free") return rewardCopy(entry);
+function noteFor(entry: LedgerEntryView, locale: Locale): string | null {
+  if (entry.action === "grant_free") return rewardCopy(entry, locale);
   if (entry.action === "refund") {
+    if (locale === "en") {
+      return entry.generation_job_id !== null
+        ? "Generation failed, so the charged credit was returned to your balance."
+        : "The charged credit was returned to your balance.";
+    }
+    if (locale === "ru") {
+      return entry.generation_job_id !== null
+        ? "Генерация не завершилась, поэтому списанные средства вернулись на баланс."
+        : "Списанные средства вернулись на баланс.";
+    }
     return entry.generation_job_id !== null
       ? "Generatsiya muvaffaqiyatsiz tugadi — yechilgan mablag‘ hisobingizga qaytarildi."
       : "Yechilgan mablag‘ hisobingizga qaytarildi.";
@@ -114,10 +171,19 @@ function noteFor(entry: LedgerEntryView): string | null {
  * An action this build has never seen still produces human copy: the ledger is
  * append-only and a future action value must not blank a user's history.
  */
-export function describeLedgerEntry(entry: LedgerEntryView): LedgerRow {
+export function describeLedgerEntry(
+  entry: LedgerEntryView,
+  locale: Locale = "uz",
+): LedgerRow {
   return {
-    label: ACTION_LABEL[entry.action] ?? "Hisob amaliyoti",
-    note: noteFor(entry),
+    label:
+      ACTION_LABEL[locale][entry.action] ??
+      (locale === "en"
+        ? "Balance activity"
+        : locale === "ru"
+          ? "Операция по балансу"
+          : "Hisob amaliyoti"),
+    note: noteFor(entry, locale),
     tone: ACTION_TONE[entry.action] ?? "neutral",
     amount: signedSoum(entry.amount),
     date: ledgerDate(entry.created_at),

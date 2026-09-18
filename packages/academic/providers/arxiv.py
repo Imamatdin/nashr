@@ -40,7 +40,7 @@ class ArxivProvider:
     BASE_URL: str = "https://export.arxiv.org/api/query"
 
     async def search(
-        self, client: httpx.AsyncClient, query: str, limit: int
+        self, client: httpx.AsyncClient, query: str, limit: int, *, strict_errors: bool = False
     ) -> list[AcademicPaper]:
         """Return up to ``limit`` arXiv preprints matching ``query``."""
 
@@ -55,6 +55,8 @@ class ArxivProvider:
             response = await client.get(self.BASE_URL, params=params)
         except httpx.HTTPError as exc:
             logger.warning("arxiv_request_failed", extra={"error": str(exc), "query": query})
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         if response.status_code != 200:
@@ -62,16 +64,22 @@ class ArxivProvider:
                 "arxiv_bad_status",
                 extra={"status": response.status_code, "query": query},
             )
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         try:
             parsed = await asyncio.to_thread(feedparser.parse, response.content)  # type: ignore[reportUnknownArgumentType, reportUnknownMemberType]
         except Exception as exc:
             logger.warning("arxiv_parse_failed", extra={"error": str(exc), "query": query})
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         entries = as_list(getattr(parsed, "entries", None))
         if entries is None:
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         papers: list[AcademicPaper] = []

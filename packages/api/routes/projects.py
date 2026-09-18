@@ -90,6 +90,8 @@ class ProvenanceRow(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    source_id: str | None = None
+
     claim_text: str
     quote: str | None
     strength: str
@@ -107,7 +109,7 @@ class ProvenanceView(BaseModel):
 _MAX_PROVENANCE_ROWS = 200
 
 
-async def _owned_project(request: Request, project_id: str, user_id: str) -> dict[str, Any]:
+async def owned_project(request: Request, project_id: str, user_id: str) -> dict[str, Any]:
     project = await request.app.state.db.get_project(project_id)
     if project is None or str(project.get("user_id")) != user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="project_not_found")
@@ -139,7 +141,7 @@ async def create_project(
 async def get_deck_access(request: Request, project_id: str, auth: Authenticated) -> DeckAccessView:
     """Short-TTL signed URL for the rendered HTML plus download links."""
 
-    await _owned_project(request, project_id, str(auth.user_id))
+    await owned_project(request, project_id, str(auth.user_id))
     storage: FileStorage = request.app.state.storage
 
     files = await request.app.state.db.get_project_files(project_id)
@@ -178,7 +180,7 @@ async def manage_share(
     token so a double-click does not silently kill circulating links.
     """
 
-    project = await _owned_project(request, project_id, str(auth.user_id))
+    project = await owned_project(request, project_id, str(auth.user_id))
     current = project.get("share_token")
 
     if body.action is ShareAction.DISABLE:
@@ -250,7 +252,7 @@ async def get_interview(
     inventing a pre-enqueue processing pipeline (out of scope for this run).
     """
 
-    await _owned_project(request, project_id, str(auth.user_id))
+    await owned_project(request, project_id, str(auth.user_id))
 
     sources_json = await request.app.state.db.get_brain_session_sources(project_id)
     if sources_json is None:
@@ -385,7 +387,7 @@ async def get_decisions(request: Request, project_id: str, auth: Authenticated) 
     in the database.
     """
 
-    await _owned_project(request, project_id, str(auth.user_id))
+    await owned_project(request, project_id, str(auth.user_id))
 
     row = await request.app.state.db.get_deck(project_id)
     if row is None:
@@ -457,7 +459,7 @@ async def get_provenance(request: Request, project_id: str, auth: Authenticated)
     predate the stamping and render with the claim text alone.
     """
 
-    await _owned_project(request, project_id, str(auth.user_id))
+    await owned_project(request, project_id, str(auth.user_id))
 
     sources_json = await request.app.state.db.get_brain_session_sources(project_id)
     if sources_json is None:
@@ -480,6 +482,11 @@ async def get_provenance(request: Request, project_id: str, auth: Authenticated)
         )
         rows.append(
             ProvenanceRow(
+                source_id=(
+                    str(claim.get("source_chunk_id") or "").partition(":")[0]
+                    if source_filename is not None
+                    else None
+                ),
                 claim_text=str(claim.get("claim_text") or ""),
                 quote=cast("str | None", claim.get("quote")),
                 strength=str(claim.get("strength") or ""),

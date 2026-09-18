@@ -18,6 +18,7 @@
 // "Qoralama" while its badge says "Yaratilmoqda".
 
 import { ApiError } from "./api";
+import type { Locale } from "./locale";
 import { type Progress, stepStates } from "./steps";
 
 export interface JobSnapshot {
@@ -77,7 +78,9 @@ export function isNewerJob(next: JobSnapshot, held: JobSnapshot): boolean {
 }
 
 /** Newest active job per project, from a flat query result. */
-export function newestByProject(rows: readonly unknown[]): Record<string, JobSnapshot> {
+export function newestByProject(
+  rows: readonly unknown[],
+): Record<string, JobSnapshot> {
   const map: Record<string, JobSnapshot> = {};
   for (const raw of rows) {
     const snapshot = jobSnapshot(raw);
@@ -131,21 +134,33 @@ export function chipOf(status: string): string {
  * row, which the worker only stamps at the end of a run: a project still
  * marked `draft` whose job is processing is generating, whatever the column says.
  */
-export function liveStatusOf(projectStatus: string, job: JobSnapshot | null): string {
+export function liveStatusOf(
+  projectStatus: string,
+  job: JobSnapshot | null,
+): string {
   if (!job || isTerminalJob(job.status)) return projectStatus;
   return job.status === "queued" ? "queued" : "generating";
 }
 
 /** "4/7 · Dizayn yo‘nalishi tanlanmoqda" — which step, not just "busy". */
-export function stepLabelOf(job: JobSnapshot | null): string | null {
+export function stepLabelOf(
+  job: JobSnapshot | null,
+  locale: Locale = "uz",
+): string | null {
   if (!job || job.status !== "processing") return null;
-  const running = stepStates(job.progress, job.status).find((row) => row.state === "running");
+  const running = stepStates(job.progress, job.status, locale).find(
+    (row) => row.state === "running",
+  );
   if (!running) return null;
   return `${running.meta} · ${running.label}`;
 }
 
 /** How long this run has been going. Null once it is no longer running. */
-export function elapsedLabel(job: JobSnapshot | null, now: number): string | null {
+export function elapsedLabel(
+  job: JobSnapshot | null,
+  now: number,
+  locale: Locale = "uz",
+): string | null {
   if (!job || isTerminalJob(job.status)) return null;
   const start = job.startedAt ?? job.createdAt;
   if (!start) return null;
@@ -155,9 +170,19 @@ export function elapsedLabel(job: JobSnapshot | null, now: number): string | nul
   if (seconds < 0) return null;
   if (seconds < 60) return `${seconds} s`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} daq`;
+  if (minutes < 60) {
+    return locale === "en"
+      ? `${minutes} min`
+      : locale === "ru"
+        ? `${minutes} мин`
+        : `${minutes} daq`;
+  }
   const hours = Math.floor(minutes / 60);
-  return `${hours} soat ${minutes % 60} daq`;
+  return locale === "en"
+    ? `${hours} h ${minutes % 60} min`
+    : locale === "ru"
+      ? `${hours} ч ${minutes % 60} мин`
+      : `${hours} soat ${minutes % 60} daq`;
 }
 
 // ----------------------------------------------------------------- failure

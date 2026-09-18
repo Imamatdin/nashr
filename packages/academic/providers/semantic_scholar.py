@@ -35,7 +35,7 @@ class SemanticScholarProvider:
     BASE_URL: str = "https://api.semanticscholar.org/graph/v1/paper/search"
 
     async def search(
-        self, client: httpx.AsyncClient, query: str, limit: int
+        self, client: httpx.AsyncClient, query: str, limit: int, *, strict_errors: bool = False
     ) -> list[AcademicPaper]:
         """Return up to ``limit`` papers matching ``query``.
 
@@ -52,6 +52,8 @@ class SemanticScholarProvider:
                 "semantic_scholar_request_failed",
                 extra={"error": str(exc), "query": query},
             )
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         if response.status_code != 200:
@@ -59,19 +61,27 @@ class SemanticScholarProvider:
                 "semantic_scholar_bad_status",
                 extra={"status": response.status_code, "query": query},
             )
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         try:
             raw_payload = response.json()
         except ValueError as exc:
             logger.warning("semantic_scholar_bad_json", extra={"error": str(exc), "query": query})
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         payload = as_dict(raw_payload)
         if payload is None:
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
         items = as_list(payload.get("data"))
         if items is None:
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         papers: list[AcademicPaper] = []

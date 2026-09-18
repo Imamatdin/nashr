@@ -17,7 +17,13 @@ function view(overrides: Partial<DecisionsView> = {}): DecisionsView {
     language: "uz",
     thesis: "Suv olib qo'yish dengizni qisqartirdi.",
     audience_takeaway: "Tinglovchi sababni ayta oladi.",
-    sections: [{ section_name: "Sabab", thesis: "Kanallar oqimni burdi.", phase: "hook" }],
+    sections: [
+      {
+        section_name: "Sabab",
+        thesis: "Kanallar oqimni burdi.",
+        phase: "hook",
+      },
+    ],
     mood: "warm_historical",
     palette: {
       background: "#1A120B",
@@ -36,7 +42,14 @@ function view(overrides: Partial<DecisionsView> = {}): DecisionsView {
     narrative_emphasis: "results_numbers",
     include_interactive: true,
     slide_count: 11,
-    slides: [{ slide_number: 1, slide_id: "s1", slide_type: "title_hero", title: "Ochilish" }],
+    slides: [
+      {
+        slide_number: 1,
+        slide_id: "s1",
+        slide_type: "title_hero",
+        title: "Ochilish",
+      },
+    ],
     ...overrides,
   };
 }
@@ -56,6 +69,11 @@ describe("machine words never reach the reader", () => {
     expect(moodLabel("brand_new_mood")).toBe("brand_new_mood");
     expect(audienceLabel("martians")).toBe("martians");
   });
+
+  it("renders decision vocabulary in English and Russian", () => {
+    expect(moodLabel("warm_historical", "en")).toBe("Warm and historical");
+    expect(audienceLabel("undergraduate", "ru")).toBe("Студенты бакалавриата");
+  });
 });
 
 describe("decidedFor names what was chosen on the user's behalf", () => {
@@ -65,8 +83,12 @@ describe("decidedFor names what was chosen on the user's behalf", () => {
     expect(facts.every((f) => f.value.length > 0)).toBe(true);
     // The audit's complaint is that apply_defaults decides SILENTLY; every
     // one of these must be a readable value, never an enum token.
-    expect(facts.find((f) => f.label === "Auditoriya")?.value).toBe("Bakalavr talabalari");
-    expect(facts.find((f) => f.label === "Davomiylik")?.value).toBe("15 daqiqa");
+    expect(facts.find((f) => f.label === "Auditoriya")?.value).toBe(
+      "Bakalavr talabalari",
+    );
+    expect(facts.find((f) => f.label === "Davomiylik")?.value).toBe(
+      "15 daqiqa",
+    );
     expect(facts.find((f) => f.label === "Slaydlar")?.value).toBe("11 ta");
   });
 

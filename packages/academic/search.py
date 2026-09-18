@@ -71,20 +71,26 @@ class AcademicSearchService:
             (
                 AcademicAPI.SEMANTIC_SCHOLAR,
                 lambda: self._semantic_scholar.search(
-                    self._http, cleaned_query, per_provider_limit
+                    self._http, cleaned_query, per_provider_limit, strict_errors=True
                 ),
             ),
             (
                 AcademicAPI.ARXIV,
-                lambda: self._arxiv.search(self._http, cleaned_query, per_provider_limit),
+                lambda: self._arxiv.search(
+                    self._http, cleaned_query, per_provider_limit, strict_errors=True
+                ),
             ),
             (
                 AcademicAPI.OPENALEX,
-                lambda: self._openalex.search(self._http, cleaned_query, per_provider_limit),
+                lambda: self._openalex.search(
+                    self._http, cleaned_query, per_provider_limit, strict_errors=True
+                ),
             ),
             (
                 AcademicAPI.CROSSREF,
-                lambda: self._crossref.search(self._http, cleaned_query, per_provider_limit),
+                lambda: self._crossref.search(
+                    self._http, cleaned_query, per_provider_limit, strict_errors=True
+                ),
             ),
         ]
 

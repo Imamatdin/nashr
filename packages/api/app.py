@@ -18,9 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from packages.api.routes.auth import router as auth_router
 from packages.api.routes.chat import router as chat_router
 from packages.api.routes.credits import router as credits_router
+from packages.api.routes.design import router as design_router
+from packages.api.routes.documents import router as documents_router
 from packages.api.routes.jobs import router as jobs_router
 from packages.api.routes.projects import router as projects_router
 from packages.api.routes.public import router as public_router
+from packages.api.routes.research import router as research_router
 from packages.api.routes.sources import router as sources_router
 from packages.api.services.identity import IdentityService
 from packages.platform.config import PlatformConfig
@@ -74,17 +77,20 @@ def create_app(
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(resolved_config.web_cors_origins),
-            allow_methods=["GET", "POST"],
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
             allow_headers=["Authorization", "Content-Type"],
         )
 
     app.include_router(auth_router)
     app.include_router(credits_router)
+    app.include_router(documents_router)
+    app.include_router(design_router)
     app.include_router(chat_router)
     app.include_router(jobs_router)
     app.include_router(sources_router)
     app.include_router(projects_router)
     app.include_router(public_router)
+    app.include_router(research_router)
     app.add_api_route("/health", _health, methods=["GET"])
 
     return app

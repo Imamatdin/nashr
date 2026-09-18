@@ -1,4 +1,4 @@
-// The purchasable tiers and the four output languages. Prices are server
+// The purchasable tiers and the three selectable output languages. Prices are server
 // truth; the copy here only has to match what the API charges.
 
 export const PACKAGES = [
@@ -29,7 +29,6 @@ export const DEFAULT_PACKAGE: PackageId = "presentation_standard";
 
 export const LANGUAGES = [
   { code: "uz", name: "O‘zbekcha" },
-  { code: "kaa", name: "Qaraqalpaqsha" },
   { code: "ru", name: "Русский" },
   { code: "en", name: "English" },
 ] as const;

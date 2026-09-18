@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { useLocale } from "@/components/locale-provider";
 
 /* ─────────────────────────────────────────────────────────
  * TASK ROWS
@@ -41,7 +42,13 @@ export interface TaskRowsProps {
   onRetry?: (key: string) => void;
 }
 
-function SpinnerRing({ active, children }: { active?: boolean; children?: ReactNode }) {
+function SpinnerRing({
+  active,
+  children,
+}: {
+  active?: boolean;
+  children?: ReactNode;
+}) {
   const size = 24,
     stroke = 2;
   const r = (size - stroke) / 2;
@@ -78,12 +85,20 @@ function SpinnerRing({ active, children }: { active?: boolean; children?: ReactN
           />
         )}
       </svg>
-      <span className="relative text-[10.5px] font-semibold tabular-nums text-ink">{children}</span>
+      <span className="relative text-[10.5px] font-semibold tabular-nums text-ink">
+        {children}
+      </span>
     </span>
   );
 }
 
-function Badge({ tone, children }: { tone: "red" | "green"; children: ReactNode }) {
+function Badge({
+  tone,
+  children,
+}: {
+  tone: "red" | "green";
+  children: ReactNode;
+}) {
   return (
     <span
       className={`flex size-5.5 shrink-0 items-center justify-center rounded-full text-on-accent
@@ -138,9 +153,12 @@ const RetryIcon = (
 );
 
 function badgeFor(row: TaskRow) {
-  if (row.status === "completed") return <Badge tone="green">{CheckIcon}</Badge>;
+  if (row.status === "completed")
+    return <Badge tone="green">{CheckIcon}</Badge>;
   if (row.status === "failed") return <Badge tone="red">{XIcon}</Badge>;
-  return <SpinnerRing active={row.status === "running"}>{row.index}</SpinnerRing>;
+  return (
+    <SpinnerRing active={row.status === "running"}>{row.index}</SpinnerRing>
+  );
 }
 
 export function TaskRows({
@@ -149,13 +167,21 @@ export function TaskRows({
   autoOpenRunning = true,
   onRetry,
 }: TaskRowsProps) {
+  const { locale } = useLocale();
+  const copy = {
+    en: { failed: "Failed", retry: "Try again", completed: "Done" },
+    ru: { failed: "Ошибка", retry: "Повторить", completed: "Готово" },
+    uz: { failed: "Xatolik", retry: "Qayta urinish", completed: "Tayyor" },
+  }[locale];
   const [manualOpen, setManualOpen] = useState<Record<string, boolean>>({});
   const list = variant === "List";
 
   return (
     <div
       className={`flex w-full max-w-110 flex-col ${
-        list ? "gap-0 self-start overflow-hidden rounded-card bg-surface shadow-card" : "gap-2"
+        list
+          ? "gap-0 self-start overflow-hidden rounded-card bg-surface shadow-card"
+          : "gap-2"
       }`}
     >
       {rows.map((row, i) => {
@@ -167,7 +193,9 @@ export function TaskRows({
           <div
             key={row.key}
             className={`self-stretch overflow-hidden transition-[border-radius,background-color] duration-300 hover:bg-inset ${
-              list ? "border-b border-line last:border-0" : "bg-surface shadow-card"
+              list
+                ? "border-b border-line last:border-0"
+                : "bg-surface shadow-card"
             }`}
             style={{
               borderRadius: list ? 0 : open ? 14 : 22,
@@ -178,7 +206,9 @@ export function TaskRows({
               type="button"
               aria-expanded={open}
               disabled={details.length === 0}
-              onClick={() => setManualOpen((current) => ({ ...current, [row.key]: !open }))}
+              onClick={() =>
+                setManualOpen((current) => ({ ...current, [row.key]: !open }))
+              }
               className="flex h-11 w-full items-center gap-2.5 px-2.5 text-left"
             >
               <span className="flex size-6 shrink-0 items-center justify-center">
@@ -187,17 +217,21 @@ export function TaskRows({
               <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">
                 {row.label}
               </span>
-              {row.meta && <span className="text-[12.5px] text-ink-2 tabular-nums">{row.meta}</span>}
+              {row.meta && (
+                <span className="text-[12.5px] text-ink-2 tabular-nums">
+                  {row.meta}
+                </span>
+              )}
               {row.status === "failed" ? (
                 <span
                   className="inline-flex h-5.5 items-center gap-1.5 rounded-full bg-red-tint px-2 text-[11.5px] font-medium text-red"
                   style={{ animation: "fade-in 200ms ease-out both" }}
                 >
-                  Xatolik
+                  {copy.failed}
                   <span
                     role="button"
                     tabIndex={0}
-                    aria-label="Qayta urinish"
+                    aria-label={copy.retry}
                     onClick={(event) => {
                       event.stopPropagation();
                       onRetry?.(row.key);
@@ -219,7 +253,7 @@ export function TaskRows({
                   className="inline-flex h-5.5 items-center gap-1.5 rounded-full bg-green-tint px-2 text-[11.5px] font-medium text-green"
                   style={{ animation: "fade-in 200ms ease-out both" }}
                 >
-                  Tayyor
+                  {copy.completed}
                 </span>
               ) : null}
               <span
@@ -270,7 +304,9 @@ export function TaskRows({
                             : undefined
                         }
                       >
-                        <span className="text-[12px] text-ink-2">{d.label}</span>
+                        <span className="text-[12px] text-ink-2">
+                          {d.label}
+                        </span>
                         {d.meta && (
                           <span className="font-mono text-[11.5px] text-ink-3 tabular-nums">
                             {d.meta}

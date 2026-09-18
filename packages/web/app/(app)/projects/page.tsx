@@ -26,14 +26,36 @@
 //   G41     — the empty folio offered a search box and a view toggle over zero
 //             rows. Both are suppressed until there is something to search.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowDown, ArrowUp, ChevronsUpDown, LayoutGrid, List, Plus } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronsUpDown,
+  LayoutGrid,
+  List,
+  Plus,
+} from "lucide-react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { AppChrome } from "@/components/chrome";
+import { useLocale } from "@/components/locale-provider";
+import { PROJECTS_COPY } from "@/components/projects-copy";
 import { FilterChips, SearchList, type SearchResult } from "@/components/bui";
-import { Button, DataText, EmptyState, Skeleton, StatusBadge } from "@/components/ui";
+import {
+  Button,
+  DataText,
+  EmptyState,
+  Skeleton,
+  StatusBadge,
+} from "@/components/ui";
 import { describeError } from "@/lib/errors";
 import {
   applyJob,
@@ -71,23 +93,6 @@ const JOB_REFRESH_MS = 20_000;
 /** How often the elapsed counters re-render while a run is in flight. */
 const TICK_MS = 15_000;
 
-const TYPE_LABEL: Record<string, string> = {
-  presentation: "Taqdimot",
-  article: "Maqola",
-};
-
-// One chip per lifecycle stage a user actually thinks in, not one per status:
-// draft / sourcing / interview all mean "not generating yet". The status → chip
-// mapping itself lives in lib/folio.ts, shared with the row badge so the two
-// can never disagree.
-const CHIPS: ReadonlyArray<{ key: string; label: string; dot: string }> = [
-  { key: "draft", label: "Qoralama", dot: "var(--orange)" },
-  { key: "generating", label: "Yaratilmoqda", dot: "var(--accent)" },
-  { key: "ready", label: "Tayyor", dot: "var(--green)" },
-  { key: "failed", label: "Xatolik", dot: "var(--red)" },
-  { key: "archived", label: "Arxiv", dot: "var(--ink-3)" },
-];
-
 // dd.mm.yyyy — a filing date, not a "3 days ago" that ages behind the user's
 // back. Tabular figures keep the column edge straight down the list.
 function filedOn(value: string | null): string {
@@ -109,13 +114,15 @@ function SortHead({
   asc: boolean;
   onClick: () => void;
 }) {
+  const { locale } = useLocale();
+  const t = PROJECTS_COPY[locale];
   const Glyph = on ? (asc ? ArrowUp : ArrowDown) : ChevronsUpDown;
   return (
     <button
       type="button"
       className="projects-sort"
       data-active={on ? "true" : undefined}
-      aria-label={`${label} bo‘yicha saralash`}
+      aria-label={t.sortBy(label)}
       onClick={onClick}
     >
       {label}
@@ -134,8 +141,9 @@ function LiveStatus({
   job: JobSnapshot | null;
   now: number;
 }) {
-  const step = stepLabelOf(job);
-  const elapsed = elapsedLabel(job, now);
+  const { locale } = useLocale();
+  const step = stepLabelOf(job, locale);
+  const elapsed = elapsedLabel(job, now, locale);
   return (
     <span className="projects-live">
       <StatusBadge status={status} />
@@ -146,7 +154,9 @@ function LiveStatus({
               {step}
             </span>
           )}
-          {elapsed !== null && <DataText className="projects-elapsed">{elapsed}</DataText>}
+          {elapsed !== null && (
+            <DataText className="projects-elapsed">{elapsed}</DataText>
+          )}
         </span>
       )}
     </span>
@@ -158,23 +168,29 @@ function LiveStatus({
  * text into a collapsible detail instead of onto the page (§4 of the audit),
  * and it is what makes "down" look different from "loading".
  */
-function FolioError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
-  const friendly = describeError(error);
+function FolioError({
+  error,
+  onRetry,
+}: {
+  error: unknown;
+  onRetry: () => void;
+}) {
+  const { locale } = useLocale();
+  const t = PROJECTS_COPY[locale];
+  const friendly = describeError(error, locale);
   return (
     <div className="projects-fail" data-tone={friendly.tone} role="alert">
       <p className="projects-fail-title">{friendly.title}</p>
       <p className="projects-fail-message">{friendly.message}</p>
-      <p className="projects-fail-note">
-        Ro‘yxat yuklanmadi — lekin yangi loyihani hozir ham boshlashingiz mumkin.
-      </p>
+      <p className="projects-fail-note">{t.errorNote}</p>
       <div className="projects-fail-actions">
         <Button variant="ghost" onClick={onRetry}>
-          {friendly.action?.label ?? "Qayta urinish"}
+          {friendly.action?.label ?? t.retry}
         </Button>
       </div>
       {friendly.detail !== undefined && (
         <details className="projects-detail">
-          <summary>Texnik tafsilot</summary>
+          <summary>{t.technical}</summary>
           <code>{friendly.detail}</code>
         </details>
       )}
@@ -185,6 +201,8 @@ function FolioError({ error, onRetry }: { error: unknown; onRetry: () => void })
 export default function ProjectsPage() {
   const router = useRouter();
   const { session } = useAppSession();
+  const { locale } = useLocale();
+  const t = PROJECTS_COPY[locale];
   const [projects, setProjects] = useState<ProjectRow[] | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [jobs, setJobs] = useState<Record<string, JobSnapshot>>({});
@@ -205,11 +223,7 @@ export default function ProjectsPage() {
   const loadProjects = useCallback(async (token: string): Promise<void> => {
     try {
       const supabase = createRlsClient(token);
-      const {
-        data,
-        error,
-        status,
-      } = await supabase
+      const { data, error, status } = await supabase
         .from("projects")
         .select("id,title,type,status,created_at")
         .order("created_at", { ascending: false })
@@ -288,7 +302,10 @@ export default function ProjectsPage() {
             setJobs((current) => applyJob(current, snapshot));
             // A run that just ended, or one for a project this tab has never
             // seen, both mean the list itself is out of date.
-            if (isTerminalJob(snapshot.status) || !knownIds.current.has(snapshot.projectId)) {
+            if (
+              isTerminalJob(snapshot.status) ||
+              !knownIds.current.has(snapshot.projectId)
+            ) {
               void loadProjects(token);
             }
           },
@@ -313,7 +330,10 @@ export default function ProjectsPage() {
   useEffect(() => {
     if (!live || !session) return;
     const token = session.accessToken;
-    const timer = window.setInterval(() => void loadJobs(token), JOB_REFRESH_MS);
+    const timer = window.setInterval(
+      () => void loadJobs(token),
+      JOB_REFRESH_MS,
+    );
     return () => window.clearInterval(timer);
   }, [live, session, loadJobs]);
 
@@ -359,12 +379,12 @@ export default function ProjectsPage() {
     list.sort((a, b) => {
       const delta =
         sortKey === "name"
-          ? a.title.localeCompare(b.title, "uz")
+          ? a.title.localeCompare(b.title, locale)
           : (a.created_at ?? "").localeCompare(b.created_at ?? "");
       return sortAsc ? delta : -delta;
     });
     return list;
-  }, [projects, sortKey, sortAsc]);
+  }, [locale, projects, sortKey, sortAsc]);
 
   useEffect(() => {
     knownIds.current = new Set((projects ?? []).map((row) => row.id));
@@ -379,30 +399,50 @@ export default function ProjectsPage() {
 
   const needle = query.trim().toLowerCase();
   const searched = useMemo(
-    () => (needle === "" ? rows : rows.filter((row) => row.title.toLowerCase().includes(needle))),
+    () =>
+      needle === ""
+        ? rows
+        : rows.filter((row) => row.title.toLowerCase().includes(needle)),
     [rows, needle],
   );
   const visible = useMemo(
     () =>
-      active === "all" ? searched : searched.filter((row) => chipOf(statusOf(row)) === active),
+      active === "all"
+        ? searched
+        : searched.filter((row) => chipOf(statusOf(row)) === active),
     [searched, active, statusOf],
   );
-  const shownIds = useMemo(() => new Set(visible.map((row) => row.id)), [visible]);
+  const shownIds = useMemo(
+    () => new Set(visible.map((row) => row.id)),
+    [visible],
+  );
 
   // Counts follow the query: with a term typed, a chip promises exactly what
   // clicking it will reveal.
   const chips = useMemo(() => {
-    const present = new Set((projects ?? []).map((row) => chipOf(statusOf(row))));
-    return [
-      { key: "all", label: "Hammasi", count: searched.length },
-      ...CHIPS.filter((chip) => chip.key !== "archived" || present.has("archived")).map((chip) => ({
-        key: chip.key,
-        label: chip.label,
-        dot: chip.dot,
-        count: searched.filter((row) => chipOf(statusOf(row)) === chip.key).length,
-      })),
+    const present = new Set(
+      (projects ?? []).map((row) => chipOf(statusOf(row))),
+    );
+    const definitions = [
+      { key: "draft", label: t.filters.draft, dot: "var(--orange)" },
+      { key: "generating", label: t.filters.generating, dot: "var(--accent)" },
+      { key: "ready", label: t.filters.ready, dot: "var(--green)" },
+      { key: "failed", label: t.filters.failed, dot: "var(--red)" },
+      { key: "archived", label: t.filters.archived, dot: "var(--ink-3)" },
     ];
-  }, [projects, searched, statusOf]);
+    return [
+      { key: "all", label: t.all, count: searched.length },
+      ...definitions
+        .filter((chip) => chip.key !== "archived" || present.has("archived"))
+        .map((chip) => ({
+          key: chip.key,
+          label: chip.label,
+          dot: chip.dot,
+          count: searched.filter((row) => chipOf(statusOf(row)) === chip.key)
+            .length,
+        })),
+    ];
+  }, [projects, searched, statusOf, t]);
 
   const results: SearchResult[] = useMemo(
     () =>
@@ -436,7 +476,7 @@ export default function ProjectsPage() {
     <AppChrome active="projects">
       <div className="projects">
         <header className="projects-head">
-          <h1 className="projects-title">Loyihalar</h1>
+          <h1 className="projects-title">{t.title}</h1>
           <div className="projects-controls">
             {/* Nothing to search and nothing to lay out until rows exist (G41). */}
             {hasRows && (
@@ -449,19 +489,19 @@ export default function ProjectsPage() {
                   <SearchList
                     query={query}
                     onQueryChange={setQuery}
-                    placeholder="Loyiha qidirish"
+                    placeholder={t.search}
                     results={results}
                     onPick={(item) => router.push(`/projects/${item.key}`)}
-                    emptyTitle="Mos loyiha topilmadi"
-                    emptyHint="Boshqa so‘z bilan urinib ko‘ring"
+                    emptyTitle={t.noMatch}
+                    emptyHint={t.tryAnother}
                   />
                 </div>
 
-                <div className="projects-view" role="group" aria-label="Ko‘rinish">
+                <div className="projects-view" role="group" aria-label={t.view}>
                   <button
                     type="button"
                     aria-pressed={view === "list"}
-                    aria-label="Ro‘yxat"
+                    aria-label={t.list}
                     onClick={() => pickView("list")}
                   >
                     <List size={16} strokeWidth={1.75} aria-hidden />
@@ -469,7 +509,7 @@ export default function ProjectsPage() {
                   <button
                     type="button"
                     aria-pressed={view === "grid"}
-                    aria-label="Katakcha"
+                    aria-label={t.grid}
                     onClick={() => pickView("grid")}
                   >
                     <LayoutGrid size={16} strokeWidth={1.75} aria-hidden />
@@ -484,7 +524,7 @@ export default function ProjectsPage() {
               <Link href="/new" className="btn btn-primary projects-new">
                 <span className="btn-label">
                   <Plus size={16} strokeWidth={2} aria-hidden />
-                  Yangi
+                  {t.new}
                 </span>
               </Link>
             )}
@@ -495,21 +535,18 @@ export default function ProjectsPage() {
 
         {loading && (
           <div className="projects-loading">
-            <p className="projects-loading-note">Loyihalar yuklanmoqda…</p>
+            <p className="projects-loading-note">{t.loading}</p>
             <Skeleton lines={5} />
           </div>
         )}
 
         {blank && (
           <div className="projects-empty">
-            <EmptyState
-              title="Hozircha loyiha yo‘q"
-              hint="Manba yuklang, talabni ayting — taqdimot shu yerda paydo bo‘ladi."
-            >
+            <EmptyState title={t.emptyTitle} hint={t.emptyHint}>
               <Link href="/new" className="btn btn-primary projects-new">
                 <span className="btn-label">
                   <Plus size={16} strokeWidth={2} aria-hidden />
-                  Birinchi loyiha
+                  {t.first}
                 </span>
               </Link>
             </EmptyState>
@@ -519,33 +556,41 @@ export default function ProjectsPage() {
         {hasRows && (
           <>
             <div className="projects-chips">
-              <FilterChips filters={chips} active={active} onChange={setActive} />
+              <FilterChips
+                filters={chips}
+                active={active}
+                onChange={setActive}
+              />
             </div>
 
             {view === "list" ? (
-              <div className="projects-table" role="region" aria-label="Loyihalar jadvali">
+              <div
+                className="projects-table"
+                role="region"
+                aria-label={t.table}
+              >
                 <div
                   className="grid border-b border-line px-4 py-2 text-[11.5px] font-medium text-ink-3"
                   style={{ gridTemplateColumns: "var(--cols)" }}
                 >
                   <span>
                     <SortHead
-                      label="Nomi"
+                      label={t.name}
                       on={sortKey === "name"}
                       asc={sortAsc}
                       onClick={() => toggleSort("name")}
                     />
                   </span>
-                  <span className="projects-cell-type">Turi</span>
+                  <span className="projects-cell-type">{t.type}</span>
                   <span>
                     <SortHead
-                      label="Yaratilgan"
+                      label={t.created}
                       on={sortKey === "date"}
                       asc={sortAsc}
                       onClick={() => toggleSort("date")}
                     />
                   </span>
-                  <span>Holat</span>
+                  <span>{t.status}</span>
                 </div>
 
                 {rows.map((row) => {
@@ -557,7 +602,8 @@ export default function ProjectsPage() {
                       style={{
                         gridTemplateRows: shown ? "1fr" : "0fr",
                         opacity: shown ? 1 : 0,
-                        transitionTimingFunction: "cubic-bezier(0.23, 1, 0.32, 1)",
+                        transitionTimingFunction:
+                          "cubic-bezier(0.23, 1, 0.32, 1)",
                       }}
                     >
                       <div className="overflow-hidden">
@@ -573,7 +619,8 @@ export default function ProjectsPage() {
                             {row.title}
                           </span>
                           <span className="projects-cell-type min-w-0 truncate text-ink-2">
-                            {TYPE_LABEL[row.type] ?? row.type}
+                            {t.types[row.type as keyof typeof t.types] ??
+                              row.type}
                           </span>
                           <span className="min-w-0 text-ink-3">
                             <DataText>{filedOn(row.created_at)}</DataText>
@@ -591,7 +638,9 @@ export default function ProjectsPage() {
                   );
                 })}
 
-                {visible.length === 0 && <p className="projects-none">Mos loyiha topilmadi</p>}
+                {visible.length === 0 && (
+                  <p className="projects-none">{t.noMatch}</p>
+                )}
               </div>
             ) : (
               <>
@@ -607,20 +656,27 @@ export default function ProjectsPage() {
                     >
                       <span className="projects-card-title">{row.title}</span>
                       <span className="projects-card-foot">
-                        <span>{TYPE_LABEL[row.type] ?? row.type}</span>
+                        <span>
+                          {t.types[row.type as keyof typeof t.types] ??
+                            row.type}
+                        </span>
                         <DataText>{filedOn(row.created_at)}</DataText>
-                        <LiveStatus status={statusOf(row)} job={jobs[row.id] ?? null} now={now} />
+                        <LiveStatus
+                          status={statusOf(row)}
+                          job={jobs[row.id] ?? null}
+                          now={now}
+                        />
                       </span>
                     </Link>
                   ))}
                 </div>
-                {visible.length === 0 && <p className="projects-none">Mos loyiha topilmadi</p>}
+                {visible.length === 0 && (
+                  <p className="projects-none">{t.noMatch}</p>
+                )}
               </>
             )}
 
-            <p className="projects-count">
-              <DataText>{visible.length}</DataText> ta loyiha
-            </p>
+            <p className="projects-count">{t.count(visible.length)}</p>
           </>
         )}
       </div>

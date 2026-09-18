@@ -33,6 +33,7 @@ class JobType(StrEnum):
     PRESENTATION_GENERATION = "presentation_generation"
     EXPORT = "export"
     PRESENTATION_EDIT = "presentation_edit"
+    PRESENTATION_RENDER = "presentation_render"
     IMAGE_REGEN = "image_regen"
 
 

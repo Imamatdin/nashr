@@ -26,12 +26,17 @@ ENQUEUE_ACTION: str = "enqueue"
 CHAT_ACTION: str = "chat"
 UPLOAD_ACTION: str = "upload"
 SHARE_VIEW_ACTION: str = "share_view"
+DESIGN_RENDER_ACTION: str = "design_render"
 
 # Defaults sized off SPEC §9 ("max 10 generation jobs per user per day") with
 # per-IP headroom for NAT'd campus networks sharing one address. Upload caps
 # assume max 10 sources per job × the 10-job user cap, minus slack for retried
 # uploads. share_view is IP-only: the public route has no authenticated user.
 DEFAULT_LIMITS: dict[tuple[str, str], int] = {
+    ("user", "research"): 60,
+    ("ip", "research"): 240,
+    ("user", DESIGN_RENDER_ACTION): 120,
+    ("ip", DESIGN_RENDER_ACTION): 480,
     ("user", ENQUEUE_ACTION): 10,
     ("ip", ENQUEUE_ACTION): 40,
     ("user", CHAT_ACTION): 200,
@@ -120,6 +125,7 @@ class RateLimiter:
 __all__ = [
     "CHAT_ACTION",
     "DEFAULT_LIMITS",
+    "DESIGN_RENDER_ACTION",
     "ENQUEUE_ACTION",
     "SHARE_VIEW_ACTION",
     "UPLOAD_ACTION",

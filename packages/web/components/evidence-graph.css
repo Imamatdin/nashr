@@ -1,0 +1,16 @@
+.evidence-map { border: 1px solid var(--fx-200); border-radius: 14px; padding: 20px; margin-bottom: 24px; text-align: left; }
+.evidence-map header { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.evidence-map h3 { font: 600 19px var(--font-source-sans), sans-serif; margin: 0; }
+.evidence-map input { border: 1px solid var(--fx-200); padding: 8px 12px; border-radius: 8px; background: transparent; font: inherit; color: inherit; max-width: 100%; }
+.evidence-hint { font-size: 13px; opacity: .8; margin: 10px 0 16px; max-width: 70ch; }
+.evidence-key { display: flex; gap: 20px; font-size: 12px; }
+.evidence-key span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--fx-cyan); margin-right: 7px; }
+.evidence-key span:nth-child(2)::before { background: var(--fx-purple); }.evidence-key span:nth-child(3)::before { background: var(--fx-orange); }
+.evidence-scroll { overflow: auto; max-height: 450px; margin-top: 16px; background-image: radial-gradient(var(--fx-200) .6px, transparent .6px); background-size: 18px 18px; border-radius: 10px; }
+.evidence-map svg { width: 100%; min-width: 580px; display: block; }
+.evidence-map path { fill: none; stroke: var(--fx-200); stroke-width: 1.5; }.evidence-map path.active-edge { stroke: var(--fx-purple); stroke-width: 2.5; }
+.evidence-node { cursor: pointer; outline: none; }.evidence-node rect { fill: var(--fx-paper); stroke: var(--fx-200); }.evidence-node text { font: 12px var(--font-source-sans), sans-serif; fill: var(--fx-ink); }
+.evidence-node circle { fill: var(--fx-purple); }.evidence-node.source circle { fill: var(--fx-cyan); }.evidence-node.unlinked circle { fill: var(--fx-orange); }
+.evidence-node.source rect { fill: var(--fx-cyan-soft); }.evidence-node.selected rect,.evidence-node:focus-visible rect { stroke: var(--fx-blue); stroke-width: 3; }
+.evidence-inspect { padding: 16px; background: var(--fx-blue-soft); color: var(--fx-ink); border-radius: 10px; margin-top: 14px; }.evidence-inspect button { float: right; font-size: 22px; }.evidence-inspect p { font-size: 13px; margin: 8px 0; }.evidence-inspect blockquote { font-size: 15px; margin: 8px 0 0; }
+@media(max-width:600px){.evidence-map{padding:12px}.evidence-map input{width:100%}}

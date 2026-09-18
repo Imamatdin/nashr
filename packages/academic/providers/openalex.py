@@ -44,7 +44,7 @@ class OpenAlexProvider:
     BASE_URL: str = "https://api.openalex.org/works"
 
     async def search(
-        self, client: httpx.AsyncClient, query: str, limit: int
+        self, client: httpx.AsyncClient, query: str, limit: int, *, strict_errors: bool = False
     ) -> list[AcademicPaper]:
         """Return up to ``limit`` works matching ``query``."""
 
@@ -62,6 +62,8 @@ class OpenAlexProvider:
                 "openalex_request_failed",
                 extra={"error": str(exc), "query": query},
             )
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         if response.status_code != 200:
@@ -69,19 +71,27 @@ class OpenAlexProvider:
                 "openalex_bad_status",
                 extra={"status": response.status_code, "query": query},
             )
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         try:
             raw_payload = response.json()
         except ValueError as exc:
             logger.warning("openalex_bad_json", extra={"error": str(exc), "query": query})
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         payload = as_dict(raw_payload)
         if payload is None:
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
         items = as_list(payload.get("results"))
         if items is None:
+            if strict_errors:
+                raise RuntimeError("Academic provider unavailable or invalid response") from None
             return []
 
         papers: list[AcademicPaper] = []
