@@ -65,7 +65,7 @@ RUN cd packages/presentation-worker \
 # Copy only runtime sources; .dockerignore also filters nested credentials
 # and host node_modules so they cannot overwrite the Linux dependencies.
 COPY packages/ ./packages/
-COPY scripts/__init__.py scripts/worker_run_job.py scripts/healthcheck.py scripts/backup_db.py scripts/backup_restore_verify.py scripts/release_preflight.py ./scripts/
+COPY scripts/__init__.py scripts/worker_run_job.py scripts/healthcheck.py scripts/backup_db.py scripts/backup_restore_verify.py scripts/release_preflight.py scripts/gc_orphan_exports.py scripts/backfill_validate_revisions.py ./scripts/
 RUN cd packages/presentation-worker && npm run build
 
 EXPOSE 8080
