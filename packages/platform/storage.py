@@ -8,7 +8,10 @@ URLs or direct ``get_object`` calls.
 Layout::
 
     sources/{project_id}/{filename}      uploaded source files
-    generated/{project_id}/{filename}    rendered outputs
+    uploads/{user_id}/{unique}/{name}    web-uploaded source files
+    exports/{document}/{revision}/{renderer}/{format}/{sha256}.{ext}
+                                         immutable presentation exports (ADR 0001)
+    generated/{project_id}/{filename}    legacy article outputs
     temp/{project_id}/{filename}         intermediate processing files
 
 The boto3 S3 client has no first-class type stubs, so the underlying
@@ -22,13 +25,18 @@ R2 account during development.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import logging
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import boto3  # pyright: ignore[reportMissingTypeStubs]
 from botocore.config import Config as BotoConfig  # pyright: ignore[reportMissingTypeStubs]
+from botocore.exceptions import ClientError  # pyright: ignore[reportMissingTypeStubs]
+from pydantic import BaseModel, ConfigDict
 
 from packages.platform.config import PlatformConfig
 
@@ -46,6 +54,21 @@ _CONTENT_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
 }
+
+
+class StorageVerificationError(RuntimeError):
+    """The stored object does not have the size or bytes that were uploaded."""
+
+
+class StoredObject(BaseModel):
+    """What the store reports about one object."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    size: int
+    sha256_b64: str | None
+    last_modified: datetime
 
 
 class FileStorage:
@@ -283,6 +306,117 @@ class FileStorage:
         except Exception:
             return False
 
+    async def put_verified(
+        self, local_path: Path, remote_key: str, sha256_hex: str, byte_size: int
+    ) -> None:
+        """Upload ``local_path`` and prove the stored object has this size and SHA-256.
+
+        The object store checks ``ChecksumSHA256`` on write; a HEAD afterwards must
+        report the same size and checksum. A store that does not echo the checksum
+        costs one download, hashed here. Any mismatch raises
+        :class:`StorageVerificationError`, so a caller never registers bytes it has
+        not seen land.
+        """
+
+        body = await asyncio.to_thread(local_path.read_bytes)
+        if len(body) != byte_size or hashlib.sha256(body).hexdigest() != sha256_hex:
+            raise StorageVerificationError(f"{remote_key}: local file changed before upload")
+        digest_b64 = base64.b64encode(bytes.fromhex(sha256_hex)).decode("ascii")
+
+        if self._available:
+            ctype = _guess_content_type(local_path)
+            await asyncio.to_thread(
+                self._client.put_object,
+                Bucket=self._bucket,
+                Key=remote_key,
+                Body=body,
+                ChecksumSHA256=digest_b64,
+                **({"ContentType": ctype} if ctype else {}),
+            )
+        else:
+            await self._local_upload(local_path, remote_key)
+
+        head = await self.head_object(remote_key)
+        if head is None or head.size != byte_size:
+            raise StorageVerificationError(f"{remote_key}: stored size does not match")
+        if head.sha256_b64 is not None:
+            if head.sha256_b64 != digest_b64:
+                raise StorageVerificationError(f"{remote_key}: stored checksum does not match")
+            return
+        stored = await self.get_bytes(remote_key)
+        if hashlib.sha256(stored).hexdigest() != sha256_hex:
+            raise StorageVerificationError(f"{remote_key}: stored bytes do not match")
+
+    async def head_object(self, remote_key: str) -> StoredObject | None:
+        """Size, checksum (when the store reports one) and age of ``remote_key``."""
+
+        if not self._available:
+            path = self._local_storage_dir / remote_key
+            if not path.is_file():
+                return None
+            data = await asyncio.to_thread(path.read_bytes)
+            return StoredObject(
+                key=remote_key,
+                size=len(data),
+                sha256_b64=base64.b64encode(hashlib.sha256(data).digest()).decode("ascii"),
+                last_modified=datetime.fromtimestamp(path.stat().st_mtime, UTC),
+            )
+        try:
+            response: Any = await asyncio.to_thread(
+                self._client.head_object,
+                Bucket=self._bucket,
+                Key=remote_key,
+                ChecksumMode="ENABLED",
+            )
+        except ClientError as exc:
+            error: Any = getattr(exc, "response", {}).get("Error", {})
+            if str(error.get("Code")) in ("404", "NoSuchKey", "NotFound"):
+                return None
+            raise
+        checksum = response.get("ChecksumSHA256")
+        return StoredObject(
+            key=remote_key,
+            size=int(response["ContentLength"]),
+            sha256_b64=checksum if isinstance(checksum, str) and "-" not in checksum else None,
+            last_modified=response["LastModified"],
+        )
+
+    async def list_objects(self, prefix: str) -> list[StoredObject]:
+        """Every object under ``prefix`` (no checksums; used by the orphan sweep)."""
+
+        if not self._available:
+            root = self._local_storage_dir
+            base = root / prefix
+            if not base.exists():
+                return []
+            return [
+                StoredObject(
+                    key=path.relative_to(root).as_posix(),
+                    size=path.stat().st_size,
+                    sha256_b64=None,
+                    last_modified=datetime.fromtimestamp(path.stat().st_mtime, UTC),
+                )
+                for path in sorted(base.rglob("*"))
+                if path.is_file()
+            ]
+
+        def run() -> list[StoredObject]:
+            out: list[StoredObject] = []
+            paginator = self._client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                for item in page.get("Contents", []):
+                    out.append(
+                        StoredObject(
+                            key=str(item["Key"]),
+                            size=int(item["Size"]),
+                            sha256_b64=None,
+                            last_modified=item["LastModified"],
+                        )
+                    )
+            return out
+
+        return await asyncio.to_thread(run)
+
     # ============================================================ key builders
 
     @staticmethod
@@ -313,17 +447,6 @@ class FileStorage:
         """Compose the R2 key for a generated output file."""
 
         return f"generated/{project_id}/{_sanitize_filename(filename)}"
-
-    @staticmethod
-    def stable_generated_key(project_id: str, ext: str) -> str:
-        """Stable per-format output key: ``generated/{project_id}/presentation.{ext}``.
-
-        Deliberately NOT title-derived: regenerations and brain fixes
-        overwrite the same object, so share links and ``generated_files``
-        rows stay valid across edits (migration 007).
-        """
-
-        return f"generated/{project_id}/presentation.{ext.lstrip('.')}"
 
     # ============================================================ local fallback
 
@@ -369,4 +492,4 @@ def _guess_content_type(path: Path) -> str | None:
     return _CONTENT_TYPES.get(path.suffix.lower())
 
 
-__all__ = ["FileStorage"]
+__all__ = ["FileStorage", "StorageVerificationError", "StoredObject"]

@@ -23,7 +23,7 @@ import pytest
 from packages.bot.orchestrators import SourceProcessingResult
 from packages.bot.orchestrators.presentation_orchestrator import (
     TOTAL_STEPS,
-    FixAndRenderResult,
+    FixBatchResult,
     PresentationOrchestrator,
     PresentationPipelineResult,
     PresentationRenderResult,
@@ -608,71 +608,30 @@ async def test_render_returns_paths_for_successful_formats() -> None:
     assert len(worker.render_calls) == 2
 
 
-async def test_render_uploads_to_storage_with_project_id_namespace() -> None:
-    """When R2 storage is configured, render uploads using project_id-namespaced keys.
+async def test_render_never_uploads_or_registers() -> None:
+    """Uploading belongs to the caller holding a job claim (ADR 0001).
 
-    Catches regressions where the orchestrator falls back to the rendered
-    file's stem (the deck title) and collides with other projects.
+    The old render() uploaded every format to a project-keyed R2 key and
+    upserted generated_files, so an older revision's render overwrote what the
+    head served. It now only writes local files.
     """
 
     from unittest.mock import AsyncMock, MagicMock
 
     bot = _StubBot()
     worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
-
     storage_stub = MagicMock()
     storage_stub.available = True
     storage_stub.upload = AsyncMock(return_value="")
-
-    orch, _, _, _ = _build_orch(bot, worker=worker, storage=storage_stub)
-
-    await orch.render(
-        _deck_spec(),
-        [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
-        _noop_progress,
-        project_id=PROJECT_ID,
-    )
-
-    assert storage_stub.upload.await_count == 2
-    keys = [call.args[1] for call in storage_stub.upload.await_args_list]
-    for key in keys:
-        assert key.startswith(f"generated/{PROJECT_ID}/")
-
-
-async def test_render_uploads_use_stable_per_format_keys_and_upsert_registration() -> None:
-    """P2 stable keys: uploads land on generated/{pid}/presentation.{ext} and the
-    generated_files row is upserted per (project, format) — never title-derived,
-    never appended as duplicates."""
-
-    from unittest.mock import AsyncMock, MagicMock
-
-    bot = _StubBot()
-    worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
-
-    storage_stub = MagicMock()
-    storage_stub.available = True
-    storage_stub.upload = AsyncMock(return_value="")
-
     orch, _, _, fake = _build_orch(bot, worker=worker, storage=storage_stub)
 
-    await orch.render(
-        _deck_spec(),
-        [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
-        _noop_progress,
-        project_id=PROJECT_ID,
+    result = await orch.render(
+        _deck_spec(), [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE], _noop_progress
     )
 
-    keys = sorted(call.args[1] for call in storage_stub.upload.await_args_list)
-    assert keys == [
-        f"generated/{PROJECT_ID}/presentation.html",
-        f"generated/{PROJECT_ID}/presentation.pptx",
-    ]
-    rows = fake.tables.get("generated_files", [])
-    assert {r["file_type"] for r in rows} == {"html", "pptx"}
-    for row in rows:
-        assert row["storage_path"] == f"generated/{PROJECT_ID}/presentation.{row['file_type']}"
-        assert row["project_id"] == PROJECT_ID
-        assert row["file_size"] > 0
+    assert result.html_path is not None and result.pptx_path is not None
+    storage_stub.upload.assert_not_awaited()
+    assert fake.tables.get("generated_files", []) == []
 
 
 async def test_process_sources_fetches_from_storage_when_key_present() -> None:
@@ -699,34 +658,44 @@ async def test_process_sources_fetches_from_storage_when_key_present() -> None:
     assert len(result.claims) == 2
 
 
-async def test_render_records_timeout_as_warning_and_continues() -> None:
+async def test_render_fails_when_any_requested_format_times_out() -> None:
+    # (i) Partial success is not a deliverable: HTML landed, PPTX timed out, and
+    # the render raises naming the failed format instead of returning half a set.
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
     bot = _StubBot()
-    worker = _StubWorkerRunner(
-        formats_to_succeed=("html",),
-        timeout_on=("pptx",),
-    )
+    worker = _StubWorkerRunner(formats_to_succeed=("html",), timeout_on=("pptx",))
     orch, _, _, _ = _build_orch(bot, worker=worker)
 
-    result = await orch.render(
-        _deck_spec(),
-        [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
-        _noop_progress,
-    )
-
-    assert result.html_path is not None
-    assert result.pptx_path is None
-    assert any("timed out" in w for w in result.warnings)
+    with pytest.raises(_OrchestratorError) as info:
+        await orch.render(
+            _deck_spec(), [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE], _noop_progress
+        )
+    assert info.value.step == "render"
+    assert "pptx: render timed out" in str(info.value.original)
+    assert len(worker.render_calls) == 2  # every format was attempted
 
 
-async def test_render_records_nonzero_exit_as_warning() -> None:
+async def test_render_fails_on_a_nonzero_exit() -> None:
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
     bot = _StubBot()
     worker = _StubWorkerRunner(formats_to_succeed=("html",), force_returncode=1)
     orch, _, _, _ = _build_orch(bot, worker=worker)
 
-    result = await orch.render(_deck_spec(), [ExportFormat.HTML], _noop_progress)
+    with pytest.raises(_OrchestratorError) as info:
+        await orch.render(_deck_spec(), [ExportFormat.HTML], _noop_progress)
+    assert info.value.step == "render"
+    assert "html" in str(info.value.original)
 
-    assert result.html_path is None
-    assert any("html" in w for w in result.warnings)
+
+async def test_render_with_no_formats_requested_fails() -> None:
+    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+
+    orch, _, _, _ = _build_orch(_StubBot())
+    with pytest.raises(_OrchestratorError) as info:
+        await orch.render(_deck_spec(), [], _noop_progress)
+    assert info.value.step == "render"
 
 
 async def test_render_calls_ensure_built_once() -> None:
@@ -757,11 +726,11 @@ async def test_render_propagates_build_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
-# run_full_pipeline
+# build_deck
 # ---------------------------------------------------------------------------
 
 
-async def test_full_pipeline_emits_seven_progress_steps() -> None:
+async def test_build_deck_emits_six_progress_steps_and_returns_the_deck() -> None:
     bot = _StubBot(payloads={"f1": b"pdf"})
     pipeline = _StubSourcePipeline([_pipeline_result()])
     worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
@@ -772,38 +741,36 @@ async def test_full_pipeline_emits_seven_progress_steps() -> None:
         assert total == TOTAL_STEPS
         seen_steps.append(step)
 
-    result = await orch.run_full_pipeline(
+    result = await orch.build_deck(
         file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
         project_id=PROJECT_ID,
         user_id=USER_ID,
         language="uz",
         raw_answers=None,
-        requested_formats=None,
         progress=progress,
         package=GenerationPackage.PRESENTATION_STANDARD,
     )
 
     assert isinstance(result, PresentationPipelineResult)
-    assert isinstance(result.render, PresentationRenderResult)
-    assert result.render.html_path is not None
-    assert result.sources is not None  # the pipeline surfaces its sources for the brain session
-    # source → matrix → interview → design → editorial → images → render
-    assert seen_steps == [1, 2, 3, 4, 5, 6, 7]
+    assert result.deck.title == "Test deck"
+    assert result.sources is not None  # surfaced for the brain session
+    # source → matrix → interview → design → editorial → images; rendering is
+    # the caller's step, after it has committed the deck as a revision.
+    assert seen_steps == [1, 2, 3, 4, 5, 6]
+    assert worker.render_calls == []
 
 
-async def test_full_pipeline_uses_defaults_when_no_answers() -> None:
+async def test_build_deck_uses_defaults_when_no_answers() -> None:
     bot = _StubBot(payloads={"f1": b"pdf"})
     interview = _StubInterviewEngine()
-    worker = _StubWorkerRunner(formats_to_succeed=("html",))
-    orch, _, _, _ = _build_orch(bot, interview=interview, worker=worker)
+    orch, _, _, _ = _build_orch(bot, interview=interview)
 
-    await orch.run_full_pipeline(
+    await orch.build_deck(
         file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
         project_id=PROJECT_ID,
         user_id=USER_ID,
         language="uz",
         raw_answers=None,
-        requested_formats=[ExportFormat.HTML],
         progress=_noop_progress,
         package=GenerationPackage.PRESENTATION_STANDARD,
     )
@@ -811,7 +778,7 @@ async def test_full_pipeline_uses_defaults_when_no_answers() -> None:
     assert interview.apply_defaults_calls and not interview.apply_answers_calls
 
 
-async def test_full_pipeline_propagates_editorial_failure() -> None:
+async def test_build_deck_propagates_editorial_failure() -> None:
     from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
 
     bot = _StubBot(payloads={"f1": b"pdf"})
@@ -819,106 +786,37 @@ async def test_full_pipeline_propagates_editorial_failure() -> None:
     orch, _, _, _ = _build_orch(bot, editorial=editorial)
 
     with pytest.raises(_OrchestratorError) as info:
-        await orch.run_full_pipeline(
+        await orch.build_deck(
             file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
             project_id=PROJECT_ID,
             user_id=USER_ID,
             language="uz",
             raw_answers=None,
-            requested_formats=[ExportFormat.HTML],
             progress=_noop_progress,
             package=GenerationPackage.PRESENTATION_STANDARD,
         )
     assert info.value.step == "editorial"
 
 
-async def test_full_pipeline_raises_when_render_produces_no_files() -> None:
-    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
-
+async def test_build_deck_writes_no_deck_or_document() -> None:
+    # The old pipeline wrote the decks table itself (_persist_deck). Persisting is
+    # now the caller's commit_revision, under its own actor and base revision.
     bot = _StubBot(payloads={"f1": b"pdf"})
-    # No format succeeds → every render call degrades to a warning → zero files.
-    worker = _StubWorkerRunner(formats_to_succeed=())
-    orch, _, _, _ = _build_orch(bot, worker=worker)
+    orch, _db, _credits, fake = _build_orch(bot)
 
-    with pytest.raises(_OrchestratorError) as info:
-        await orch.run_full_pipeline(
-            file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
-            project_id=PROJECT_ID,
-            user_id=USER_ID,
-            language="uz",
-            raw_answers=None,
-            requested_formats=[ExportFormat.HTML],
-            progress=_noop_progress,
-            package=GenerationPackage.PRESENTATION_STANDARD,
-        )
-    assert info.value.step == "render"
-    assert "deliverable" in str(info.value.original)
-
-
-async def test_full_pipeline_partial_render_does_not_raise() -> None:
-    bot = _StubBot(payloads={"f1": b"pdf"})
-    # HTML lands, PPTX fails → one deliverable file → the job still succeeds.
-    worker = _StubWorkerRunner(formats_to_succeed=("html",))
-    orch, _, _, _ = _build_orch(bot, worker=worker)
-
-    result = await orch.run_full_pipeline(
+    await orch.build_deck(
         file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
         project_id=PROJECT_ID,
         user_id=USER_ID,
         language="uz",
         raw_answers=None,
-        requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
         progress=_noop_progress,
         package=GenerationPackage.PRESENTATION_STANDARD,
     )
 
-    assert result.render.html_path is not None
-    assert result.render.pptx_path is None  # the failed format is absent, not fatal
-    assert any("pptx" in w for w in result.render.warnings)
-
-
-async def test_full_pipeline_persists_the_generated_deck() -> None:
-    bot = _StubBot(payloads={"f1": b"pdf"})
-    worker = _StubWorkerRunner(formats_to_succeed=("html",))
-    orch, db, _credits, fake = _build_orch(bot, worker=worker)
-    # save_deck sources the denormalised columns from the project row, so the
-    # persist hook silently no-ops unless a project exists. Seed one whose title
-    # differs from the deck's so provenance is proven end-to-end.
-    fake.seed(
-        "projects",
-        [
-            {
-                "id": PROJECT_ID,
-                "user_id": USER_ID,
-                "type": "presentation",
-                "title": "Seeded project",
-                "language": "uz",
-                "audience": "talaba",
-            }
-        ],
-    )
-
-    await orch.run_full_pipeline(
-        file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
-        project_id=PROJECT_ID,
-        user_id=USER_ID,
-        language="uz",
-        raw_answers=None,
-        requested_formats=[ExportFormat.HTML],
-        progress=_noop_progress,
-        package=GenerationPackage.PRESENTATION_STANDARD,
-    )
-
-    # The _persist_deck hook fired inside run_full_pipeline: exactly one deck row
-    # holding the pipeline's deck. Deleting the wire-up makes get_deck return
-    # None and fails this test.
-    assert len(fake.tables.get("decks", [])) == 1
-    row = await db.get_deck(PROJECT_ID)
-    assert row is not None
-    restored = DeckSpec.model_validate(row["deck_json"])
-    assert restored.title == "Test deck"  # the generated deck, persisted intact
-    assert restored.slides  # at least one slide round-tripped through deck_json
-    assert row["title"] == "Seeded project"  # denormalised column from project, not deck
+    assert fake.tables.get("decks", []) == []
+    assert fake.tables.get("document_revisions", []) == []
+    assert fake.rpc_calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -973,17 +871,16 @@ async def test_full_pipeline_threads_package_to_image_budget(
     bot = _StubBot(payloads={"f1": b"pdf"})
     worker = _StubWorkerRunner(formats_to_succeed=("html",))
     storage_stub = MagicMock()
-    storage_stub.available = False  # disables _upload_rendered, keeps render local
+    storage_stub.available = False
     spy = _SpyImagePass()
     orch, _, _, _ = _build_orch(bot, worker=worker, storage=storage_stub, image_pass=spy)
 
-    await orch.run_full_pipeline(
+    await orch.build_deck(
         file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
         project_id=PROJECT_ID,
         user_id=USER_ID,
         language="uz",
         raw_answers=None,
-        requested_formats=[ExportFormat.HTML],
         progress=_noop_progress,
         package=package,
     )
@@ -1009,13 +906,12 @@ async def test_full_pipeline_premium_image_budget_strictly_exceeds_standard() ->
         storage_stub.available = False
         spy = _SpyImagePass()
         orch, _, _, _ = _build_orch(bot, worker=worker, storage=storage_stub, image_pass=spy)
-        await orch.run_full_pipeline(
+        await orch.build_deck(
             file_infos=[{"file_id": "f1", "filename": "a.pdf", "file_type": "pdf"}],
             project_id=PROJECT_ID,
             user_id=USER_ID,
             language="uz",
             raw_answers=None,
-            requested_formats=[ExportFormat.HTML],
             progress=_noop_progress,
             package=package,
         )
@@ -1272,13 +1168,13 @@ async def test_regenerate_slide_propagates_editorial_error_unwrapped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Batch fix-and-render chain (apply_fixes_and_render)
+# Batch fix chain (apply_fixes)
 #
 # The brain's primary fix tool: N slide fixes → regenerate per fix (scoped
-# image each) → persist ONCE → render ONCE → return. These pin the chain
-# contract: per-fix regen accumulation, the persist/render batch invariant,
-# scoped-image accumulation, fail-fast id validation, atomic batch abort, and
-# the best-effort persist that surfaces (not swallows) its failure.
+# image each) → return the edited deck. It neither persists nor renders: the
+# caller commits the deck against its base revision and renders only what was
+# committed (ADR 0001). These pin per-fix regen accumulation, scoped-image
+# accumulation, fail-fast id validation and atomic batch abort.
 # ---------------------------------------------------------------------------
 
 
@@ -1325,239 +1221,123 @@ class _StubBatchRegenEditorial:
         return self._real.splice_regenerated_slide(deck, new_slide)
 
 
-async def test_apply_fixes_chains_regen_persists_and_renders_once() -> None:
-    from unittest.mock import AsyncMock, MagicMock
+def _fix_orch(editorial: Any, worker: Any = None, spy: Any = None) -> Any:
+    from unittest.mock import MagicMock
 
+    storage_stub = MagicMock()
+    storage_stub.available = False
+    orch, _db, _, fake = _build_orch(
+        _StubBot(payloads={}),
+        editorial=cast(Any, editorial),
+        worker=worker or _StubWorkerRunner(),
+        storage=storage_stub,
+        image_pass=spy or _SpyImagePass(),
+    )
+    return orch, fake
+
+
+async def test_apply_fixes_chains_regen_and_neither_persists_nor_renders() -> None:
     deck = _regen_deck()
     editorial = _StubBatchRegenEditorial()
     worker = _StubWorkerRunner(formats_to_succeed=("html", "pptx"))
-    storage_stub = MagicMock()
-    storage_stub.available = False
-    spy = _SpyImagePass()
-    orch, db, _, _ = _build_orch(
-        _StubBot(payloads={}),
-        editorial=cast(Any, editorial),
-        worker=worker,
-        storage=storage_stub,
-        image_pass=spy,
-    )
-    save_deck = AsyncMock(return_value={})
-    db.save_deck = save_deck  # spy the single persist (orch uses this same db)
+    orch, fake = _fix_orch(editorial, worker)
     sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
     fixes = [
         SlideFix(slide_id="gallery", instruction="punchier"),
         SlideFix(slide_id="end", instruction="tighter takeaway"),
     ]
-    formats = [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
 
-    result = await orch.apply_fixes_and_render(
+    result = await orch.apply_fixes(
         deck,
         fixes,
         sources,
         PROJECT_ID,
-        formats,
         _noop_progress,
         package=GenerationPackage.PRESENTATION_STANDARD,
     )
 
-    # regenerate_slide ran once per fix, in order
     assert [c["slide_id"] for c in editorial.regen_calls] == ["gallery", "end"]
-    # persisted ONCE, carrying the final two-edit deck
-    assert save_deck.call_count == 1
-    persisted_project_id, persisted_deck = save_deck.call_args.args
-    assert persisted_project_id == PROJECT_ID
-    assert persisted_deck.slides[1].content.title == "EDITED Thinkers"
-    assert persisted_deck.slides[2].content.title == "EDITED Legacy"
-    # rendered ONCE: a single render pass over both formats (not per-fix)
-    assert len(worker.render_calls) == len(formats)
-    assert len({c["output_dir"] for c in worker.render_calls}) == 1
-    # result carries the fresh render + the per-fix findings (not discarded)
-    assert isinstance(result, FixAndRenderResult)
-    assert result.render.html_path is not None
-    assert result.render.pptx_path is not None
-    assert len(result.fixes) == 2
+    assert isinstance(result, FixBatchResult)
     assert result.deck.slides[1].content.title == "EDITED Thinkers"
+    assert result.deck.slides[2].content.title == "EDITED Legacy"
+    assert len(result.fixes) == 2
+    assert worker.render_calls == []
+    assert fake.tables.get("decks", []) == [] and fake.rpc_calls == []
 
 
 async def test_apply_fixes_scopes_images_per_edited_slide_only() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
     deck = _regen_deck()
     editorial = _StubBatchRegenEditorial()
-    storage_stub = MagicMock()
-    storage_stub.available = False
     spy = _SpyImagePass()
-    orch, db, _, _ = _build_orch(
-        _StubBot(payloads={}),
-        editorial=cast(Any, editorial),
-        storage=storage_stub,
-        image_pass=spy,
-    )
-    db.save_deck = AsyncMock(return_value={})
+    orch, _fake = _fix_orch(editorial, spy=spy)
     sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
     fixes = [
         SlideFix(slide_id="gallery", instruction="x"),
         SlideFix(slide_id="end", instruction="y"),
     ]
 
-    result = await orch.apply_fixes_and_render(
+    result = await orch.apply_fixes(
         deck,
         fixes,
         sources,
         PROJECT_ID,
-        [ExportFormat.HTML],
         _noop_progress,
         package=GenerationPackage.PRESENTATION_STANDARD,
     )
 
-    # each fix re-resolved images scoped to exactly its slide, in order
     assert spy.scope_calls == [frozenset({"gallery"}), frozenset({"end"})]
     assert spy.resolve_calls == [2, 2]  # STANDARD per-slide budget, once per fix
-    # the untouched slide ("hero") keeps its content (slide_index may renumber)
     assert result.deck.slides[0].slide_id == "hero"
     assert result.deck.slides[0].content == deck.slides[0].content
 
 
 async def test_apply_fixes_unknown_slide_id_fails_fast_before_spend() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
     deck = _regen_deck()
     editorial = _StubBatchRegenEditorial()
-    worker = _StubWorkerRunner()
-    storage_stub = MagicMock()
-    storage_stub.available = False
     spy = _SpyImagePass()
-    orch, db, _, _ = _build_orch(
-        _StubBot(payloads={}),
-        editorial=cast(Any, editorial),
-        worker=worker,
-        storage=storage_stub,
-        image_pass=spy,
-    )
-    save_deck = AsyncMock(return_value={})
-    db.save_deck = save_deck
+    orch, _fake = _fix_orch(editorial, spy=spy)
     sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
-    # "gallery" is valid, but the unknown "nope" must abort the whole batch first.
     fixes = [
         SlideFix(slide_id="gallery", instruction="ok"),
         SlideFix(slide_id="nope", instruction="bad"),
     ]
 
     with pytest.raises(ValueError, match="nope"):
-        await orch.apply_fixes_and_render(
+        await orch.apply_fixes(
             deck,
             fixes,
             sources,
             PROJECT_ID,
-            [ExportFormat.HTML],
             _noop_progress,
             package=GenerationPackage.PRESENTATION_STANDARD,
         )
 
-    assert editorial.regen_calls == []  # no regen ran — validated before any spend
-    assert spy.scope_calls == []  # no image budget consumed
-    assert save_deck.call_count == 0  # nothing persisted
-    assert worker.render_calls == []  # nothing rendered
+    assert editorial.regen_calls == []  # validated before any spend
+    assert spy.scope_calls == []
 
 
 async def test_apply_fixes_empty_batch_raises() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
-    deck = _regen_deck()
     editorial = _StubBatchRegenEditorial()
-    worker = _StubWorkerRunner()
-    storage_stub = MagicMock()
-    storage_stub.available = False
-    orch, db, _, _ = _build_orch(
-        _StubBot(payloads={}),
-        editorial=cast(Any, editorial),
-        worker=worker,
-        storage=storage_stub,
-        image_pass=_SpyImagePass(),
-    )
-    save_deck = AsyncMock(return_value={})
-    db.save_deck = save_deck
+    orch, _fake = _fix_orch(editorial)
     sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
 
     with pytest.raises(ValueError, match="at least one fix"):
-        await orch.apply_fixes_and_render(
-            deck,
+        await orch.apply_fixes(
+            _regen_deck(),
             [],
             sources,
             PROJECT_ID,
-            [ExportFormat.HTML],
             _noop_progress,
             package=GenerationPackage.PRESENTATION_STANDARD,
         )
 
     assert editorial.regen_calls == []
-    assert save_deck.call_count == 0
-    assert worker.render_calls == []
 
 
-async def test_apply_fixes_persist_failure_raises_and_skips_render() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
-    from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
-
-    deck = _regen_deck()
-    editorial = _StubBatchRegenEditorial()
-    worker = _StubWorkerRunner(formats_to_succeed=("html",))
-    storage_stub = MagicMock()
-    storage_stub.available = False
-    orch, db, _, _ = _build_orch(
-        _StubBot(payloads={}),
-        editorial=cast(Any, editorial),
-        worker=worker,
-        storage=storage_stub,
-        image_pass=_SpyImagePass(),
-    )
-    save_deck = AsyncMock(side_effect=RuntimeError("db down"))
-    db.save_deck = save_deck
-    sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
-    fixes = [SlideFix(slide_id="gallery", instruction="x")]
-
-    with pytest.raises(_OrchestratorError) as info:
-        await orch.apply_fixes_and_render(
-            deck,
-            fixes,
-            sources,
-            PROJECT_ID,
-            [ExportFormat.HTML],
-            _noop_progress,
-            package=GenerationPackage.PRESENTATION_STANDARD,
-        )
-
-    # A persist failure aborts the batch: delivering files a stale DB deck cannot
-    # reflect would let the next load_session resurrect the pre-fix deck.
-    assert info.value.step == "persist_deck"
-    assert isinstance(info.value.original, RuntimeError)
-    assert "db down" in str(info.value.original)
-    assert save_deck.call_count == 1  # the single batch persist was attempted once
-    # render was NOT invoked after the persist failure: ensure_built (top of render)
-    # never ran and no format was handed to the worker.
-    assert worker.ensure_calls == 0
-    assert worker.render_calls == []
-
-
-async def test_apply_fixes_batch_failure_aborts_before_persist_and_render() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
-    deck = _regen_deck()
+async def test_apply_fixes_batch_failure_propagates_unapplied() -> None:
     # fix #2 ("end") hard-stops after fix #1 ("gallery") already spent its budget.
     editorial = _StubBatchRegenEditorial(raises_on={"end": EditorialSlideRegenError("ungrounded")})
-    worker = _StubWorkerRunner()
-    storage_stub = MagicMock()
-    storage_stub.available = False
-    orch, db, _, _ = _build_orch(
-        _StubBot(payloads={}),
-        editorial=cast(Any, editorial),
-        worker=worker,
-        storage=storage_stub,
-        image_pass=_SpyImagePass(),
-    )
-    save_deck = AsyncMock(return_value={})
-    db.save_deck = save_deck
+    orch, _fake = _fix_orch(editorial)
     sources = SourceProcessingResult(claims=[_claim()], chunks=[_chunk()])
     fixes = [
         SlideFix(slide_id="gallery", instruction="ok"),
@@ -1565,20 +1345,16 @@ async def test_apply_fixes_batch_failure_aborts_before_persist_and_render() -> N
     ]
 
     with pytest.raises(EditorialSlideRegenError):
-        await orch.apply_fixes_and_render(
-            deck,
+        await orch.apply_fixes(
+            _regen_deck(),
             fixes,
             sources,
             PROJECT_ID,
-            [ExportFormat.HTML],
             _noop_progress,
             package=GenerationPackage.PRESENTATION_STANDARD,
         )
 
-    # fix #1 ran (and #2 was attempted) but the batch did NOT persist or render
     assert [c["slide_id"] for c in editorial.regen_calls] == ["gallery", "end"]
-    assert save_deck.call_count == 0  # atomic: no half-applied persist
-    assert worker.render_calls == []  # atomic: nothing rendered
 
 
 async def test_restash_outputs_overwrites_cache_with_new_paths(tmp_path: Path) -> None:

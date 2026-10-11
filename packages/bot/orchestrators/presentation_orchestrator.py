@@ -68,7 +68,6 @@ from packages.workers.source.pipeline import SourcePipeline
 logger = logging.getLogger("nashr.orchestrator.presentation")
 
 ProgressCallback = Callable[[str, int, int], Awaitable[None]]
-DeckPersistCallback = Callable[[DeckSpec], Awaitable[None]]
 
 # source → matrix → interview → design → editorial → images → render
 TOTAL_STEPS: Final[int] = 7
@@ -90,13 +89,11 @@ _BUILD_TIMEOUT_SECONDS: Final[int] = 120
 
 
 class PresentationRenderResult(BaseModel):
-    """Files written by the Node renderer for one deck.
+    """Files written by the Node renderer for one deck: every requested format.
 
-    ``html_path`` / ``pptx_path`` / ``pdf_path`` are populated only for
-    the formats that were requested AND rendered successfully. A failed
-    format is logged (in ``warnings``) and silently absent rather than
-    raising — partial delivery beats zero delivery when one renderer
-    barfs.
+    :meth:`PresentationOrchestrator.render` raises unless every requested format
+    rendered, so a returned result is complete. ``warnings`` carries the
+    renderer's non-fatal audit output (for example a degraded slide).
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
@@ -119,13 +116,12 @@ class PresentationRenderResult(BaseModel):
         return out
 
 
-class FixAndRenderResult(BaseModel):
-    """Result of applying a batch of slide fixes and re-rendering once.
+class FixBatchResult(BaseModel):
+    """Result of applying a batch of slide fixes to a deck, in memory only.
 
-    ``deck`` is the edited in-memory deck (every fix spliced in, persisted before
-    render — a persist failure aborts before render, so a returned result always
-    reflects a saved deck); ``render`` carries the freshly rendered file paths the
-    handler re-delivers (and any best-effort upload warnings); ``fixes`` keeps the
+    ``deck`` is the edited deck with every fix spliced in. Nothing is persisted or
+    rendered here: the caller commits it as a revision (which may be refused or
+    become a proposal) and renders only what was committed. ``fixes`` keeps the
     per-fix :class:`SlideRegenResult` findings — the brain reads ``.passed`` to
     decide whether to accept the batch or retry a slide, so they are not discarded.
 
@@ -142,25 +138,23 @@ class FixAndRenderResult(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     deck: DeckSpec
-    render: PresentationRenderResult
     fixes: list[SlideRegenResult] = Field(default_factory=list[SlideRegenResult])
     estimated_cost_usd: float = Field(default=0.0, ge=0.0)
     image_count: int = Field(default=0, ge=0)
 
 
 class PresentationPipelineResult(BaseModel):
-    """The full first-generation output: the rendered files AND the sources.
+    """The first-generation output: the structurally final deck AND its sources.
 
-    ``run_full_pipeline`` builds a :class:`SourceProcessingResult` and threads it
-    through every stage; Stage 5a surfaces it (rather than discarding it) so the
-    delivery handler can seed the brain editing session with the exact sources
-    first-gen grounded against — no re-parsing of the uploads. ``render`` is the
-    unchanged rendered-files result the delivery path already consumes.
+    The sources are surfaced (rather than discarded) so the caller can seed the
+    brain editing session with the exact sources first-gen grounded against — no
+    re-parsing of the uploads. The deck is not yet persisted or rendered: the
+    caller commits it as a revision and renders the committed revision.
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    render: PresentationRenderResult
+    deck: DeckSpec
     sources: SourceProcessingResult
 
 
@@ -664,53 +658,36 @@ class PresentationOrchestrator:
             image_count=image_count,
         )
 
-    async def apply_fixes_and_render(
+    async def apply_fixes(
         self,
         deck: DeckSpec,
         fixes: Sequence[SlideFix],
         sources: SourceProcessingResult,
         project_id: str,
-        formats: list[ExportFormat],
         progress: ProgressCallback,
         *,
         package: GenerationPackage,
-        persist: DeckPersistCallback | None = None,
-    ) -> FixAndRenderResult:
-        """Apply a batch of slide fixes, persist once, render once.
+    ) -> FixBatchResult:
+        """Apply a batch of slide fixes to ``deck`` in memory.
 
         The brain's primary fix tool (Build 2, Stage 3). Each fix re-runs the
         single-slide :meth:`regenerate_slide` — content regen, id-keyed splice,
         section-scoped re-check, and a scoped image re-resolution restricted to
-        that slide — accumulating the edits on one deck. The batch persists ONCE
-        (``save_deck`` upsert, replacing the project's current deck row) and
-        renders ONCE; it never persists or renders per fix.
-
-        Persist runs BEFORE render (mirroring :meth:`run_full_pipeline`) so
-        durability does not hinge on the renderer subprocess, but here the chain
-        owns its own ``try/except`` instead of the silent :meth:`_persist_deck`:
-        an edit's persisted deck already exists, so a ``save_deck`` failure raises
-        :class:`_OrchestratorError` (step ``persist_deck``) and ABORTS before render
-        rather than being swallowed. Rendering past a failed persist would deliver
-        files a stale DB deck cannot reflect — the next ``load_session`` resurrects
-        the pre-fix deck and silently loses the delivered fix; failing here keeps the
-        DB and the delivered files consistent (the edit-path caller degrades this
-        raise gracefully, exactly as it already guards a fix-chain error).
+        that slide — accumulating the edits on one deck.
 
         Batch semantics are ATOMIC: a fix that raises (unknown id, empty LLM
-        output, or a content-critic hard stop) propagates before persist/render,
-        so the persisted deck and the caller's deck are never left half-applied.
-        Image budget already spent on earlier fixes is the accepted cost of a
-        failed attempt. ``slide_id``\\ s are validated up front so a typo in a
-        later fix never burns regen spend on the earlier ones.
+        output, or a content-critic hard stop) propagates, so the caller never
+        sees a half-applied deck. Image budget already spent on earlier fixes is
+        the accepted cost of a failed attempt. Slide ids are validated up front so
+        a typo in a later fix never burns regen spend on the earlier ones.
 
-        ``formats`` is required (no silent default): the caller passes the same
-        set it originally delivered, because the renderer's output set — not
-        ``deck.export_formats``, which first-gen never writes back — is what the
-        download surface serves.
+        Persisting and rendering belong to the caller (ADR 0001): only the caller
+        knows the actor and the base revision to commit against, and only a
+        committed revision may be rendered and published.
         """
 
         if not fixes:
-            raise ValueError("apply_fixes_and_render requires at least one fix")
+            raise ValueError("apply_fixes requires at least one fix")
         known_ids = {slide.slide_id for slide in deck.slides}
         unknown = sorted({fix.slide_id for fix in fixes if fix.slide_id not in known_ids})
         if unknown:
@@ -732,22 +709,8 @@ class PresentationOrchestrator:
             )
             outcomes.append(outcome)
 
-        try:
-            if persist is None:
-                await self._db.save_deck(project_id, working)
-            else:
-                await persist(working)
-        except Exception as exc:
-            logger.warning(
-                "presentation_edit_persist_failed",
-                extra={"project_id": project_id, "error_type": type(exc).__name__},
-            )
-            raise _OrchestratorError("persist_deck", exc) from exc
-
-        render_result = await self.render(working, formats, progress, project_id=project_id)
-        return FixAndRenderResult(
+        return FixBatchResult(
             deck=working,
-            render=render_result,
             fixes=outcomes,
             estimated_cost_usd=sum(o.estimated_cost_usd for o in outcomes),
             image_count=sum(o.image_count for o in outcomes),
@@ -762,20 +725,20 @@ class PresentationOrchestrator:
         deck_spec: DeckSpec,
         formats: list[ExportFormat],
         progress: ProgressCallback,
-        project_id: str | None = None,
     ) -> PresentationRenderResult:
-        """Invoke the Node.js worker to render the deck to disk.
+        """Render every requested format with the Node.js worker, or raise.
 
-        Uses a fresh temp directory per call so the renderer's output
-        files do not collide between projects. The worker's CLI gates
-        export on the internal quality audit; a FAIL-severity audit
-        result surfaces as a non-zero exit and is captured as a render
-        warning (the format is dropped, others still attempted).
-        ``project_id`` is used to namespace R2 keys when storage upload
-        is enabled; ``None`` falls back to the rendered file's stem.
+        Uses a fresh temp directory per call so outputs never collide. The
+        worker's CLI gates export on its internal quality audit, so a FAIL-severity
+        finding is a non-zero exit. Any format that fails (unknown, timeout,
+        non-zero exit, no file) raises :class:`_OrchestratorError` at step
+        ``render``, naming every failed format: a partial set is not a deliverable
+        (ADR 0001). Uploading is the caller's job, under its job claim.
         """
 
         await progress("Rendering presentation", 7, TOTAL_STEPS)
+        if not formats:
+            raise _OrchestratorError("render", ValueError("no export formats requested"))
 
         try:
             output_dir = Path(tempfile.mkdtemp(prefix="nashr_pres_"))
@@ -795,11 +758,12 @@ class PresentationOrchestrator:
         except Exception as exc:
             raise _OrchestratorError("render_prepare", exc) from exc
         result = PresentationRenderResult()
+        failures: list[str] = []
 
         for fmt in formats:
             cli_arg, ext = _FORMAT_TO_CLI.get(fmt, (None, None))
             if cli_arg is None or ext is None:
-                logger.warning("presentation_unknown_format", extra={"format": fmt})
+                failures.append(f"{fmt}: unknown format")
                 continue
 
             try:
@@ -810,11 +774,11 @@ class PresentationOrchestrator:
                     cli_format=cli_arg,
                 )
             except subprocess.TimeoutExpired:
-                result.warnings.append(f"{ext}: render timed out")
+                failures.append(f"{ext}: render timed out")
                 logger.warning("presentation_render_timeout", extra={"format": ext})
                 continue
             except Exception as exc:
-                result.warnings.append(f"{ext}: {type(exc).__name__}")
+                failures.append(f"{ext}: {type(exc).__name__}")
                 logger.exception(
                     "presentation_render_failed",
                     extra={"format": ext, "error_type": type(exc).__name__},
@@ -831,19 +795,16 @@ class PresentationOrchestrator:
                 )
                 tail = full_err.splitlines()
                 snippet = tail[-1] if tail else "non-zero exit"
-                result.warnings.append(f"{ext}: {snippet}")
-                logger.warning(
-                    "presentation_render_nonzero",
-                    extra={"format": ext, "stderr_tail": snippet},
-                )
+                failures.append(f"{ext}: {snippet}")
                 continue
 
             # Render succeeded, but the worker still writes audit WARNINGS to
             # stderr — notably Q1 truncation (L1's reliability floor degraded a
             # slide so the deck could still export). Surface them so the degrade
-            # is locatable in the logs instead of being swallowed on success.
+            # is locatable instead of being swallowed on success.
             warn_text = (completed.stderr or "").strip()
             if warn_text:
+                result.warnings.append(f"{ext}: {warn_text.splitlines()[-1][:300]}")
                 logger.warning(
                     "presentation_render_warnings",
                     extra={"format": ext, "stderr_tail": warn_text[:3000]},
@@ -851,120 +812,36 @@ class PresentationOrchestrator:
 
             produced = _find_output_file(output_dir, ext)
             if produced is None:
-                result.warnings.append(f"{ext}: renderer reported success but no file appeared")
+                failures.append(f"{ext}: renderer reported success but no file appeared")
                 continue
             _attach_output(result, ext, produced)
 
-        await self._upload_rendered(result, project_id)
-        return result
-
-    async def _upload_rendered(
-        self,
-        result: PresentationRenderResult,
-        project_id: str | None,
-    ) -> None:
-        """Upload every rendered output to R2 when storage is configured.
-
-        Best-effort: failures are logged and a warning is appended to
-        ``result.warnings`` so the bot can surface them, but the local
-        files keep flowing through to Telegram delivery. ``project_id``
-        namespaces the R2 key under ``generated/{project_id}/``; when
-        absent we fall back to the file's stem so the upload still
-        succeeds (older callers that bypass ``run_full_pipeline``).
-        """
-
-        storage = self._storage
-        if storage is None or not storage.available:
-            return
-        for ext, path in result.by_extension().items():
-            try:
-                if project_id:
-                    # Stable per-format key (migration 007): a regenerated or
-                    # brain-fixed deck OVERWRITES in place, so share links and
-                    # web downloads never point at an orphaned title-named key.
-                    key = FileStorage.stable_generated_key(project_id, ext)
-                else:
-                    key = FileStorage.generated_key(path.stem, path.name)
-                await storage.upload(path, key)
-                if project_id:
-                    await self._register_generated_file(project_id, ext, key, path)
-            except Exception as exc:
-                result.warnings.append(f"{ext}: upload failed ({type(exc).__name__})")
-                logger.warning(
-                    "presentation_storage_upload_failed",
-                    extra={"format": ext, "error_type": type(exc).__name__},
-                )
-
-    async def _register_generated_file(
-        self,
-        project_id: str,
-        ext: str,
-        key: str,
-        path: Path,
-    ) -> None:
-        """Upsert the project's generated_files row for one format (best-effort).
-
-        Keys on (project_id, file_type), so re-delivery refreshes the row
-        instead of appending duplicates — the web surface reads these rows.
-        A DB failure never blocks delivery; the local files still flow.
-        """
-
-        try:
-            size = int(path.stat().st_size)
-            await self._db.upsert_generated_file(project_id, ext, key, size)
-        except Exception as exc:
-            logger.warning(
-                "presentation_generated_file_register_failed",
-                extra={"format": ext, "error_type": type(exc).__name__},
+        if failures:
+            raise _OrchestratorError(
+                "render", RuntimeError(f"render failed — {'; '.join(failures)}")
             )
+        return result
 
     # ====================================================================
     # FULL PIPELINE
     # ====================================================================
 
-    async def _persist_deck(self, deck_spec: DeckSpec, project_id: str) -> None:
-        """Persist the structurally final deck so it survives past delivery.
-
-        Build 2, Stage 0: the brain later loads and edits this DeckSpec, so it
-        must outlive the render that delivers it. Persisted from inside the
-        pipeline because the spec never leaves the orchestrator — the handler
-        receives only :class:`PresentationRenderResult` file paths.
-
-        Best-effort and non-fatal, mirroring :meth:`_register_source`: a
-        persistence failure logs a warning and is swallowed so the deck still
-        renders and delivers. Stage 0 is additive and must not regress the
-        working delivery path. Runs before :meth:`render` so durability does
-        not depend on the renderer subprocess succeeding; ``render`` does not
-        mutate the spec, so persisting first loses nothing.
-        """
-
-        try:
-            await self._db.save_deck(project_id, deck_spec)
-        except Exception as exc:
-            logger.warning(
-                "presentation_deck_persist_failed",
-                extra={"project_id": project_id, "error_type": type(exc).__name__},
-            )
-
-    async def run_full_pipeline(
+    async def build_deck(
         self,
         file_infos: list[dict[str, object]],
         project_id: str,
         user_id: str,
         language: str,
         raw_answers: Mapping[str, object] | None,
-        requested_formats: list[ExportFormat] | None,
         progress: ProgressCallback,
         *,
         package: GenerationPackage,
         topic: str | None = None,
     ) -> PresentationPipelineResult:
-        """Drive the full presentation pipeline end-to-end.
+        """Run sources → matrix → interview → design → editorial → images.
 
-        Called *after* payment has been confirmed. The orchestrator
-        raises on unrecoverable errors (no usable sources, editorial
-        pass failure); the caller (the bot handler) is responsible for
-        refunding credits when this raises.
+        Called *after* payment has been confirmed. Raises on unrecoverable
+        errors (no usable sources, editorial pass failure); the caller refunds.
 
         ``package`` is the paid tier; it threads through to the image stage to
         set the per-deck generated-image budget. Required keyword-only so a
@@ -974,9 +851,10 @@ class PresentationOrchestrator:
         pass as steering context only (see :meth:`apply_interview`); the
         grounding discipline downstream is unchanged, so a brief the sources
         cannot support still hard-stops rather than being fabricated to.
-        """
 
-        formats = requested_formats or [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
+        The deck comes back unpersisted and unrendered (ADR 0001): the caller
+        commits it as a revision under its own actor and renders that revision.
+        """
 
         sources = await self.process_sources(
             file_infos=file_infos,
@@ -1004,19 +882,7 @@ class PresentationOrchestrator:
         deck_spec = await self.resolve_images(
             deck_spec, sources, project_id, progress, package=package
         )
-        await self._persist_deck(deck_spec, project_id)
-        render = await self.render(deck_spec, formats, progress, project_id=project_id)
-        # render() degrades each format to a warning, so a total failure returns
-        # normally with zero files — the delivery handler would then announce success
-        # with nothing to download. Fail the job so the handler refunds; partial
-        # success (>=1 file) still returns, preserving render()'s degrade semantics.
-        if not render.by_extension():
-            detail = "; ".join(render.warnings) or "no renderer output"
-            raise _OrchestratorError(
-                "render",
-                RuntimeError(f"render produced no deliverable files — {detail}"),
-            )
-        return PresentationPipelineResult(render=render, sources=sources)
+        return PresentationPipelineResult(deck=deck_spec, sources=sources)
 
 
 # ---------------------------------------------------------------------------
@@ -1169,7 +1035,9 @@ def _count_generated_images(slide: SlideSpec) -> int:
 
 __all__ = [
     "TOTAL_STEPS",
+    "FixBatchResult",
     "PresentationOrchestrator",
+    "PresentationPipelineResult",
     "PresentationRenderResult",
     "ProgressCallback",
 ]

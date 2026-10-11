@@ -28,14 +28,24 @@ import sys
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from postgrest.exceptions import APIError
 
 from packages.core.enums import ExportFormat, GenerationPackage
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.platform.document_models import (
+    CommitOutcome,
+    DocumentKind,
+    RevisionKind,
+    worker_actor,
+)
+from packages.platform.document_store import DocumentStore
+from packages.platform.exports import ExportPublisher, renderer_version
 from packages.platform.jobs import (
     DEFAULT_STALE_SECONDS,
     HEARTBEAT_INTERVAL_SECONDS,
@@ -45,6 +55,11 @@ from packages.platform.jobs import (
 )
 from packages.platform.liveness import LivenessFile
 from packages.platform.storage import FileStorage
+
+if TYPE_CHECKING:
+    from aiogram import Bot
+
+    from packages.bot.orchestrators.presentation_orchestrator import PresentationOrchestrator
 
 logger = logging.getLogger("nashr.worker")
 
@@ -80,14 +95,22 @@ async def _refund_job(credits: CreditLedger, job: GenerationJob, reason: str) ->
         )
         return
     # Stamped with the job id so GET /jobs can state the refund as a FACT
-    # rather than inferring it from timestamps (JobView.refunded).
-    await credits.refund(
-        job.user_id,
-        job.project_id,
-        amount,
-        reason=reason[:200],
-        generation_job_id=job.id,
-    )
+    # rather than inferring it from timestamps (JobView.refunded). Migration 016
+    # makes a second refund row for the same job a unique violation: a retried
+    # refund is then already done, not an error.
+    try:
+        await credits.refund(
+            job.user_id,
+            job.project_id,
+            amount,
+            reason=reason[:200],
+            generation_job_id=job.id,
+        )
+    except APIError as exc:
+        if exc.code != "23505":
+            raise
+        logger.info("worker_refund_already_recorded %s", json.dumps({"job_id": job.id}))
+        return
     logger.info(
         "worker_job_refunded %s",
         json.dumps({"job_id": job.id, "amount": amount, "reason": reason[:200]}),
@@ -202,35 +225,19 @@ class JobRunner:
 
         await ingest_sources(job, self._worker_id, self._db, self._queue, self._storage)
 
-    async def _run_presentation_render(self, job: GenerationJob) -> None:
-        """Render one immutable manually edited deck revision without model calls."""
-
-        from aiogram import Bot
-
+    def _orchestrator(self, bot: Bot) -> PresentationOrchestrator:
         from packages.bot.orchestrators.presentation_orchestrator import (
             PresentationOrchestrator,
         )
-        from packages.core.models.presentation import DeckSpec
 
-        document_id = job.payload.get("document_id")
-        revision_id = job.payload.get("revision_id")
-        if not isinstance(document_id, str) or not isinstance(revision_id, str):
-            raise RuntimeError("presentation_render job is missing its document revision")
-        revision = await self._db.get_document_revision(document_id, revision_id)
-        if revision is None:
-            raise RuntimeError("presentation_render revision no longer exists")
-        deck = DeckSpec.model_validate(revision["content"])
-        if deck.project_id != job.project_id:
-            raise RuntimeError("presentation_render project does not match its deck")
-
-        bot = Bot(token=self._config.telegram_bot_token)
-        orchestrator = PresentationOrchestrator(
+        return PresentationOrchestrator(
             bot=bot,
             db=self._db,
             credits=self._credits,
             storage=self._storage,
         )
 
+    def _progress(self, job: GenerationJob) -> Callable[[str, int, int], Awaitable[None]]:
         async def progress(step: str, current: int, total: int) -> None:
             await self._queue.set_progress(
                 job.id,
@@ -238,51 +245,88 @@ class JobRunner:
                 {"step": step, "current": current, "total": total},
             )
 
+        return progress
+
+    async def _finish_completed(self, job: GenerationJob, outcome: dict[str, Any]) -> None:
+        """Record the outcome where the UI reads it, then land the guarded completion."""
+
+        await self._queue.set_progress(job.id, self._worker_id, {"step": "done", **outcome})
+        completed_by_us = await self._queue.complete(job.id, self._worker_id, telemetry={})
+        if not completed_by_us:
+            logger.warning(
+                "worker_complete_suppressed_row_not_ours %s", json.dumps({"job_id": job.id})
+            )
+            return
+        logger.info(
+            "worker_job_completed %s",
+            json.dumps({"job_id": job.id, "project_id": job.project_id, **outcome}),
+        )
+
+    async def _run_presentation_render(self, job: GenerationJob) -> None:
+        """Render one immutable revision and publish every requested format, or fail."""
+
+        from aiogram import Bot
+
+        from packages.bot.orchestrators.deck_revisions import render_and_publish, render_formats
+        from packages.core.models.presentation import DeckSpec
+
+        payload = job.payload
+        revision_id = payload.get("revision_id")
+        names = payload.get("formats")
+        if not isinstance(revision_id, str) or not isinstance(names, list) or not names:
+            raise RuntimeError("presentation_render job is missing its revision or formats")
+        version = renderer_version()
+        if payload.get("renderer_version") != version:
+            logger.warning(
+                "worker_render_version_changed %s",
+                json.dumps({"job_id": job.id, "requested": payload.get("renderer_version")}),
+            )
+        store = DocumentStore(self._db)
+        found = await store.revision_in_project(job.project_id, revision_id)
+        if found is None:
+            raise RuntimeError("presentation_render revision is not in this project")
+        revision = found[1]
+        deck = DeckSpec.model_validate(revision.content)
+
+        bot = Bot(token=self._config.telegram_bot_token)
         try:
-            rendered = await orchestrator.render(
-                deck,
-                [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE, ExportFormat.PDF],
-                progress,
-                project_id=job.project_id,
+            published = await render_and_publish(
+                orchestrator=self._orchestrator(bot),
+                publisher=ExportPublisher(store, self._storage),
+                job_id=job.id,
+                worker_id=self._worker_id,
+                document_id=revision.document_id,
+                revision_id=revision_id,
+                deck=deck,
+                formats=render_formats([str(name) for name in cast(list[Any], names)]),
+                progress=self._progress(job),
             )
         finally:
             await bot.session.close()
-
-        if not rendered.by_extension():
-            raise RuntimeError("presentation_render produced no deliverable files")
-        await self._db.save_deck(job.project_id, deck)
-        completed_by_us = await self._queue.complete(
-            job.id,
-            self._worker_id,
-            telemetry={"formats": sorted(rendered.by_extension())},
+        await self._finish_completed(
+            job,
+            {
+                "outcome": "rendered",
+                "revision_id": revision_id,
+                "renderer_version": version,
+                "formats": [item.format.value for item in published.exports],
+            },
         )
-        if not completed_by_us:
-            logger.warning(
-                "worker_render_complete_suppressed_row_not_ours %s",
-                json.dumps({"job_id": job.id}),
-            )
 
     async def _run_presentation_edit(self, job: GenerationJob) -> None:
-        """Apply a parked Way-2 fix batch and re-render. No charge, no refund.
+        """Apply a parked fix batch against its base revision; commit or propose; publish.
 
-        The API ran the brain turn and parked the batch (its ``edit_slides``
-        call is still unanswered in the session history); this answers it. The
-        deck-persist and the R2 upload of every re-rendered format both happen
-        inside ``apply_fixes_and_render`` → ``render``, so the web's deck route
-        serves the edited files without any extra wiring here.
+        No charge and no refund: an edit spends the tier's fix allowance, not
+        money. The API stamped ``base_revision_id`` (the revision the brain saw);
+        if the deck moved since, the edit is stored as a proposal instead of
+        overwriting newer work (ADR 0001).
         """
 
         from aiogram import Bot
 
-        from packages.bot.orchestrators.presentation_orchestrator import (
-            PresentationOrchestrator,
-        )
+        from packages.bot.orchestrators.deck_revisions import render_and_publish
         from packages.core.models.presentation import DeckSpec, SlideFix
-        from packages.sessions_core import (
-            abandon_parked_fix,
-            dispatch_fix,
-            park_pending_for_apply,
-        )
+        from packages.sessions_core import FixStatus, dispatch_fix, park_pending_for_apply
 
         payload = job.payload
         call_count = 1
@@ -300,65 +344,51 @@ class JobRunner:
             raw_fixes = payload.get("fixes")
             if not isinstance(raw_fixes, list) or not raw_fixes:
                 raise RuntimeError("presentation_edit job carries no fixes")
-            # ALL-OR-NOTHING, matching apply_fixes_and_render's atomic batch
-            # semantics. Skipping malformed entries would apply part of an
-            # approved batch, consume the tier's fix allowance for it, and
-            # report success — the user would pay an edit for a change they
-            # never fully got. A malformed payload is a bug; fail the job.
+            # ALL-OR-NOTHING: skipping a malformed entry would apply part of an
+            # approved batch and report success. A malformed payload is a bug.
             fixes: list[SlideFix] = []
             for entry in cast(list[Any], raw_fixes):
                 if not isinstance(entry, dict):
                     raise RuntimeError("presentation_edit job carries a malformed fix entry")
                 fixes.append(SlideFix.model_validate(cast(dict[str, Any], entry)))
 
-        persist: Callable[[DeckSpec], Awaitable[None]] | None = None
         document_id = payload.get("document_id")
         base_revision_id = payload.get("base_revision_id")
-        if (document_id is None) != (base_revision_id is None):
-            raise RuntimeError("presentation_edit carries incomplete revision metadata")
-        if isinstance(document_id, str) and isinstance(base_revision_id, str):
-            if job.user_id is None:
-                raise RuntimeError("presentation_edit job has no user_id")
-            edit_user_id = job.user_id
-            current = await self._db.get_document(job.project_id, "presentation")
-            current_document_id = (
-                str(current["document_id"] if "document_id" in current else current["id"])
-                if current is not None
-                else None
-            )
-            if (
-                current is None
-                or current_document_id != document_id
-                or str(current["revision_id"]) != base_revision_id
-            ):
-                await abandon_parked_fix(self._db, job.project_id, call_count=call_count)
-                raise RuntimeError("presentation_edit base revision is stale")
+        if not isinstance(document_id, str) or not isinstance(base_revision_id, str):
+            raise RuntimeError("presentation_edit carries no document revision to edit")
 
-            async def _persist_revision(edited_deck: DeckSpec) -> None:
-                await self._db.commit_presentation_revision_and_deck(
-                    document_id,
-                    base_revision_id,
-                    edited_deck.model_dump(mode="json"),
-                    edit_user_id,
-                    f"chat-edit:{job.id}",
-                )
-
-            persist = _persist_revision
-
+        store = DocumentStore(self._db)
+        publisher = ExportPublisher(store, self._storage)
+        actor = worker_actor(job.id)
         bot = Bot(token=self._config.telegram_bot_token)
-        orchestrator = PresentationOrchestrator(
-            bot=bot,
-            db=self._db,
-            credits=self._credits,
-            storage=self._storage,
-        )
+        orchestrator = self._orchestrator(bot)
+        progress = self._progress(job)
 
-        async def progress(step: str, current: int, total: int) -> None:
-            await self._queue.set_progress(
-                job.id,
-                self._worker_id,
-                {"step": step, "current": current, "total": total},
+        async def commit(deck: DeckSpec, base: str | None) -> CommitOutcome:
+            return await store.commit(
+                document_id,
+                base,
+                deck.model_dump(mode="json"),
+                kind=RevisionKind.AI_EDIT,
+                actor=actor,
+                idempotency_key=f"chat-edit:{job.id}",
             )
+
+        async def deliver(
+            deck: DeckSpec, revision_id: str, formats: list[ExportFormat]
+        ) -> list[str]:
+            published = await render_and_publish(
+                orchestrator=orchestrator,
+                publisher=publisher,
+                job_id=job.id,
+                worker_id=self._worker_id,
+                document_id=document_id,
+                revision_id=revision_id,
+                deck=deck,
+                formats=formats,
+                progress=progress,
+            )
+            return list(published.render.warnings)
 
         try:
             result = await dispatch_fix(
@@ -368,55 +398,53 @@ class JobRunner:
                 fixes=fixes,
                 call_count=call_count,
                 progress=progress,
-                persist=persist,
+                base_revision_id=base_revision_id,
+                commit=commit,
+                deliver=deliver,
             )
         finally:
             await bot.session.close()
 
-        if not result.delivered:
-            # dispatch_fix already answered the parked call and persisted, so
-            # the session is coherent; the job row just has to say what happened.
-            failed_by_us = await self._queue.fail(
-                job.id,
-                self._worker_id,
-                step="apply_fixes",
-                message=result.reason or "edit produced no deliverable files",
-            )
-            if not failed_by_us:
-                logger.warning("worker_edit_fail_row_not_ours %s", json.dumps({"job_id": job.id}))
-            return
-
-        completed_by_us = await self._queue.complete(job.id, self._worker_id, telemetry={})
-        if not completed_by_us:
-            logger.warning(
-                "worker_complete_suppressed_row_not_ours %s", json.dumps({"job_id": job.id})
-            )
-            return
-        logger.info(
-            "worker_edit_completed %s",
-            json.dumps(
+        if result.status in (FixStatus.DELIVERED, FixStatus.PROPOSED, FixStatus.UNCHANGED):
+            await self._finish_completed(
+                job,
                 {
-                    "job_id": job.id,
-                    "project_id": job.project_id,
+                    "outcome": result.status.value,
+                    "revision_id": result.revision_id,
+                    "proposal_id": result.proposal_id,
                     "slides_changed": result.slides_changed,
                     "warnings": list(result.warnings),
-                }
-            ),
+                },
+            )
+            return
+        # dispatch_fix already answered the parked call and persisted, so the
+        # session is coherent; the job row just has to say what happened.
+        failed_by_us = await self._queue.fail(
+            job.id,
+            self._worker_id,
+            step="apply_fixes",
+            message=result.reason or result.status.value,
         )
+        if not failed_by_us:
+            logger.warning("worker_edit_fail_row_not_ours %s", json.dumps({"job_id": job.id}))
 
     async def _run_presentation(self, job: GenerationJob) -> None:
+        """Generate a deck, commit it as a revision (or proposal), publish it, open the session."""
+
         # Imported here so --help / unit tests never pull aiogram + the full
         # pipeline stack just to parse args.
         from aiogram import Bot
 
-        from packages.bot.orchestrators.presentation_orchestrator import (
-            PresentationOrchestrator,
+        from packages.bot.orchestrators.deck_revisions import (
+            commit_generated_deck,
+            render_and_publish,
+            renderable,
         )
 
         payload = job.payload
         package = GenerationPackage(str(payload.get("package", "presentation_standard")))
         formats_raw = payload.get("formats")
-        formats: list[ExportFormat] | None = None
+        formats = [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
         if isinstance(formats_raw, list) and formats_raw:
             formats = [ExportFormat(str(f)) for f in cast(list[Any], formats_raw)]
         sources_raw = payload.get("sources")
@@ -435,72 +463,76 @@ class JobRunner:
         if job.user_id is None:
             raise RuntimeError("job has no user_id; cannot run entitled pipeline")
 
+        store = DocumentStore(self._db)
+        head = await store.head(job.project_id, DocumentKind.PRESENTATION)
+        base_revision_id = head.revision_id if head is not None else None
         bot = Bot(token=self._config.telegram_bot_token)
-        orchestrator = PresentationOrchestrator(
-            bot=bot,
-            db=self._db,
-            credits=self._credits,
-            storage=self._storage,
-        )
-
-        async def progress(step: str, current: int, total: int) -> None:
-            await self._queue.set_progress(
-                job.id,
-                self._worker_id,
-                {"step": step, "current": current, "total": total},
-            )
-
+        orchestrator = self._orchestrator(bot)
+        progress = self._progress(job)
         try:
-            result = await orchestrator.run_full_pipeline(
+            built = await orchestrator.build_deck(
                 file_infos=file_infos,
                 project_id=job.project_id,
                 user_id=job.user_id,
                 language=language,
                 raw_answers=answers,
-                requested_formats=formats,
                 progress=progress,
                 package=package,
                 topic=topic,
             )
+            outcome = await commit_generated_deck(
+                store,
+                project_id=job.project_id,
+                deck=built.deck,
+                actor=worker_actor(job.id),
+                base_revision_id=base_revision_id,
+                idempotency_key=f"job:{job.id}:deck",
+            )
+            revision_id = renderable(outcome)
+            if revision_id is not None:
+                await render_and_publish(
+                    orchestrator=orchestrator,
+                    publisher=ExportPublisher(store, self._storage),
+                    job_id=job.id,
+                    worker_id=self._worker_id,
+                    document_id=outcome.document_id,
+                    revision_id=revision_id,
+                    deck=built.deck,
+                    formats=formats,
+                    progress=progress,
+                )
         finally:
             await bot.session.close()
 
-        files = {ext: str(path) for ext, path in result.render.by_extension().items()}
+        if revision_id is not None:
+            # The editing session starts on the revision just published. Best-effort:
+            # the deck is committed and its exports registered; a failed session
+            # write only means chat editing is unavailable until the next delivery.
+            try:
+                from packages.bot.sessions.store import create_session
 
-        # Persist the brain session the bot's delivery handler would have
-        # created: web jobs have no Telegram delivery, and the session row is
-        # what the provenance view (and later web editing) reads. Best-effort —
-        # the deck is already rendered and uploaded, so a session write failure
-        # degrades provenance, not delivery.
-        try:
-            from packages.bot.sessions.store import create_session
+                await create_session(
+                    self._db,
+                    project_id=job.project_id,
+                    sources=built.sources,
+                    package=package,
+                    formats=formats,
+                    revision_id=revision_id,
+                    deck=built.deck,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "worker_session_persist_failed %s",
+                    json.dumps({"job_id": job.id, "error_type": type(exc).__name__}),
+                )
 
-            await create_session(
-                self._db,
-                project_id=job.project_id,
-                sources=result.sources,
-                package=package,
-                formats=formats or [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
-            )
-        except Exception as exc:
-            logger.warning(
-                "worker_session_persist_failed %s",
-                json.dumps({"job_id": job.id, "error_type": type(exc).__name__}),
-            )
-
-        completed_by_us = await self._queue.complete(job.id, self._worker_id, telemetry={})
-        if not completed_by_us:
-            # Reaped while we were (slowly) finishing: the row is failed or
-            # re-queued and possibly refunded — do not report success. The
-            # --job-id exit code re-reads the row and will reflect this.
-            logger.warning(
-                "worker_complete_suppressed_row_not_ours %s",
-                json.dumps({"job_id": job.id}),
-            )
-            return
-        logger.info(
-            "worker_job_completed %s",
-            json.dumps({"job_id": job.id, "project_id": job.project_id, "files": files}),
+        await self._finish_completed(
+            job,
+            {
+                "outcome": outcome.status.value,
+                "revision_id": revision_id,
+                "proposal_id": outcome.proposal_id,
+            },
         )
 
 

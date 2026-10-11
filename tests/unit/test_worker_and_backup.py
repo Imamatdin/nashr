@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from postgrest.exceptions import APIError
 
 from packages.core.enums import (
     AudienceType,
     BackgroundTreatment,
+    ExportFormat,
     PresentationMood,
     SlideType,
 )
@@ -23,8 +26,10 @@ from packages.core.models.presentation import (
     SlideSpec,
 )
 from packages.platform.credits import CreditLedger
+from packages.platform.exports import renderer_version
 from packages.platform.jobs import GenerationJob, JobType
-from packages.sessions_core import FixDispatchResult, PendingActionView
+from packages.platform.storage import StorageVerificationError
+from packages.sessions_core import FixDispatchResult, FixStatus, PendingActionView
 from scripts.backup_db import (
     BACKUP_PREFIX,
     RETENTION_DAYS,
@@ -36,6 +41,8 @@ from scripts.worker_run_job import (
     _refund_amount,  # pyright: ignore[reportPrivateUsage]
     _refund_job,  # pyright: ignore[reportPrivateUsage]
 )
+from tests.unit.fake_documents import DocumentRpcEmulator, seed_presentation
+from tests.unit.test_database_client import FakeSupabaseClient
 
 
 def _job(**overrides: Any) -> GenerationJob:
@@ -136,17 +143,6 @@ async def test_refund_job_skips_unpriced_payload() -> None:
     credits = _FakeCredits()
     await _refund_job(cast(Any, credits), _job(payload={}), "refund:job:x:render")
     assert credits.refunds == []
-
-
-def _runner(queue: _FakeQueue, credits: _FakeCredits) -> JobRunner:
-    return JobRunner(
-        cast(Any, object()),
-        cast(Any, object()),
-        cast(Any, queue),
-        cast(Any, credits),
-        cast(Any, object()),
-        "w-test",
-    )
 
 
 @pytest.mark.asyncio
@@ -278,65 +274,160 @@ class _FakeBot:
         self.session = _FakeBotSession()
 
 
-class _FakeRender:
-    def by_extension(self) -> dict[str, str]:
-        return {"html": "/out/deck.html"}
+class _FakeStorage:
+    """Records verified uploads; ``fail`` makes the post-upload verification fail."""
 
-
-class _FakePipelineResult:
     def __init__(self) -> None:
-        self.render = _FakeRender()
+        self.uploads: list[tuple[str, str, int]] = []
+        self.fail = False
+
+    async def put_verified(self, path: Path, key: str, sha256: str, size: int) -> None:
+        if self.fail:
+            raise StorageVerificationError(f"{key}: stored checksum does not match")
+        self.uploads.append((key, sha256, size))
+
+
+class _FakeBuilt:
+    def __init__(self, deck: DeckSpec) -> None:
+        self.deck = deck
         self.sources: list[Any] = []
 
 
 class _FakeOrchestrator:
-    """Records the kwargs the worker hands the pipeline."""
+    """Records what the worker hands the pipeline; renders real temp files."""
 
-    def __init__(self, bot: Any, db: Any, credits: Any, storage: Any) -> None:
+    def __init__(self, bot: Any, db: Any, credits: Any, storage: Any, out: Path) -> None:
         self.bot = bot
         self.db = db
-        self.pipeline_kwargs: dict[str, Any] = {}
-        self.render_kwargs: dict[str, Any] = {}
+        self.out = out
+        self.build_kwargs: dict[str, Any] = {}
+        self.rendered: list[DeckSpec] = []
+        self.deck = _render_deck()
+        self.before_commit: Any = None
 
-    async def run_full_pipeline(self, **kwargs: Any) -> _FakePipelineResult:
-        self.pipeline_kwargs = kwargs
-        return _FakePipelineResult()
+    async def build_deck(self, **kwargs: Any) -> _FakeBuilt:
+        self.build_kwargs = kwargs
+        if self.before_commit is not None:
+            await self.before_commit()
+        return _FakeBuilt(self.deck)
 
-    async def render(
-        self, deck: DeckSpec, formats: list[Any], progress: Any, *, project_id: str
-    ) -> _FakeRender:
-        self.render_kwargs = {"deck": deck, "formats": formats, "project_id": project_id}
+    async def render(self, deck: DeckSpec, formats: list[Any], progress: Any) -> Any:
+        from packages.bot.orchestrators.presentation_orchestrator import (
+            PresentationRenderResult,
+        )
+
+        self.rendered.append(deck)
         await progress("Rendering presentation", 7, 7)
-        return _FakeRender()
+        html = self.out / f"deck-{len(self.rendered)}.html"
+        html.write_text(f"<h1>{deck.title}</h1>", encoding="utf-8")
+        return PresentationRenderResult(html_path=html)
 
 
-def _wired_runner(queue: _FakeQueue, credits: _FakeCredits, db: Any) -> JobRunner:
-    """A runner whose config carries a token, for the paths that build a Bot."""
+class _World:
+    """A DatabaseClient over the emulated client: project p1 owned by u1, one job row."""
 
+    def __init__(self, tmp_path: Path, job: GenerationJob, *, worker_id: str = "w-test") -> None:
+        from packages.platform.config import PlatformConfig
+        from packages.platform.database import DatabaseClient
+        from packages.platform.document_store import DocumentStore
+
+        self.fake = FakeSupabaseClient()
+        self.fake.seed("projects", [{"id": "p1", "user_id": "u1", "type": "presentation"}])
+        self.fake.seed("users", [{"id": "u1", "telegram_id": 555}])
+        self.fake.seed(
+            "generation_jobs",
+            [{**job.model_dump(mode="json"), "worker_id": worker_id, "status": "processing"}],
+        )
+        cfg = PlatformConfig(
+            supabase_url="https://x.supabase.co",
+            supabase_service_key="k",
+            telegram_bot_token="t",
+        )
+        self.db = DatabaseClient(cfg, client=cast(Any, self.fake))
+        self.store = DocumentStore(self.db)
+        self.storage = _FakeStorage()
+        self.queue = _FakeQueue()
+        self.credits = _FakeCredits()
+        self.tmp = tmp_path
+        self.built: list[_FakeOrchestrator] = []
+        # Runs inside build_deck: simulates another writer moving the head mid-run.
+        self.race: Any = None
+
+    def runner(self) -> JobRunner:
+        return JobRunner(
+            cast(Any, _FakeConfig()),
+            self.db,
+            cast(Any, self.queue),
+            cast(Any, self.credits),
+            cast(Any, self.storage),
+            "w-test",
+        )
+
+    def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _make(*, bot: Any, db: Any, credits: Any, storage: Any) -> _FakeOrchestrator:
+            orchestrator = _FakeOrchestrator(bot, db, credits, storage, self.tmp)
+            orchestrator.before_commit = self.race
+            self.built.append(orchestrator)
+            return orchestrator
+
+        monkeypatch.setattr("aiogram.Bot", _FakeBot)
+        monkeypatch.setattr(
+            "packages.bot.orchestrators.presentation_orchestrator.PresentationOrchestrator",
+            _make,
+        )
+
+    def seed_revision(self, title: str) -> tuple[str, str]:
+        """Commit a deck titled ``title`` as the new head; (document_id, revision_id)."""
+
+        documents = self.fake.tables.get("documents")
+        if not documents:
+            return seed_presentation(
+                self.fake.tables,
+                project_id="p1",
+                content=_render_deck(title).model_dump(mode="json"),
+            )
+        document = documents[0]
+        result = DocumentRpcEmulator(self.fake.tables).commit_revision(
+            {
+                "p_document_id": document["id"],
+                "p_base_revision_id": document["head_revision_id"],
+                "p_content": _render_deck(title).model_dump(mode="json"),
+                "p_kind": "import",
+                "p_schema_version": 1,
+                "p_actor": "system:test",
+                "p_idempotency_key": f"seed-{title}",
+            }
+        )
+        return str(document["id"]), str(result[0]["revision_id"])
+
+    def exports(self) -> list[dict[str, Any]]:
+        return self.fake.tables.get("revision_exports", [])
+
+    def head(self) -> str | None:
+        documents = self.fake.tables.get("documents") or [{}]
+        return documents[0].get("head_revision_id")
+
+
+def _render_job(revision_id: str) -> GenerationJob:
+    return _job(
+        job_type=JobType.PRESENTATION_RENDER.value,
+        payload={
+            "revision_id": revision_id,
+            "renderer_version": renderer_version(),
+            "formats": ["html"],
+        },
+    )
+
+
+def _runner(queue: _FakeQueue, credits: _FakeCredits) -> JobRunner:
     return JobRunner(
-        cast(Any, _FakeConfig()),
-        db,
+        cast(Any, object()),
+        cast(Any, object()),
         cast(Any, queue),
         cast(Any, credits),
         cast(Any, object()),
         "w-test",
     )
-
-
-def _patch_bot_and_orchestrator(monkeypatch: pytest.MonkeyPatch) -> list[_FakeOrchestrator]:
-    built: list[_FakeOrchestrator] = []
-
-    def _make(*, bot: Any, db: Any, credits: Any, storage: Any) -> _FakeOrchestrator:
-        orchestrator = _FakeOrchestrator(bot, db, credits, storage)
-        built.append(orchestrator)
-        return orchestrator
-
-    monkeypatch.setattr("aiogram.Bot", _FakeBot)
-    monkeypatch.setattr(
-        "packages.bot.orchestrators.presentation_orchestrator.PresentationOrchestrator",
-        _make,
-    )
-    return built
 
 
 def _patch_dispatch_fix(
@@ -363,10 +454,10 @@ def _edit_job(payload: dict[str, Any]) -> GenerationJob:
     return _job(job_type=JobType.PRESENTATION_EDIT.value, payload=payload)
 
 
-def _render_deck() -> DeckSpec:
+def _render_deck(title: str = "Direct design") -> DeckSpec:
     return DeckSpec(
         project_id="p1",
-        title="Direct design",
+        title=title,
         design=DesignDirectionSpec(
             mood=PresentationMood.CLEAN_PROFESSIONAL,
             palette=ColorPalette(
@@ -392,91 +483,202 @@ def _render_deck() -> DeckSpec:
     )
 
 
-class _RenderDb:
-    def __init__(self, deck: DeckSpec) -> None:
-        self.deck = deck
-        self.saved: list[DeckSpec] = []
+@pytest.mark.asyncio
+async def test_render_of_an_older_revision_publishes_only_that_revisions_exports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Bug (a), worker side: the render job used to overwrite the project's stable
+    # export keys and the decks row with the older revision. Now its exports are
+    # keyed by that revision, and the head is untouched.
+    _doc, older = (None, None)
+    job = _render_job("placeholder")
+    world = _World(tmp_path, job)
+    document_id, older = world.seed_revision("Older")
+    _doc, newer = world.seed_revision("Newer")
+    job = _render_job(older)
+    world.fake.tables["generation_jobs"][0]["payload"] = job.payload
+    world.patch(monkeypatch)
 
-    async def get_document_revision(
-        self, document_id: str, revision_id: str
-    ) -> dict[str, Any] | None:
-        if (document_id, revision_id) != ("document-1", "revision-1"):
-            return None
-        return {"content": self.deck.model_dump(mode="json")}
+    await world.runner()._run_presentation_render(job)  # pyright: ignore[reportPrivateUsage]
 
-    async def save_deck(self, project_id: str, deck: DeckSpec) -> dict[str, Any]:
-        self.saved.append(deck)
-        return {"project_id": project_id}
-
-
-class _VersionedEditDb:
-    def __init__(self, deck: DeckSpec) -> None:
-        self.deck = deck
-        self.commits: list[dict[str, Any]] = []
-
-    async def get_document(self, project_id: str, kind: str) -> dict[str, Any]:
-        assert (project_id, kind) == ("p1", "presentation")
-        return {
-            "id": "document-1",
-            "revision_id": "revision-1",
-            "content": self.deck.model_dump(mode="json"),
-        }
-
-    async def commit_presentation_revision_and_deck(
-        self,
-        document_id: str,
-        base_revision_id: str,
-        content: dict[str, Any],
-        user_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self.commits.append(
-            {
-                "document_id": document_id,
-                "base_revision_id": base_revision_id,
-                "content": content,
-                "user_id": user_id,
-                "idempotency_key": idempotency_key,
-            }
-        )
-        return {"revision_id": "revision-2"}
+    assert world.head() == newer
+    assert [row["revision_id"] for row in world.exports()] == [older]
+    key = world.exports()[0]["storage_key"]
+    assert key.startswith(f"exports/{document_id}/{older}/{renderer_version()}/html/")
+    assert world.storage.uploads[0][0] == key
+    assert world.built[0].rendered[0].title == "Older"
+    assert world.queue.completed == [job.id]
+    assert world.queue.progress[-1]["outcome"] == "rendered"
+    assert world.credits.refunds == []
 
 
 @pytest.mark.asyncio
-async def test_manual_render_uses_exact_revision_and_updates_current_deck(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_render_with_a_lost_claim_registers_nothing_and_never_completes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    queue, credits = _FakeQueue(), _FakeCredits()
-    deck = _render_deck()
-    db = _RenderDb(deck)
-    built = _patch_bot_and_orchestrator(monkeypatch)
-    runner = _wired_runner(queue, credits, cast(Any, db))
-    job = _job(
-        job_type=JobType.PRESENTATION_RENDER.value,
-        payload={"document_id": "document-1", "revision_id": "revision-1"},
+    # (f) The row was reaped and re-claimed by another worker while this one
+    # rendered: register_export refuses, the job is not completed by us, and no
+    # refund fires from this worker (the guarded fail does not land).
+    world = _World(tmp_path, _render_job("x"), worker_id="someone-else")
+    _doc, revision = world.seed_revision("Deck")
+    job = _render_job(revision)
+    world.fake.tables["generation_jobs"][0]["payload"] = job.payload
+    world.queue.fail_lands = False
+    world.patch(monkeypatch)
+
+    await world.runner()._execute(job)  # pyright: ignore[reportPrivateUsage]
+
+    assert world.exports() == []
+    assert world.queue.completed == []
+    assert "claim_lost" in world.queue.failed[0]["message"]
+    assert world.credits.refunds == []
+
+
+@pytest.mark.asyncio
+async def test_render_job_cannot_publish_a_revision_of_another_project(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # (g) A render job for revision X can never register exports for a revision
+    # it does not target: one from another project is not even loaded.
+    world = _World(tmp_path, _render_job("x"))
+    world.fake.tables["projects"].append({"id": "p2", "user_id": "u1", "type": "presentation"})
+    _doc, foreign = seed_presentation(
+        world.fake.tables, project_id="p2", content=_render_deck("Other").model_dump(mode="json")
     )
+    job = _render_job(foreign)
+    world.patch(monkeypatch)
 
-    await runner._run_presentation_render(job)  # pyright: ignore[reportPrivateUsage]
+    await world.runner()._execute(job)  # pyright: ignore[reportPrivateUsage]
 
-    assert db.saved == [deck]
-    assert queue.completed == [job.id]
-    assert queue.progress[-1]["step"] == "Rendering presentation"
-    assert built[0].render_kwargs["project_id"] == "p1"
-    assert built[0].render_kwargs["deck"] == deck
-    assert credits.refunds == []
+    assert world.exports() == []
+    assert "not in this project" in world.queue.failed[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_upload_verification_failure_fails_the_render_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    world = _World(tmp_path, _render_job("x"))
+    _doc, revision = world.seed_revision("Deck")
+    job = _render_job(revision)
+    world.fake.tables["generation_jobs"][0]["payload"] = job.payload
+    world.storage.fail = True
+    world.patch(monkeypatch)
+
+    await world.runner()._execute(job)  # pyright: ignore[reportPrivateUsage]
+
+    assert world.exports() == []
+    assert world.queue.completed == []
+    assert world.queue.failed[0]["step"] == "publish"
+    assert "checksum" in world.queue.failed[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_generation_commits_publishes_and_opens_the_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    job = _job(payload={"product_type": "presentation_standard", "formats": ["html"]})
+    world = _World(tmp_path, job)
+    world.patch(monkeypatch)
+    sessions: list[dict[str, Any]] = []
+
+    async def _session(*_args: Any, **kwargs: Any) -> None:
+        sessions.append(kwargs)
+
+    monkeypatch.setattr("packages.bot.sessions.store.create_session", _session)
+
+    await world.runner()._run_presentation(job)  # pyright: ignore[reportPrivateUsage]
+
+    head = world.head()
+    assert head is not None
+    revision = next(r for r in world.fake.tables["document_revisions"] if r["id"] == head)
+    assert revision["kind"] == "generation" and revision["actor"] == f"worker:{job.id}"
+    assert [row["revision_id"] for row in world.exports()] == [head]
+    assert sessions[0]["revision_id"] == head
+    assert world.queue.completed == [job.id]
+    assert world.queue.progress[-1]["outcome"] == "committed"
+
+
+@pytest.mark.asyncio
+async def test_generation_racing_a_new_head_becomes_a_proposal_not_an_overwrite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A head appeared while the deck was generated. The paid output is kept as a
+    # proposal for the owner; the other writer's head is not overwritten, nothing
+    # is rendered, and the job completes (no refund: the work was delivered).
+    job = _job(payload={"product_type": "presentation_standard", "formats": ["html"]})
+    world = _World(tmp_path, job)
+    raced: list[str] = []
+
+    async def _another_writer() -> None:
+        raced.append(world.seed_revision("Someone else")[1])
+
+    world.race = _another_writer
+    world.patch(monkeypatch)
+
+    await world.runner()._run_presentation(job)  # pyright: ignore[reportPrivateUsage]
+
+    assert world.head() == raced[0]
+    proposals = world.fake.tables["revision_proposals"]
+    assert len(proposals) == 1 and proposals[0]["kind"] == "regeneration"
+    assert proposals[0]["source_job_id"] == job.id
+    assert proposals[0]["base_revision_id"] is None
+    assert world.exports() == []
+    assert world.built[0].rendered == []
+    assert world.queue.completed == [job.id]
+    assert world.queue.progress[-1]["outcome"] == "proposed"
+    assert world.credits.refunds == []
+
+
+@pytest.mark.asyncio
+async def test_regeneration_commits_against_the_head_it_started_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    job = _job(payload={"product_type": "presentation_standard", "formats": ["html"]})
+    world = _World(tmp_path, job)
+    _doc, first = world.seed_revision("First generation")
+    world.patch(monkeypatch)
+
+    async def _session(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("packages.bot.sessions.store.create_session", _session)
+
+    await world.runner()._run_presentation(job)  # pyright: ignore[reportPrivateUsage]
+
+    head = world.head()
+    revision = next(r for r in world.fake.tables["document_revisions"] if r["id"] == head)
+    assert revision["kind"] == "regeneration" and revision["parent_revision_id"] == first
+
+
+@pytest.mark.asyncio
+async def test_presentation_payload_topic_reaches_the_pipeline_verbatim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """W4: EnqueueRequest.topic -> payload["topic"] -> build_deck(topic=...)."""
+
+    async def _no_session(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("packages.bot.sessions.store.create_session", _no_session)
+
+    async def topic_seen_for(payload: dict[str, Any]) -> object:
+        job = _job(payload=payload)
+        world = _World(tmp_path, job)
+        world.patch(monkeypatch)
+        await world.runner()._run_presentation(job)  # pyright: ignore[reportPrivateUsage]
+        return world.built[0].build_kwargs["topic"]
+
+    assert await topic_seen_for({"topic": "Suv resurslari"}) == "Suv resurslari"
+    assert await topic_seen_for({}) is None
+    assert await topic_seen_for({"topic": "   "}) is None
 
 
 @pytest.mark.asyncio
 async def test_failed_edit_refunds_nothing_but_failed_generation_does(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """W1: the refundable gate must discriminate by job type, not by payload.
-
-    Both jobs below carry the SAME priced payload, so the only thing standing
-    between a failure and a refund is ``job.job_type is PRESENTATION_GENERATION``.
-    An edit spends the tier's fix allowance, not money — nothing was deducted
-    when it was enqueued, so refunding one would mint credit out of a failure.
-    """
+    """W1: the refundable gate must discriminate by job type, not by payload."""
 
     priced = {"product_type": "presentation_standard"}
 
@@ -499,6 +701,19 @@ async def test_failed_edit_refunds_nothing_but_failed_generation_does(
     assert len(gen_credits.refunds) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_refund_already_recorded_for_the_job_is_not_an_error() -> None:
+    # (h) Migration 016 makes a second refund row for a job a unique violation;
+    # a retried refund must treat it as done, not crash the worker loop.
+    class _AlreadyRefunded(_FakeCredits):
+        async def refund(self, *args: Any, **kwargs: Any) -> None:
+            raise APIError(
+                {"message": "duplicate key", "code": "23505", "hint": None, "details": None}
+            )
+
+    await _refund_job(cast(Any, _AlreadyRefunded()), _job(), "refund:job:x:publish")
+
+
 def test_executor_for_routes_by_job_type() -> None:
     runner = _runner(_FakeQueue(), _FakeCredits())
     executor_for = runner._executor_for  # pyright: ignore[reportPrivateUsage]
@@ -519,88 +734,108 @@ async def test_export_job_has_no_executor_and_is_failed_with_refund() -> None:
     assert len(credits.refunds) == 1
 
 
+def _edit_payload(**extra: Any) -> dict[str, Any]:
+    return {"document_id": "document-1", "base_revision_id": "revision-1", **extra}
+
+
 @pytest.mark.asyncio
-async def test_edit_inline_fixes_reach_dispatch_and_complete_the_job(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_edit_inline_fixes_reach_dispatch_against_the_stamped_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    queue, credits = _FakeQueue(), _FakeCredits()
-    db = object()
-    built = _patch_bot_and_orchestrator(monkeypatch)
-    calls = _patch_dispatch_fix(monkeypatch, FixDispatchResult(True, slides_changed=2))
-    runner = _wired_runner(queue, credits, db)
     job = _edit_job(
-        {
-            "fixes": [
+        _edit_payload(
+            fixes=[
                 {"slide_id": "s2", "instruction": "tighten the title"},
                 {"slide_id": "s5", "instruction": "drop the fourth bullet"},
             ],
-            "call_count": 2,
-        }
+            call_count=2,
+        )
+    )
+    world = _World(tmp_path, job)
+    world.patch(monkeypatch)
+    calls = _patch_dispatch_fix(
+        monkeypatch,
+        FixDispatchResult(FixStatus.DELIVERED, slides_changed=2, revision_id="revision-2"),
     )
 
-    await runner._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
+    await world.runner()._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
 
-    assert len(calls) == 1
     kwargs = calls[0]
-    assert kwargs["runner"] is built[0]
-    assert kwargs["db"] is db
+    assert kwargs["runner"] is world.built[0]
+    assert kwargs["db"] is world.db
     assert kwargs["project_id"] == "p1"
     assert kwargs["call_count"] == 2
+    assert kwargs["base_revision_id"] == "revision-1"
     fixes = cast(list[SlideFix], kwargs["fixes"])
     assert [f.slide_id for f in fixes] == ["s2", "s5"]
-    assert all(isinstance(f, SlideFix) for f in fixes)
-    assert queue.completed == [job.id]
-    assert queue.failed == []
-    assert cast(_FakeBot, built[0].bot).session.closed is True
+    assert world.queue.completed == [job.id]
+    assert world.queue.progress[-1]["outcome"] == "delivered"
+    assert cast(_FakeBot, world.built[0].bot).session.closed is True
 
 
 @pytest.mark.asyncio
-async def test_versioned_edit_commits_document_and_deck_through_one_callback(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    queue, credits = _FakeQueue(), _FakeCredits()
-    deck = _render_deck()
-    db = _VersionedEditDb(deck)
-    _patch_bot_and_orchestrator(monkeypatch)
+    job = _edit_job(_edit_payload(fixes=[{"slide_id": "s1", "instruction": "x"}]))
+    world = _World(tmp_path, job)
+    document_id, base = world.seed_revision("Before")
+    job.payload.update(document_id=document_id, base_revision_id=base)
+    world.patch(monkeypatch)
+    edited = _render_deck("After the AI edit")
 
     async def _dispatch(**kwargs: Any) -> FixDispatchResult:
-        await kwargs["persist"](deck)
-        return FixDispatchResult(True, slides_changed=1)
+        outcome = await kwargs["commit"](edited, kwargs["base_revision_id"])
+        warnings = await kwargs["deliver"](edited, outcome.revision_id, [ExportFormat.HTML])
+        return FixDispatchResult(
+            FixStatus.DELIVERED, revision_id=outcome.revision_id, warnings=tuple(warnings)
+        )
 
     monkeypatch.setattr("packages.sessions_core.dispatch_fix", _dispatch)
-    runner = _wired_runner(queue, credits, cast(Any, db))
-    job = _edit_job(
-        {
-            "fixes": [{"slide_id": "s1", "instruction": "tighten the title"}],
-            "call_count": 1,
-            "document_id": "document-1",
-            "base_revision_id": "revision-1",
-        }
+
+    await world.runner()._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
+
+    head = world.head()
+    revision = next(r for r in world.fake.tables["document_revisions"] if r["id"] == head)
+    assert revision["kind"] == "ai_edit" and revision["actor"] == f"worker:{job.id}"
+    assert revision["parent_revision_id"] == base
+    assert revision["idempotency_key"] == f"chat-edit:{job.id}"
+    assert [row["revision_id"] for row in world.exports()] == [head]
+    assert world.queue.completed == [job.id]
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_became_a_proposal_completes_the_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    job = _edit_job(_edit_payload(fixes=[{"slide_id": "s1", "instruction": "x"}]))
+    world = _World(tmp_path, job)
+    world.patch(monkeypatch)
+    _patch_dispatch_fix(
+        monkeypatch, FixDispatchResult(FixStatus.PROPOSED, proposal_id="proposal-1")
     )
 
-    await runner._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
+    await world.runner()._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
 
-    assert queue.completed == [job.id]
-    assert db.commits == [
-        {
-            "document_id": "document-1",
-            "base_revision_id": "revision-1",
-            "content": deck.model_dump(mode="json"),
-            "user_id": "u1",
-            "idempotency_key": f"chat-edit:{job.id}",
-        }
-    ]
+    assert world.queue.completed == [job.id]
+    assert world.queue.progress[-1]["outcome"] == "proposed"
+    assert world.queue.progress[-1]["proposal_id"] == "proposal-1"
 
 
 @pytest.mark.asyncio
 async def test_edit_from_pending_uses_the_parked_batch_and_its_call_count(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The parked action is the source of truth; a stale payload cannot override it."""
 
-    queue, credits = _FakeQueue(), _FakeCredits()
-    _patch_bot_and_orchestrator(monkeypatch)
-    calls = _patch_dispatch_fix(monkeypatch, FixDispatchResult(True, slides_changed=1))
+    job = _edit_job(
+        _edit_payload(
+            from_pending=True, call_count=2, fixes=[{"slide_id": "s1", "instruction": "ignored"}]
+        )
+    )
+    world = _World(tmp_path, job)
+    world.patch(monkeypatch)
+    calls = _patch_dispatch_fix(monkeypatch, FixDispatchResult(FixStatus.DELIVERED))
     _patch_pending(
         monkeypatch,
         PendingActionView(
@@ -609,21 +844,13 @@ async def test_edit_from_pending_uses_the_parked_batch_and_its_call_count(
             call_count=7,
         ),
     )
-    runner = _wired_runner(queue, credits, object())
-    job = _edit_job(
-        {
-            "from_pending": True,
-            "call_count": 2,
-            "fixes": [{"slide_id": "s1", "instruction": "ignored"}],
-        }
-    )
 
-    await runner._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
+    await world.runner()._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
 
     kwargs = calls[0]
     assert [f.slide_id for f in cast(list[SlideFix], kwargs["fixes"])] == ["s9"]
     assert kwargs["call_count"] == 7
-    assert queue.completed == [job.id]
+    assert world.queue.completed == [job.id]
 
 
 @pytest.mark.asyncio
@@ -632,7 +859,7 @@ async def test_edit_from_pending_with_nothing_parked_fails_without_refund(
 ) -> None:
     queue, credits = _FakeQueue(), _FakeCredits()
     _patch_pending(monkeypatch, None)
-    runner = _wired_runner(queue, credits, object())
+    runner = _runner(queue, credits)
     job = _edit_job({"from_pending": True, "product_type": "presentation_standard"})
 
     with pytest.raises(RuntimeError, match="no longer parked"):
@@ -644,9 +871,18 @@ async def test_edit_from_pending_with_nothing_parked_fails_without_refund(
 
 
 @pytest.mark.asyncio
+async def test_edit_without_a_base_revision_is_refused() -> None:
+    runner = _runner(_FakeQueue(), _FakeCredits())
+    with pytest.raises(RuntimeError, match="no document revision"):
+        await runner._run_presentation_edit(  # pyright: ignore[reportPrivateUsage]
+            _edit_job({"fixes": [{"slide_id": "s1", "instruction": "x"}]})
+        )
+
+
+@pytest.mark.asyncio
 async def test_edit_without_usable_fixes_raises() -> None:
     queue, credits = _FakeQueue(), _FakeCredits()
-    runner = _wired_runner(queue, credits, object())
+    runner = _runner(queue, credits)
 
     with pytest.raises(RuntimeError, match="carries no fixes"):
         await runner._run_presentation_edit(_edit_job({}))  # pyright: ignore[reportPrivateUsage]
@@ -654,10 +890,8 @@ async def test_edit_without_usable_fixes_raises() -> None:
         await runner._run_presentation_edit(_edit_job({"fixes": []}))  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(RuntimeError, match="malformed fix entry"):
         await runner._run_presentation_edit(_edit_job({"fixes": ["s1", 7]}))  # pyright: ignore[reportPrivateUsage]
-    # A MIXED batch is the sharp case, and it used to slip through: filtering
-    # the junk out would apply half of an approved batch, spend the tier's fix
-    # allowance on it, and report success. apply_fixes_and_render is atomic, so
-    # its input parsing has to be too — one bad entry fails the whole job.
+    # A MIXED batch is the sharp case: filtering the junk out would apply half of
+    # an approved batch and report success. One bad entry fails the whole job.
     with pytest.raises(RuntimeError, match="malformed fix entry"):
         await runner._run_presentation_edit(  # pyright: ignore[reportPrivateUsage]
             _edit_job({"fixes": [{"slide_id": "s2", "instruction": "fix the date"}, "junk"]})
@@ -667,46 +901,22 @@ async def test_edit_without_usable_fixes_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_edit_that_delivers_nothing_fails_the_row_at_apply_fixes(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A fix that produced no file must not report success — dispatch_fix has
-    already answered the parked call, so the row is all that is left to state."""
+    """dispatch_fix already answered the parked call; the row is all that is left to state."""
 
-    queue, credits = _FakeQueue(), _FakeCredits()
-    built = _patch_bot_and_orchestrator(monkeypatch)
-    _patch_dispatch_fix(monkeypatch, FixDispatchResult(False, reason="fixes_exhausted"))
-    runner = _wired_runner(queue, credits, object())
-    job = _edit_job({"fixes": [{"slide_id": "s3", "instruction": "swap the image"}]})
+    job = _edit_job(_edit_payload(fixes=[{"slide_id": "s3", "instruction": "swap the image"}]))
+    world = _World(tmp_path, job)
+    world.patch(monkeypatch)
+    _patch_dispatch_fix(
+        monkeypatch, FixDispatchResult(FixStatus.EXHAUSTED, reason="fixes_exhausted")
+    )
 
-    await runner._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
+    await world.runner()._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
 
-    assert queue.completed == []
-    assert queue.failed == [{"job_id": job.id, "step": "apply_fixes", "message": "fixes_exhausted"}]
-    assert credits.refunds == []
-    assert cast(_FakeBot, built[0].bot).session.closed is True
-
-
-@pytest.mark.asyncio
-async def test_presentation_payload_topic_reaches_the_pipeline_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """W4: EnqueueRequest.topic -> payload["topic"] -> run_full_pipeline(topic=...).
-
-    Without this seam the web's typed topic is silently dropped and the deck is
-    generated from the registered sources alone.
-    """
-
-    async def _no_session(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("packages.bot.sessions.store.create_session", _no_session)
-
-    async def topic_seen_for(payload: dict[str, Any]) -> object:
-        built = _patch_bot_and_orchestrator(monkeypatch)
-        runner = _wired_runner(_FakeQueue(), _FakeCredits(), object())
-        await runner._run_presentation(_job(payload=payload))  # pyright: ignore[reportPrivateUsage]
-        return built[0].pipeline_kwargs["topic"]
-
-    assert await topic_seen_for({"topic": "Suv resurslari"}) == "Suv resurslari"
-    assert await topic_seen_for({}) is None
-    assert await topic_seen_for({"topic": "   "}) is None
+    assert world.queue.completed == []
+    assert world.queue.failed == [
+        {"job_id": job.id, "step": "apply_fixes", "message": "fixes_exhausted"}
+    ]
+    assert world.credits.refunds == []
+    assert cast(_FakeBot, world.built[0].bot).session.closed is True

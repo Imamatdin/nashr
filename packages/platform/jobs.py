@@ -13,6 +13,9 @@ seam, wrapped in ``asyncio.to_thread`` like every other platform module.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, cast
@@ -20,6 +23,8 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.platform.database import DatabaseClient
+
+logger = logging.getLogger("nashr.jobs")
 
 DEFAULT_STALE_SECONDS: int = 120
 HEARTBEAT_INTERVAL_SECONDS: float = 15.0
@@ -177,17 +182,90 @@ class JobQueue:
             "max_attempts": max_attempts,
         }
 
+        return await self._insert(row)
+
+    async def start_inline(
+        self,
+        *,
+        project_id: str,
+        user_id: str,
+        job_type: JobType,
+        payload: dict[str, Any],
+        worker_id: str,
+    ) -> GenerationJob:
+        """Insert a job already claimed by ``worker_id`` (an in-process runner).
+
+        The bot renders in its own process; its exports must still be registered
+        under a job claim (ADR 0001). Inserting the row ``processing`` with the
+        claim in place means the queue worker can never pick it up in between.
+        The caller must heartbeat (:func:`heartbeat_while`) and finish it.
+        """
+
+        now = datetime.now(UTC).isoformat()
+        row: dict[str, Any] = {
+            "project_id": project_id,
+            "user_id": user_id,
+            "job_type": job_type.value,
+            "status": JobStatus.PROCESSING.value,
+            "payload": payload,
+            "max_attempts": 1,
+            "attempts": 1,
+            "worker_id": worker_id,
+            "claimed_at": now,
+            "heartbeat_at": now,
+            "started_at": now,
+        }
+        return await self._insert(row)
+
+    async def get_active_render_job(
+        self, revision_id: str, renderer_version: str, formats: list[str]
+    ) -> GenerationJob | None:
+        """The active render job for exactly this revision, renderer and format set."""
+
+        def run() -> Any:
+            return (
+                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
+                .select("*")
+                .eq("job_type", JobType.PRESENTATION_RENDER.value)
+                .eq("payload->>revision_id", revision_id)
+                .eq("payload->>renderer_version", renderer_version)
+                .in_("status", [JobStatus.QUEUED.value, JobStatus.PROCESSING.value])
+                .execute()
+            )
+
+        result = await asyncio.to_thread(run)
+        wanted = sorted(formats)
+        for row in cast(list[dict[str, Any]], list(result.data or [])):
+            job = _row_to_job(row)
+            if sorted(cast(list[str], job.payload.get("formats", []))) == wanted:
+                return job
+        return None
+
+    async def _insert(self, row: dict[str, Any]) -> GenerationJob:
         def run() -> Any:
             return self._db._query("generation_jobs").insert(row).execute()  # pyright: ignore[reportPrivateUsage]
 
         try:
             result = await asyncio.to_thread(run)
         except Exception as exc:
-            existing = await self.get_active_job(project_id, job_type)
+            existing = await self._existing_for(row)
             if existing is not None:
                 raise DuplicateActiveJobError(existing) from exc
             raise
         return _row_to_job(cast(dict[str, Any], result.data[0]))
+
+    async def _existing_for(self, row: dict[str, Any]) -> GenerationJob | None:
+        """The active job a duplicate insert of ``row`` collided with."""
+
+        job_type = JobType(str(row["job_type"]))
+        payload = cast(dict[str, Any], row["payload"])
+        if job_type is JobType.PRESENTATION_RENDER:
+            return await self.get_active_render_job(
+                str(payload.get("revision_id")),
+                str(payload.get("renderer_version")),
+                cast(list[str], payload.get("formats", [])),
+            )
+        return await self.get_active_job(str(row["project_id"]), job_type)
 
     # ------------------------------------------------------------- worker side
 
@@ -346,6 +424,41 @@ class JobQueue:
         return [_row_to_job(r) for r in rows]
 
 
+@contextlib.asynccontextmanager
+async def heartbeat_while(
+    queue: JobQueue,
+    job_id: str,
+    worker_id: str,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+) -> AsyncGenerator[None]:
+    """Keep ``job_id``'s claim alive while the body runs (for inline runners).
+
+    The reaper fails a processing row whose heartbeat is older than
+    :data:`DEFAULT_STALE_SECONDS`; a render takes longer than that. A lost claim is
+    not raised here: ``register_export`` and the guarded terminal write already
+    refuse a worker that no longer owns the row.
+    """
+
+    async def beat() -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                if not await queue.heartbeat(job_id, worker_id):
+                    logger.warning("inline_job_heartbeat_lost job=%s", job_id)
+            except Exception as exc:
+                logger.warning(
+                    "inline_job_heartbeat_error job=%s error_type=%s", job_id, type(exc).__name__
+                )
+
+    task = asyncio.create_task(beat())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 __all__ = [
     "DEFAULT_STALE_SECONDS",
     "HEARTBEAT_INTERVAL_SECONDS",
@@ -354,4 +467,5 @@ __all__ = [
     "JobQueue",
     "JobStatus",
     "JobType",
+    "heartbeat_while",
 ]

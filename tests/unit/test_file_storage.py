@@ -377,3 +377,116 @@ def test_r2_client_constructed_with_endpoint(monkeypatch: pytest.MonkeyPatch) ->
     cfg: Any = kwargs.get("config")
     assert cfg is not None
     assert cfg.signature_version == "s3v4"
+
+
+# ---------------------------------------------------------------------------
+# verified export uploads (ADR 0001)
+# ---------------------------------------------------------------------------
+
+
+def _digest(data: bytes) -> tuple[str, str]:
+    import base64
+    import hashlib
+
+    raw = hashlib.sha256(data).digest()
+    return raw.hex(), base64.b64encode(raw).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_local_put_verified_stores_and_proves_the_bytes(
+    tmp_path: Path, _isolate_home: Path
+) -> None:
+    source = tmp_path / "deck.html"
+    source.write_bytes(b"<h1>deck</h1>")
+    sha_hex, _ = _digest(b"<h1>deck</h1>")
+    storage = FileStorage(_make_local_config())
+
+    await storage.put_verified(source, "exports/d/r/v/html/x.html", sha_hex, 13)
+
+    head = await storage.head_object("exports/d/r/v/html/x.html")
+    assert head is not None and head.size == 13
+
+
+@pytest.mark.asyncio
+async def test_put_verified_refuses_a_file_that_changed_before_upload(
+    tmp_path: Path, _isolate_home: Path
+) -> None:
+    from packages.platform.storage import StorageVerificationError
+
+    source = tmp_path / "deck.html"
+    source.write_bytes(b"changed")
+    sha_hex, _ = _digest(b"original")
+    storage = FileStorage(_make_local_config())
+
+    with pytest.raises(StorageVerificationError):
+        await storage.put_verified(source, "exports/k.html", sha_hex, 8)
+    assert await storage.head_object("exports/k.html") is None
+
+
+@pytest.mark.asyncio
+async def test_r2_put_verified_sends_the_checksum_and_checks_the_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _patch_boto(monkeypatch)
+    source = tmp_path / "deck.pdf"
+    source.write_bytes(b"%PDF")
+    sha_hex, sha_b64 = _digest(b"%PDF")
+    client.head_object.return_value = {
+        "ContentLength": 4,
+        "ChecksumSHA256": sha_b64,
+        "LastModified": __import__("datetime").datetime(2026, 1, 1),
+    }
+    storage = FileStorage(_make_r2_config())
+
+    await storage.put_verified(source, "exports/k.pdf", sha_hex, 4)
+
+    put = client.put_object.call_args.kwargs
+    assert put["ChecksumSHA256"] == sha_b64 and put["Key"] == "exports/k.pdf"
+    assert client.head_object.call_args.kwargs["ChecksumMode"] == "ENABLED"
+    client.get_object.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_r2_put_verified_fails_on_a_checksum_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from packages.platform.storage import StorageVerificationError
+
+    client = _patch_boto(monkeypatch)
+    source = tmp_path / "deck.pdf"
+    source.write_bytes(b"%PDF")
+    sha_hex, _ = _digest(b"%PDF")
+    _, other_b64 = _digest(b"something else")
+    client.head_object.return_value = {
+        "ContentLength": 4,
+        "ChecksumSHA256": other_b64,
+        "LastModified": __import__("datetime").datetime(2026, 1, 1),
+    }
+    storage = FileStorage(_make_r2_config())
+
+    with pytest.raises(StorageVerificationError, match="checksum"):
+        await storage.put_verified(source, "exports/k.pdf", sha_hex, 4)
+
+
+@pytest.mark.asyncio
+async def test_r2_without_a_reported_checksum_downloads_and_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from io import BytesIO
+
+    from packages.platform.storage import StorageVerificationError
+
+    client = _patch_boto(monkeypatch)
+    source = tmp_path / "deck.pdf"
+    source.write_bytes(b"%PDF")
+    sha_hex, _ = _digest(b"%PDF")
+    client.head_object.return_value = {
+        "ContentLength": 4,
+        "LastModified": __import__("datetime").datetime(2026, 1, 1),
+    }
+    client.get_object.return_value = {"Body": BytesIO(b"%PDX")}
+    storage = FileStorage(_make_r2_config())
+
+    with pytest.raises(StorageVerificationError, match="bytes"):
+        await storage.put_verified(source, "exports/k.pdf", sha_hex, 4)
+    client.get_object.assert_called_once()
