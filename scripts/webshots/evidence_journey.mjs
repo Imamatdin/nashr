@@ -31,8 +31,26 @@ async function step(name, run) {
   }
 }
 
+// JOURNEY_RECORD=1 (CI) keeps a video and a Playwright trace per browser context.
+const record = process.env.JOURNEY_RECORD === "1";
+let traceCount = 0;
+
 async function openProject(browser, locale, { viewport = { width: 1440, height: 1000 }, session = seed.session } = {}) {
-  const context = await browser.newContext({ viewport, acceptDownloads: true, locale: "en-US" });
+  const context = await browser.newContext({
+    viewport,
+    acceptDownloads: true,
+    locale: "en-US",
+    ...(record ? { recordVideo: { dir: join(outDir, "video"), size: { width: 1280, height: 800 } } } : {}),
+  });
+  if (record) {
+    await context.tracing.start({ screenshots: true, snapshots: true });
+    const close = context.close.bind(context);
+    const name = `trace-${locale}-${++traceCount}.zip`;
+    context.close = async () => {
+      await context.tracing.stop({ path: join(outDir, name) }).catch(() => {});
+      return close();
+    };
+  }
   await context.addInitScript(([stored, chosen]) => {
     if (!window.sessionStorage.getItem("journey-seeded")) {
       window.localStorage.setItem("nashr.session", stored);

@@ -1,0 +1,245 @@
+# Heavy verification that cannot run on the 8 GB workstation (ADR 0001 §11).
+# Runs on pushes to ci/** branches and on manual dispatch only — never main.
+# Test configuration only: no production secrets, no model or payment keys,
+# MinIO stands in for R2, and every credential below is a local constant.
+name: ci
+
+on:
+  push:
+    branches: ["ci/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+  NODE_VERSION: "20"
+
+jobs:
+  unit:
+    name: unit tests, pyright, web tests, typecheck, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: packages/web/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pytest>=8" "pytest-asyncio>=0.24" "pyright>=1.1.380" "docker>=7.1" "asyncpg>=0.29" "hypothesis>=6.100"
+      - name: Python tests
+        run: |
+          mkdir -p artifacts
+          set -o pipefail
+          python -m pytest tests/ -q -ra --junitxml=artifacts/pytest-unit.xml 2>&1 | tee artifacts/pytest-unit.log
+      - name: pyright
+        run: python -m pyright packages/ 2>&1 | tee artifacts/pyright.log; exit ${PIPESTATUS[0]}
+      - name: Web unit tests, typecheck, production build
+        working-directory: packages/web
+        env:
+          NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8090
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-logs
+          path: artifacts/
+          retention-days: 5
+
+  postgres:
+    name: real PostgreSQL + PostgREST
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci-postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      NASHR_TEST_DATABASE_URL: postgresql://postgres:ci-postgres@127.0.0.1:5432/postgres
+      NASHR_TEST_ARTIFACTS: artifacts
+      JWT_SECRET: local-only-jwt-secret-not-for-production-0000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pytest>=8" "pytest-asyncio>=0.24" "asyncpg>=0.29" "hypothesis>=6.100"
+      - name: Cluster roles
+        run: |
+          mkdir -p artifacts
+          psql "$NASHR_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/db/bootstrap_roles.sql
+      - name: Pre-change run — bug tests must FAIL on migrations 001–015
+        run: |
+          set +e
+          NASHR_TEST_SCHEMA=legacy python -m pytest tests/db/test_bug_regressions.py -v -ra \
+            --junitxml=artifacts/prechange.xml 2>&1 | tee artifacts/prechange.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prechange.xml | tee artifacts/prechange-verdict.log
+      - name: Post-change run — full suite on migrations 001–016
+        run: |
+          set -o pipefail
+          python -m pytest tests/db -v -ra -s --junitxml=artifacts/postgres.xml 2>&1 | tee artifacts/postgres.log
+      - name: SQL harness
+        run: |
+          python -m tests.db.migrate nashr_sql
+          psql "postgresql://postgres:ci-postgres@127.0.0.1:5432/nashr_sql" -v ON_ERROR_STOP=1 \
+            -f tests/sql/document_functions.sql 2>&1 | tee artifacts/sql-harness.log
+      - name: PostgREST on a migrated database
+        run: |
+          python -m tests.db.migrate nashr_rest
+          docker run -d --name postgrest --network host \
+            -e PGRST_DB_URI="postgres://authenticator:local-authenticator@127.0.0.1:5432/nashr_rest" \
+            -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=anon \
+            -e PGRST_JWT_SECRET="$JWT_SECRET" -e PGRST_SERVER_PORT=3000 \
+            postgrest/postgrest:v12.2.3
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:3000/ >/dev/null && break; sleep 1; done
+      - name: Isolation through PostgREST with user tokens
+        env:
+          NASHR_TEST_POSTGREST_URL: http://127.0.0.1:3000
+          NASHR_TEST_JWT_SECRET: ${{ env.JWT_SECRET }}
+          NASHR_TEST_REST_DATABASE_URL: postgresql://postgres:ci-postgres@127.0.0.1:5432/nashr_rest
+        run: |
+          set -o pipefail
+          python -m pytest tests/db/test_postgrest.py -v -ra --junitxml=artifacts/postgrest.xml 2>&1 \
+            | tee artifacts/postgrest.log
+      - name: PostgREST log
+        if: always()
+        run: docker logs postgrest > artifacts/postgrest-server.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: postgres-logs
+          path: artifacts/
+          retention-days: 5
+
+  journey:
+    name: browser journey (API + worker + next start)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Local stack (Postgres + migrations + PostgREST + Caddy)
+        run: |
+          mkdir -p artifacts
+          bash scripts/local_stack/up.sh 2>&1 | tee artifacts/stack.log
+      - name: MinIO as the R2 stand-in
+        run: |
+          docker run -d --name s3 -p 54322:9000 \
+            -e MINIO_ROOT_USER=local-access -e MINIO_ROOT_PASSWORD=local-secret \
+            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:54322/minio/health/live && break; sleep 1; done
+          python - <<'PY'
+          import boto3
+          s3 = boto3.client("s3", endpoint_url="http://127.0.0.1:54322",
+                            aws_access_key_id="local-access", aws_secret_access_key="local-secret",
+                            region_name="us-east-1")
+          s3.create_bucket(Bucket="nashr-local")
+          PY
+      - name: Test environment
+        run: |
+          python scripts/local_stack/local_env.py | sed -e "s/^export //" -e "s/'//g" >> "$GITHUB_ENV"
+          echo "TELEGRAM_BOT_TOKEN=0:ci-placeholder" >> "$GITHUB_ENV"
+      - name: Start API and worker
+        run: |
+          nohup python -m packages.api.run > artifacts/api.log 2>&1 &
+          nohup python scripts/worker_run_job.py --loop > artifacts/worker.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8090/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:8090/health
+      - name: Build and start the web app (next build + next start)
+        working-directory: packages/web
+        run: |
+          npm ci
+          npm run build 2>&1 | tee ../../artifacts/next-build.log
+          nohup npx next start -p 3100 > ../../artifacts/next.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:3100/ >/dev/null && break; sleep 1; done
+      - name: Seed and fixtures
+        run: |
+          python scripts/local_stack/seed.py > artifacts/seed.json
+          python scripts/local_stack/fixtures.py artifacts/fixtures
+      - name: Playwright journey (headless, one worker)
+        working-directory: scripts/webshots
+        env:
+          JOURNEY_RECORD: "1"
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          node evidence_journey.mjs ../../artifacts/seed.json ../../artifacts/fixtures ../../artifacts/journey
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: journey-artifacts
+          path: |
+            artifacts/
+            !artifacts/seed.json
+          retention-days: 5
+
+  minutes:
+    name: minutes used
+    if: always()
+    needs: [unit, postgres, journey]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Report billable minutes per job (rounded up per job, as GitHub bills)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | select(.completed_at != null) | [.name, .started_at, .completed_at] | @tsv' \
+            > jobs.tsv
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import csv, math
+          from datetime import datetime
+          rows, total = [], 0
+          for name, start, end in csv.reader(open("jobs.tsv"), delimiter="\t"):
+              span = datetime.fromisoformat(end.replace("Z", "+00:00")) - datetime.fromisoformat(start.replace("Z", "+00:00"))
+              minutes = max(1, math.ceil(span.total_seconds() / 60))
+              total += minutes
+              rows.append(f"| {name} | {span.total_seconds():.0f}s | {minutes} |")
+          print("| job | wall time | billable minutes |\n|---|---|---|")
+          print("\n".join(rows))
+          print(f"| **total (excluding this report job)** | | **{total}** |")
+          PY
