@@ -1,254 +1,68 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowDown,
   ArrowUp,
   Check,
   Download,
   History,
+  Link2,
   Plus,
   Quote,
   Trash2,
 } from "lucide-react";
 import {
-  ApiError,
   downloadArticleDocx,
-  getArticle,
   getArticleRevisions,
-  initializeArticle,
-  restoreArticle,
-  saveArticle,
   type ArticleBlockType,
-  type ArticleContent,
-  type ArticleDocumentView,
   type DocumentRevision,
-  type ProvenanceRow,
 } from "@/lib/api";
-import {
-  addBlock,
-  moveBlock,
-  newBlock,
-  removeBlock,
-  wordCount,
-} from "@/lib/article-editor";
+import { articleEvidenceRows, attachPassage, detachCitation } from "@/lib/article-evidence";
+import { addBlock, moveBlock, removeBlock, wordCount } from "@/lib/article-editor";
+import { useArticleDocument } from "@/lib/use-article-document";
 import { useAppSession } from "@/lib/use-session";
 import { useLocale } from "./locale-provider";
 import { EvidenceMap } from "./evidence-graph";
 import { ResearchPanel } from "./research-panel";
+import { EvidenceLibrary } from "./evidence-library";
+import { ARTICLE_COPY } from "./article-workspace-copy";
 import "./article-workspace.css";
-
-type SaveState = "saved" | "dirty" | "saving" | "conflict" | "error";
-const COPY = {
-  en: {
-    document: "Document",
-    outline: "Outline",
-    research: "Research",
-    saved: "Saved",
-    dirty: "Unsaved changes",
-    saving: "Saving…",
-    conflict: "This article changed elsewhere. Reload before continuing.",
-    error: "Could not save. Your changes are still on this device.",
-    reload: "Reload current version",
-    history: "Version history",
-    restore: "Restore",
-    add: "Add block",
-    paragraph: "Paragraph",
-    heading: "Heading",
-    quote: "Quote",
-    bullet: "Bullet",
-    words: "words",
-    empty: "Start writing here",
-    title: "Article title",
-    delete: "Delete block",
-    up: "Move up",
-    down: "Move down",
-    close: "Close",
-    loading: "Opening your document…",
-    export: "Download DOCX",
-    exporting: "Preparing…",
-    exportError: "Could not prepare the Word file.",
-  },
-  ru: {
-    document: "Документ",
-    outline: "Структура",
-    research: "Исследования",
-    saved: "Сохранено",
-    dirty: "Есть несохранённые изменения",
-    saving: "Сохранение…",
-    conflict:
-      "Статья изменилась в другом окне. Обновите версию перед продолжением.",
-    error: "Не удалось сохранить. Изменения остались на этом устройстве.",
-    reload: "Загрузить текущую версию",
-    history: "История версий",
-    restore: "Восстановить",
-    add: "Добавить блок",
-    paragraph: "Абзац",
-    heading: "Заголовок",
-    quote: "Цитата",
-    bullet: "Список",
-    words: "слов",
-    empty: "Начните писать",
-    title: "Название статьи",
-    delete: "Удалить блок",
-    up: "Выше",
-    down: "Ниже",
-    close: "Закрыть",
-    loading: "Открываем документ…",
-    export: "Скачать DOCX",
-    exporting: "Подготовка…",
-    exportError: "Не удалось подготовить файл Word.",
-  },
-  uz: {
-    document: "Hujjat",
-    outline: "Tuzilma",
-    research: "Tadqiqot",
-    saved: "Saqlandi",
-    dirty: "Saqlanmagan o‘zgarishlar",
-    saving: "Saqlanmoqda…",
-    conflict:
-      "Maqola boshqa oynada o‘zgargan. Davom etishdan oldin joriy versiyani yuklang.",
-    error: "Saqlab bo‘lmadi. O‘zgarishlar shu qurilmada turibdi.",
-    reload: "Joriy versiyani yuklash",
-    history: "Versiyalar tarixi",
-    restore: "Tiklash",
-    add: "Blok qo‘shish",
-    paragraph: "Xatboshi",
-    heading: "Sarlavha",
-    quote: "Iqtibos",
-    bullet: "Ro‘yxat",
-    words: "so‘z",
-    empty: "Yozishni boshlang",
-    title: "Maqola nomi",
-    delete: "Blokni o‘chirish",
-    up: "Yuqoriga",
-    down: "Pastga",
-    close: "Yopish",
-    loading: "Hujjat ochilmoqda…",
-    export: "DOCX yuklash",
-    exporting: "Tayyorlanmoqda…",
-    exportError: "Word faylini tayyorlab bo‘lmadi.",
-  },
-};
-const SAVE_DELAY_MS = 900;
 
 interface ArticleWorkspaceProps {
   projectId: string;
   title: string;
   sourcePanel?: ReactNode;
-  evidenceRows?: ProvenanceRow[];
+  sourceCount?: number;
 }
 
 export function ArticleWorkspace({
   projectId,
   title,
   sourcePanel,
-  evidenceRows = [],
+  sourceCount = 0,
 }: ArticleWorkspaceProps) {
   const { locale } = useLocale();
-  const t = COPY[locale];
+  const t = ARTICLE_COPY[locale];
   const { withAuth } = useAppSession();
-  const [document, setDocument] = useState<ArticleDocumentView | null>(null);
-  const [content, setContent] = useState<ArticleContent | null>(null);
-  const [state, setState] = useState<SaveState>("saved");
+  const article = useArticleDocument(projectId, title);
+  const { document, content, state, load, recovery, deviceCopy, update } = article;
   const [history, setHistory] = useState<DocumentRevision[] | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState(false);
-  const contentRef = useRef<ArticleContent | null>(null);
-  const documentRef = useRef<ArticleDocumentView | null>(null);
-  const editVersionRef = useRef(0);
-  const savingRef = useRef(false);
-  contentRef.current = content;
-  documentRef.current = document;
-
-  const load = useCallback(async () => {
-    const view = await withAuth(async (token) => {
-      try {
-        return await getArticle(projectId, token);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 404) {
-          return initializeArticle(
-            projectId,
-            title,
-            `init:${projectId}`,
-            token,
-          );
-        }
-        throw error;
-      }
-    });
-    if (!view) return;
-    const initial = view.content.blocks.length
-      ? view.content
-      : {
-          ...view.content,
-          blocks: [newBlock("heading"), newBlock("paragraph")],
-        };
-    editVersionRef.current = 0;
-    setDocument(view);
-    setContent(initial);
-    setState(initial === view.content ? "saved" : "dirty");
-  }, [projectId, title, withAuth]);
+  const [citationTarget, setCitationTarget] = useState<string | null>(null);
+  const [inspectPassage, setInspectPassage] = useState<string | null>(null);
+  const targetExists = !citationTarget || Boolean(content?.blocks.some((block) => block.id === citationTarget));
 
   useEffect(() => {
-    void load();
-  }, [load]);
-  useEffect(() => {
-    if (state !== "dirty" || !content || !document) return;
-    const timer = window.setTimeout(async () => {
-      const savingContent = contentRef.current;
-      const base = documentRef.current;
-      if (
-        !savingContent ||
-        !base ||
-        !savingContent.title.trim() ||
-        savingRef.current
-      )
-        return;
-      const savingVersion = editVersionRef.current;
-      savingRef.current = true;
-      setState("saving");
-      try {
-        const next = await withAuth((token) =>
-          saveArticle(
-            projectId,
-            base.revision_id,
-            savingContent,
-            crypto.randomUUID(),
-            token,
-          ),
-        );
-        if (!next) return;
-        setDocument(next);
-        setState(editVersionRef.current === savingVersion ? "saved" : "dirty");
-      } catch (error) {
-        setState(
-          error instanceof ApiError && error.status === 409
-            ? "conflict"
-            : "error",
-        );
-      } finally {
-        savingRef.current = false;
-      }
-    }, SAVE_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [content, document, projectId, state, withAuth]);
+    if (!targetExists) setCitationTarget(null);
+  }, [targetExists]);
 
-  function update(next: ArticleContent) {
-    editVersionRef.current += 1;
-    setContent(next);
-    setState("dirty");
-  }
   function updateBlock(
     id: string,
-    patch: Partial<ArticleContent["blocks"][number]>,
+    patch: Partial<NonNullable<typeof content>["blocks"][number]>,
   ) {
     if (!content) return;
     update({
@@ -260,36 +74,27 @@ export function ArticleWorkspace({
   }
   async function openHistory() {
     setHistoryOpen(true);
-    const result = await withAuth((token) =>
-      getArticleRevisions(projectId, token),
-    );
-    if (result) setHistory(result.revisions);
-  }
-  async function restore(revisionId: string) {
-    if (!document) return;
-    const view = await withAuth((token) =>
-      restoreArticle(
-        projectId,
-        revisionId,
-        document.revision_id,
-        crypto.randomUUID(),
-        token,
-      ),
-    );
-    if (view) {
-      setDocument(view);
-      setContent(view.content);
-      setState("saved");
-      setHistoryOpen(false);
+    setHistory(null);
+    setHistoryError(null);
+    try {
+      const result = await withAuth((token) => getArticleRevisions(projectId, token));
+      if (result) setHistory(result.revisions);
+    } catch {
+      setHistoryError(t.historyError);
     }
   }
+  async function restore(revisionId: string) {
+    const outcome = await article.restore(revisionId);
+    if (outcome === "ok") setHistoryOpen(false);
+    else setHistoryError(outcome === "blocked" ? t.restoreBlocked : t.restoreError);
+  }
   async function exportDocx() {
-    if (exporting || state !== "saved" || !content?.title.trim()) return;
+    if (exporting || state !== "saved" || !content?.title.trim() || !document) return;
     setExporting(true);
     setExportError(false);
     try {
       const blob = await withAuth((token) =>
-        downloadArticleDocx(projectId, token),
+        downloadArticleDocx(projectId, token, document.revision_id),
       );
       if (!blob) return;
       const url = URL.createObjectURL(blob);
@@ -304,11 +109,20 @@ export function ArticleWorkspace({
       setExporting(false);
     }
   }
+  if (load.kind === "failed")
+    return (
+      <div className="article-loading" role="alert">
+        <p>{t.loadFailed}</p>
+        {load.hasDraft && <p>{t.loadDraft}</p>}
+        <button onClick={article.reopen}>{t.tryAgain}</button>
+      </div>
+    );
   if (!content || !document)
     return <div className="article-loading">{t.loading}</div>;
   const headings = content.blocks.filter(
     (block) => block.type === "heading" && block.text.trim(),
   );
+  const evidenceRows = articleEvidenceRows(content);
   const labels: Record<ArticleBlockType, string> = {
     paragraph: t.paragraph,
     heading: t.heading,
@@ -348,10 +162,30 @@ export function ArticleWorkspace({
           <button onClick={() => setExportError(false)}>{t.close}</button>
         </div>
       )}
-      {(state === "conflict" || state === "error") && (
+      {state === "error" && (
         <div className="article-alert" role="alert">
-          <span>{t[state]}</span>
-          <button onClick={() => void load()}>{t.reload}</button>
+          <span>{deviceCopy ? t.errorDevice : t.errorNoDevice}</span>
+          <button onClick={article.retry}>{t.retryNow}</button>
+        </div>
+      )}
+      {state === "conflict" && (
+        <div className="article-alert" role="alert">
+          <span>{t.conflictBody} {t.keepMineHint}</span>
+          <button onClick={() => void article.keepMine()}>{t.keepMine}</button>
+          <button onClick={() => void article.takeSaved()}>{t.useSaved}</button>
+        </div>
+      )}
+      {state === "rejected" && (
+        <div className="article-alert" role="alert">
+          <span>{t.rejectedBody}</span>
+          <button onClick={() => void article.takeSaved()}>{t.useSaved}</button>
+        </div>
+      )}
+      {recovery?.kind === "resumed" && state !== "conflict" && (
+        <div className="article-alert article-notice" role="status">
+          <span>{t.resumed}</span>
+          <button onClick={() => void article.takeSaved()}>{t.discard}</button>
+          <button onClick={article.dismissRecovery}>{t.close}</button>
         </div>
       )}
       <div className="article-grid">
@@ -375,12 +209,12 @@ export function ArticleWorkspace({
             {content.blocks.map((block, index) => (
               <div
                 id={`block-${block.id}`}
-                className={`article-block ${block.type}`}
+                className={`article-block ${block.type} ${citationTarget === block.id ? "citation-target" : ""}`}
                 key={block.id}
               >
                 <div className="article-block-tools">
                   <select
-                    aria-label="Block type"
+                    aria-label={t.blockType}
                     value={block.type}
                     onChange={(event) =>
                       updateBlock(block.id, {
@@ -395,6 +229,10 @@ export function ArticleWorkspace({
                       </option>
                     ))}
                   </select>
+                  <button aria-label={t.addSource} title={t.addSource} onClick={() => {
+                    setCitationTarget(block.id);
+                    window.document.getElementById("article-source-library")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                  }}><Link2 size={14} />{t.addSource}</button>
                   <button
                     aria-label={t.up}
                     disabled={index === 0}
@@ -428,7 +266,13 @@ export function ArticleWorkspace({
                 {block.citations.length > 0 && (
                   <div className="article-citations">
                     {block.citations.map((citation) => (
-                      <span key={citation.claim_id}>{citation.label}</span>
+                      <span key={citation.passage_id ?? citation.claim_id}>
+                        {citation.passage_id ? <button onClick={() => {
+                          setInspectPassage(citation.passage_id!);
+                          window.document.getElementById("article-source-library")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                        }}>{citation.label}</button> : citation.label}
+                        <button aria-label={`${t.removeSource}: ${citation.label}`} onClick={() => update(detachCitation(content, block.id, (citation.passage_id ?? citation.claim_id)!))}>×</button>
+                      </span>
                     ))}
                   </div>
                 )}
@@ -447,6 +291,13 @@ export function ArticleWorkspace({
         </main>
         <aside className="article-side">
           {sourcePanel}
+          <EvidenceLibrary projectId={projectId} refreshKey={sourceCount}
+            selectedBlock={content.blocks.find((block) => block.id === citationTarget)}
+            inspectId={inspectPassage} onCloseInspect={() => setInspectPassage(null)}
+            onCancel={() => setCitationTarget(null)}
+            onAttach={(passage, filename) => {
+              if (citationTarget) update(attachPassage(content, citationTarget, passage, filename));
+            }} />
           <ResearchPanel projectId={projectId} />
           <div className="article-source-note">
             <Quote size={16} />
@@ -471,8 +322,10 @@ export function ArticleWorkspace({
               <h2>{t.history}</h2>
               <button onClick={() => setHistoryOpen(false)}>{t.close}</button>
             </header>
+            {historyError && <p role="alert">{historyError}</p>}
+            {state !== "saved" && <p>{t.restoreBlocked}</p>}
             {history === null ? (
-              <p>{t.loading}</p>
+              !historyError && <p>{t.loading}</p>
             ) : (
               <ol>
                 {history.map((revision, index) => (
@@ -488,7 +341,7 @@ export function ArticleWorkspace({
                       <small>{revision.content_hash.slice(0, 8)}</small>
                     </div>
                     {revision.id !== document.revision_id && (
-                      <button onClick={() => void restore(revision.id)}>
+                      <button disabled={state !== "saved"} onClick={() => void restore(revision.id)}>
                         {t.restore}
                       </button>
                     )}

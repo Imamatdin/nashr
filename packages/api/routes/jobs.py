@@ -119,7 +119,7 @@ def _payload_int(payload: dict[str, Any], key: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-async def _view(
+async def job_view(
     job: GenerationJob,
     credits: CreditLedger | None = None,
     *,
@@ -174,7 +174,7 @@ def _persisted_package(project: dict[str, Any]) -> GenerationPackage:
     return package
 
 
-def _client_ip(request: Request) -> str:
+def client_ip(request: Request) -> str:
     """Caller address for the per-IP cap.
 
     Caddy APPENDS the peer address to X-Forwarded-For, so only the LAST entry
@@ -197,7 +197,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
     credits: CreditLedger = request.app.state.credits
     user_id = str(auth.user_id)
 
-    decision = await limiter.check(action=ENQUEUE_ACTION, user_id=user_id, ip=_client_ip(request))
+    decision = await limiter.check(action=ENQUEUE_ACTION, user_id=user_id, ip=client_ip(request))
     if not decision.allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -225,7 +225,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
 
     existing = await queue.get_active_job(body.project_id, job_type)
     if existing is not None:
-        return await _view(existing, credits, existing=True)
+        return await job_view(existing, credits, existing=True)
 
     # Every source must be a row this project registered (POST /sources): the
     # worker fetches whatever key the payload names with the service role, so
@@ -296,7 +296,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
             -deduction.amount,
             reason=f"refund:duplicate_enqueue:{exc.existing.id}",
         )
-        return await _view(exc.existing, credits, existing=True)
+        return await job_view(exc.existing, credits, existing=True)
 
     if body.package is not None:
         # Stamped only for an EXPLICIT choice, and only after the job is safely
@@ -325,7 +325,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
         package.value,
         user_id,
     )
-    return await _view(job, credits)
+    return await job_view(job, credits)
 
 
 @router.get("", response_model=JobView)
@@ -361,7 +361,7 @@ async def get_latest_project_job(
     job = await queue.get_latest_job(project_id, job_type)
     if job is None or (job.user_id is not None and job.user_id != str(auth.user_id)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-    return await _view(job, credits)
+    return await job_view(job, credits)
 
 
 @router.get("/{job_id}", response_model=JobView)
@@ -373,4 +373,4 @@ async def get_job(request: Request, job_id: str, auth: Authenticated) -> JobView
     job = await queue.get_job(job_id)
     if job is None or job.user_id != str(auth.user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-    return await _view(job, credits)
+    return await job_view(job, credits)

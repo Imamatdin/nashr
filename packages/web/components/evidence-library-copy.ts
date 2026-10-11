@@ -1,0 +1,32 @@
+export const EVIDENCE_COPY = {
+  en: {
+    title: "Source passages", intro: "Extracted text with source locations. Attaching a passage records a reference; it does not verify your statement.",
+    refresh: "Refresh", process: "Process sources", working: "Processing sources…", ready: "Ready", pending: "Not processed",
+    empty: "Upload a source above, then process it to read and cite its passages.", failed: "Processing stopped. Completed sources are preserved. Retry to continue.",
+    error: "Could not load source passages. Try again.", all: "All sources", page: "Page", passage: "Passage", more: "Load more passages",
+    cite: "Attach to selected block", select: "Select ‘Cite a source’ on an article block first.", selected: "Adding a source to", attached: "Attached",
+    ocr: "OCR text — check the original", low: "Low OCR confidence", close: "Close", loading: "Loading passages…", inspect: "Source passage",
+    cancel: "Cancel selection", invalid: "This passage is unavailable. Your reference is still in the article.", retry: "Retry processing", unreadable: "Could not read this file",
+    failedSome: "Some files could not be read: they may be damaged, protected, or have no extractable text. The other sources are ready. Retrying repeats the attempt.",
+  },
+  ru: {
+    title: "Фрагменты источников", intro: "Извлечённый текст с указанием места в источнике. Прикрепление фрагмента создаёт ссылку, но не подтверждает утверждение.",
+    refresh: "Обновить", process: "Обработать источники", working: "Обработка источников…", ready: "Готов", pending: "Не обработан",
+    empty: "Загрузите источник выше и обработайте его, чтобы читать и цитировать фрагменты.", failed: "Обработка остановлена. Готовые источники сохранены. Повторите попытку.",
+    error: "Не удалось загрузить фрагменты. Попробуйте ещё раз.", all: "Все источники", page: "Страница", passage: "Фрагмент", more: "Загрузить ещё",
+    cite: "Прикрепить к выбранному блоку", select: "Сначала нажмите «Сослаться на источник» у блока статьи.", selected: "Источник для блока", attached: "Прикреплён",
+    ocr: "Распознанный текст — сверьте с оригиналом", low: "Низкая точность распознавания", close: "Закрыть", loading: "Загрузка фрагментов…", inspect: "Фрагмент источника",
+    cancel: "Отменить выбор", invalid: "Этот фрагмент недоступен. Ссылка осталась в статье.", retry: "Повторить обработку", unreadable: "Не удалось прочитать файл",
+    failedSome: "Некоторые файлы не удалось прочитать: они могут быть повреждены, защищены или не содержать извлекаемого текста. Остальные источники готовы. Повтор запустит попытку заново.",
+  },
+  uz: {
+    title: "Manba parchalari", intro: "Manbadagi o‘rni ko‘rsatilgan matn. Parchani biriktirish havola yaratadi, lekin fikringizni tasdiqlamaydi.",
+    refresh: "Yangilash", process: "Manbalarni qayta ishlash", working: "Manbalar qayta ishlanmoqda…", ready: "Tayyor", pending: "Ishlanmagan",
+    empty: "Yuqorida manba yuklang, so‘ng parchalarni o‘qish va iqtibos keltirish uchun uni qayta ishlang.", failed: "Qayta ishlash to‘xtadi. Tayyor manbalar saqlangan. Davom etish uchun qayta urining.",
+    error: "Manba parchalarini yuklab bo‘lmadi. Qayta urinib ko‘ring.", all: "Barcha manbalar", page: "Sahifa", passage: "Parcha", more: "Yana parchalar yuklash",
+    cite: "Tanlangan blokka biriktirish", select: "Avval maqola blokida «Manbaga havola» ni bosing.", selected: "Blok uchun manba", attached: "Biriktirilgan",
+    ocr: "OCR matni — asl nusxani tekshiring", low: "OCR aniqligi past", close: "Yopish", loading: "Parchalar yuklanmoqda…", inspect: "Manba parchasi",
+    cancel: "Tanlovni bekor qilish", invalid: "Bu parcha mavjud emas. Havola maqolada saqlangan.", retry: "Qayta urinish", unreadable: "Faylni o‘qib bo‘lmadi",
+    failedSome: "Ba’zi fayllarni o‘qib bo‘lmadi: ular buzilgan, himoyalangan yoki ajratib olinadigan matnsiz bo‘lishi mumkin. Boshqa manbalar tayyor. Qayta urinish harakatni takrorlaydi.",
+  },
+};

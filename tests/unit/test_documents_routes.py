@@ -36,6 +36,16 @@ class _FakeDb:
         self.revision_id = _REVISION_ID
         self.content = _content()
         self.saved: list[dict[str, Any]] = []
+        self.targets: list[dict[str, Any]] = []
+        self.sources: list[dict[str, Any]] = []
+
+    async def get_project_sources(self, project_id: str) -> list[dict[str, Any]]:
+        return self.sources
+
+    async def get_citation_targets(
+        self, project_id: str, ids: list[str], *, claims: bool = False
+    ) -> list[dict[str, Any]]:
+        return [row for row in self.targets if row["id"] in ids]
 
     async def get_project(self, project_id: str) -> dict[str, Any] | None:
         if project_id != _PROJECT_ID:
@@ -163,6 +173,59 @@ async def test_save_article_advances_revision() -> None:
     assert db.saved == [_content("Changed")]
 
 
+async def test_passage_citation_is_checked_and_label_comes_from_source() -> None:
+    client, db = _client()
+    source_id, passage_id = str(uuid4()), str(uuid4())
+    db.sources = [{"id": source_id, "filename": "study.pdf"}]
+    db.targets = [{"id": passage_id, "source_id": source_id, "page": 3}]
+    content = _content()
+    content["blocks"] = [
+        {
+            "id": str(uuid4()),
+            "type": "paragraph",
+            "text": "My finding",
+            "citations": [
+                {"source_id": source_id, "passage_id": passage_id, "label": "Invented label"}
+            ],
+        }
+    ]
+    response = await client.put(
+        f"/projects/{_PROJECT_ID}/documents/article",
+        headers=_headers(),
+        json={"base_revision_id": _REVISION_ID, "idempotency_key": "cite", "content": content},
+    )
+    assert response.status_code == 200
+    citation = response.json()["content"]["blocks"][0]["citations"][0]
+    assert citation["label"] == "study.pdf · 3"
+
+
+@pytest.mark.parametrize("wrong_source", [False, True])
+async def test_unknown_or_mismatched_citation_never_enters_a_revision(wrong_source: bool) -> None:
+    client, db = _client()
+    source_id, passage_id = str(uuid4()), str(uuid4())
+    db.sources = [{"id": source_id, "filename": "study.pdf"}]
+    if wrong_source:
+        db.targets = [{"id": passage_id, "source_id": str(uuid4()), "page": 3}]
+    content = _content()
+    content["blocks"] = [
+        {
+            "id": str(uuid4()),
+            "text": "Finding",
+            "citations": [
+                {"source_id": source_id, "passage_id": passage_id, "label": "Unverified"}
+            ],
+        }
+    ]
+    response = await client.put(
+        f"/projects/{_PROJECT_ID}/documents/article",
+        headers=_headers(),
+        json={"base_revision_id": _REVISION_ID, "idempotency_key": "bad-cite", "content": content},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "citation_target_not_found"
+    assert not db.saved
+
+
 async def test_stale_save_is_a_visible_conflict() -> None:
     client, _db = _client()
     response = await client.put(
@@ -240,9 +303,48 @@ async def test_export_article_returns_current_revision_as_docx() -> None:
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     assert "attachment" in response.headers["content-disposition"]
+    assert response.headers["x-document-revision"] == _REVISION_ID
     rendered = Document(BytesIO(response.content))
     assert [paragraph.text for paragraph in rendered.paragraphs] == [
         "Evidence based teaching",
         "Methods",
         "Students compared two approaches.",
     ]
+
+
+async def test_export_pins_the_visible_revision_when_another_tab_has_saved() -> None:
+    """Downloading an older visible revision must not export the newer head."""
+    client, db = _client()
+    db.content = _content("Newer content from another tab")
+    previous = "00000000-0000-0000-0000-000000000001"
+    response = await client.get(
+        f"/projects/{_PROJECT_ID}/documents/article/export.docx?revision_id={previous}",
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+    assert response.headers["x-document-revision"] == previous
+    rendered = Document(BytesIO(response.content))
+    assert rendered.paragraphs[0].text == "Previous"
+    assert db.content["title"] == "Newer content from another tab"
+
+
+async def test_export_unknown_revision_does_not_fall_back_to_latest() -> None:
+    """Missing historical content must produce a visible failure."""
+    client, _ = _client()
+    response = await client.get(
+        f"/projects/{_PROJECT_ID}/documents/article/export.docx?revision_id={uuid4()}",
+        headers=_headers(),
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "revision_not_found"
+
+
+async def test_export_revision_requires_project_ownership() -> None:
+    """A known revision id does not bypass the project's ownership boundary."""
+    client, _ = _client()
+    response = await client.get(
+        f"/projects/{_PROJECT_ID}/documents/article/export.docx"
+        "?revision_id=00000000-0000-0000-0000-000000000001",
+        headers=_headers(uuid4()),
+    )
+    assert response.status_code == 404

@@ -174,7 +174,8 @@ export function createProject(
 export type ArticleBlockType = "paragraph" | "heading" | "quote" | "bullet";
 export interface ArticleCitation {
   source_id: string;
-  claim_id: string;
+  claim_id?: string | null;
+  passage_id?: string | null;
   label: string;
 }
 export interface ArticleBlock {
@@ -228,12 +229,13 @@ export function getArticle(
 export async function downloadArticleDocx(
   projectId: string,
   token: string,
+  revisionId: string,
 ): Promise<Blob> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(
-      `${apiBase()}/projects/${projectId}/documents/article/export.docx`,
+      `${apiBase()}/projects/${projectId}/documents/article/export.docx?revision_id=${encodeURIComponent(revisionId)}`,
       {
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal,
@@ -421,6 +423,42 @@ export interface PresignView {
   expires_in: number;
 }
 
+export interface EvidencePassage {
+  id: string;
+  source_id: string;
+  project_id: string;
+  chunk_index: number;
+  text: string;
+  page: number | null;
+  is_ocr: boolean;
+  confidence: number;
+  created_at: string;
+}
+export interface EvidenceSource {
+  id: string;
+  filename: string;
+  processed_at: string | null;
+  passage_count: number;
+  warnings: string[];
+}
+export interface EvidenceView {
+  sources: EvidenceSource[];
+  passages: EvidencePassage[];
+  next_offset: number | null;
+  job: JobView | null;
+}
+export function getEvidence(projectId: string, token: string, sourceId = "", offset = 0): Promise<EvidenceView> {
+  const query = new URLSearchParams({ offset: String(offset) });
+  if (sourceId) query.set("source_id", sourceId);
+  return getJson<EvidenceView>(`/projects/${projectId}/evidence?${query}`, token);
+}
+export function processEvidence(projectId: string, token: string): Promise<JobView> {
+  return postJson<JobView>(`/projects/${projectId}/evidence/process`, {}, token);
+}
+export function getEvidencePassage(projectId: string, passageId: string, token: string): Promise<EvidencePassage> {
+  return getJson<EvidencePassage>(`/projects/${projectId}/evidence/passages/${passageId}`, token);
+}
+
 export interface SourceView {
   id: string;
   project_id: string;
@@ -516,7 +554,7 @@ export interface JobView {
   project_id: string;
   job_type: string;
   status: string;
-  progress: { step?: string; current?: number; total?: number };
+  progress: { step?: string; current?: number; total?: number; failed_sources?: string[] };
   error_message: string | null;
   existing: boolean;
   created_at: string | null;

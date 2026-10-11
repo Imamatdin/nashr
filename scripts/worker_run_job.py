@@ -191,7 +191,16 @@ class JobRunner:
             return self._run_presentation_edit
         if job_type is JobType.PRESENTATION_RENDER:
             return self._run_presentation_render
+        if job_type is JobType.SOURCE_PROCESSING:
+            return self._run_source_processing
         return None
+
+    async def _run_source_processing(self, job: GenerationJob) -> None:
+        """Extract durable page evidence without creating a bot or calling a model."""
+
+        from packages.workers.source.ingest import ingest_sources
+
+        await ingest_sources(job, self._worker_id, self._db, self._queue, self._storage)
 
     async def _run_presentation_render(self, job: GenerationJob) -> None:
         """Render one immutable manually edited deck revision without model calls."""

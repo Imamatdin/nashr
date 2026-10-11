@@ -78,6 +78,33 @@ def _patch_boto(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_limited_r2_read_closes_stream_on_oversize(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker cannot download unbounded data from a subsequently changed object."""
+
+    from io import BytesIO
+
+    client = _patch_boto(monkeypatch)
+    stream = BytesIO(b"too much data")
+    client.get_object.return_value = {"Body": stream}
+    storage = FileStorage(_make_r2_config())
+    with pytest.raises(ValueError, match="source_file_limit"):
+        await storage.get_bytes_limited("upload.txt", 4)
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_limited_r2_read_accepts_exact_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from io import BytesIO
+
+    client = _patch_boto(monkeypatch)
+    stream = BytesIO(b"four")
+    client.get_object.return_value = {"Body": stream}
+    storage = FileStorage(_make_r2_config())
+    assert await storage.get_bytes_limited("upload.txt", 4) == b"four"
+    assert stream.closed
+
+
 def test_storage_not_available_without_config() -> None:
     storage = FileStorage(_make_local_config())
     assert storage.available is False

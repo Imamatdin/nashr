@@ -155,6 +155,30 @@ class FileStorage:
             raise RuntimeError(f"unexpected body type from R2: {type(data).__name__}")
         return data
 
+    async def get_bytes_limited(self, remote_key: str, max_bytes: int) -> bytes:
+        """Read at most the upload limit, off-loop, and always close the stream."""
+
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
+
+        def read() -> bytes:
+            if self._available:
+                response = self._client.get_object(Bucket=self._bucket, Key=remote_key)
+                body = response["Body"]
+            else:
+                body = (self._local_storage_dir / remote_key).open("rb")
+            try:
+                data = body.read(max_bytes + 1)
+                if not isinstance(data, bytes):
+                    raise RuntimeError("unexpected storage body type")
+                if len(data) > max_bytes:
+                    raise ValueError("source_file_limit")
+                return data
+            finally:
+                body.close()
+
+        return await asyncio.to_thread(read)
+
     async def signed_url(
         self,
         remote_key: str,

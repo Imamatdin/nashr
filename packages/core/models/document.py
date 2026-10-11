@@ -19,13 +19,22 @@ class ArticleBlockType(StrEnum):
 
 
 class DocumentCitation(BaseModel):
-    """A visible link from authored text to one persisted source claim."""
+    """An attachment to a passage or claim; neither implies verification."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     source_id: UUID
-    claim_id: UUID
+    claim_id: UUID | None = None
+    passage_id: UUID | None = None
     label: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def one_target(self) -> DocumentCitation:
+        """Preserve legacy claim references without mislabeling raw passages."""
+
+        if (self.claim_id is None) == (self.passage_id is None):
+            raise ValueError("citation requires exactly one claim_id or passage_id")
+        return self
 
 
 class ArticleBlock(BaseModel):
@@ -71,4 +80,6 @@ class ArticleDocumentContent(BaseModel):
             raise ValueError("article block ids must be unique")
         if sum(len(block.text) for block in self.blocks) > 1_000_000:
             raise ValueError("article document text exceeds 1,000,000 characters")
+        if sum(len(block.citations) for block in self.blocks) > 1_000:
+            raise ValueError("article document exceeds 1,000 citations")
         return self

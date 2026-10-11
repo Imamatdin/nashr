@@ -430,6 +430,88 @@ class DatabaseClient:
         )
         return cast(list[dict[str, Any]], list(result.data))
 
+    async def get_source_passages(
+        self, project_id: str, source_id: str | None, offset: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """Read a bounded, stable page of evidence within one project."""
+
+        def run() -> Any:
+            query = self._client.table("source_chunks").select("*").eq("project_id", project_id)
+            if source_id:
+                query = query.eq("source_id", source_id)
+            return (
+                query.order("source_id")
+                .order("chunk_index")
+                .range(offset, offset + limit - 1)
+                .execute()
+            )
+
+        result = await asyncio.to_thread(run)
+        return cast(list[dict[str, Any]], list(result.data))
+
+    async def get_evidence_passage(self, project_id: str, passage_id: str) -> dict[str, Any] | None:
+        """Read a selected passage using both its identity and project scope."""
+
+        result = await asyncio.to_thread(
+            lambda: (
+                self._client.table("source_chunks")
+                .select("*")
+                .eq("project_id", project_id)
+                .eq("id", passage_id)
+                .limit(1)
+                .execute()
+            )
+        )
+        return cast(dict[str, Any], result.data[0]) if result.data else None
+
+    async def commit_source_evidence(
+        self,
+        job_id: str,
+        worker_id: str,
+        source_id: str,
+        chunks: list[dict[str, Any]],
+        sha256: str,
+        warnings: list[str],
+    ) -> bool:
+        """Atomically persist passages only while this worker owns the job."""
+
+        result = await asyncio.to_thread(
+            lambda: self.rpc(
+                "commit_source_evidence",
+                {
+                    "p_job_id": job_id,
+                    "p_worker_id": worker_id,
+                    "p_source_id": source_id,
+                    "p_chunks": chunks,
+                    "p_sha256": sha256,
+                    "p_warnings": warnings,
+                },
+            )
+        )
+        return bool(result.data)
+
+    async def get_citation_targets(
+        self, project_id: str, ids: list[str], *, claims: bool = False
+    ) -> list[dict[str, Any]]:
+        """Resolve citation identities in the project, never across owners."""
+
+        table = "source_claims" if claims else "source_chunks"
+        columns = "id,source_chunk_id" if claims else "id,source_id,page"
+        rows: list[dict[str, Any]] = []
+        for start in range(0, len(ids), 100):
+            batch = ids[start : start + 100]
+            result = await asyncio.to_thread(
+                lambda batch=batch: (
+                    self._client.table(table)
+                    .select(columns)
+                    .eq("project_id", project_id)
+                    .in_("id", batch)
+                    .execute()
+                )
+            )
+            rows.extend(cast(list[dict[str, Any]], result.data))
+        return rows
+
     # ------------------------------------------------------- generated_files
 
     async def create_generated_file(

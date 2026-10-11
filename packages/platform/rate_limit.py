@@ -27,12 +27,15 @@ CHAT_ACTION: str = "chat"
 UPLOAD_ACTION: str = "upload"
 SHARE_VIEW_ACTION: str = "share_view"
 DESIGN_RENDER_ACTION: str = "design_render"
+SOURCE_PROCESSING_ACTION: str = "source_processing"
 
 # Defaults sized off SPEC §9 ("max 10 generation jobs per user per day") with
 # per-IP headroom for NAT'd campus networks sharing one address. Upload caps
 # assume max 10 sources per job × the 10-job user cap, minus slack for retried
 # uploads. share_view is IP-only: the public route has no authenticated user.
 DEFAULT_LIMITS: dict[tuple[str, str], int] = {
+    ("user", SOURCE_PROCESSING_ACTION): 30,
+    ("ip", SOURCE_PROCESSING_ACTION): 120,
     ("user", "research"): 60,
     ("ip", "research"): 240,
     ("user", DESIGN_RENDER_ACTION): 120,

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from packages.api.middleware.auth import Authenticated
 from packages.api.routes.projects import owned_project
 from packages.api.services.article_document_export import render_article_document_docx
+from packages.api.services.document_citations import validate_document_citations
 from packages.core.models.document import ArticleDocumentContent
 
 router = APIRouter(prefix="/projects", tags=["documents"])
@@ -99,6 +100,8 @@ async def _owned_article(request: Request, project_id: str, user_id: str) -> dic
 
 def raise_document_commit_error(exc: APIError) -> NoReturn:
     message = str(exc)
+    if "invalid_citation" in message:
+        raise HTTPException(status_code=422, detail="citation_target_not_found") from exc
     if "stale_revision" in message:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="stale_revision") from exc
     if "document_not_found" in message:
@@ -140,14 +143,25 @@ async def get_article(
 
 
 @router.get("/{project_id}/documents/article/export.docx")
-async def export_article_docx(request: Request, project_id: str, auth: Authenticated) -> Response:
-    """Download the current article head as an editable Word document."""
+async def export_article_docx(
+    request: Request, project_id: str, auth: Authenticated, revision_id: UUID | None = None
+) -> Response:
+    """Download a specified revision; legacy callers may request the current head."""
 
     await _owned_article(request, project_id, str(auth.user_id))
     row = await request.app.state.db.get_document(project_id, "article")
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document_not_found")
-    content = ArticleDocumentContent.model_validate(row["content"])
+    selected_revision = str(revision_id) if revision_id else str(row["revision_id"])
+    if revision_id:
+        revision = await request.app.state.db.get_document_revision(
+            str(row["id"]), selected_revision
+        )
+        if revision is None:
+            raise HTTPException(status_code=404, detail="revision_not_found")
+        content = ArticleDocumentContent.model_validate(revision["content"])
+    else:
+        content = ArticleDocumentContent.model_validate(row["content"])
     payload = await asyncio.to_thread(render_article_document_docx, content)
     safe_ascii = re.sub(r"[^A-Za-z0-9._-]+", "-", content.title).strip("-.")[:80]
     fallback = f"{safe_ascii or 'article'}.docx"
@@ -156,9 +170,11 @@ async def export_article_docx(request: Request, project_id: str, auth: Authentic
         content=payload,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={
+            "X-Document-Revision": selected_revision,
+            "Cache-Control": "private, no-store",
             "Content-Disposition": (
                 f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
-            )
+            ),
         },
     )
 
@@ -173,6 +189,7 @@ async def save_article(
     current = await request.app.state.db.get_document(project_id, "article")
     if current is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document_not_found")
+    await validate_document_citations(request.app.state.db, project_id, body.content)
     try:
         row = await request.app.state.db.commit_document_revision(
             str(current["id"]),
@@ -216,6 +233,7 @@ async def restore_article(
     if previous is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="revision_not_found")
     content = ArticleDocumentContent.model_validate(previous["content"])
+    await validate_document_citations(request.app.state.db, project_id, content)
     try:
         row = await request.app.state.db.commit_document_revision(
             str(current["id"]),

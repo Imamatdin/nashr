@@ -625,7 +625,7 @@ export default function ProjectPage() {
           projectId={projectId}
           title={project.title}
           sourcePanel={sourcePanel}
-          evidenceRows={provenance?.rows ?? []}
+          sourceCount={sources?.length ?? 0}
         />
         {toast && <Toast message={toast.message} danger={toast.danger} />}
       </AppChrome>

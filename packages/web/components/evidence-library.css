@@ -1,0 +1,20 @@
+.evidence-library { margin-top: 20px; padding: 16px; border: 1px solid var(--fx-ui-2); border-radius: 12px; background: var(--fx-bg-2); scroll-margin-top: 90px; }
+.evidence-library header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.evidence-library h3 { margin: 0; font-size: 15px; }
+.evidence-library p { font-size: 12px; line-height: 1.6; color: var(--fx-tx-2); }
+.evidence-library button, .evidence-library select { min-height: 32px; border: 1px solid var(--fx-ui-2); border-radius: 7px; padding: 5px 9px; color: var(--fx-tx); background: var(--fx-bg); font: inherit; font-size: 12px; cursor: pointer; }
+.evidence-library button:disabled { opacity: .5; cursor: default; }
+.evidence-library .evidence-process { width: 100%; color: var(--fx-blue); border-color: var(--fx-blue); margin: 6px 0 12px; }
+.evidence-source-status { display: flex; flex-wrap: wrap; gap: 4px 8px; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--fx-ui); font-size: 12px; }
+.evidence-source-status span { overflow-wrap: anywhere; }
+.evidence-library small { color: var(--fx-tx-2); }
+.evidence-library .evidence-warning { color: var(--fx-red); }
+.evidence-selection { padding: 10px; margin: 12px 0; background: color-mix(in srgb, var(--fx-blue) 8%, var(--fx-bg)); border-radius: 8px; color: var(--fx-tx-2); font-size: 12px; }
+.evidence-selection p { margin: 6px 0; }
+.evidence-passages { max-height: 650px; overflow-y: auto; }
+.source-passage { padding: 12px 0; border-top: 1px solid var(--fx-ui-2); }
+.source-passage strong, .source-passage small { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.source-passage blockquote { margin: 10px 0; padding: 0 0 0 10px; border-left: 2px solid var(--fx-cyan); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.7; max-height: 260px; overflow-y: auto; }
+.evidence-inspected { padding: 10px; border: 1px solid var(--fx-cyan); border-radius: 8px; }
+.article-citations button { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.article-block.citation-target { box-shadow: 0 0 0 2px var(--fx-blue); border-radius: 7px; }

@@ -20,6 +20,7 @@ from packages.api.routes.chat import router as chat_router
 from packages.api.routes.credits import router as credits_router
 from packages.api.routes.design import router as design_router
 from packages.api.routes.documents import router as documents_router
+from packages.api.routes.evidence import router as evidence_router
 from packages.api.routes.jobs import router as jobs_router
 from packages.api.routes.projects import router as projects_router
 from packages.api.routes.public import router as public_router
@@ -84,6 +85,7 @@ def create_app(
     app.include_router(auth_router)
     app.include_router(credits_router)
     app.include_router(documents_router)
+    app.include_router(evidence_router)
     app.include_router(design_router)
     app.include_router(chat_router)
     app.include_router(jobs_router)
