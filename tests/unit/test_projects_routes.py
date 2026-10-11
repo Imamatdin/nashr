@@ -14,7 +14,16 @@ import pytest
 from packages.api.app import create_app
 from packages.api.services.tokens import mint_app_jwt
 from packages.platform.config import PlatformConfig
+from packages.platform.database import DatabaseClient
+from packages.platform.document_models import (
+    ExportFileFormat,
+    export_storage_key,
+)
+from packages.platform.document_store import DocumentStore
+from packages.platform.exports import renderer_version
 from packages.platform.rate_limit import RateDecision
+from tests.unit.fake_documents import seed_presentation
+from tests.unit.test_database_client import FakeSupabaseClient
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,12 +46,13 @@ class _FakeDb:
     def __init__(self) -> None:
         self.project_owner: str = str(_USER_ID)
         self.share_token: str | None = None
-        self.files: list[dict[str, Any]] = []
         self.sources_json: dict[str, Any] | None = None
-        self.deck_row: dict[str, Any] | None = None
         self.project_sources: list[dict[str, Any]] = [{"id": _SOURCE_ID, "filename": "manba.pdf"}]
         self.share_writes: list[tuple[str, str | None]] = []
         self.created_projects: list[dict[str, Any]] = []
+        self.fake = FakeSupabaseClient()
+        self.fake.seed("projects", [{"id": _PROJECT_ID, "user_id": str(_USER_ID)}])
+        self.store = DocumentStore(DatabaseClient(_config(), client=cast(Any, self.fake)))
 
     async def get_project(self, project_id: str) -> dict[str, Any] | None:
         return {
@@ -62,9 +72,6 @@ class _FakeDb:
         self.created_projects.append({**kwargs, **row})
         return row
 
-    async def get_project_files(self, project_id: str) -> list[dict[str, Any]]:
-        return self.files
-
     async def get_project_sources(self, project_id: str) -> list[dict[str, Any]]:
         return self.project_sources
 
@@ -79,9 +86,6 @@ class _FakeDb:
 
     async def get_brain_session_sources(self, project_id: str) -> dict[str, Any] | None:
         return self.sources_json
-
-    async def get_deck(self, project_id: str) -> dict[str, Any] | None:
-        return self.deck_row
 
 
 class _FakeStorage:
@@ -123,6 +127,7 @@ def _client() -> tuple[httpx.AsyncClient, _FakeDb, _FakeLimiter]:
         job_queue=cast(Any, object()),
         rate_limiter=cast(Any, limiter),
         storage=cast(Any, _FakeStorage()),
+        documents=db.store,
     )
     transport = httpx.ASGITransport(app=app)
     return httpx.AsyncClient(transport=transport, base_url="http://test"), db, limiter
@@ -133,12 +138,68 @@ def _headers(user_id: UUID | None = None) -> dict[str, str]:
     return {"Authorization": f"Bearer {session.access_token}"}
 
 
-def _delivered_files() -> list[dict[str, Any]]:
-    return [
-        {"file_type": "html", "storage_path": f"generated/{_PROJECT_ID}/presentation.html"},
-        {"file_type": "pptx", "storage_path": f"generated/{_PROJECT_ID}/presentation.pptx"},
-        {"file_type": "pdf", "storage_path": f"generated/{_PROJECT_ID}/presentation.pdf"},
-    ]
+def _seed_deck(db: _FakeDb, content: dict[str, Any] | None = None) -> str:
+    """Commit a deck revision as the head; returns its id."""
+
+    head = db.fake.tables.get("documents")
+    if not head:
+        _document_id, revision_id = seed_presentation(
+            db.fake.tables, project_id=_PROJECT_ID, content=content or {"title": "deck"}
+        )
+        return revision_id
+    from tests.unit.fake_documents import DocumentRpcEmulator
+
+    document = head[0]
+    result = DocumentRpcEmulator(db.fake.tables).commit_revision(
+        {
+            "p_document_id": document["id"],
+            "p_base_revision_id": document["head_revision_id"],
+            "p_content": content or {"title": f"deck {len(db.fake.tables['document_revisions'])}"},
+            "p_kind": "import",
+            "p_schema_version": 1,
+            "p_actor": "system:test",
+            "p_idempotency_key": f"seed-{uuid4()}",
+        }
+    )
+    return str(result[0]["revision_id"])
+
+
+def _publish(
+    db: _FakeDb,
+    revision_id: str,
+    formats: tuple[str, ...] = ("html", "pptx", "pdf"),
+    *,
+    version: str | None = None,
+) -> None:
+    """Register exports for ``revision_id`` the way register_export would."""
+
+    document = db.fake.tables["documents"][0]
+    for name in formats:
+        fmt = ExportFileFormat(name)
+        sha = f"{name[0]}" * 64
+        db.fake.tables.setdefault("revision_exports", []).append(
+            {
+                "revision_id": revision_id,
+                "format": name,
+                "renderer_version": version or renderer_version(),
+                "storage_key": export_storage_key(
+                    document["id"], revision_id, version or renderer_version(), fmt, sha
+                ),
+                "sha256": sha,
+                "byte_size": 100,
+                "page_count": None,
+                "created_by_job": None,
+                "created_at": f"2026-01-01T00:00:0{len(db.fake.tables['revision_exports']) % 10}+00:00",
+            }
+        )
+
+
+def _delivered(db: _FakeDb, formats: tuple[str, ...] = ("html", "pptx", "pdf")) -> str:
+    """A deck whose head has registered exports from the current renderer."""
+
+    revision_id = _seed_deck(db)
+    _publish(db, revision_id, formats)
+    return revision_id
 
 
 # ------------------------------------------------------------------- create
@@ -165,7 +226,7 @@ async def test_create_project_returns_row_for_caller() -> None:
 
 async def test_deck_access_is_owner_only_404() -> None:
     client, db, _limiter = _client()
-    db.files = _delivered_files()
+    _delivered(db)
     db.project_owner = str(uuid4())
     response = await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())
     assert response.status_code == 404
@@ -180,16 +241,20 @@ async def test_deck_not_ready_is_404() -> None:
 
 async def test_deck_access_returns_short_html_ttl_and_hour_downloads() -> None:
     client, db, _limiter = _client()
-    db.files = _delivered_files()
+    head = _delivered(db)
     response = await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())
     assert response.status_code == 200
     body = response.json()
-    assert body["html_expires_in"] == 900
-    assert "ttl=900" in body["html_url"] and "presentation.html" in body["html_url"]
-    formats = {d["format"]: d for d in body["downloads"]}
+    assert body["state"] == "ready" and body["revision_id"] == head and body["is_head"] is True
+    current = body["current"]
+    assert current["html_expires_in"] == 900
+    assert "ttl=900" in current["html_url"] and f"/{head}/" in current["html_url"]
+    assert current["html_url"].split("?")[0].endswith(".html")
+    formats = {d["format"]: d for d in current["downloads"]}
     assert set(formats) == {"pptx", "pdf"}
-    assert all(d["expires_in"] == 3600 for d in body["downloads"])
+    assert all(d["expires_in"] == 3600 for d in current["downloads"])
     assert "ttl=3600" in formats["pdf"]["url"]
+    assert body["fallback"] is None
 
 
 # -------------------------------------------------------------------- share
@@ -298,19 +363,19 @@ async def test_provenance_is_owner_only() -> None:
 async def test_public_share_resolves_without_auth() -> None:
     client, db, limiter = _client()
     db.share_token = "tok-abcdefghijklmnop"
-    db.files = _delivered_files()
+    _delivered(db)
     response = await client.get(f"/public/decks/{db.share_token}")
     assert response.status_code == 200
     body = response.json()
     assert body["title"] == "Test loyiha"
-    assert "presentation.html" in body["html_url"] and "ttl=900" in body["html_url"]
+    assert body["html_url"].split("?")[0].endswith(".html") and "ttl=900" in body["html_url"]
     assert limiter.ip_calls[0]["action"] == "share_view"
 
 
 async def test_public_share_unknown_or_rotated_token_is_404() -> None:
     client, db, _limiter = _client()
     db.share_token = "tok-abcdefghijklmnop"
-    db.files = _delivered_files()
+    _delivered(db)
     response = await client.get("/public/decks/tok-wrongwrongwrongwrong")
     assert response.status_code == 404
 
@@ -445,7 +510,7 @@ async def test_public_share_hands_over_downloads_at_an_hour_ttl() -> None:
     # protected nothing and only made the share view useless to students.
     client, db, _limiter = _client()
     db.share_token = "tok-abcdefghijklmnop"
-    db.files = _delivered_files()
+    _delivered(db)
     response = await client.get(f"/public/decks/{db.share_token}")
     assert response.status_code == 200
     body = response.json()
@@ -455,18 +520,18 @@ async def test_public_share_hands_over_downloads_at_an_hour_ttl() -> None:
     assert set(formats) == {"pptx", "pdf"}
     assert formats["pptx"]["expires_in"] == 3600 and "ttl=3600" in formats["pptx"]["url"]
     assert formats["pdf"]["expires_in"] == 3600 and "ttl=3600" in formats["pdf"]["url"]
-    assert "presentation.pptx" in formats["pptx"]["url"]
+    assert formats["pptx"]["url"].split("?")[0].endswith(".pptx")
 
 
 async def test_public_share_with_html_only_returns_an_empty_downloads_list() -> None:
     client, db, _limiter = _client()
     db.share_token = "tok-abcdefghijklmnop"
-    db.files = [{"file_type": "html", "storage_path": f"generated/{_PROJECT_ID}/presentation.html"}]
+    _delivered(db, ("html",))
     response = await client.get(f"/public/decks/{db.share_token}")
     assert response.status_code == 200
     body = response.json()
     assert body["downloads"] == []
-    assert "presentation.html" in body["html_url"]
+    assert body["html_url"].split("?")[0].endswith(".html")
 
 
 # ------------------------------------------------------- interview localisation
@@ -583,7 +648,7 @@ def _decisions_deck(*, with_plan: bool = True) -> dict[str, Any]:
 
 async def test_decisions_returns_the_argument_and_the_look() -> None:
     client, db, _limiter = _client()
-    db.deck_row = _decisions_deck()
+    _seed_deck(db, _decisions_deck()["deck_json"])
 
     response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
 
@@ -610,7 +675,7 @@ async def test_decisions_degrades_for_a_deck_that_predates_the_planner() -> None
     # binding has no argument to report. The design and the roster still exist,
     # so the route serves those rather than 404ing or inventing a thesis.
     client, db, _limiter = _client()
-    db.deck_row = _decisions_deck(with_plan=False)
+    _seed_deck(db, _decisions_deck(with_plan=False)["deck_json"])
 
     response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
 
@@ -625,8 +690,7 @@ async def test_decisions_degrades_for_a_deck_that_predates_the_planner() -> None
 
 
 async def test_decisions_without_a_deck_is_404() -> None:
-    client, db, _limiter = _client()
-    db.deck_row = None
+    client, _db, _limiter = _client()
 
     response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
 
@@ -636,7 +700,7 @@ async def test_decisions_without_a_deck_is_404() -> None:
 
 async def test_decisions_is_owner_only() -> None:
     client, db, _limiter = _client()
-    db.deck_row = _decisions_deck()
+    _seed_deck(db, _decisions_deck()["deck_json"])
     db.project_owner = str(uuid4())
 
     response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
@@ -660,7 +724,7 @@ async def test_decisions_roster_is_bounded_by_the_model_not_the_route() -> None:
     row["deck_json"]["slides"] = [
         {**one, "slide_index": i, "slide_id": f"slide_{i:03d}"} for i in range(bound)
     ]
-    db.deck_row = row
+    _seed_deck(db, row["deck_json"])
 
     response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
 
@@ -668,3 +732,96 @@ async def test_decisions_roster_is_bounded_by_the_model_not_the_route() -> None:
     body = response.json()
     assert body["slide_count"] == bound
     assert len(body["slides"]) == bound
+
+
+# ------------------------------------------------- revision-keyed downloads (ADR 0001)
+
+
+async def test_head_without_exports_is_render_needed() -> None:
+    client, db, _limiter = _client()
+    head = _seed_deck(db)
+    response = await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        **body,
+        "revision_id": head,
+        "head_revision_id": head,
+        "is_head": True,
+        "state": "render_needed",
+        "current": None,
+        "fallback": None,
+    }
+
+
+async def test_a_render_of_an_older_revision_never_becomes_the_heads_download() -> None:
+    # Bug (a): an older revision's render overwrote the project-keyed files the
+    # head served. Exports are keyed by revision now: the head stays
+    # render_needed, and the older export is offered only as a LABELLED fallback.
+    client, db, _limiter = _client()
+    older = _seed_deck(db, {"title": "older"})
+    head = _seed_deck(db, {"title": "newer"})
+    _publish(db, older)
+
+    body = (await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())).json()
+
+    assert body["revision_id"] == head and body["state"] == "render_needed"
+    assert body["current"] is None
+    assert body["fallback"]["reason"] == "older_revision"
+    assert body["fallback"]["revision_id"] == older
+    assert f"/{older}/" in body["fallback"]["html_url"]
+
+
+async def test_the_same_revision_from_an_earlier_renderer_is_a_labelled_fallback() -> None:
+    client, db, _limiter = _client()
+    head = _seed_deck(db)
+    _publish(db, head, version="pw-0000000000000000")
+
+    body = (await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())).json()
+
+    assert body["state"] == "render_needed"
+    assert body["fallback"]["reason"] == "older_renderer"
+    assert body["fallback"]["revision_id"] == head
+    assert body["fallback"]["renderer_version"] == "pw-0000000000000000"
+
+
+async def test_an_explicit_older_revision_serves_its_own_exports() -> None:
+    client, db, _limiter = _client()
+    older = _seed_deck(db, {"title": "older"})
+    _publish(db, older)
+    head = _seed_deck(db, {"title": "newer"})
+    _publish(db, head)
+
+    body = (
+        await client.get(f"/projects/{_PROJECT_ID}/deck?revision_id={older}", headers=_headers())
+    ).json()
+
+    assert body["revision_id"] == older and body["is_head"] is False
+    assert body["state"] == "ready"
+    assert f"/{older}/" in body["current"]["html_url"]
+
+
+async def test_a_revision_of_another_project_is_404() -> None:
+    client, db, _limiter = _client()
+    _delivered(db)
+    response = await client.get(
+        f"/projects/{_PROJECT_ID}/deck?revision_id={uuid4()}", headers=_headers()
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "revision_not_found"
+
+
+async def test_public_share_without_head_exports_is_404() -> None:
+    client, db, _limiter = _client()
+    db.share_token = "tok-abcdefghijklmnop"
+    _seed_deck(db)
+    response = await client.get(f"/public/decks/{db.share_token}")
+    assert response.status_code == 404
+
+
+async def test_decisions_for_a_legacy_invalid_head_is_409() -> None:
+    client, db, _limiter = _client()
+    head = _seed_deck(db, {"legacy_raw": [1, 2, 3]})
+    response = await client.get(f"/projects/{_PROJECT_ID}/decisions", headers=_headers())
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"reason": "legacy_invalid", "revision_id": head}

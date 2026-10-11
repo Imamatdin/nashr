@@ -15,6 +15,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from packages.api.services.deck_exports import shared_head_links
 from packages.platform.rate_limit import SHARE_VIEW_ACTION, RateLimiter
 from packages.platform.storage import FileStorage
 
@@ -87,33 +88,17 @@ async def resolve_shared_deck(request: Request, share_token: str) -> SharedDeckV
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
 
     project_id = str(project.get("id"))
-    files = await request.app.state.db.get_project_files(project_id)
-    html_key = next(
-        (str(row.get("storage_path")) for row in files if str(row.get("file_type")) == "html"),
-        None,
-    )
-    if html_key is None:
+    # The head's newest HTML export (ADR 0001). Recipients can TAKE the deck, not
+    # just look at it: the token is already the whole capability, so the same
+    # revision's PPTX/PDF grant nothing new (G19).
+    links = await shared_head_links(request.app.state.documents, storage, project_id)
+    if links is None or links.html_url is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
-
-    html_url = await storage.signed_url(html_key, expires_in=SHARED_HTML_TTL_SECONDS)
-
-    # Recipients can TAKE the deck, not just look at it. The token is already
-    # the whole capability — anyone holding it can open the HTML — so handing
-    # over the same deck's PPTX/PDF grants nothing new; withholding them only
-    # made the share view useless to the students it was built for (G19).
-    by_type = {str(row.get("file_type")): str(row.get("storage_path")) for row in files}
-    downloads: list[SharedDownload] = []
-    for fmt in ("pptx", "pdf"):
-        key = by_type.get(fmt)
-        if key is None:
-            continue
-        downloads.append(
-            SharedDownload(
-                format=fmt,
-                url=await storage.signed_url(key, expires_in=SHARED_DOWNLOAD_TTL_SECONDS),
-                expires_in=SHARED_DOWNLOAD_TTL_SECONDS,
-            )
-        )
+    html_url = links.html_url
+    downloads = [
+        SharedDownload(format=item.format, url=item.url, expires_in=item.expires_in)
+        for item in links.downloads
+    ]
 
     logger.info("share_view project=%s", project_id)
     return SharedDeckView(

@@ -476,3 +476,114 @@
     grid-column: 1/-1;
   }
 }
+
+/* Exports keyed by revision (ADR 0001): an older export is always labelled. */
+.designer-preview-note,
+.designer-render-needed,
+.designer-fallback-note {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  background: var(--fx-blue-soft);
+  color: var(--fx-blue);
+}
+.designer-preview-note {
+  margin: 12px 12px 0;
+  border-radius: 6px;
+}
+.designer-render-needed,
+.designer-fallback-note {
+  flex-basis: 100%;
+  border-radius: 6px;
+}
+
+/* Proposals: stored AI edits that lost the race to the head. */
+.proposals {
+  border-top: 1px solid var(--fx-ui-2);
+  padding: 14px 16px;
+  background: var(--fx-bg-2);
+  color: var(--fx-tx);
+  font-size: 13px;
+}
+.proposals header p {
+  margin: 4px 0 10px;
+  color: var(--fx-tx-2);
+}
+.proposal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.proposal-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.proposal-list time {
+  color: var(--fx-tx-2);
+  margin-right: auto;
+}
+.proposals button {
+  text-decoration: underline;
+}
+.proposal-review {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--fx-ui-2);
+  border-radius: 8px;
+  background: var(--fx-bg);
+}
+.proposal-review h4 {
+  margin: 10px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fx-tx-2);
+}
+.proposal-diff {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.proposal-diff li {
+  display: flex;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+.proposal-change {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+.proposal-diff li[data-change="removed"] .proposal-change {
+  color: var(--fx-red);
+}
+.proposal-diff li[data-change="added"] .proposal-change {
+  color: var(--fx-green);
+}
+.proposal-diff li[data-change="changed"] .proposal-change,
+.proposal-diff li[data-change="moved"] .proposal-change {
+  color: var(--fx-blue);
+}
+.proposal-warning,
+.proposal-message {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--fx-red-soft);
+  color: var(--fx-red);
+}
+.proposal-empty {
+  margin: 0;
+  color: var(--fx-tx-2);
+}
+.proposal-actions {
+  display: flex;
+  gap: 14px;
+  margin-top: 12px;
+}

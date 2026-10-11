@@ -338,7 +338,7 @@ export function ArticleWorkspace({
                               locale,
                             )}
                       </strong>
-                      <small>{revision.content_hash.slice(0, 8)}</small>
+                      <small>{revision.content_sha256.slice(0, 8)}</small>
                     </div>
                     {revision.id !== document.revision_id && (
                       <button disabled={state !== "saved"} onClick={() => void restore(revision.id)}>

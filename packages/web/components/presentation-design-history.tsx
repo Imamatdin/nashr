@@ -71,7 +71,7 @@ export function DesignHistory({
                         ? copy.current
                         : new Date(revision.created_at).toLocaleString(locale)}
                     </strong>
-                    <small>{revision.content_hash.slice(0, 8)}</small>
+                    <small>{revision.content_sha256.slice(0, 8)}</small>
                   </div>
                   {!current && (
                     <button

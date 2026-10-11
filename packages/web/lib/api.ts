@@ -197,12 +197,27 @@ export interface ArticleDocumentView {
   content: ArticleContent;
   updated_at: string;
 }
+export type RevisionKind =
+  | "generation"
+  | "regeneration"
+  | "manual"
+  | "autosave"
+  | "ai_edit"
+  | "bot_edit"
+  | "import"
+  | "restore";
+/** A human save: an explicit one, or the debounced editor autosave. */
+export type SaveKind = "manual" | "autosave";
 export interface DocumentRevision {
   id: string;
   parent_revision_id: string | null;
   created_by: string | null;
-  content_hash: string;
+  actor: string;
+  kind: RevisionKind;
+  schema_version: number;
+  content_sha256: string;
   created_at: string;
+  accepted_from_proposal_id: string | null;
 }
 
 export function initializeArticle(
@@ -254,6 +269,7 @@ export function saveArticle(
   content: ArticleContent,
   idempotencyKey: string,
   token: string,
+  kind: SaveKind = "autosave",
 ): Promise<ArticleDocumentView> {
   return request<ArticleDocumentView>(
     `/projects/${projectId}/documents/article`,
@@ -264,6 +280,7 @@ export function saveArticle(
         base_revision_id: baseRevisionId,
         idempotency_key: idempotencyKey,
         content,
+        kind,
       }),
     },
     token,
@@ -347,6 +364,8 @@ export interface DesignRenderView {
   job_id: string;
   status: string;
   existing: boolean;
+  revision_id: string;
+  renderer_version: string;
 }
 
 export function getDesign(
@@ -361,6 +380,7 @@ export function saveDesign(
   content: DesignDeck,
   idempotencyKey: string,
   token: string,
+  kind: SaveKind = "autosave",
 ): Promise<DesignDocumentView> {
   return request<DesignDocumentView>(
     `/projects/${projectId}/design`,
@@ -371,6 +391,7 @@ export function saveDesign(
         base_revision_id: baseRevisionId,
         idempotency_key: idempotencyKey,
         content,
+        kind,
       }),
     },
     token,
@@ -619,17 +640,105 @@ export function getJob(jobId: string, token: string): Promise<JobView> {
 
 // -------------------------------------------------------- deck & sharing
 
-export interface DeckAccessView {
-  html_url: string;
+/** Signed URLs for one (revision, renderer) export set. */
+export interface ExportLinks {
+  revision_id: string;
+  renderer_version: string;
+  created_at: string;
+  html_url: string | null;
   html_expires_in: number;
   downloads: Array<{ format: string; url: string; expires_in: number }>;
+}
+/** An export set that is NOT the requested one; the UI must label it. */
+export interface FallbackExport extends ExportLinks {
+  reason: "older_renderer" | "older_revision";
+}
+/**
+ * Downloads are keyed by revision (ADR 0001). `current` is the requested
+ * revision rendered by today's renderer; when it is missing the state is
+ * `render_needed`, and any `fallback` is an older export, never the head's.
+ */
+export interface DeckAccessView {
+  revision_id: string;
+  head_revision_id: string;
+  is_head: boolean;
+  state: "ready" | "render_needed";
+  renderer_version: string;
+  current: ExportLinks | null;
+  fallback: FallbackExport | null;
 }
 
 export function getDeckAccess(
   projectId: string,
   token: string,
+  revisionId?: string,
 ): Promise<DeckAccessView> {
-  return getJson<DeckAccessView>(`/projects/${projectId}/deck`, token);
+  const query = revisionId ? `?revision_id=${encodeURIComponent(revisionId)}` : "";
+  return getJson<DeckAccessView>(`/projects/${projectId}/deck${query}`, token);
+}
+
+// ----------------------------------------------------------------- proposals
+
+export interface ProposalView {
+  id: string;
+  kind: RevisionKind;
+  status: "pending" | "accepted" | "rejected" | "superseded";
+  base_revision_id: string | null;
+  created_at: string;
+}
+export interface DiffEntry {
+  item_id: string;
+  change: "added" | "removed" | "changed" | "moved";
+  label: string;
+  before_index: number | null;
+  after_index: number | null;
+}
+export interface RevisionDiff {
+  unit: "slide" | "block";
+  entries: DiffEntry[];
+  fields_changed: string[];
+}
+export interface ProposalDiffView {
+  proposal: ProposalView;
+  /** The head this diff was computed against; accept must send it back. */
+  head_revision_id: string | null;
+  ai_changes: RevisionDiff;
+  accept_changes: RevisionDiff;
+  schema_matches_head: boolean;
+}
+
+export function listProposals(
+  projectId: string,
+  token: string,
+): Promise<{ head_revision_id: string | null; proposals: ProposalView[] }> {
+  return getJson(`/projects/${projectId}/proposals`, token);
+}
+export function getProposalDiff(
+  projectId: string,
+  proposalId: string,
+  token: string,
+): Promise<ProposalDiffView> {
+  return getJson<ProposalDiffView>(`/projects/${projectId}/proposals/${proposalId}/diff`, token);
+}
+export function acceptProposal(
+  projectId: string,
+  proposalId: string,
+  expectedHeadRevisionId: string | null,
+  idempotencyKey: string,
+  token: string,
+): Promise<{ status: string; revision_id: string | null; head_revision_id: string | null }> {
+  return postJson(
+    `/projects/${projectId}/proposals/${proposalId}/accept`,
+    { expected_head_revision_id: expectedHeadRevisionId, idempotency_key: idempotencyKey },
+    token,
+  );
+}
+export function rejectProposal(
+  projectId: string,
+  proposalId: string,
+  token: string,
+): Promise<ProposalView> {
+  return postJson<ProposalView>(`/projects/${projectId}/proposals/${proposalId}/reject`, {}, token);
 }
 
 export interface ShareView {

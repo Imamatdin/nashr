@@ -146,7 +146,10 @@ export function useLiveJob({
         )
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: "decks", filter: `project_id=eq.${projectId}` },
+          // decks became a view of the document head (migration 016); a view
+          // cannot be published, and a documents row changes exactly when the
+          // head moves.
+          { event: "*", schema: "public", table: "documents", filter: `project_id=eq.${projectId}` },
           () => deckCallback.current(),
         )
         .subscribe((status) => {

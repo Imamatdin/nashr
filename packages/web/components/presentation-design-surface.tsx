@@ -47,13 +47,17 @@ export function SlideCanvas({
   slide,
   mode,
   htmlUrl,
+  previewNote = null,
   previewLabel,
   onTitle,
 }: {
   deck: DesignDeck;
   slide: DesignSlide;
   mode: "canvas" | "preview";
-  htmlUrl: string;
+  /** Null when this version has no export yet. */
+  htmlUrl: string | null;
+  /** Shown above the preview when it is not this version's own export. */
+  previewNote?: string | null;
   previewLabel: string;
   onTitle: (title: string) => void;
 }) {
@@ -61,7 +65,12 @@ export function SlideCanvas({
   if (mode === "preview")
     return (
       <main className="designer-stage">
-        <iframe src={htmlUrl} sandbox="allow-scripts" title={previewLabel} />
+        {previewNote && (
+          <p className="designer-preview-note" role="note">
+            {previewNote}
+          </p>
+        )}
+        {htmlUrl && <iframe src={htmlUrl} sandbox="allow-scripts" title={previewLabel} />}
       </main>
     );
   const style = {

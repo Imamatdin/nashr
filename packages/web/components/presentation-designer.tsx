@@ -21,6 +21,7 @@ import {
   type DesignDocumentView,
   type DocumentRevision,
 } from "@/lib/api";
+import { shownExports } from "@/lib/deck-exports";
 import { useAppSession } from "@/lib/use-session";
 import { useLocale } from "./locale-provider";
 import {
@@ -29,10 +30,11 @@ import {
   PropertiesPanel,
 } from "./presentation-design-surface";
 import { DesignHistory } from "./presentation-design-history";
+import { ProposalsPanel } from "./presentation-proposals";
 import { DESIGNER_COPY } from "./presentation-designer-copy";
 import "./presentation-designer.css";
 
-type SaveState = "saved" | "dirty" | "saving" | "conflict" | "busy" | "error";
+type SaveState = "saved" | "dirty" | "saving" | "conflict" | "error";
 const SAVE_DELAY_MS = 900;
 
 export function PresentationDesigner({
@@ -110,15 +112,10 @@ export function PresentationDesigner({
         setView(next);
         setState(versionRef.current === version ? "saved" : "dirty");
       } catch (error) {
-        setState(
-          error instanceof ApiError &&
-            error.status === 409 &&
-            error.reason.includes("design_busy")
-            ? "busy"
-            : error instanceof ApiError && error.status === 409
-              ? "conflict"
-              : "error",
-        );
+        // A 409 means the head moved under this editor (ADR 0001): reload
+        // rather than overwrite. Manual edits are never locked out by an AI
+        // edit any more; that one becomes a proposal instead.
+        setState(error instanceof ApiError && error.status === 409 ? "conflict" : "error");
       } finally {
         savingRef.current = false;
       }
@@ -273,6 +270,11 @@ export function PresentationDesigner({
   const slide =
     content.slides.find((item) => item.slide_id === selected) ??
     content.slides[0];
+  // Only the head's own exports are presented as current; an older export is
+  // shown only with a label saying which kind of older it is (ADR 0001).
+  const shown = shownExports(deck);
+  const exports = shown.exports;
+  const previewNote = shown.notice ? t[shown.notice] : null;
   return (
     <section className="designer">
       <header className="designer-bar">
@@ -311,7 +313,7 @@ export function PresentationDesigner({
           {renderState === "rendering" ? t.rendering : t.render}
         </button>
       </header>
-      {(state === "conflict" || state === "busy" || state === "error") && (
+      {(state === "conflict" || state === "error") && (
         <div className="designer-alert">
           <span>{t[state]}</span>
           <button onClick={() => void load()}>{t.reload}</button>
@@ -334,7 +336,8 @@ export function PresentationDesigner({
           deck={content}
           slide={slide}
           mode={mode}
-          htmlUrl={deck.html_url}
+          htmlUrl={exports?.html_url ?? null}
+          previewNote={previewNote}
           previewLabel={t.preview}
           onTitle={(title) => updateSlide({ title })}
         />
@@ -350,13 +353,29 @@ export function PresentationDesigner({
         />
       </div>
       <footer className="designer-downloads">
-        {deck.downloads.map((item) => (
+        {deck.state === "render_needed" && (
+          <p className="designer-render-needed" role="status">
+            {t.renderNeeded}
+          </p>
+        )}
+        {previewNote && deck.fallback && (
+          <p className="designer-fallback-note">{previewNote}</p>
+        )}
+        {(exports?.downloads ?? []).map((item) => (
           <a key={item.format} href={item.url} download>
             <ExternalLink size={14} />
             {t.download} {item.format.toUpperCase()}
           </a>
         ))}
       </footer>
+      <ProposalsPanel
+        projectId={projectId}
+        copy={t}
+        onAccepted={() => {
+          void load();
+          onRendered();
+        }}
+      />
       {historyOpen && (
         <DesignHistory
           revisions={history}

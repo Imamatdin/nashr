@@ -12,22 +12,21 @@ import logging
 import secrets
 from enum import StrEnum
 from typing import Any, cast
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
+from packages.api.services.deck_exports import DeckAccessView, DeckNotReadyError, deck_access
 from packages.core.enums import Audience, Language, ProjectType
+from packages.platform.document_models import DocumentKind
 from packages.platform.storage import FileStorage
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
-# The HTML render URL is deliberately short-lived (15 min): it is re-minted on
-# every viewer load, so a leaked URL goes stale fast. Downloads get an hour.
-DECK_HTML_TTL_SECONDS = 900
-DOWNLOAD_TTL_SECONDS = 3600
 _SHARE_TOKEN_BYTES = 24
 
 
@@ -47,24 +46,6 @@ class ProjectView(BaseModel):
     title: str
     project_type: str
     status: str
-
-
-class DownloadLink(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    format: str
-    url: str
-    expires_in: int
-
-
-class DeckAccessView(BaseModel):
-    """Signed URLs for the delivered deck: inline HTML + download formats."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    html_url: str
-    html_expires_in: int
-    downloads: list[DownloadLink]
 
 
 class ShareAction(StrEnum):
@@ -138,35 +119,28 @@ async def create_project(
 
 
 @router.get("/{project_id}/deck", response_model=DeckAccessView)
-async def get_deck_access(request: Request, project_id: str, auth: Authenticated) -> DeckAccessView:
-    """Short-TTL signed URL for the rendered HTML plus download links."""
+async def get_deck_access(
+    request: Request, project_id: str, auth: Authenticated, revision_id: UUID | None = None
+) -> DeckAccessView:
+    """Signed URLs for one revision's exports (default: the head), or ``render_needed``.
+
+    Exports are keyed by revision and renderer (ADR 0001), so a render of an
+    older revision can never change what the head serves. A missing export for
+    the head is a ``render_needed`` answer the UI acts on; an older export, when
+    offered, comes back as a labelled ``fallback``, never as ``current``.
+    """
 
     await owned_project(request, project_id, str(auth.user_id))
     storage: FileStorage = request.app.state.storage
-
-    files = await request.app.state.db.get_project_files(project_id)
-    by_type = {str(row.get("file_type")): str(row.get("storage_path")) for row in files}
-    html_key = by_type.get("html")
-    if html_key is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="deck_not_ready")
-
-    html_url = await storage.signed_url(html_key, expires_in=DECK_HTML_TTL_SECONDS)
-    downloads: list[DownloadLink] = []
-    for fmt in ("pptx", "pdf"):
-        key = by_type.get(fmt)
-        if key is not None:
-            downloads.append(
-                DownloadLink(
-                    format=fmt,
-                    url=await storage.signed_url(key, expires_in=DOWNLOAD_TTL_SECONDS),
-                    expires_in=DOWNLOAD_TTL_SECONDS,
-                )
-            )
-    return DeckAccessView(
-        html_url=html_url,
-        html_expires_in=DECK_HTML_TTL_SECONDS,
-        downloads=downloads,
-    )
+    try:
+        return await deck_access(
+            request.app.state.documents,
+            storage,
+            project_id,
+            str(revision_id) if revision_id is not None else None,
+        )
+    except DeckNotReadyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.post("/{project_id}/share", response_model=ShareView)
@@ -380,7 +354,7 @@ class DecisionsView(BaseModel):
 async def get_decisions(request: Request, project_id: str, auth: Authenticated) -> DecisionsView:
     """The deck's own record of what it decided (owner only).
 
-    ``decks.deck_json`` has carried the design direction, the binding plan, the
+    The deck (the presentation document's head revision) has carried the design direction, the binding plan, the
     resolved interview preferences and the slide roster since the pipeline
     shipped, and nothing has ever been able to read it. Without this the answer
     to "why does my deck look like this, and what is it arguing?" existed only
@@ -389,15 +363,23 @@ async def get_decisions(request: Request, project_id: str, auth: Authenticated) 
 
     await owned_project(request, project_id, str(auth.user_id))
 
-    row = await request.app.state.db.get_deck(project_id)
-    if row is None:
+    head = await request.app.state.documents.head(project_id, DocumentKind.PRESENTATION)
+    if head is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="deck_not_ready")
 
     # Imported lazily: DeckSpec drags the presentation package in, and every
     # other route on this module must stay cheap to import.
+    from pydantic import ValidationError
+
     from packages.core.models.presentation import DeckSpec
 
-    deck = DeckSpec.model_validate(row["deck_json"])
+    try:
+        deck = DeckSpec.model_validate(head.content)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": "legacy_invalid", "revision_id": head.revision_id},
+        ) from exc
     design = deck.design
     plan = deck.plan
     interview = deck.interview
