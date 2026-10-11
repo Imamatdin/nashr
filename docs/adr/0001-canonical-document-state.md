@@ -1,0 +1,462 @@
+# ADR 0001 — Canonical document state
+
+- Status: proposed (2026-10-11)
+- Scope: presentation decks and article documents; their revisions, AI proposals
+  and rendered exports
+- Supersedes: the write paths of migrations 011, 013, 015 (`create_document_if_missing`,
+  `commit_document_revision`, `commit_presentation_revision_and_deck`), migration
+  007's stable export keys, and `DatabaseClient.save_deck`
+
+## 1. Problem
+
+The canonical state of a presentation exists in two tables with seven writers that
+disagree about which one is authoritative (full inventory in Appendix A).
+
+1. **Two sources of truth.** `documents`/`document_revisions` (011) is the versioned
+   store; `decks` (001/003) is a single mutable row per project. Generation, the bot
+   edit and the render job write `decks` directly through `save_deck`
+   (`database.py:590`). Only the web AI-edit job (`worker_run_job.py:338`, migration
+   013) writes both, atomically. The web manual save (`design.py:154`) and restore
+   (`design.py:198`) write only revisions, so `decks` goes stale.
+2. **Readers pick different truths.** The bot loads the document head and falls back
+   to `decks` (`store.py:157-166`). `/decisions` reads `decks` (`projects.py:392`).
+   Web Realtime listens on `decks` (`use-live-job.ts:149`). A web manual edit is
+   therefore invisible to `/decisions`. A bot edit after a web import writes `decks`
+   while the head stays put, so the web keeps showing the pre-edit deck and the
+   bot's next turn reloads the old head and silently discards the bot edit (§7, test b).
+3. **Exports are keyed by project, not by content.** `generated/{project_id}/presentation.{ext}`
+   (`storage.py:318`) is overwritten in place and registered in `generated_files`
+   by `(project_id, file_type)`. A render job for an older revision overwrites what
+   downloads return for the head (`worker_run_job.py:242-253`), then also overwrites
+   `decks` with the old content (test a).
+4. **Failures are swallowed.** Upload failure (`presentation_orchestrator.py:891`),
+   registration failure (`:915`) and deck-persist failure (`:942`) are logged and
+   dropped. `render()` turns each failed format into a warning (`:812-839`), so a job
+   that delivered one of three requested formats reports success (test i).
+5. **No fencing on exports.** Nothing checks that the worker registering an export
+   still holds its job claim, or that the export belongs to the revision the job
+   targeted (tests f, g).
+6. **Concurrent AI writes are thrown away.** A web AI edit whose base went stale is
+   abandoned before running (`worker_run_job.py:329-335`); a stale edit discovered
+   after the LLM ran would raise `stale_revision` and lose the paid output (test c).
+7. **Invariants live in application code.** RLS policies on `decks` and
+   `document_revisions` are `for all`, so an authenticated PostgREST client can write
+   either table directly, bypassing hashing, idempotency and compare-and-swap (test k).
+
+## 2. Invariants (enforced by the database)
+
+| # | Invariant | Mechanism |
+|---|---|---|
+| I1 | A revision row never changes after insert | INSERT/UPDATE/DELETE/TRUNCATE revoked from `anon`, `authenticated`, `service_role`; only `commit_revision` (SECURITY DEFINER) inserts |
+| I2 | `documents.head_revision_id` advances only by compare-and-swap from the caller's base | head moved only inside `commit_revision` under `SELECT … FOR UPDATE` on the document row; direct writes to `documents` revoked |
+| I3 | Head is the last committed revision; parent of every new revision is the head it replaced | same transaction sets `parent_revision_id = head` and `head = new` |
+| I4 | Retrying an operation with the same idempotency key never duplicates; reusing a key for different content is an error | key unique per document across revisions **and** proposals, checked under the document lock; hash compared |
+| I5 | A losing AI, regeneration or import write is stored, not discarded | `kind in (ai_edit, regeneration, import)` with stale base inserts a `revision_proposals` row |
+| I6 | The deck read model always equals head content | `decks` becomes a VIEW over the head (§4.4); it cannot diverge |
+| I7 | An export belongs to exactly one (revision, format, renderer_version) and is never overwritten | PK on that triple; different hash for the same key raises |
+| I8 | Only the worker currently holding a job's claim can register that job's exports, only for a revision that job targets | `register_export` locks the job row and checks `worker_id`, `status = processing`, and the revision link |
+| I9 | Only known content schema versions are stored; content size is bounded | `document_schema_versions` registry; `octet_length(content::text) <= 2 MiB` |
+| I10 | A user can read and commit only their own documents | owner-only SELECT RLS; `commit_revision` resolves the caller (`app_uid()` or the actor) to the project owner |
+| I11 | At most one refund ledger row per job | partial unique index on `credit_ledger(generation_job_id) where action = 'refund'` (created only if legacy data has no duplicates; see §8) |
+
+## 3. Decision summary
+
+1. Keep `documents` + `document_revisions` as the only canonical store, extended
+   with provenance columns.
+2. Replace the three write functions with one `commit_revision`, plus
+   `ensure_document`, `accept_proposal`, `reject_proposal`, `register_export`.
+3. Turn `decks` into a security-invoker VIEW of the head (§4.4, Appendix B).
+4. Replace `generated_files` (for presentations) with immutable `revision_exports`
+   keyed by `(revision_id, format, renderer_version)` and content-addressed storage
+   keys.
+5. Every writer, including the bot, goes through these functions; every render runs
+   under a job claim (the bot claims an inline job, §6.4).
+
+## 4. Schema (migration 016)
+
+### 4.1 `document_revisions` (altered)
+
+| Column | Change | Notes |
+|---|---|---|
+| `kind` | add, `text not null` | `generation, regeneration, manual, autosave, ai_edit, bot_edit, import, restore`; legacy rows backfilled to `import` |
+| `schema_version` | add, `int not null` | checked against `document_schema_versions` for the document's kind inside `commit_revision`; legacy rows = 1 |
+| `content_sha256` | rename of `content_hash` | DB-computed `sha256(content::text)` (jsonb text is canonical: keys sorted, whitespace normalized) |
+| `actor` | add, `text not null` | `<user uuid>`, `worker:<job uuid>`, `bot:<telegram id>`, or `system:<name>` (import only); legacy = `created_by` or `system:legacy` |
+| `created_by` | kept | the resolved owning user, so history can show a person even for worker/bot actors |
+| `parent_revision_id`, `idempotency_key` | kept (011) | `unique (document_id, idempotency_key)` already exists |
+| `accepted_from_proposal_id` | add, nullable | set when the revision came from accepting a proposal |
+
+`documents.head_revision_id` already exists (011); it is not re-added.
+
+### 4.2 New tables
+
+- `document_schema_versions(kind, version)`: registry, seeded with
+  `(presentation, 1)` and `(article, 1)`. `DeckSpec` has no version field today, so the
+  presentation version is 1 by definition; `ArticleDocumentContent.schema_version` is
+  `Literal[1]`.
+- `revision_proposals(id, document_id, base_revision_id null, content, content_sha256,
+  schema_version, kind, actor, source_job_id, idempotency_key, status pending|accepted|rejected|superseded,
+  created_at, resolved_at, resolved_by, accepted_revision_id)`. The brief's column list
+  gains `idempotency_key`, `content_sha256` and `actor`: without them a retried
+  AI commit that became a proposal would create a second proposal (breaks I4 / test e).
+  `base_revision_id` is nullable for the one case in §6.1.
+- `revision_exports(revision_id, format, renderer_version, storage_key, sha256,
+  byte_size, page_count, created_by_job, created_at)`, PK `(revision_id, format,
+  renderer_version)`, owner-only SELECT RLS.
+- `revision_validations(revision_id pk, validator, status valid|legacy_invalid,
+  detail, created_at)`: insert-once validation result per revision, written by the
+  backfill flagger (§8). A separate keyed table instead of a mutable flag column on
+  the revision keeps I1 literal.
+
+Deviation from `.claude/rules/database.md` (uuid PK on every table): `revision_exports`,
+`document_schema_versions` and `revision_validations` use natural keys. The export PK
+`(revision_id, format, renderer_version)` *is* the invariant (I7), the registry is a
+lookup set, and a validation is one row per revision.
+
+### 4.3 Functions (SECURITY DEFINER, `search_path = public, pg_temp`)
+
+`commit_revision(document_id, base_revision_id, content, kind, schema_version, actor,
+idempotency_key) → (status, document_id, revision_id, head_revision_id, proposal_id)`
+
+1. Lock the document row (`FOR UPDATE`); `document_not_found` if absent.
+2. Resolve the caller. If the session role is `authenticated`, the owner must be
+   `app_uid()`, the actor must equal it, and kind is limited to
+   `manual, autosave, restore`. Otherwise (service role, or the migration owner) the
+   actor is parsed: a user uuid must own the project; `worker:<job>` must name a
+   `processing` job of the same project whose `user_id` owns it; `bot:<telegram id>`
+   must map through `users.telegram_id` to the owner; `system:` only for `import`.
+3. Validate kind, `schema_version` against the registry, content is a JSON object,
+   size ≤ 2 MiB (real decks are 20–55 KB; see Appendix B).
+4. Idempotency: same key with same hash on a revision → `duplicate` (original id);
+   on a proposal → `proposed` (original proposal id); same key with different hash →
+   `idempotency_key_reused` error.
+5. No-op: content hash equals the head's → `unchanged` with the head id; nothing is
+   written, whatever the base. An identical autosave would otherwise advance the head
+   and turn every in-flight AI edit on that head into a proposal.
+6. `base = head` → insert revision (`parent = head`), advance head, `committed`.
+7. `base ≠ head` → for `ai_edit`/`regeneration`/`import` insert a proposal, `proposed`; for any
+   other kind, `conflict` with the current head id. Nothing is written on conflict.
+
+`ensure_document(project_id, kind) → document_id`: creates the row with a null head
+if missing (ownership-checked the same way). Replaces the creation half of
+`create_document_if_missing`; the first revision is then an ordinary
+`commit_revision` with `base = null`.
+
+`accept_proposal(proposal_id, expected_head_revision_id, actor, idempotency_key)`:
+**replace-head-with-consent, not rebase.** A proposal exists because its base was no
+longer the head, so "accept only if base = head" would make every proposal
+unacceptable. Instead the caller states which head it showed the user:
+
+1. Lock the document; same caller resolution and ownership checks as `commit_revision`.
+2. Same idempotency rules (`duplicate` on retry, error on key reuse with other content).
+3. Proposal not `pending` → `proposal_not_pending`.
+4. Proposal `schema_version` ≠ head revision's → `proposal_schema_mismatch`. There is no
+   silent migration.
+5. `expected_head ≠ head` → `conflict` with the current head id. The UI re-fetches the
+   diff and asks again.
+6. Otherwise commit the proposal content as a new revision: kind = the proposal's kind
+   (`ai_edit` or `regeneration`), `parent_revision_id = expected_head`,
+   `accepted_from_proposal_id` set. The proposal becomes `accepted` with
+   `resolved_at`/`resolved_by`. Other pending proposals stay pending. Nothing is lost,
+   because the replaced head stays in history and can be restored.
+
+`reject_proposal(proposal_id, actor)`: pending → rejected. `superseded` is kept in the
+status domain for the element-level rebase work; nothing sets it yet.
+
+Informed consent: `GET /projects/{id}/proposals/{proposal_id}/diff` returns (a) the
+diff from the proposal's base to its content (what the AI changed) and (b) the diff
+from the **current head** to its content (what accepting will actually change,
+including user edits made after the base that accepting would revert), plus the head
+id the diff was computed against. That id is what the accept call must send. Diffs
+are slide-level for presentations (by `slide_id`: added, removed, changed, moved)
+and block-level for articles (by block id). Element-level rebase arrives with the
+scene-graph editor (B3/B4) and will reuse this API.
+
+`register_export(job_id, worker_id, revision_id, format, renderer_version,
+storage_key, sha256, byte_size, page_count)`: locks the job row; requires
+`worker_id` match and `status = processing`; requires the job to target the revision
+(`payload->>'revision_id' = revision_id`, or the revision's actor is
+`worker:<job_id>`, i.e. the job committed it); requires the storage key to have the
+canonical shape for that revision. Inserts if absent; identical row → no-op; same PK
+with different hash or key → `export_conflict` error.
+
+Grants: `commit_revision`, `ensure_document`, `accept_proposal`, `reject_proposal` to
+`service_role` and `authenticated`; `register_export` to `service_role` only.
+`PUBLIC` and `anon` revoked on all.
+
+### 4.4 `decks`: VIEW, not a locked projection
+
+Evidence (Appendix B):
+
+- Only `deck_json` comes from revision content. `title`, `language`, `audience` were
+  always copied from the **project row** at save time (`database.py:582-587`); a view
+  joins `projects` and returns the same values, current rather than snapshotted.
+- `decks.id` has no reader in any code path. Its only dependent is the
+  `design_directions.deck_id` FK, and `design_directions` has zero readers or writers
+  in `packages/`.
+- The design principle forbids mutating derived data in place. A projection table
+  is updated in place on every head move; a view is computed from the revision.
+- A view cannot diverge from the head, so invariant I6 needs no maintenance code and
+  test n's "read model equals head" holds by construction (it is still tested).
+
+Costs and how each is paid:
+
+- **Realtime.** A view cannot be added to a publication. The one subscriber
+  (`use-live-job.ts:149`) moves to `documents` (filter `project_id`), whose row
+  changes exactly when the head moves (`updated_at` trigger). `documents` is added to
+  `supabase_realtime` with replica identity full.
+- **`design_directions` FK.** Nothing to do: foreign keys bind to the table, not the
+  name, so after the rename it points at `decks_legacy` and keeps its rows valid.
+- **Row security on a view** needs `security_invoker = true` (PostgreSQL ≥ 15). The
+  migration asserts `server_version_num >= 150000` and aborts otherwise. Production's
+  version is **unverified** from here.
+- **Writes.** A join view is not auto-updatable, and INSERT/UPDATE/DELETE are revoked
+  as well (test k).
+
+Legacy rows: `decks` is renamed `decks_legacy` (privileges revoked, kept for audit
+and rollback) after the backfill imports every row.
+
+Alternatives for the read model:
+
+- *Locked projection table maintained by `commit_revision`*: keeps Realtime as is, but
+  stores derived data mutated in place, needs a second invariant (I6) maintained by
+  code, and still needs the privilege lockdown. Rejected.
+- *Fenced pointer* (`decks.revision_id` pointing at the head, content read through it):
+  still a mutable row that must be kept equal to `documents.head_revision_id`, which
+  duplicates the head pointer. Rejected; the view is that pointer, without a copy.
+
+### 4.5 Storage
+
+Key: `exports/{document_id}/{revision_id}/{renderer_version}/{format}/{sha256}.{ext}`.
+Uploads send `ChecksumSHA256` so the object store verifies the bytes. A HEAD request
+(`ChecksumMode=ENABLED`) must then report the same size and SHA-256 before
+`register_export` is called. Local-disk storage mode re-hashes the file.
+
+`renderer_version` is `pw-` plus the first 16 hex characters of a SHA-256 over the
+renderer's source tree and lockfile (`packages/presentation-worker/src/**`,
+`package-lock.json`). The package version is `0.1.0` and has never been bumped, so it
+can't identify a renderer. A source hash changes exactly when output can change, and
+the API, worker and bot all ship `packages/`, so they compute the same value.
+
+## 5. Read paths
+
+- Design/article GET return the head revision. A head that fails current model
+  validation (legacy import) returns `409 {reason: "legacy_invalid", revision_id}`
+  instead of a 500.
+- Downloads (`GET /projects/{id}/deck?revision_id=`, default head):
+  exact `(revision, current renderer)` exports exist → signed URLs, `state: ready`.
+  Otherwise `state: render_needed`, plus an optional `fallback` (the same revision
+  rendered by an earlier renderer, or the newest older revision with exports),
+  flagged so the UI must label it as older.
+- Share links serve the head's HTML export only; no export → 404.
+
+## 6. Write paths after the change
+
+### 6.1 Generation (worker and bot)
+
+At job start the runner reads the head `H0`. With no head the commit is
+`kind=generation, base=null`; otherwise `kind=regeneration, base=H0`. If a generation
+loses the race (a head appeared mid-run), it is re-submitted once as
+`regeneration, base=null`, which stores it as a proposal. Paid output is never dropped.
+Then the committed revision is rendered and its exports registered under the
+generation job's claim. On `proposed` the job completes without rendering, with
+`outcome: proposed` in telemetry, and no refund (the output was delivered as a
+proposal).
+
+### 6.2 Manual, autosave, restore (web)
+
+`ensure_document` + `commit_revision`. `conflict` → `409 {reason: "stale_revision",
+head_revision_id}` (the existing `detail` string is kept inside a structured body).
+The design import path (`design.py:96-113`) is deleted: after the backfill every deck
+already has a document.
+
+### 6.3 AI edit (web chat → worker)
+
+Base stamped at enqueue (`chat.py:243`). The worker no longer abandons on a stale base
+before running. It runs the fix, commits `kind=ai_edit, actor=worker:<job>`; `proposed`
+completes the job with `outcome: proposed`. A chat edit on a project without a
+document is no longer possible (backfill), which removes the `save_deck` fallback.
+
+### 6.4 Bot
+
+`brain_sessions` gains `revision_id`: the revision the user is editing. The deck is
+loaded **from that revision**, not from the head. A bot edit commits
+`kind=bot_edit, base=session.revision_id, actor=bot:<telegram id>`. On `conflict` the
+bot replies in the user's language (uz/ru/kaa/en) that the deck changed elsewhere,
+with a Reload button that sets `revision_id` to the head.
+
+Bot generation and bot edits render in-process (Telegram delivers the local files
+at once) and had **no job row**, so their exports could not satisfy I8. After a
+committed revision is rendered, the bot inserts a `presentation_render` job already
+claimed by itself (`status = processing`, `worker_id = bot:<host>-<pid>-<rand>`,
+`payload.revision_id` = the committed revision), heartbeats it while publishing,
+registers the exports under that claim, and lands the guarded `complete`/`fail`
+(`packages/bot/orchestrators/inline_publish.py`). Inserting it pre-claimed means the
+queue worker can never pick it up. A publishing failure fails that job but never
+blocks Telegram delivery; the web then shows "render needed" for the revision.
+
+### 6.5 Render jobs
+
+Payload carries `document_id, revision_id, renderer_version, formats` (sorted).
+Active-job dedupe moves from `(project_id, job_type)` to `(revision_id,
+renderer_version, formats)` for `presentation_render` (a new partial unique index),
+because the per-project index would hand a request for the head an already-running
+render of an older revision. Every requested format must render, upload, verify and
+register, or the job fails. A lost claim aborts without registering and without
+completing; the reaper owns that job's outcome and refund.
+
+## 7. Bugs this fixes (each gets a test that fails before the change)
+
+| Test | Today | After |
+|---|---|---|
+| a | render of revision Y overwrites `generated/{p}/presentation.*` and `decks` | exports keyed by revision; downloads for head unaffected |
+| b | bot edit writes `decks`, head unchanged; web and the next bot turn read the old head | bot commits a revision; head advances |
+| c/d | manual save vs AI edit: AI raises or is pre-abandoned | manual commits, AI stored as proposal; two manual saves: one commits, one conflicts |
+| e | `create_document_if_missing` on an existing key silently returns; key reuse with other content returns the old revision | duplicate/proposed on true retry, error on reuse |
+| f/g | no claim or revision check on export registration | `register_export` fences both |
+| h | upload failure swallowed, job completes | job fails; refund once (I11) |
+| i | 1 of 3 formats → completed | failed |
+| j/k | `for all` RLS lets a client write `decks`/`document_revisions` directly | writes revoked; RLS select-only; ownership checked in functions |
+| accept | no proposals exist | accept against the head the user saw commits; a moved head conflicts; retry is idempotent; another user is denied; schema mismatch is rejected; the replaced head stays restorable; both diffs are correct after user edits past the base |
+| no-op | an identical autosave appends a revision | `unchanged`, no revision, and a concurrent AI edit on that head still commits instead of becoming a proposal |
+
+## 8. Migration and backfill plan
+
+016 runs in one transaction and is re-runnable (`if not exists`, guarded renames, `do`
+blocks that check catalog state):
+
+1. Assert PostgreSQL ≥ 15.
+2. Alter `document_revisions` (add columns nullable, backfill legacy rows, then
+   `set not null`), rename `content_hash`.
+3. Create registry, proposals, exports, validations tables; RLS; revoke privileges.
+4. Create functions; drop the three superseded functions.
+5. Rename `decks` → `decks_legacy` (its Realtime publication membership is dropped
+   first) and revoke every application privilege on it.
+6. **Backfill** (inside 016, through `commit_revision`): for every `decks_legacy` row,
+   in `(created_at, id)` order, `ensure_document`, then `commit_revision(kind=import,
+   base=null, actor='system:migration-016', idempotency_key='import:legacy-deck:<deck
+   id>')`. A project with no head gets the deck as its head. A project whose head
+   already equals the deck returns `unchanged`. A project whose head differs (bug b:
+   bot edits that only reached `decks`) gets the deck as a pending **import proposal**,
+   because the base (null) is not the head and `import` is one of the kinds that propose
+   on conflict. The user can diff and accept it, so nothing is dropped. Non-object
+   `deck_json` is wrapped as `{"legacy_raw": …}`. Rows of non-presentation projects are
+   counted and left in `decks_legacy`. Counts are emitted with `raise notice`.
+   Re-running returns `duplicate` / `proposed` by idempotency key and adds nothing.
+   Then the `decks` view is created and `documents` is published instead.
+7. Create `uq_credit_ledger_refund_per_job` if no duplicate refund rows exist;
+   otherwise emit a warning with the count and skip it (it must not block the
+   migration; the count goes in the report).
+
+`scripts/backfill_validate_revisions.py` then validates every `import` revision
+against `DeckSpec` / `ArticleDocumentContent` in keyset-paginated batches, inserting a
+`revision_validations` row (`valid` or `legacy_invalid` with the first errors). It
+skips revisions already validated (resumable, idempotent), defaults to dry-run, and
+prints counts. DeckSpec validation is Python; it cannot run inside the migration,
+which is why flagging is a separate pass and why the import itself never depends on
+validity.
+
+### Rollback
+
+The DOWN block at the end of migration 016: drop the view; rename `decks_legacy` → `decks`;
+**re-project** every presentation head into it (it will be stale for revisions
+committed after 016); restore the publication; restore 011/013/015
+functions; re-grant the old privileges. New columns and tables are left in place
+(additive and harmless to old code, which ignores them). Exports written under
+`exports/` remain valid objects; old code serves `generated/` keys again, so a render
+is needed after rollback. Rollback is lossy only for proposals (old code cannot see
+them); they are kept in the table.
+
+## 9. Alternatives considered (overall approach)
+
+- **Keep two tables and harden each writer.** It doesn't scale: seven writers,
+  three of them in the bot, each one a chance to drift again. Rejected.
+- **Make `decks` canonical and drop revisions.** It loses history, conflict detection
+  and proposals. Rejected.
+- **Application-level CAS through PostgREST filters** (`update … where head = base`).
+  PostgREST cannot do the multi-statement insert-revision + move-head + maybe-propose
+  atomically, and any role with table privileges could bypass it. Rejected.
+- **Event sourcing with a separate projector process.** Correct, but it adds a moving
+  part this scale doesn't need; the view gives the same guarantee synchronously.
+  Rejected.
+
+## 10. Decisions taken and open questions
+
+Decided 2026-10-11: `accept_proposal` is replace-head-with-consent (§4.3). The
+brief's literal rule (accept only while the proposal's base is the head) would make
+every conflict-born proposal unacceptable, because head ids only move forward.
+
+Open:
+
+1. **Bot article outputs** (`article_flow.py:689-701`) write `generated_files` rows that
+   contain local filesystem paths, and on a second export they hit the
+   `(project_id, file_type)` unique constraint, which is swallowed. That pipeline has
+   no documents or revisions at all. Proposal: stop writing those rows (they have no
+   correct reader) and leave the legacy article pipeline outside this ADR.
+2. **Production PostgreSQL version** must be ≥ 15 for the view. Unverified.
+3. **R2 SHA-256 checksum support** on PutObject/HEAD is assumed and unverified without
+   R2 access. If R2 does not return the checksum on HEAD, verification falls back to a
+   full GET and re-hash, which costs one extra download per export.
+
+## 11. Verification
+
+The workstation runs unit tests, pyright and the web typecheck only (8 GB RAM; the
+last local stack froze it). Everything that needs PostgreSQL, PostgREST, a browser or
+a production Next build runs in GitHub Actions (`.github/workflows/ci.yml`) on pushes
+to `ci/**` branches and on manual dispatch, never on `main`:
+
+1. Unit tests, pyright, web unit tests, typecheck, `next build`.
+2. SQL tests: a Postgres 16 service container bootstrapped with the Supabase roles
+   and grants the migrations expect (`scripts/local_stack/bootstrap.sql`), all
+   migrations applied in order from a clean database, then the multi-connection
+   pytest suite (`tests/db/`) and PostgREST-token tests against a PostgREST
+   container on the same database.
+3. Browser journey: API, worker and `next build && next start` (not `next dev`),
+   headless Playwright with one worker. Providers are stubbed, R2 is replaced by
+   local-disk storage, and no production secrets are used.
+
+Each run uploads traces, videos, screenshots and logs as short-retention artifacts
+and reports the minutes it used.
+
+## Appendix A — inventory (2026-10-11, tree at `a1ab4dc` + uncommitted work)
+
+### A.1 Writers
+
+| Target | Writer | Caller(s) |
+|---|---|---|
+| `decks` (upsert) | `database.py:553-592` `save_deck` | `presentation_orchestrator.py:942` `_persist_deck` ← `run_full_pipeline:1007` ← bot `presentation_flow.py:448` (in-process generation) and worker `worker_run_job.py:454`; `presentation_orchestrator.py:737` (edit with `persist=None`) ← bot edit `presentation_flow.py:1014` and web chat edit without a document `sessions_core/chat.py:502-512`; render job `worker_run_job.py:253` |
+| `decks` (insert/upsert in SQL) | migration 013 `commit_presentation_revision_and_deck` | `database.py:293` ← web AI edit `worker_run_job.py:338` |
+| `documents` + first revision | migration 011/015 `create_document_if_missing` | `database.py:216` ← article init `documents.py:122`, design import `design.py:107` |
+| `document_revisions` + head | migration 011 `commit_document_revision` | `database.py:270` ← article save `documents.py:194`, article restore `:238`, design save `design.py:154`, design restore `:198` |
+| `generated_files` (insert) | `database.py:517` | bot article flow `article_flow.py:689,696` (local paths) |
+| `generated_files` (upsert) | `database.py:901` | `presentation_orchestrator.py:914` ← `_upload_rendered:890` |
+| R2 `generated/{p}/presentation.{ext}` | `storage.py:318` + `upload` | `presentation_orchestrator.py:885-888` (`generated_key` fallback `:887`) |
+| Scripts | `save_deck` | `gate_build2_stage0.py:126,143`, `gate_build2_stage3.py:200`, `gate_build2_stage4.py:139`, `gate_build2_stage5a.py:177`; in-memory stub `wire_stub_api.py:316` |
+| Tests (fakes or SQL) | `save_deck` | `test_database_client.py:692-741`, `test_chat_routes.py:156`, `test_brain_session.py:179,829`, `test_presentation_flow_handlers.py:464`; SQL `tests/sql/document_functions.sql`; direct inserts in a private PGlite schema `tests/sql/source-evidence.mjs` |
+
+The web client writes nothing directly; its only direct table read is `projects`
+(`chrome.tsx:178`).
+
+### A.2 Readers
+
+| Source | Reader |
+|---|---|
+| `decks` | `database.py:594` `get_deck` ← bot `store.py:161` (fallback), `design.py:103` (import), `/decisions` `projects.py:392`; Realtime `use-live-job.ts:149`; `backup_restore_verify.py:43`; `gate_build2_stage0.py:101`; probes `_probe_slide_field.py:18`, `_probe_deck_numbers.py:18`, `_forensic_slide11.py:36`, `_forensic_9330c308.py:23,56` |
+| document head | `database.py:240` `get_document` ← `documents.py:139,152,189,213,227`, `design.py:99`, `chat.py:247`, `store.py:157`, `worker_run_job.py:323` |
+| revisions | `database.py:316` (list) ← `documents.py:216`, `design.py:175`; `database.py:335` (one) ← `documents.py:157,230`, `design.py:189`, `worker_run_job.py:219` |
+| `generated_files` | `database.py:537` ← downloads `projects.py:147-166`, share `public.py:90-116` |
+| storage keys | signed URLs `projects.py:153,161`, `public.py:98,113`; bot delivers local paths `presentation_flow.py:513,647` (no storage read) |
+
+## Appendix B — `decks` column map
+
+| `decks` column | Source today | Source in the view |
+|---|---|---|
+| `id` | random at first save; read by nothing except the unused `design_directions` FK | `documents.id` |
+| `project_id` | caller | `documents.project_id` |
+| `title`, `language`, `audience` | **project row** at save time (`database.py:582-587`) | `projects` row (current) |
+| `deck_json` | `DeckSpec.model_dump` | head `document_revisions.content` |
+| `created_at` | first save | `documents.created_at` |
+| `updated_at` | trigger | head revision `created_at` |
+
+Measured deck sizes (`debug/*.json`, `gate_b_regen_deck.json`): 1–55 KB; images are
+URLs. The 2 MiB cap leaves about 40× headroom; the 200 KB latency probe is 4× a real deck.
