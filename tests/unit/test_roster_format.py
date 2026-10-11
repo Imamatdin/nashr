@@ -25,7 +25,7 @@ from packages.core.enums import AudienceType, ExportFormat, GenerationPackage
 from packages.core.models.presentation import SlideFix
 from tests.unit.test_brain_loop import _reply_turn
 from tests.unit.test_brain_session import _FakeOrchestrator, _provision
-from tests.unit.test_database_client import _make_deck
+from tests.unit.test_database_client import OWNER_TELEGRAM_ID, _make_deck
 
 
 def test_display_slide_number_is_one_based() -> None:
@@ -95,6 +95,7 @@ async def test_delivered_fix_function_response_roster_matches_text_numbers() -> 
         project_id="proj-1",
         user_text="fix slide",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     reloaded = await load_session(db, "proj-1")

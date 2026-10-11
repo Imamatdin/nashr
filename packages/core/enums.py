@@ -554,3 +554,19 @@ class IdentityProvider(StrEnum):
 
     TELEGRAM = "telegram"
     EMAIL = "email"
+
+
+class DiffUnit(StrEnum):
+    """The unit a revision diff compares: slides of a deck, blocks of an article."""
+
+    SLIDE = "slide"
+    BLOCK = "block"
+
+
+class DiffChange(StrEnum):
+    """How one slide or block differs between two revisions."""
+
+    ADDED = "added"
+    REMOVED = "removed"
+    CHANGED = "changed"
+    MOVED = "moved"

@@ -79,9 +79,11 @@ async def test_all_expected_schema_surfaces_present() -> None:
         elif request.url.path == "/rest/v1/":
             payload = {
                 "paths": {
-                    "/rpc/create_document_if_missing": {},
-                    "/rpc/commit_document_revision": {},
-                    "/rpc/commit_presentation_revision_and_deck": {},
+                    "/rpc/ensure_document": {},
+                    "/rpc/commit_revision": {},
+                    "/rpc/accept_proposal": {},
+                    "/rpc/reject_proposal": {},
+                    "/rpc/register_export": {},
                 }
             }
         else:

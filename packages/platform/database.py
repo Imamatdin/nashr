@@ -20,7 +20,6 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from packages.core.models.presentation import DeckSpec
 from packages.platform.config import PlatformConfig
 from supabase import Client, create_client
 
@@ -213,146 +212,6 @@ class DatabaseClient:
             return None
         return cast(dict[str, Any], result.data[0])
 
-    async def create_document_if_missing(
-        self,
-        project_id: str,
-        kind: str,
-        content: dict[str, Any],
-        user_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Atomically create one document and its initial immutable revision."""
-
-        result = await asyncio.to_thread(
-            self.rpc,
-            "create_document_if_missing",
-            {
-                "p_project_id": project_id,
-                "p_kind": kind,
-                "p_schema_version": 1,
-                "p_content": content,
-                "p_created_by": user_id,
-                "p_idempotency_key": idempotency_key,
-            },
-        )
-        return cast(dict[str, Any], result.data[0])
-
-    async def get_document(self, project_id: str, kind: str) -> dict[str, Any] | None:
-        """Read the current immutable revision for one project document."""
-
-        document_result = await asyncio.to_thread(
-            lambda: (
-                self._client.table("documents")
-                .select("*")
-                .eq("project_id", project_id)
-                .eq("kind", kind)
-                .limit(1)
-                .execute()
-            )
-        )
-        if not document_result.data:
-            return None
-        document = cast(dict[str, Any], document_result.data[0])
-        revision_result = await asyncio.to_thread(
-            lambda: (
-                self._client.table("document_revisions")
-                .select("*")
-                .eq("id", str(document["head_revision_id"]))
-                .limit(1)
-                .execute()
-            )
-        )
-        if not revision_result.data:
-            return None
-        revision = cast(dict[str, Any], revision_result.data[0])
-        return {**document, "revision_id": revision["id"], "content": revision["content"]}
-
-    async def commit_document_revision(
-        self,
-        document_id: str,
-        base_revision_id: str,
-        content: dict[str, Any],
-        user_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Commit content only when the caller still targets the current head."""
-
-        result = await asyncio.to_thread(
-            self.rpc,
-            "commit_document_revision",
-            {
-                "p_document_id": document_id,
-                "p_base_revision_id": base_revision_id,
-                "p_content": content,
-                "p_created_by": user_id,
-                "p_idempotency_key": idempotency_key,
-            },
-        )
-        return cast(dict[str, Any], result.data[0])
-
-    async def commit_presentation_revision_and_deck(
-        self,
-        document_id: str,
-        base_revision_id: str,
-        content: dict[str, Any],
-        user_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Atomically advance a presentation document and its deck read model."""
-
-        result = await asyncio.to_thread(
-            self.rpc,
-            "commit_presentation_revision_and_deck",
-            {
-                "p_document_id": document_id,
-                "p_base_revision_id": base_revision_id,
-                "p_content": content,
-                "p_created_by": user_id,
-                "p_idempotency_key": idempotency_key,
-            },
-        )
-        return cast(dict[str, Any], result.data[0])
-
-    async def list_document_revisions(
-        self,
-        document_id: str,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """Return compact revision metadata newest first."""
-
-        result = await asyncio.to_thread(
-            lambda: (
-                self._client.table("document_revisions")
-                .select("id,parent_revision_id,created_by,content_hash,created_at")
-                .eq("document_id", document_id)
-                .order("created_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
-        )
-        return cast(list[dict[str, Any]], list(result.data))
-
-    async def get_document_revision(
-        self,
-        document_id: str,
-        revision_id: str,
-    ) -> dict[str, Any] | None:
-        """Read one revision while constraining it to the expected document."""
-
-        result = await asyncio.to_thread(
-            lambda: (
-                self._client.table("document_revisions")
-                .select("*")
-                .eq("document_id", document_id)
-                .eq("id", revision_id)
-                .limit(1)
-                .execute()
-            )
-        )
-        if not result.data:
-            return None
-        return cast(dict[str, Any], result.data[0])
-
     async def get_user_projects(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
         """Get a user's projects, newest first."""
 
@@ -535,71 +394,15 @@ class DatabaseClient:
         )
         return cast(dict[str, Any], result.data[0])
 
-    async def get_project_files(self, project_id: str) -> list[dict[str, Any]]:
-        """Get every generated output file for a project."""
-
-        result = await asyncio.to_thread(
-            lambda: (
-                self._client.table("generated_files")
-                .select("*")
-                .eq("project_id", project_id)
-                .order("created_at", desc=True)
-                .execute()
-            )
-        )
-        return cast(list[dict[str, Any]], list(result.data))
-
     # ------------------------------------------------------------------ decks
 
-    async def save_deck(self, project_id: str, deck_spec: DeckSpec) -> dict[str, Any]:
-        """Persist a generated deck as the project's single current deck.
-
-        Maintains exactly one ``decks`` row per project: the first call
-        inserts, every later call (a regeneration, or a future brain edit)
-        updates the same row in place. The upsert keys on the
-        ``decks_project_id_key`` unique constraint, so "one current deck" is a
-        database invariant rather than a convention a concurrent save could
-        violate; row history is served by the conversation layer, not here.
-
-        The denormalised ``title`` / ``language`` / ``audience`` columns come
-        from the PROJECT row, never the spec. ``DeckSpec.interview.audience``
-        is an ``AudienceType`` (school / undergraduate / …) that does not
-        satisfy the ``decks.audience`` CHECK (talaba / oqituvchi / akademik /
-        biznes), and ``DeckSpec.title`` permits 300 characters against the
-        column's 200; the project row already holds DB-valid values for all
-        three. Only ``deck_json`` is sourced from the spec. ``created_at`` and
-        ``updated_at`` are owned by the column default and the
-        ``trg_decks_updated_at`` trigger respectively, so neither is written.
-
-        Raises :class:`ValueError` if the project does not exist — without it
-        the denormalised columns cannot be filled (audience has no spec-side
-        fallback) and the ``project_id`` foreign key would reject the insert
-        anyway.
-        """
-
-        project = await self.get_project(project_id)
-        if project is None:
-            raise ValueError(f"project {project_id} not found; cannot persist deck")
-        payload: dict[str, Any] = {
-            "project_id": project_id,
-            "title": str(project["title"]),
-            "language": str(project["language"]),
-            "audience": str(project["audience"]),
-            "deck_json": deck_spec.model_dump(mode="json"),
-        }
-        result = await asyncio.to_thread(
-            lambda: self._client.table("decks").upsert(payload, on_conflict="project_id").execute()
-        )
-        return cast(dict[str, Any], result.data[0])
-
     async def get_deck(self, project_id: str) -> dict[str, Any] | None:
-        """Get the project's current deck row, or ``None`` if none persisted.
+        """Read the project's current deck from the ``decks`` view, or ``None``.
 
-        Returns the single deck row maintained by :meth:`save_deck`. The
-        ``order(created_at desc).limit(1)`` is a belt-and-braces tiebreak: the
-        ``decks_project_id_key`` unique constraint guarantees at most one row
-        per project, so the ordering is inert in practice but keeps the read
-        deterministic if a stray duplicate ever predates the constraint.
+        Since migration 016 ``decks`` is a view of the presentation document's
+        head revision (ADR 0001), so this can never return a stale deck. It is a
+        read path only; decks are written as revisions through
+        :class:`packages.platform.document_store.DocumentStore`.
         """
 
         result = await asyncio.to_thread(
@@ -607,7 +410,6 @@ class DatabaseClient:
                 self._client.table("decks")
                 .select("*")
                 .eq("project_id", project_id)
-                .order("created_at", desc=True)
                 .limit(1)
                 .execute()
             )
@@ -630,7 +432,7 @@ class DatabaseClient:
     _SESSION_LIGHT_COLUMNS: str = (
         "id,project_id,history_json,sources_json,package,formats_json,"
         "approval_state,pending_action_json,fixes_used,accumulated_cost_usd,"
-        "accumulated_image_count,findings_json,created_at,updated_at"
+        "accumulated_image_count,findings_json,revision_id,created_at,updated_at"
     )
 
     async def save_brain_session(
@@ -647,6 +449,7 @@ class DatabaseClient:
         accumulated_cost_usd: float,
         accumulated_image_count: int,
         figures_json: list[dict[str, Any]] | None = None,
+        revision_id: str | None = None,
     ) -> dict[str, Any]:
         """Upsert the project's single brain session and return the saved row.
 
@@ -659,6 +462,8 @@ class DatabaseClient:
         session, then omit it (``None``) on every per-turn save so the upsert
         preserves the stored figures rather than wiping them — the source figures
         never change during editing, only the deck and the conversation do.
+
+        ``revision_id`` is the document revision the session is editing (ADR 0001).
         """
 
         payload: dict[str, Any] = {
@@ -672,6 +477,7 @@ class DatabaseClient:
             "fixes_used": fixes_used,
             "accumulated_cost_usd": accumulated_cost_usd,
             "accumulated_image_count": accumulated_image_count,
+            "revision_id": revision_id,
         }
         if figures_json is not None:
             payload["figures_json"] = figures_json
@@ -896,38 +702,6 @@ class DatabaseClient:
                 .execute()
             )
         )
-
-    # ------------------------------------------------------ generated upsert
-
-    async def upsert_generated_file(
-        self,
-        project_id: str,
-        file_type: str,
-        storage_path: str,
-        file_size: int,
-    ) -> dict[str, Any]:
-        """Register (or refresh) the project's single output row per format.
-
-        Keys on the migration-007 ``uq_generated_files_project_type`` unique
-        constraint, mirroring the stable R2 key layout
-        ``generated/{project_id}/presentation.{ext}`` that overwrites in
-        place — re-delivery updates the row instead of appending duplicates.
-        """
-
-        payload: dict[str, Any] = {
-            "project_id": project_id,
-            "file_type": file_type,
-            "storage_path": storage_path,
-            "file_size": file_size,
-        }
-        result = await asyncio.to_thread(
-            lambda: (
-                self._client.table("generated_files")
-                .upsert(payload, on_conflict="project_id,file_type")
-                .execute()
-            )
-        )
-        return cast(dict[str, Any], result.data[0])
 
     # ------------------------------------------------------------ share links
 

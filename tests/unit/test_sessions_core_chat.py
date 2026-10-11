@@ -23,6 +23,8 @@ from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
 from packages.core.enums import GenerationPackage
 from packages.core.models.presentation import SlideFix
 from packages.platform.database import DatabaseClient
+from packages.platform.document_models import DocumentKind, RevisionKind
+from packages.platform.document_store import DocumentStore
 from packages.sessions_core.chat import (
     TurnKind,
     abandon_parked_fix,
@@ -165,6 +167,50 @@ def _response_payload(content: genai_types.Content, index: int = 0) -> dict[str,
     return payload
 
 
+_JOB_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def _fake_of(db: DatabaseClient) -> Any:
+    return db._client  # pyright: ignore[reportPrivateUsage]
+
+
+async def _dispatch(*, fake: Any, **kwargs: Any) -> Any:
+    """dispatch_fix wired the way the worker wires it (ADR 0001).
+
+    The base is the session's revision; ``commit`` writes an AI edit as a worker
+    holding a processing job; ``deliver`` is the runner's (strict) render.
+    """
+
+    if not any(row.get("id") == _JOB_ID for row in fake.tables.get("generation_jobs", [])):
+        fake.tables.setdefault("generation_jobs", []).append(
+            {"id": _JOB_ID, "project_id": "proj-1", "user_id": "u1", "status": "processing"}
+        )
+    db: DatabaseClient = kwargs["db"]
+    runner = kwargs["runner"]
+    session = await _session(db)
+    store = DocumentStore(db)
+    document_id = await store.document_id("proj-1", DocumentKind.PRESENTATION)
+    assert document_id is not None
+
+    async def commit(deck: Any, base: str | None) -> Any:
+        return await store.commit(
+            document_id,
+            base,
+            deck.model_dump(mode="json"),
+            kind=RevisionKind.AI_EDIT,
+            actor=f"worker:{_JOB_ID}",
+            idempotency_key=f"chat-edit:{len(fake.tables.get('document_revisions', []))}",
+        )
+
+    async def deliver(deck: Any, revision_id: str, formats: list[Any]) -> list[str]:
+        render = await runner.render(deck, formats, kwargs["progress"])
+        return list(render.warnings)
+
+    return await dispatch_fix(
+        base_revision_id=str(session.revision_id), commit=commit, deliver=deliver, **kwargs
+    )
+
+
 async def _park_a_dangling_call(db: DatabaseClient, *, calls: int = 1) -> None:
     """Persist a session whose history ends with an unanswered edit_slides call."""
 
@@ -259,7 +305,10 @@ async def test_turn_without_a_session_is_no_session() -> None:
 
 async def test_turn_without_a_deck_is_no_session() -> None:
     db, fake, _deck, _sources = await _provision()
-    fake.seed("decks", [])  # the deck row is gone; the session cannot edit
+    # The head is content that does not validate as a deck (a legacy import):
+    # the session cannot edit it.
+    for row in fake.tables["document_revisions"]:
+        row["content"] = {"legacy_raw": [1]}
     driver = _FakeDriver()
 
     result = await run_web_turn(
@@ -445,7 +494,8 @@ async def test_delivered_fix_consumes_exactly_one_edit_and_answers_the_call() ->
     await _park_a_dangling_call(db)
     runner = _FakeOrchestrator(deck, cost=0.25, images=1)
 
-    result = await dispatch_fix(
+    result = await _dispatch(
+        fake=_fake_of(db),
         runner=cast(Any, runner),
         db=db,
         project_id="proj-1",
@@ -470,7 +520,8 @@ async def test_multi_call_dispatch_answers_every_parked_call_part() -> None:
     await _park_a_dangling_call(db, calls=2)
     runner = _FakeOrchestrator(deck)
 
-    result = await dispatch_fix(
+    result = await _dispatch(
+        fake=_fake_of(db),
         runner=cast(Any, runner),
         db=db,
         project_id="proj-1",
@@ -493,7 +544,8 @@ async def test_zero_file_render_does_not_consume_an_edit() -> None:
     await _park_a_dangling_call(db)
     runner = _FakeOrchestrator(deck, deliver=False)  # every format failed to render
 
-    result = await dispatch_fix(
+    result = await _dispatch(
+        fake=_fake_of(db),
         runner=cast(Any, runner),
         db=db,
         project_id="proj-1",
@@ -503,7 +555,7 @@ async def test_zero_file_render_does_not_consume_an_edit() -> None:
     )
 
     assert result.delivered is False
-    assert result.reason == "render_failed"
+    assert result.reason is not None and result.reason.startswith("render_failed")
     assert len(runner.calls) == 1  # the chain ran; it just delivered nothing
     reloaded = await _session(db)
     assert reloaded.fixes_used == 0
@@ -514,7 +566,8 @@ async def test_raising_runner_does_not_consume_an_edit() -> None:
     db, _fake, _deck, _sources = await _provision()
     await _park_a_dangling_call(db)
 
-    result = await dispatch_fix(
+    result = await _dispatch(
+        fake=_fake_of(db),
         runner=cast(Any, _RaisingOrchestrator()),
         db=db,
         project_id="proj-1",
@@ -538,7 +591,8 @@ async def test_dispatch_refuses_before_calling_the_runner_when_exhausted() -> No
     await persist_session(db, session)
     runner = _FakeOrchestrator(deck)
 
-    result = await dispatch_fix(
+    result = await _dispatch(
+        fake=_fake_of(db),
         runner=cast(Any, runner),
         db=db,
         project_id="proj-1",
@@ -556,7 +610,7 @@ async def test_dispatch_refuses_before_calling_the_runner_when_exhausted() -> No
 
 
 class _PipelineExposingOrchestrator(_FakeOrchestrator):
-    """A runner that ALSO offers ``run_full_pipeline`` — and tells on itself.
+    """A runner that ALSO offers ``build_deck`` — and tells on itself.
 
     The real orchestrator has both capabilities; the Protocol narrowing them to
     one is a claim about dispatch_fix, not a fact the type system enforces at
@@ -569,7 +623,7 @@ class _PipelineExposingOrchestrator(_FakeOrchestrator):
         self.pipeline_touches: list[str] = []
 
     @property
-    def run_full_pipeline(self) -> Callable[..., Awaitable[Any]]:
+    def build_deck(self) -> Callable[..., Awaitable[Any]]:
         self.pipeline_touches.append("attribute_read")
 
         async def _never(*_args: Any, **_kwargs: Any) -> Any:
@@ -581,13 +635,14 @@ class _PipelineExposingOrchestrator(_FakeOrchestrator):
 async def test_the_fix_runner_seam_cannot_rerun_the_pipeline() -> None:
     # The "a fix re-renders WITHOUT re-running the pipeline" guarantee, driven
     # rather than asserted: the runner handed to dispatch_fix DOES expose
-    # run_full_pipeline, and a normal delivered fix must still reach only the
+    # build_deck, and a normal delivered fix must still reach only the
     # apply seam.
     db, _fake, deck, _sources = await _provision()
     await _park_a_dangling_call(db)
     runner = _PipelineExposingOrchestrator(deck)
 
-    result = await dispatch_fix(
+    result = await _dispatch(
+        fake=_fake_of(db),
         runner=cast(Any, runner),
         db=db,
         project_id="proj-1",
@@ -599,3 +654,48 @@ async def test_the_fix_runner_seam_cannot_rerun_the_pipeline() -> None:
     assert result.delivered is True
     assert len(runner.calls) == 1  # the apply seam ran
     assert runner.pipeline_touches == []  # the pipeline was never even read
+
+
+async def test_ai_edit_racing_a_manual_save_becomes_a_proposal_and_loses_nothing() -> None:
+    # (c) A manual save and an AI edit start from the same base. The manual save
+    # commits first; the AI edit, committed against the old base, is stored as a
+    # proposal instead of overwriting it, and no edit allowance is consumed.
+    db, fake, deck, _sources = await _provision()
+    await _park_a_dangling_call(db)
+    store = DocumentStore(db)
+    head = await store.head("proj-1", DocumentKind.PRESENTATION)
+    assert head is not None
+    manual = dict(head.content)
+    manual["title"] = "Saved by hand"
+    saved = await store.commit(
+        head.document_id,
+        head.revision_id,
+        manual,
+        kind=RevisionKind.IMPORT,
+        actor="system:test-manual",
+        idempotency_key="manual-save",
+    )
+    runner = _FakeOrchestrator(deck)
+
+    result = await _dispatch(
+        fake=fake,
+        runner=cast(Any, runner),
+        db=db,
+        project_id="proj-1",
+        fixes=[SlideFix(slide_id="s0", instruction="tighten")],
+        call_count=1,
+        progress=_progress(),
+    )
+
+    assert result.status.value == "proposed"
+    after = await store.head("proj-1", DocumentKind.PRESENTATION)
+    assert after is not None and after.revision_id == saved.revision_id
+    assert after.content["title"] == "Saved by hand"
+    proposals = fake.tables["revision_proposals"]
+    assert len(proposals) == 1
+    assert proposals[0]["base_revision_id"] == head.revision_id
+    assert proposals[0]["kind"] == "ai_edit"
+    assert runner.renders == []
+    reloaded = await _session(db)
+    assert reloaded.fixes_used == 0
+    assert _response_payload(reloaded.history[-1])["proposed"] is True

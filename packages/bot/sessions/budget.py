@@ -7,7 +7,7 @@ a per-fix cost projection — a counter is an integer the model cannot influence
 with no estimate to be wrong (the projection went through three rounds of bound
 bugs; the count cannot be exceeded).
 
-The real per-fix cost is still surfaced (``FixAndRenderResult.estimated_cost_usd``)
+The real per-fix cost is still surfaced (``FixBatchResult.estimated_cost_usd``)
 and accumulated on the session for billing/analytics, but it does NOT gate.
 """
 

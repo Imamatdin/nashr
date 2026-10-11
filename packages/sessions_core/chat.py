@@ -2,15 +2,17 @@
 
 The web split of the bot's chat loop. The bot runs a turn and applies the fix
 in the same coroutine because a Telegram handler can afford to; a web request
-cannot — ``apply_fixes_and_render`` re-runs editorial regeneration and the Node
-renderer, minutes of work. So the turn and the apply are separated:
+cannot — applying fixes re-runs editorial regeneration and the Node renderer,
+minutes of work. So the turn and the apply are separated:
 
 * :func:`run_web_turn` (API process) runs ONE brain turn and, when the turn
   requests edits the user themselves asked for, PARKS them: the session is
   persisted with the model's ``edit_slides`` call still UNANSWERED in history
   and the caller enqueues a ``presentation_edit`` job carrying the fixes.
-* :func:`dispatch_fix` (worker process) applies the parked batch, answers the
-  call, consumes one unit of the tier's fix allowance, and persists.
+* :func:`dispatch_fix` (worker process) applies the parked batch against the
+  revision the brain saw, commits it (or stores a proposal when the deck moved),
+  renders and publishes the committed revision, answers the call, and persists
+  (see :mod:`packages.sessions_core.apply`).
 
 The unanswered call is the same interlock the approval gate already relies on:
 no turn may run against a session that has one, because resending a dangling
@@ -28,7 +30,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
 from google.genai import types as genai_types
 
@@ -39,19 +41,29 @@ from packages.bot.sessions.models import (
     PendingAction,
     requires_approval,
 )
-from packages.bot.sessions.roster_format import render_roster_payload
-from packages.bot.sessions.store import hydrate_figures, load_session, persist_session
+from packages.bot.sessions.store import (
+    load_revision_deck,
+    load_session,
+    move_session_to_head,
+    persist_session,
+)
 from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
-from packages.core.gemini_tools import FunctionResult, build_function_responses_content
 from packages.core.models.presentation import SlideFix
 from packages.platform.database import DatabaseClient
+from packages.sessions_core.apply import (
+    CommitDeck,
+    DeliverRevision,
+    FixDispatchResult,
+    FixRunner,
+    FixStatus,
+    answer_fix_calls,
+    apply_fix_batch,
+)
 
 if TYPE_CHECKING:  # heavy (aiogram + the whole pipeline) — worker-side only
     from collections.abc import Awaitable, Callable, Sequence
 
-    from packages.bot.orchestrators.presentation_orchestrator import FixAndRenderResult
     from packages.bot.sessions.driver import BrainDriver
-    from packages.core.enums import ExportFormat, GenerationPackage
 
 logger = logging.getLogger(__name__)
 
@@ -63,29 +75,6 @@ _CONTEXT_PREFIX_MARKER = "DECK ROSTER (address slides by slide_id):"
 _CONTEXT_SEPARATOR = "\n\n---\n\n"
 
 _MAX_WIRE_MESSAGES = 200
-
-
-class FixRunner(Protocol):
-    """The one orchestrator capability this module needs, as a seam.
-
-    Keeps ``packages.sessions_core`` free of the bot orchestrator (and therefore
-    of aiogram) at import time: the worker passes the real
-    :class:`~packages.bot.orchestrators.presentation_orchestrator.PresentationOrchestrator`,
-    a test passes a fake.
-    """
-
-    async def apply_fixes_and_render(
-        self,
-        deck: Any,
-        fixes: Sequence[SlideFix],
-        sources: Any,
-        project_id: str,
-        formats: list[ExportFormat],
-        progress: Callable[[str, int, int], Awaitable[None]],
-        *,
-        package: GenerationPackage,
-        persist: Callable[[Any], Awaitable[None]] | None = None,
-    ) -> FixAndRenderResult: ...
 
 
 class TurnKind(StrEnum):
@@ -119,6 +108,8 @@ class TurnResult:
     fix_call_count: int = 0
     fix_limit: int = 0
     fixes_used: int = 0
+    # The revision the brain saw this turn: a parked edit commits against it.
+    revision_id: str | None = None
 
 
 @dataclass
@@ -224,10 +215,7 @@ def append_fix_result(session: BrainSession, response: dict[str, object], *, cou
     turn, so ``count`` responses are appended — never fewer.
     """
 
-    parts = [
-        FunctionResult(name=EDIT_SLIDES_TOOL_NAME, response=response) for _ in range(max(1, count))
-    ]
-    session.history = [*session.history, build_function_responses_content(parts)]
+    answer_fix_calls(session, response, count=count)
 
 
 async def repair_dangling_call(db: DatabaseClient, session: BrainSession) -> bool:
@@ -303,7 +291,7 @@ async def run_web_turn(
     """
 
     session = await load_session(db, project_id)
-    if session is None or session.deck is None:
+    if session is None:
         return TurnResult(TurnKind.NO_SESSION)
 
     if session.pending_action is not None:
@@ -328,6 +316,12 @@ async def run_web_turn(
                 fixes_used=session.fixes_used,
             )
         await repair_dangling_call(db, session)
+
+    # The web chat edits what the web shows: the head. (The bot instead keeps its
+    # revision and asks the user to reload when the deck changed elsewhere.)
+    await move_session_to_head(db, session)
+    if session.deck is None:
+        return TurnResult(TurnKind.NO_SESSION)
 
     outcome = await driver.run_turn(session, user_text)
     session.history = outcome.history
@@ -392,6 +386,7 @@ async def run_web_turn(
         fix_call_count=max(1, outcome.fix_call_count),
         fix_limit=fix_limit,
         fixes_used=session.fixes_used,
+        revision_id=session.revision_id,
     )
 
 
@@ -448,16 +443,6 @@ async def reject_pending(db: DatabaseClient, project_id: str) -> bool:
 # ----------------------------------------------------------------- apply side
 
 
-@dataclass(frozen=True)
-class FixDispatchResult:
-    """What the worker's apply produced, for the job's terminal row."""
-
-    delivered: bool
-    slides_changed: int = 0
-    warnings: tuple[str, ...] = ()
-    reason: str | None = None
-
-
 async def dispatch_fix(
     *,
     runner: FixRunner,
@@ -466,106 +451,43 @@ async def dispatch_fix(
     fixes: Sequence[SlideFix],
     call_count: int,
     progress: Callable[[str, int, int], Awaitable[None]],
-    persist: Callable[[Any], Awaitable[None]] | None = None,
+    base_revision_id: str,
+    commit: CommitDeck,
+    deliver: DeliverRevision,
 ) -> FixDispatchResult:
-    """Apply a parked fix batch, answer its call, and persist. Worker-side.
+    """Apply a parked fix batch against the revision the brain saw. Worker-side.
 
-    Lifted from the bot's ``_dispatch_fix`` with its two invariants intact:
-
-    * the allowance is consumed IFF the batch produced at least one deliverable
-      file — a render that degraded every format is a failed fix, not a used
-      edit;
-    * every exit answers each parked call part, so the next turn's history is
-      coherent whatever happened.
-
-    The web path needs no local-file stashing: ``apply_fixes_and_render`` →
-    ``render`` already uploads each format to its stable R2 key and refreshes
-    the ``generated_files`` rows the deck route serves.
+    ``base_revision_id`` was stamped when the batch was parked. If the session has
+    since moved (the bot reloaded, or a later web turn followed the head), the
+    batch still applies to the deck it was asked about, so it is committed against
+    that base and becomes a proposal or a conflict instead of overwriting newer work.
     """
 
     session = await load_session(db, project_id)
-    if session is None or session.deck is None:
-        return FixDispatchResult(False, reason="no_session")
-
-    fix_limit = session_fix_limit(session.package)
-    if not has_fixes_remaining(session.fixes_used, session.package):
-        append_fix_result(
-            session, {"error": "fixes_exhausted", "fix_limit": fix_limit}, count=call_count
-        )
-        session.pending_action = None
-        session.approval_state = ApprovalState.IDLE
-        await persist_session(db, session)
-        return FixDispatchResult(False, reason="fixes_exhausted")
-
-    try:
-        await hydrate_figures(db, session)
-        if persist is None:
-            result = await runner.apply_fixes_and_render(
-                session.deck,
-                list(fixes),
-                session.sources,
-                session.project_id,
-                session.formats,
-                progress,
-                package=session.package,
+    if session is None:
+        return FixDispatchResult(FixStatus.NO_SESSION, reason="no_session")
+    if session.revision_id != base_revision_id:
+        revision_id, deck = await load_revision_deck(db, project_id, base_revision_id)
+        if revision_id != base_revision_id:
+            append_fix_result(
+                session,
+                {"error": "fix_failed", "detail": "base_revision_missing"},
+                count=call_count,
             )
-        else:
-            result = await runner.apply_fixes_and_render(
-                session.deck,
-                list(fixes),
-                session.sources,
-                session.project_id,
-                session.formats,
-                progress,
-                package=session.package,
-                persist=persist,
-            )
-    except Exception as exc:
-        logger.warning(
-            "chat_fix_chain_failed project=%s error_type=%s",
-            session.project_id,
-            type(exc).__name__,
-        )
-        session.pending_action = None
-        session.approval_state = ApprovalState.IDLE
-        append_fix_result(
-            session, {"error": "fix_failed", "detail": type(exc).__name__}, count=call_count
-        )
-        await persist_session(db, session)
-        return FixDispatchResult(False, reason=f"fix_failed:{type(exc).__name__}")
-
-    session.deck = result.deck
-    session.pending_action = None
-    session.approval_state = ApprovalState.IDLE
-
-    if not result.render.by_extension():
-        append_fix_result(
-            session,
-            {"error": "render_failed", "warnings": list(result.render.warnings)},
-            count=call_count,
-        )
-        await persist_session(db, session)
-        return FixDispatchResult(
-            False, warnings=tuple(result.render.warnings), reason="render_failed"
-        )
-
-    session.fixes_used += 1
-    session.accumulated_cost_usd += result.estimated_cost_usd
-    session.accumulated_image_count += result.image_count
-    append_fix_result(
-        session,
-        {
-            "delivered": True,
-            "slides_changed": len(fixes),
-            "roster": render_roster_payload(session.deck),
-        },
-        count=call_count,
-    )
-    await persist_session(db, session)
-    return FixDispatchResult(
-        True,
-        slides_changed=len(fixes),
-        warnings=tuple(result.render.warnings),
+            session.pending_action = None
+            session.approval_state = ApprovalState.IDLE
+            await persist_session(db, session)
+            return FixDispatchResult(FixStatus.FAILED, reason="base_revision_missing")
+        session.revision_id, session.deck = revision_id, deck
+    return await apply_fix_batch(
+        runner=runner,
+        db=db,
+        session=session,
+        fixes=fixes,
+        call_count=call_count,
+        progress=progress,
+        commit=commit,
+        deliver=deliver,
     )
 
 

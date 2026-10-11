@@ -109,6 +109,13 @@ class BotLabels:
     edit_nudge: str  # reviewing_output: how to reach the editor
     edit_nudge_unavailable: str  # reviewing_output, no editing session: buttons only
     brain_text_only: str  # talking_to_brain: non-text message rejected
+    # Canonical document state (ADR 0001): the deck the user is editing here was
+    # changed elsewhere; the bot never overwrites it and offers a reload instead.
+    deck_changed_elsewhere: str
+    reload_deck_button: str
+    deck_reloaded: str
+    deck_regeneration_proposed: str
+    edit_unchanged: str
 
 
 LABELS_UZ = BotLabels(
@@ -207,6 +214,11 @@ LABELS_UZ = BotLabels(
         "uchun quyidagi tugmalardan foydalaning."
     ),
     brain_text_only="Bu yerda faqat matn bilan ishlay olaman — o'zgartirishni so'z bilan yozing.",
+    deck_changed_elsewhere="Bu taqdimot siz bu yerda tahrirlashni boshlaganingizdan keyin boshqa joyda (masalan, saytda) o'zgartirildi. Tahriringiz qo'llanmadi. Eng so'nggi versiyani yuklab, qayta urinib ko'ring.",
+    reload_deck_button="🔄 So'nggi versiyani yuklash",
+    deck_reloaded="So'nggi versiya yuklandi. Tahrirlashni davom ettirishingiz mumkin.",
+    deck_regeneration_proposed="Qayta yaratish davomida taqdimot boshqa joyda o'zgartirildi. Yangi versiya taklif sifatida saqlandi — uni saytda ko'rib chiqib, qabul qilishingiz mumkin.",
+    edit_unchanged="Bu tahrir taqdimotga hech qanday o'zgarish kiritmadi.",
 )
 
 
@@ -301,6 +313,11 @@ LABELS_RU = BotLabels(
         "чтобы скачать или создать заново."
     ),
     brain_text_only="Здесь я работаю только с текстом — опишите изменение словами.",
+    deck_changed_elsewhere="Эта презентация была изменена в другом месте (например, на сайте) после того, как вы начали редактировать её здесь. Ваша правка не применена. Загрузите последнюю версию и попробуйте снова.",
+    reload_deck_button="🔄 Загрузить последнюю версию",
+    deck_reloaded="Последняя версия загружена. Можно продолжать редактирование.",
+    deck_regeneration_proposed="Пока презентация создавалась заново, её изменили в другом месте. Новая версия сохранена как предложение — её можно просмотреть и принять на сайте.",
+    edit_unchanged="Эта правка не изменила презентацию.",
 )
 
 
@@ -389,6 +406,11 @@ LABELS_EN = BotLabels(
         "Editing isn't available for this deck — use the buttons below to download or regenerate."
     ),
     brain_text_only="I can only work with text here — describe the change in words.",
+    deck_changed_elsewhere="This presentation was changed somewhere else (for example on the website) after you started editing it here. Your edit was not applied. Reload the latest version and try again.",
+    reload_deck_button="🔄 Reload latest version",
+    deck_reloaded="Loaded the latest version. You can keep editing.",
+    deck_regeneration_proposed="The presentation was changed elsewhere while it was being regenerated. The new version was saved as a proposal — you can review and accept it on the website.",
+    edit_unchanged="That edit made no change to the presentation.",
 )
 
 
@@ -484,6 +506,11 @@ LABELS_KAA = BotLabels(
         "jaratıw ushın tómendegi túymelerden paydalanıń."
     ),
     brain_text_only="Bul jerde tek tekst penen isley alaman — ózgerisdi sóz benen jazıń.",
+    deck_changed_elsewhere="Bul prezentaciya siz bul jerde redaktorlawdı baslaǵannan keyin basqa jerde (mısalı, saytta) ózgertildi. Redaktorlawıńız qollanılmadı. Eń sońǵı versiyanı júklep, qayta urınıp kóriń.",
+    reload_deck_button="🔄 Eń sońǵı versiyanı júklew",
+    deck_reloaded="Eń sońǵı versiya júklendi. Redaktorlawdı dawam ettiriwińiz múmkin.",
+    deck_regeneration_proposed="Qaytadan jaratıw waqtında prezentaciya basqa jerde ózgertildi. Jańa versiya usınıs retinde saqlandı — onı saytta kórip shıǵıp, qabıl ete alasız.",
+    edit_unchanged="Bul redaktorlaw prezentaciyaǵa hesh qanday ózgeris kirgizbedi.",
 )
 
 

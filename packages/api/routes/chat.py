@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
 from packages.core.models.presentation import SlideFix
-from packages.platform.database import DatabaseClient
+from packages.platform.document_models import DocumentKind
 from packages.platform.jobs import DuplicateActiveJobError, JobQueue, JobType
 from packages.platform.rate_limit import CHAT_ACTION, RateLimiter
 from packages.sessions_core import (
@@ -241,16 +241,23 @@ async def _enqueue_edit(
     return job.id
 
 
-async def _design_revision_payload(db: DatabaseClient, project_id: str) -> dict[str, str]:
-    """Stamp an edit when this project already has a versioned design document."""
+async def _design_revision_payload(
+    request: Request, project_id: str, revision_id: str | None
+) -> dict[str, str]:
+    """Stamp an edit with the revision the brain saw; the worker commits against it.
 
-    design = await db.get_document(project_id, "presentation")
-    if design is None:
-        return {}
-    return {
-        "document_id": str(design["document_id"] if "document_id" in design else design["id"]),
-        "base_revision_id": str(design["revision_id"]),
-    }
+    Every presentation has a document since migration 016, so a missing document
+    or revision means the session cannot edit and the edit is refused (409).
+    """
+
+    document_id = await request.app.state.documents.document_id(
+        project_id, DocumentKind.PRESENTATION
+    )
+    if document_id is None or revision_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail={"reason": "session_not_ready"}
+        )
+    return {"document_id": document_id, "base_revision_id": revision_id}
 
 
 @router.post("/{project_id}/chat", response_model=ChatTurnView)
@@ -314,6 +321,11 @@ async def post_chat(
     # FIX_READY: the session is parked with the call unanswered; the job carries
     # the batch. An enqueue that fails must un-park, or the session stays wedged.
     try:
+        revision_payload = await _design_revision_payload(request, project_id, result.revision_id)
+    except HTTPException:
+        await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
+        raise
+    try:
         job_id = await _enqueue_edit(
             request,
             project_id=project_id,
@@ -325,7 +337,7 @@ async def post_chat(
                 ],
                 "call_count": result.fix_call_count,
                 "reply_text": result.reply_text,
-                **(await _design_revision_payload(db, project_id)),
+                **revision_payload,
             },
         )
     except DuplicateActiveJobError:
@@ -369,6 +381,13 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "no_pending_action"}
         )
+    session_row = await db.get_brain_session(project_id)
+    session_revision = (
+        str(session_row["revision_id"])
+        if session_row is not None and session_row.get("revision_id")
+        else None
+    )
+    revision_payload = await _design_revision_payload(request, project_id, session_revision)
 
     # The batch is NOT copied into the payload: it stays on the session row so a
     # lost job leaves the decision re-presentable instead of silently dropped.
@@ -380,7 +399,7 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
             payload={
                 "from_pending": True,
                 "call_count": pending.call_count,
-                **(await _design_revision_payload(db, project_id)),
+                **revision_payload,
             },
         )
     except DuplicateActiveJobError:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -45,8 +46,11 @@ from packages.platform.database import (
     generate_invoice_number,
     generate_subscriber_id,
 )
+from tests.unit.fake_documents import DocumentRpcEmulator
 
 # --------------------------------------------------------------- fakes
+
+OWNER_TELEGRAM_ID = 777_001
 
 
 class _FakeQuery:
@@ -63,7 +67,9 @@ class _FakeQuery:
         self._mode: str = "select"
         self._payload: dict[str, Any] | None = None
         self._filters: list[tuple[str, Any]] = []
+        self._in_filters: list[tuple[str, list[Any]]] = []
         self._lt_filters: list[tuple[str, Any]] = []
+        self._gt_filters: list[tuple[str, Any]] = []
         self._limit: int | None = None
         self._order: tuple[str, bool] | None = None
         self._select_cols: str = "*"
@@ -94,6 +100,14 @@ class _FakeQuery:
         self._filters.append((col, val))
         return self
 
+    def in_(self, col: str, values: list[Any]) -> _FakeQuery:
+        self._in_filters.append((col, list(values)))
+        return self
+
+    def gt(self, col: str, val: Any) -> _FakeQuery:
+        self._gt_filters.append((col, val))
+        return self
+
     def lt(self, col: str, val: Any) -> _FakeQuery:
         self._lt_filters.append((col, val))
         return self
@@ -112,7 +126,9 @@ class _FakeQuery:
             mode=self._mode,
             payload=self._payload,
             filters=self._filters,
+            in_filters=self._in_filters,
             lt_filters=self._lt_filters,
+            gt_filters=self._gt_filters,
             limit=self._limit,
             order=self._order,
             select_cols=self._select_cols,
@@ -132,9 +148,39 @@ class FakeSupabaseClient:
         self.tables: dict[str, list[dict[str, Any]]] = {}
         self.inserts: list[tuple[str, dict[str, Any]]] = []
         self.updates: list[tuple[str, dict[str, Any], list[tuple[str, Any]]]] = []
+        self.documents = DocumentRpcEmulator(self.tables)
+        self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def rpc(self, fn: str, params: dict[str, Any]) -> SimpleNamespace:
+        """The migration-016 document functions, emulated over the fake tables."""
+
+        self.rpc_calls.append((fn, dict(params)))
+        call = self.documents.call
+        return SimpleNamespace(execute=lambda: _rpc_result(call, fn, params))
 
     def seed(self, table: str, rows: list[dict[str, Any]]) -> None:
         self.tables[table] = list(rows)
+
+    @staticmethod
+    def _value(row: dict[str, Any], col: str) -> Any:
+        """A column, or a PostgREST JSON path like ``payload->>revision_id``."""
+
+        if "->>" in col:
+            base, key = col.split("->>", 1)
+            nested = row.get(base)
+            value = nested.get(key) if isinstance(nested, dict) else None
+            return None if value is None else str(value)
+        return row.get(col)
+
+    def _matches(
+        self,
+        row: dict[str, Any],
+        filters: list[tuple[str, Any]],
+        in_filters: list[tuple[str, list[Any]]],
+    ) -> bool:
+        return all(self._value(row, c) == v for c, v in filters) and all(
+            self._value(row, c) in vs for c, vs in in_filters
+        )
 
     def table(self, name: str) -> _FakeQuery:
         return _FakeQuery(self, name)
@@ -146,20 +192,26 @@ class FakeSupabaseClient:
         mode: str,
         payload: dict[str, Any] | None,
         filters: list[tuple[str, Any]],
+        in_filters: list[tuple[str, list[Any]]] | None = None,
         lt_filters: list[tuple[str, Any]] | None = None,
+        gt_filters: list[tuple[str, Any]] | None = None,
         limit: int | None,
         order: tuple[str, bool] | None,
         select_cols: str,
         on_conflict: str = "",
     ) -> SimpleNamespace:
         lt_filters = lt_filters or []
+        in_filters = in_filters or []
         rows = self.tables.setdefault(table, [])
         if mode == "select":
-            filtered = [r for r in rows if all(r.get(c) == v for c, v in filters)]
+            filtered = [r for r in rows if self._matches(r, filters, in_filters)]
             filtered = [
                 r
                 for r in filtered
                 if all(r.get(c) is not None and str(r.get(c)) < str(v) for c, v in lt_filters)
+                and all(
+                    r.get(c) is not None and str(r.get(c)) > str(v) for c, v in gt_filters or []
+                )
             ]
             if order is not None:
                 col, desc = order
@@ -183,7 +235,7 @@ class FakeSupabaseClient:
             assert payload is not None
             updated: list[dict[str, Any]] = []
             for r in rows:
-                if all(r.get(c) == v for c, v in filters):
+                if self._matches(r, filters, in_filters):
                     r.update(payload)
                     updated.append(r)
             self.updates.append((table, dict(payload), list(filters)))
@@ -212,6 +264,17 @@ class FakeSupabaseClient:
             self.inserts.append((table, dict(row)))
             return SimpleNamespace(data=[row])
         return SimpleNamespace(data=[])
+
+
+def _rpc_result(
+    call: Callable[[str, dict[str, Any]], SimpleNamespace | None],
+    fn: str,
+    params: dict[str, Any],
+) -> SimpleNamespace:
+    result = call(fn, params)
+    if result is None:
+        raise NotImplementedError(f"FakeSupabaseClient has no rpc {fn!r}")
+    return result
 
 
 def _make_db() -> tuple[DatabaseClient, FakeSupabaseClient]:
@@ -677,68 +740,43 @@ def _seed_project(
             }
         ],
     )
+    # The owner, with the Telegram identity the bot writes as (``bot:<id>``).
+    users = fake.tables.setdefault("users", [])
+    if not any(row.get("id") == "u1" for row in users):
+        users.append({"id": "u1", "telegram_id": OWNER_TELEGRAM_ID, "language": language})
 
 
-async def test_save_deck_sources_denormalised_columns_from_project() -> None:
+async def test_get_deck_reads_the_decks_view_and_never_writes() -> None:
+    # Since migration 016 ``decks`` is a view of the head revision; the client
+    # only reads it. Writes go through DocumentStore (commit_revision).
     db, fake = _make_db()
-    # All THREE denormalised columns are seeded to differ from the deck's own
-    # value, so a regression that reads any of them from the spec fails here.
-    # The deck's language is the uz default, so the project's ru can only come
-    # from the project row; its 300-char title and undergraduate audience would
-    # each violate a decks CHECK if they ever reached a column.
-    _seed_project(fake, title="Project row title", language="ru", audience="talaba")
-    deck = _make_deck(title="A" * 300, audience=AudienceType.UNDERGRADUATE)
+    fake.seed("decks", [{"project_id": "proj-1", "revision_id": "r1", "deck_json": {"t": 1}}])
 
-    saved = await db.save_deck("proj-1", deck)
-
-    assert saved["project_id"] == "proj-1"
-    assert saved["title"] == "Project row title"  # project, not the 300-char deck title
-    assert saved["language"] == "ru"  # project ru, not the deck's default uz
-    assert saved["audience"] == "talaba"  # NOT "undergraduate" (AudienceType has no DB mapping)
-
-
-async def test_save_deck_round_trips_spec_through_deck_json() -> None:
-    db, fake = _make_db()
-    _seed_project(fake)
-    deck = _make_deck(title="A" * 300, audience=AudienceType.UNDERGRADUATE)
-
-    await db.save_deck("proj-1", deck)
     row = await db.get_deck("proj-1")
 
-    assert row is not None
-    restored = DeckSpec.model_validate(row["deck_json"])
-    # The spec's own values survive intact inside deck_json, distinct from the
-    # denormalised columns sourced from the project.
-    assert restored == deck
-    assert restored.title == "A" * 300
-    assert restored.interview.audience is AudienceType.UNDERGRADUATE
-    assert restored.plan is not None
-    assert [s.section_name for s in restored.plan.sections] == ["Origins", "Legacy"]
-    assert [s.slide_id for s in restored.slides] == [s.slide_id for s in deck.slides]
+    assert row is not None and row["revision_id"] == "r1"
+    assert fake.inserts == [] and fake.updates == []
 
 
-async def test_save_deck_upserts_one_row_per_project() -> None:
-    db, fake = _make_db()
-    _seed_project(fake)
-
-    await db.save_deck(
-        "proj-1", _make_deck(title="First generation", audience=AudienceType.UNDERGRADUATE)
-    )
-    await db.save_deck(
-        "proj-1", _make_deck(title="Second generation", audience=AudienceType.GRADUATE)
-    )
-
-    # Current-state, not history: the second save updates the same row in place.
-    assert len(fake.tables["decks"]) == 1
-    row = await db.get_deck("proj-1")
-    assert row is not None
-    assert DeckSpec.model_validate(row["deck_json"]).title == "Second generation"
-
-
-async def test_save_deck_raises_when_project_missing() -> None:
+async def test_brain_session_persists_the_revision_it_edits() -> None:
     db, _ = _make_db()
-    with pytest.raises(ValueError):
-        await db.save_deck("ghost", _make_deck(title="x", audience=AudienceType.UNDERGRADUATE))
+    await db.save_brain_session(
+        "proj-1",
+        history_json=[],
+        sources_json={},
+        package="presentation_standard",
+        formats_json=["html"],
+        approval_state="idle",
+        pending_action_json=None,
+        fixes_used=0,
+        accumulated_cost_usd=0.0,
+        accumulated_image_count=0,
+        revision_id="revision-7",
+    )
+
+    row = await db.get_brain_session("proj-1")
+
+    assert row is not None and row["revision_id"] == "revision-7"
 
 
 async def test_get_deck_returns_none_when_absent() -> None:

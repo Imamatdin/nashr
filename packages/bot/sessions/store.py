@@ -4,17 +4,21 @@ The bot-layer bridge between the typed :class:`BrainSession` and the JSON-valued
 :class:`~packages.platform.database.DatabaseClient` brain-session methods. It owns
 every (de)serialization the platform layer must not (history via the SDK channel,
 sources via the split serializer) and assembles the session from its row plus the
-deck. Persistence keys on ``project_id`` alone, so recovery after a restart is a
-single lookup — no restart can orphan a session.
+deck of the revision it is editing. Persistence keys on ``project_id`` alone, so
+recovery after a restart is a single lookup — no restart can orphan a session.
 
-The wiring gap this module was built against is CLOSED (Stage 5a):
-``run_full_pipeline`` returns its sources via ``PresentationPipelineResult`` and
-the delivery handler seeds the session through ``_open_brain_session``
-(``presentation_flow.start_generation``); :func:`create_session` still takes the
-live sources from its caller by design.
+The session is created on the revision a generation just committed: both the
+worker and the bot's ``start_generation`` pass the deck, its revision id and the
+sources ``build_deck`` returned (ADR 0001); :func:`create_session` takes them from
+its caller by design.
 """
 
 from __future__ import annotations
+
+import logging
+from typing import Any
+
+from pydantic import ValidationError
 
 from packages.bot.orchestrators.article_orchestrator import SourceProcessingResult
 from packages.bot.sessions.models import ApprovalState, BrainSession, PendingAction
@@ -23,6 +27,10 @@ from packages.core.enums import ExportFormat, GenerationPackage
 from packages.core.gemini_tools import deserialize_history, serialize_history
 from packages.core.models.presentation import DeckSpec
 from packages.platform.database import DatabaseClient
+from packages.platform.document_models import DocumentKind
+from packages.platform.document_store import DocumentStore
+
+logger = logging.getLogger(__name__)
 
 
 async def create_session(
@@ -32,24 +40,16 @@ async def create_session(
     sources: SourceProcessingResult,
     package: GenerationPackage,
     formats: list[ExportFormat],
+    revision_id: str,
+    deck: DeckSpec,
 ) -> BrainSession:
-    """Create and persist the project's brain session, returning the live object.
+    """Create and persist the project's brain session on a committed revision.
 
-    The deck is read back from the decks table (``run_full_pipeline`` already
-    persisted it), so the decks table stays the single source of truth for the
-    deck. The figure bytes are written ONCE here; per-turn saves never touch them.
-
-    INVARIANT — a ``brain_sessions`` row implies a persisted deck: the deck is
-    loaded and verified BEFORE the row is written, so a deck-less session is never
-    created (the pipeline's deck persist is itself best-effort). No deck ⇒ raise ⇒
-    no row, so downstream can treat any session row as backed by a real deck.
+    The caller has just committed ``deck`` as ``revision_id`` (ADR 0001), so the
+    session starts on exactly that revision. The figure bytes are written ONCE
+    here; per-turn saves never touch them.
     """
 
-    deck = await _load_deck(db, project_id)
-    if deck is None:
-        raise ValueError(
-            f"cannot create a brain session for project {project_id}: no persisted deck"
-        )
     light, figures = serialize_sources(sources)
     await db.save_brain_session(
         project_id,
@@ -63,11 +63,13 @@ async def create_session(
         fixes_used=0,
         accumulated_cost_usd=0.0,
         accumulated_image_count=0,
+        revision_id=revision_id,
     )
     return BrainSession(
         project_id=project_id,
         history=[],
         sources=sources,
+        revision_id=revision_id,
         deck=deck,
         package=package,
         formats=formats,
@@ -93,11 +95,16 @@ async def load_session(db: DatabaseClient, project_id: str) -> BrainSession | No
     if row is None:
         return None
     pending_raw = row["pending_action_json"]
+    stored_revision = row.get("revision_id")
+    revision_id, deck = await load_revision_deck(
+        db, project_id, str(stored_revision) if stored_revision else None
+    )
     return BrainSession(
         project_id=project_id,
         history=deserialize_history(row["history_json"]),
         sources=deserialize_sources(row["sources_json"], None),
-        deck=await _load_deck(db, project_id),
+        revision_id=revision_id,
+        deck=deck,
         package=GenerationPackage(row["package"]),
         formats=[ExportFormat(fmt) for fmt in row["formats_json"]],
         approval_state=ApprovalState(row["approval_state"]),
@@ -148,17 +155,54 @@ async def persist_session(db: DatabaseClient, session: BrainSession) -> None:
         fixes_used=session.fixes_used,
         accumulated_cost_usd=session.accumulated_cost_usd,
         accumulated_image_count=session.accumulated_image_count,
+        revision_id=session.revision_id,
     )
 
 
-async def _load_deck(db: DatabaseClient, project_id: str) -> DeckSpec | None:
-    """Load the editable document head, falling back to the legacy deck row."""
+async def load_revision_deck(
+    db: DatabaseClient, project_id: str, revision_id: str | None
+) -> tuple[str | None, DeckSpec | None]:
+    """The session's revision and its deck; the head when no revision is recorded.
 
-    document = await db.get_document(project_id, "presentation")
-    if document is not None:
-        return DeckSpec.model_validate(document["content"])
+    A session written before migration 016 has no revision: it adopts the head.
+    Content that does not validate as a deck (a legacy import) yields no deck, so
+    the session cannot be edited until a valid revision is the head.
+    """
 
-    deck_row = await db.get_deck(project_id)
-    if deck_row is None:
-        return None
-    return DeckSpec.model_validate(deck_row["deck_json"])
+    store = DocumentStore(db)
+    content: dict[str, Any] | None = None
+    if revision_id is not None:
+        found = await store.revision_in_project(project_id, revision_id)
+        if found is not None:
+            content = found[1].content
+    if content is None:
+        head = await store.head(project_id, DocumentKind.PRESENTATION)
+        if head is None:
+            return None, None
+        revision_id, content = head.revision_id, head.content
+    try:
+        return revision_id, DeckSpec.model_validate(content)
+    except ValidationError:
+        logger.warning(
+            "session_revision_not_a_deck project=%s revision=%s", project_id, revision_id
+        )
+        return revision_id, None
+
+
+async def move_session_to_head(db: DatabaseClient, session: BrainSession) -> bool:
+    """Point the session at the current head; True when it moved.
+
+    The bot's Reload button and the web chat (which always edits what the web
+    shows) use this. A parked approval is left alone: its call is answered first.
+    """
+
+    if session.pending_action is not None:
+        return False
+    head = await DocumentStore(db).head(session.project_id, DocumentKind.PRESENTATION)
+    if head is None or head.revision_id == session.revision_id:
+        return False
+    revision_id, deck = await load_revision_deck(db, session.project_id, head.revision_id)
+    session.revision_id = revision_id
+    session.deck = deck
+    await persist_session(db, session)
+    return True

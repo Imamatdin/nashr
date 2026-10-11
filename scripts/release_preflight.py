@@ -63,9 +63,11 @@ def _valid_payload(name: str, payload: object) -> bool:
     if name == "document_rpcs":
         paths = record.get("paths")
         expected = {
-            "/rpc/create_document_if_missing",
-            "/rpc/commit_document_revision",
-            "/rpc/commit_presentation_revision_and_deck",
+            "/rpc/ensure_document",
+            "/rpc/commit_revision",
+            "/rpc/accept_proposal",
+            "/rpc/reject_proposal",
+            "/rpc/register_export",
         }
         return isinstance(paths, dict) and expected <= paths.keys()
     return isinstance(payload, list) and not payload

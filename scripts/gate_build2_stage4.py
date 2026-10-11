@@ -4,7 +4,7 @@ Drives the SESSION MACHINERY (not the brain — a scripted stub stands in) again
 the REAL Supabase, a REAL plan-bearing deck, REAL sources, and the REAL
 orchestrator fix-chain, proving end-to-end what the unit suite cannot:
 
-  1. FIX TURN — a stubbed fix-tool turn dispatches to apply_fixes_and_render
+  1. FIX TURN — a stubbed fix-tool turn dispatches to the shared fix path (apply_fixes → commit → render)
      ABOVE the orchestrator: the deck changes, the path-cache the download
      buttons read is refreshed, and the session persists the new history + the
      REAL editorial/image spend.
@@ -79,6 +79,7 @@ from packages.core.models.presentation import DeckSpec, SlideFix  # noqa: E402
 from packages.platform.config import PlatformConfig  # noqa: E402
 from packages.platform.database import DatabaseClient  # noqa: E402
 from packages.platform.storage import FileStorage  # noqa: E402
+from scripts._gate_documents import owner_telegram_id, seed_deck_revision  # noqa: E402
 from scripts.gate_build2_stage0 import _cleanup, _GateReporter  # noqa: E402
 from scripts.gate_build2_stage3 import (  # noqa: E402
     _GROUNDED_INSTRUCTIONS,
@@ -136,9 +137,16 @@ async def _run_gate(
     sources = await _sources_from_sco2()
     print(f"  {deck.slide_count} slides; sources figures={len(sources.figures)}")
 
-    await db.save_deck(project_id, deck)
+    revision_id = await seed_deck_revision(db, project_id, deck)
+    telegram_id = await owner_telegram_id(db, project_id)
     await create_session(
-        db, project_id=project_id, sources=sources, package=_PACKAGE, formats=_FORMATS
+        db,
+        project_id=project_id,
+        sources=sources,
+        package=_PACKAGE,
+        formats=_FORMATS,
+        revision_id=revision_id,
+        deck=deck,
     )
 
     counter = _GeminiImageCounter()
@@ -171,6 +179,7 @@ async def _run_gate(
         project_id=project_id,
         user_text="tighten it",
         user_initiated=True,
+        telegram_id=telegram_id,
     )
     reporter.check("fix turn re-delivered", res1.outcome is _ChatOutcome.REDELIVERED)
     reporter.check("download cache refreshed", "files" in _PROJECT_CACHE.get(project_id, {}))
@@ -220,6 +229,7 @@ async def _run_gate(
         project_id=project_id,
         user_text="ok",
         user_initiated=False,
+        telegram_id=telegram_id,
     )
     reporter.check(
         "model-proposed fix parks at awaiting_approval",
@@ -232,7 +242,9 @@ async def _run_gate(
         parked.approval_state is ApprovalState.AWAITING_APPROVAL
         and parked.pending_action is not None,
     )
-    res_app = await _apply_pending(orchestrator=orch, db=db, project_id=project_id)
+    res_app = await _apply_pending(
+        orchestrator=orch, db=db, project_id=project_id, telegram_id=telegram_id
+    )
     reporter.check("approve fires the parked change", res_app.outcome is _ChatOutcome.REDELIVERED)
     cleared = await load_session(db, project_id)
     assert cleared is not None
@@ -255,6 +267,7 @@ async def _run_gate(
         project_id=project_id,
         user_text="ok",
         user_initiated=False,
+        telegram_id=telegram_id,
     )
     res_rej = await _reject_pending(db=db, project_id=project_id)
     reporter.check("reject discards the change", res_rej.outcome is _ChatOutcome.DISCARDED)
@@ -308,6 +321,7 @@ async def _run_gate(
         project_id=project_id,
         user_text="one more edit",
         user_initiated=True,
+        telegram_id=telegram_id,
     )
     reporter.check(
         "fix counter refuses past the allowance", res_b.outcome is _ChatOutcome.FIXES_EXHAUSTED
@@ -321,6 +335,7 @@ async def _run_gate(
         project_id=project_id,
         user_text="can I still ask things?",
         user_initiated=True,
+        telegram_id=telegram_id,
     )
     reporter.check("chat still works after edits are spent", res_chat.outcome is _ChatOutcome.REPLY)
 

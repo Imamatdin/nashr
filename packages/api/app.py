@@ -23,6 +23,7 @@ from packages.api.routes.documents import router as documents_router
 from packages.api.routes.evidence import router as evidence_router
 from packages.api.routes.jobs import router as jobs_router
 from packages.api.routes.projects import router as projects_router
+from packages.api.routes.proposals import router as proposals_router
 from packages.api.routes.public import router as public_router
 from packages.api.routes.research import router as research_router
 from packages.api.routes.sources import router as sources_router
@@ -30,6 +31,7 @@ from packages.api.services.identity import IdentityService
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.platform.document_store import DocumentStore
 from packages.platform.jobs import JobQueue
 from packages.platform.rate_limit import RateLimiter
 from packages.platform.storage import FileStorage
@@ -46,6 +48,7 @@ def create_app(
     rate_limiter: RateLimiter | None = None,
     storage: FileStorage | None = None,
     brain_driver_factory: Callable[[], Any] | None = None,
+    documents: DocumentStore | None = None,
 ) -> FastAPI:
     """Build the API app; tests inject config/db/service, production uses env."""
 
@@ -70,6 +73,7 @@ def create_app(
     app.state.job_queue = job_queue if job_queue is not None else JobQueue(resolved_db)
     app.state.rate_limiter = rate_limiter if rate_limiter is not None else RateLimiter(resolved_db)
     app.state.storage = storage if storage is not None else FileStorage(resolved_config)
+    app.state.documents = documents if documents is not None else DocumentStore(resolved_db)
     # None means "build the real Gemini brain lazily, per turn" (see
     # packages/api/routes/chat.py::_driver). Tests inject a scripted stub.
     app.state.brain_driver_factory = brain_driver_factory
@@ -91,6 +95,7 @@ def create_app(
     app.include_router(jobs_router)
     app.include_router(sources_router)
     app.include_router(projects_router)
+    app.include_router(proposals_router)
     app.include_router(public_router)
     app.include_router(research_router)
     app.add_api_route("/health", _health, methods=["GET"])

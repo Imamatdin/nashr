@@ -33,9 +33,12 @@ from packages.core.gemini_tools import FunctionResult, build_function_responses_
 from packages.core.models.presentation import SlideFix
 from packages.platform.config import PlatformConfig
 from packages.platform.database import DatabaseClient
+from packages.platform.document_models import DocumentKind, RevisionKind
+from packages.platform.document_store import DocumentStore
 from packages.platform.jobs import DuplicateActiveJobError, GenerationJob, JobType
 from packages.platform.rate_limit import RateDecision
 from packages.sessions_core.chat import has_dangling_call
+from tests.unit.fake_documents import seed_presentation
 from tests.unit.test_brain_session import _make_sources  # pyright: ignore[reportPrivateUsage]
 from tests.unit.test_database_client import (
     FakeSupabaseClient,
@@ -153,8 +156,9 @@ async def _harness(
     fake.tables["projects"][0]["user_id"] = owner if owner is not None else str(_USER_ID)
 
     if with_session:
-        await db.save_deck(
-            _PROJECT_ID, _make_deck(title="Cooling", audience=AudienceType.UNDERGRADUATE)
+        deck = _make_deck(title="Cooling", audience=AudienceType.UNDERGRADUATE)
+        _document_id, revision_id = seed_presentation(
+            fake.tables, project_id=_PROJECT_ID, content=deck.model_dump(mode="json")
         )
         await create_session(
             db,
@@ -162,6 +166,8 @@ async def _harness(
             sources=_make_sources(with_figure=False),
             package=package,
             formats=_FORMATS,
+            revision_id=revision_id,
+            deck=deck,
         )
 
     driver = driver_cls(script=list(script or []))
@@ -330,29 +336,23 @@ async def test_user_initiated_fix_becomes_a_presentation_edit_job() -> None:
     ]
 
 
-async def test_fix_job_is_stamped_with_the_design_revision_when_one_exists() -> None:
+async def test_fix_job_is_stamped_with_the_head_the_web_turn_edited() -> None:
+    # The web chat edits what the web shows. If the head moved after the session
+    # opened (a manual save), the turn follows it, and the queued edit carries
+    # that head as its base: the worker commits against what the brain saw.
     harness = await _harness(script=_fix_script())
-    deck = _make_deck(title="Direct design", audience=AudienceType.UNDERGRADUATE)
-    harness.fake.seed(
-        "documents",
-        [
-            {
-                "id": "document-1",
-                "project_id": _PROJECT_ID,
-                "kind": "presentation",
-                "head_revision_id": "revision-1",
-            }
-        ],
-    )
-    harness.fake.seed(
-        "document_revisions",
-        [
-            {
-                "id": "revision-1",
-                "document_id": "document-1",
-                "content": deck.model_dump(mode="json"),
-            }
-        ],
+    store = DocumentStore(harness.db)
+    head = await store.head(_PROJECT_ID, DocumentKind.PRESENTATION)
+    assert head is not None
+    edited = dict(head.content)
+    edited["title"] = "Saved on the web"
+    newer = await store.commit(
+        head.document_id,
+        head.revision_id,
+        edited,
+        kind=RevisionKind.IMPORT,
+        actor="system:test-web",
+        idempotency_key="web-save",
     )
 
     response = await harness.client.post(
@@ -363,8 +363,8 @@ async def test_fix_job_is_stamped_with_the_design_revision_when_one_exists() -> 
 
     assert response.status_code == 200
     payload = harness.queue.enqueued[0]["payload"]
-    assert payload["document_id"] == "document-1"
-    assert payload["base_revision_id"] == "revision-1"
+    assert payload["document_id"] == head.document_id
+    assert payload["base_revision_id"] == newer.revision_id
 
 
 async def test_a_fix_turn_never_touches_the_ledger() -> None:
@@ -509,7 +509,17 @@ async def test_approve_queues_from_the_session_and_leaves_the_decision_parked() 
     assert enqueued["job_type"] is JobType.PRESENTATION_EDIT
     # The batch is NOT copied into the payload: a job that dies must leave the
     # decision on the session row, still re-presentable, rather than dropped.
-    assert enqueued["payload"] == {"from_pending": True, "call_count": 1}
+    session = await load_session(harness.db, _PROJECT_ID)
+    document_id = await DocumentStore(harness.db).document_id(
+        _PROJECT_ID, DocumentKind.PRESENTATION
+    )
+    assert session is not None
+    assert enqueued["payload"] == {
+        "from_pending": True,
+        "call_count": 1,
+        "document_id": document_id,
+        "base_revision_id": session.revision_id,
+    }
     follow_up = await harness.client.get(f"/projects/{_PROJECT_ID}/chat", headers=_headers())
     assert follow_up.json()["pending_action"] is not None
 

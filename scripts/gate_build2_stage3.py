@@ -1,6 +1,6 @@
 """Live droplet gate for Build 2, Stage 3 — the fix-and-render chain.
 
-Drives ``PresentationOrchestrator.apply_fixes_and_render`` directly (no brain)
+Drives ``PresentationOrchestrator.apply_fixes`` + ``render`` directly (no brain)
 on a plan-bearing deck and a throwaway Supabase project, proving the batch edit
 chain end-to-end:
 
@@ -48,7 +48,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 from packages.bot.handlers.presentation_flow import (  # noqa: E402
     _PROJECT_CACHE,
-    _register_outputs,
     _stash_outputs,
 )
 from packages.bot.orchestrators.presentation_orchestrator import (  # noqa: E402
@@ -61,9 +60,9 @@ from packages.platform.config import PlatformConfig  # noqa: E402
 from packages.platform.database import DatabaseClient  # noqa: E402
 from packages.platform.storage import FileStorage  # noqa: E402
 from packages.presentation.image_pass import ImagePass  # noqa: E402
+from scripts._gate_documents import commit_bot_edit, seed_deck_revision  # noqa: E402
 from scripts.gate_build2_stage0 import (  # noqa: E402
     _cleanup,
-    _count_deck_rows,
     _GateReporter,
 )
 from scripts.proof_slide_regen import (  # noqa: E402
@@ -196,9 +195,9 @@ async def _run_gate(
         image_pass=image_pass,
     )
 
-    print("\n[4] Baseline: save_deck + render (pre-edit reference)")
-    await db.save_deck(project_id, deck)
-    baseline = await orch.render(deck, formats, _noop_progress, project_id=project_id)
+    print("\n[4] Baseline: commit the deck as the head + render (pre-edit reference)")
+    base_revision = await seed_deck_revision(db, project_id, deck)
+    baseline = await orch.render(deck, formats, _noop_progress)
     if baseline.html_path is None:
         raise SystemExit(f"baseline HTML render failed: {baseline.warnings}")
     baseline_html_path = baseline.html_path
@@ -222,31 +221,31 @@ async def _run_gate(
     orch.render = _counting_render  # type: ignore[method-assign]
 
     fixes = [SlideFix(slide_id=sid, instruction=_GROUNDED_INSTRUCTIONS) for sid in target_ids]
-    print(f"\n[5] apply_fixes_and_render — batch of {len(fixes)} fixes …")
+    print(f"\n[5] apply_fixes → commit as a bot edit → render — batch of {len(fixes)} fixes …")
     try:
-        result = await orch.apply_fixes_and_render(
+        batch = await orch.apply_fixes(
             deck,
             fixes,
             sources,
             project_id,
-            formats,
             _noop_progress,
             package=package,
         )
     finally:
         gemini_logger.removeHandler(counter)
+    head_revision = await commit_bot_edit(db, project_id, base_revision, batch.deck)
+    render = await orch.render(batch.deck, formats, _noop_progress)
 
-    # Re-delivery: refresh the path-cache (and registry) the bot serves from.
-    _stash_outputs(project_id, result.render)
-    await _register_outputs(db, project_id, result.render)
+    # Re-delivery: refresh the path-cache the bot serves from.
+    _stash_outputs(project_id, render)
 
-    chain_html_path = result.render.html_path
+    chain_html_path = render.html_path
     if chain_html_path is None:
-        reporter.check("chain rendered HTML", False, f"warnings={result.render.warnings}")
+        reporter.check("chain rendered HTML", False, f"warnings={render.warnings}")
         return counter.count
     chain_html_bytes = chain_html_path.read_bytes()
     chain_html_text = chain_html_bytes.decode("utf-8", errors="replace")
-    after_fp = {s.slide_id: _slide_fingerprint(s) for s in result.deck.slides}
+    after_fp = {s.slide_id: _slide_fingerprint(s) for s in batch.deck.slides}
 
     # ---- (E) render ONCE for the whole batch ---------------------------------
     reporter.check(
@@ -271,18 +270,19 @@ async def _run_gate(
             f"(A) edited slide {sid} content changed (fingerprint)",
             after_fp.get(sid) != before_fp[sid],
         )
-        new_title = _slide_by_id(result.deck, sid).content.title
+        new_title = _slide_by_id(batch.deck, sid).content.title
         print(
             f"  (A info) {sid} title {before_titles[sid]!r} → {new_title!r}; "
             f"present verbatim in HTML: {new_title in chain_html_text}"
         )
 
     # ---- (B) persisted deck reflects the edit, one row (upsert) --------------
-    rows = await _count_deck_rows(raw, project_id)
-    reporter.check(
-        "(B) exactly one deck row after baseline+chain (upsert)", rows == 1, f"rows={rows}"
-    )
     persisted = await db.get_deck(project_id)
+    reporter.check(
+        "(B) the edit's revision is the head",
+        persisted is not None and str(persisted["revision_id"]) == head_revision,
+        f"head={persisted['revision_id'] if persisted else None} edit={head_revision}",
+    )
     if persisted is None:
         reporter.check("(B) get_deck returns the persisted deck", False, "got None")
     else:
@@ -315,7 +315,7 @@ async def _run_gate(
         changed == set(target_ids),
         f"changed={sorted(changed)} expected={sorted(target_ids)}",
     )
-    images_resolved = sum(1 for sid in target_ids if _has_image(_slide_by_id(result.deck, sid)))
+    images_resolved = sum(1 for sid in target_ids if _has_image(_slide_by_id(batch.deck, sid)))
     print(
         f"  (D soft) edited slides with a non-null image after re-resolution: "
         f"{images_resolved}/{len(target_ids)} (0 acceptable if Gemini abstained)"
@@ -327,7 +327,7 @@ async def _run_gate(
     # failed on re-render is absent from BOTH the result and the refreshed cache
     # (the vanished-format case): no stale PPTX button can survive a re-render.
     cached = _PROJECT_CACHE.get(project_id, {}).get("files", {})
-    expected_cache = {ext: str(path) for ext, path in result.render.by_extension().items()}
+    expected_cache = {ext: str(path) for ext, path in render.by_extension().items()}
     reporter.check(
         "(UX) path-cache holds EXACTLY the new render's formats (no stale survivors)",
         cached == expected_cache,
@@ -367,9 +367,7 @@ async def main() -> int:
 
     config = PlatformConfig.from_env()
     if not config.supabase_url or not config.supabase_service_key:
-        print(
-            "Set SUPABASE_URL and SUPABASE_SERVICE_KEY — the gate exercises real save_deck/get_deck."
-        )
+        print("Set SUPABASE_URL and SUPABASE_SERVICE_KEY — the gate commits real revisions.")
         return 2
 
     storage: FileStorage | None
@@ -386,7 +384,7 @@ async def main() -> int:
 
     package = GenerationPackage(args.package)
     print("=" * 78)
-    print("Build 2 Stage 3 gate — apply_fixes_and_render (batch fix → persist once → render once)")
+    print("Build 2 Stage 3 gate — apply_fixes (batch fix → commit once → render once)")
     print(f"  package={package.value} image_budget={image_budget_for_package(package)} per fix")
     print("=" * 78)
 

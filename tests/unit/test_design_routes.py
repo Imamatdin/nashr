@@ -1,4 +1,4 @@
-"""Behavior tests for versioned direct presentation design routes."""
+"""Behavior tests for versioned direct presentation design routes (ADR 0001)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from postgrest.exceptions import APIError
 
 from packages.api.app import create_app
 from packages.api.services.tokens import mint_app_jwt
@@ -27,22 +26,26 @@ from packages.core.models.presentation import (
     SlideSpec,
 )
 from packages.platform.config import PlatformConfig
-from packages.platform.jobs import GenerationJob, JobStatus, JobType
+from packages.platform.database import DatabaseClient
+from packages.platform.document_models import DocumentKind
+from packages.platform.document_store import DocumentStore
+from packages.platform.exports import renderer_version
+from packages.platform.jobs import DuplicateActiveJobError, GenerationJob, JobStatus, JobType
 from packages.platform.rate_limit import RateDecision
+from tests.unit.fake_documents import seed_presentation
+from tests.unit.test_database_client import FakeSupabaseClient
 
 pytestmark = pytest.mark.asyncio
 
 _SECRET = "test-jwt-secret"
 _USER_ID = uuid4()
 _PROJECT_ID = str(uuid4())
-_DOCUMENT_ID = str(uuid4())
-_REVISION_ID = str(uuid4())
 
 
-def _deck() -> DeckSpec:
+def _deck(title: str = "Learning") -> DeckSpec:
     return DeckSpec(
         project_id=_PROJECT_ID,
-        title="Learning",
+        title=title,
         design=DesignDirectionSpec(
             mood=PresentationMood.WARM_HISTORICAL,
             palette=ColorPalette(
@@ -62,7 +65,7 @@ def _deck() -> DeckSpec:
             SlideSpec(
                 slide_index=0,
                 slide_type=SlideType.TITLE_HERO,
-                content=SlideContent(title="Learning"),
+                content=SlideContent(title=title),
             )
         ],
     )
@@ -71,104 +74,9 @@ def _deck() -> DeckSpec:
 class _FakeDb:
     def __init__(self) -> None:
         self.owner = str(_USER_ID)
-        self.document: dict[str, Any] | None = None
-        self.deck = _deck()
-        self.revisions: dict[str, dict[str, Any]] = {}
 
     async def get_project(self, project_id: str) -> dict[str, Any] | None:
         return {"id": project_id, "user_id": self.owner, "type": "presentation"}
-
-    async def get_deck(self, project_id: str) -> dict[str, Any] | None:
-        return {"id": "deck-1", "deck_json": self.deck.model_dump(mode="json")}
-
-    async def get_document(self, project_id: str, kind: str) -> dict[str, Any] | None:
-        return self.document
-
-    async def create_document_if_missing(
-        self,
-        project_id: str,
-        kind: str,
-        content: dict[str, Any],
-        user_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        created_at = datetime.now(UTC)
-        self.document = {
-            "id": _DOCUMENT_ID,
-            "document_id": _DOCUMENT_ID,
-            "revision_id": _REVISION_ID,
-            "content": content,
-            "updated_at": created_at,
-        }
-        self.revisions[_REVISION_ID] = {
-            "id": _REVISION_ID,
-            "document_id": _DOCUMENT_ID,
-            "parent_revision_id": None,
-            "created_by": user_id,
-            "content_hash": "a" * 64,
-            "created_at": created_at,
-            "content": content,
-        }
-        return self.document
-
-    async def commit_document_revision(
-        self,
-        document_id: str,
-        base_revision_id: str,
-        content: dict[str, Any],
-        user_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        assert self.document is not None
-        if base_revision_id != self.document["revision_id"]:
-            raise APIError(
-                {"message": "stale_revision", "code": "P0001", "hint": None, "details": None}
-            )
-        revision_id = str(uuid4())
-        created_at = datetime.now(UTC)
-        self.revisions[revision_id] = {
-            "id": revision_id,
-            "document_id": document_id,
-            "parent_revision_id": base_revision_id,
-            "created_by": user_id,
-            "content_hash": "b" * 64,
-            "created_at": created_at,
-            "content": content,
-        }
-        self.document = {
-            **self.document,
-            "revision_id": revision_id,
-            "content": content,
-            "updated_at": created_at,
-        }
-        return self.document
-
-    async def list_document_revisions(
-        self, document_id: str, limit: int = 50
-    ) -> list[dict[str, Any]]:
-        rows = sorted(self.revisions.values(), key=lambda row: row["created_at"], reverse=True)[
-            :limit
-        ]
-        return [
-            {
-                key: row[key]
-                for key in (
-                    "id",
-                    "parent_revision_id",
-                    "created_by",
-                    "content_hash",
-                    "created_at",
-                )
-            }
-            for row in rows
-            if row["document_id"] == document_id
-        ]
-
-    async def get_document_revision(
-        self, document_id: str, revision_id: str
-    ) -> dict[str, Any] | None:
-        row = self.revisions.get(revision_id)
-        return row if row and row["document_id"] == document_id else None
 
 
 class _FakeLimiter:
@@ -184,24 +92,84 @@ class _FakeLimiter:
 
 
 class _FakeQueue:
+    """Active render jobs are unique on (revision, renderer, formats), like the index."""
+
     def __init__(self) -> None:
         self.enqueued: list[dict[str, Any]] = []
-        self.active: GenerationJob | None = None
+        self.jobs: list[GenerationJob] = []
 
-    async def get_active_job(self, project_id: str, job_type: JobType) -> GenerationJob | None:
-        if self.active is not None and self.active.job_type is job_type:
-            return self.active
+    async def get_active_render_job(
+        self, revision_id: str, renderer_version: str, formats: list[str]
+    ) -> GenerationJob | None:
+        for job in self.jobs:
+            payload = job.payload
+            if (
+                payload["revision_id"] == revision_id
+                and payload["renderer_version"] == renderer_version
+                and sorted(payload["formats"]) == sorted(formats)
+            ):
+                return job
         return None
 
     async def enqueue(self, **kwargs: Any) -> GenerationJob:
+        payload = kwargs["payload"]
+        existing = await self.get_active_render_job(
+            payload["revision_id"], payload["renderer_version"], payload["formats"]
+        )
+        if existing is not None:
+            raise DuplicateActiveJobError(existing)
         self.enqueued.append(kwargs)
-        return GenerationJob(
-            id="render-1",
+        job = GenerationJob(
+            id=f"render-{len(self.jobs) + 1}",
             project_id=kwargs["project_id"],
             user_id=kwargs["user_id"],
             job_type=kwargs["job_type"],
             status=JobStatus.QUEUED,
-            payload=kwargs["payload"],
+            payload=payload,
+        )
+        self.jobs.append(job)
+        return job
+
+
+class _Harness:
+    def __init__(self, *, with_deck: bool = True, head: dict[str, Any] | None = None) -> None:
+        self.fake = FakeSupabaseClient()
+        self.fake.seed("projects", [{"id": _PROJECT_ID, "user_id": str(_USER_ID)}])
+        cfg = _config()
+        self.store = DocumentStore(DatabaseClient(cfg, client=cast(Any, self.fake)))
+        self.revision_id: str | None = None
+        if with_deck:
+            content = head if head is not None else _deck().model_dump(mode="json")
+            _doc, self.revision_id = seed_presentation(
+                self.fake.tables, project_id=_PROJECT_ID, content=content
+            )
+        self.queue = _FakeQueue()
+        app = create_app(
+            config=cfg,
+            db=cast(Any, _FakeDb()),
+            identity_service=cast(Any, object()),
+            credits=cast(Any, object()),
+            job_queue=cast(Any, self.queue),
+            rate_limiter=cast(Any, _FakeLimiter()),
+            storage=cast(Any, object()),
+            documents=self.store,
+        )
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        )
+
+    async def save(
+        self, base: str, content: dict[str, Any], key: str, kind: str = "manual"
+    ) -> httpx.Response:
+        return await self.client.put(
+            f"/projects/{_PROJECT_ID}/design",
+            json={
+                "base_revision_id": base,
+                "idempotency_key": key,
+                "content": content,
+                "kind": kind,
+            },
+            headers=_headers(),
         )
 
 
@@ -214,117 +182,198 @@ def _config() -> PlatformConfig:
     )
 
 
-def _client() -> tuple[httpx.AsyncClient, _FakeDb, _FakeQueue]:
-    db = _FakeDb()
-    queue = _FakeQueue()
-    app = create_app(
-        config=_config(),
-        db=cast(Any, db),
-        identity_service=cast(Any, object()),
-        credits=cast(Any, object()),
-        job_queue=cast(Any, queue),
-        rate_limiter=cast(Any, _FakeLimiter()),
-        storage=cast(Any, object()),
-    )
-    return (
-        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test"),
-        db,
-        queue,
-    )
-
-
 def _headers(user_id: UUID = _USER_ID) -> dict[str, str]:
     session = mint_app_jwt(_SECRET, user_id, 3600)
     return {"Authorization": f"Bearer {session.access_token}"}
 
 
-async def test_get_design_imports_current_deck_once() -> None:
-    client, db, _queue = _client()
-    response = await client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())
+async def test_get_design_returns_the_head_revision() -> None:
+    h = _Harness()
+    response = await h.client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())
     assert response.status_code == 200
+    assert response.json()["revision_id"] == h.revision_id
     assert response.json()["content"]["slides"][0]["content"]["title"] == "Learning"
-    assert db.document is not None
 
 
-async def test_save_design_creates_a_new_revision() -> None:
-    client, _db, _queue = _client()
-    opened = await client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())
-    body = opened.json()
-    body["content"]["slides"][0]["content"]["title"] = "Edited directly"
-    saved = await client.put(
-        f"/projects/{_PROJECT_ID}/design",
-        json={
-            "base_revision_id": body["revision_id"],
-            "idempotency_key": "save-1",
-            "content": body["content"],
-        },
-        headers=_headers(),
-    )
+async def test_get_design_without_a_document_is_not_ready() -> None:
+    h = _Harness(with_deck=False)
+    response = await h.client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())
+    assert response.status_code == 404
+    assert response.json()["detail"] == "deck_not_ready"
+
+
+async def test_save_design_commits_a_new_head_as_a_manual_revision() -> None:
+    h = _Harness()
+    content = _deck("Edited directly").model_dump(mode="json")
+    saved = await h.save(str(h.revision_id), content, "save-1")
     assert saved.status_code == 200
-    assert saved.json()["revision_id"] != body["revision_id"]
+    assert saved.json()["revision_id"] != h.revision_id
     assert saved.json()["content"]["slides"][0]["content"]["title"] == "Edited directly"
+    head = await h.store.head(_PROJECT_ID, DocumentKind.PRESENTATION)
+    assert head is not None and head.revision_id == saved.json()["revision_id"]
+    assert head.revision.kind.value == "manual"
+    assert head.revision.actor == str(_USER_ID)
 
 
-async def test_render_queues_exact_current_revision_without_credit_charge() -> None:
-    client, _db, queue = _client()
-    opened = (await client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())).json()
-    response = await client.post(
+async def test_stale_save_is_a_409_that_names_the_current_head() -> None:
+    h = _Harness()
+    first = await h.save(str(h.revision_id), _deck("First").model_dump(mode="json"), "save-a")
+    stale = await h.save(str(h.revision_id), _deck("Second").model_dump(mode="json"), "save-b")
+    assert stale.status_code == 409
+    assert stale.json()["detail"] == {
+        "reason": "stale_revision",
+        "head_revision_id": first.json()["revision_id"],
+    }
+    head = await h.store.head(_PROJECT_ID, DocumentKind.PRESENTATION)
+    assert head is not None and head.content["title"] == "First"
+
+
+async def test_identical_save_is_a_no_op_that_keeps_the_head() -> None:
+    # Resaving exactly what the editor loaded must not create a revision (an
+    # identical autosave would otherwise turn every in-flight AI edit into a proposal).
+    h = _Harness()
+    opened = (await h.client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())).json()
+    same = await h.save(opened["revision_id"], opened["content"], "save-same", kind="autosave")
+    assert same.status_code == 200
+    assert same.json()["revision_id"] == h.revision_id
+    assert len(await h.store.list_revisions(await _doc_id(h))) == 1
+
+
+async def _doc_id(h: _Harness) -> str:
+    document_id = await h.store.document_id(_PROJECT_ID, DocumentKind.PRESENTATION)
+    assert document_id is not None
+    return document_id
+
+
+async def test_retried_save_with_the_same_key_returns_the_same_revision() -> None:
+    h = _Harness()
+    content = _deck("Once").model_dump(mode="json")
+    first = await h.save(str(h.revision_id), content, "retry-key")
+    again = await h.save(str(h.revision_id), content, "retry-key")
+    assert again.status_code == 200
+    assert again.json()["revision_id"] == first.json()["revision_id"]
+
+
+async def test_reusing_a_key_for_different_content_is_refused() -> None:
+    h = _Harness()
+    await h.save(str(h.revision_id), _deck("A").model_dump(mode="json"), "same-key")
+    reused = await h.save(str(h.revision_id), _deck("B").model_dump(mode="json"), "same-key")
+    assert reused.status_code == 409
+    assert reused.json()["detail"] == {"reason": "idempotency_key_reused"}
+
+
+async def test_autosave_is_recorded_as_an_autosave() -> None:
+    h = _Harness()
+    saved = await h.save(
+        str(h.revision_id), _deck("Typed").model_dump(mode="json"), "auto-1", kind="autosave"
+    )
+    history = await h.client.get(f"/projects/{_PROJECT_ID}/design/revisions", headers=_headers())
+    assert saved.status_code == 200
+    assert history.json()["revisions"][0]["kind"] == "autosave"
+
+
+async def test_manual_save_commits_even_while_an_ai_edit_is_running() -> None:
+    # The old route refused manual saves while an edit job ran. The database now
+    # arbitrates: the manual save commits; a racing AI edit becomes a proposal.
+    h = _Harness()
+    h.queue.jobs.append(
+        GenerationJob(
+            id="edit-1",
+            project_id=_PROJECT_ID,
+            user_id=str(_USER_ID),
+            job_type=JobType.PRESENTATION_EDIT,
+            status=JobStatus.PROCESSING,
+            payload={"revision_id": "x", "renderer_version": "x", "formats": []},
+        )
+    )
+    saved = await h.save(str(h.revision_id), _deck("Human").model_dump(mode="json"), "busy")
+    assert saved.status_code == 200
+
+
+async def test_render_queues_the_exact_revision_with_renderer_and_formats() -> None:
+    h = _Harness()
+    response = await h.client.post(
         f"/projects/{_PROJECT_ID}/design/render",
-        json={"revision_id": opened["revision_id"]},
+        json={"revision_id": h.revision_id},
         headers=_headers(),
     )
     assert response.status_code == 200
-    assert response.json() == {"job_id": "render-1", "status": "queued", "existing": False}
-    assert queue.enqueued[0]["job_type"] is JobType.PRESENTATION_RENDER
-    assert queue.enqueued[0]["payload"]["revision_id"] == opened["revision_id"]
+    body = response.json()
+    assert body["job_id"] == "render-1" and body["existing"] is False
+    assert body["renderer_version"] == renderer_version()
+    payload = h.queue.enqueued[0]["payload"]
+    assert h.queue.enqueued[0]["job_type"] is JobType.PRESENTATION_RENDER
+    assert payload["revision_id"] == h.revision_id
+    assert payload["formats"] == ["html", "pdf", "pptx"]
+    assert payload["renderer_version"] == renderer_version()
+
+
+async def test_render_of_the_same_revision_reuses_the_active_job() -> None:
+    h = _Harness()
+    url = f"/projects/{_PROJECT_ID}/design/render"
+    first = await h.client.post(url, json={"revision_id": h.revision_id}, headers=_headers())
+    second = await h.client.post(url, json={"revision_id": h.revision_id}, headers=_headers())
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert second.json()["existing"] is True
+    assert len(h.queue.enqueued) == 1
+
+
+async def test_render_of_another_revision_gets_its_own_job() -> None:
+    # The old per-project dedupe handed a request for the head an active render
+    # of an older revision. Dedupe is now keyed on the revision.
+    h = _Harness()
+    saved = await h.save(str(h.revision_id), _deck("Newer").model_dump(mode="json"), "newer")
+    url = f"/projects/{_PROJECT_ID}/design/render"
+    older = await h.client.post(url, json={"revision_id": h.revision_id}, headers=_headers())
+    newer = await h.client.post(
+        url, json={"revision_id": saved.json()["revision_id"]}, headers=_headers()
+    )
+    assert older.json()["job_id"] != newer.json()["job_id"]
+    assert newer.json()["revision_id"] == saved.json()["revision_id"]
+
+
+async def test_render_of_an_unknown_revision_is_404() -> None:
+    h = _Harness()
+    response = await h.client.post(
+        f"/projects/{_PROJECT_ID}/design/render",
+        json={"revision_id": str(uuid4())},
+        headers=_headers(),
+    )
+    assert response.status_code == 404
 
 
 async def test_design_history_lists_revisions_and_restore_creates_new_head() -> None:
-    client, _db, _queue = _client()
-    opened = (await client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())).json()
-    original_revision = opened["revision_id"]
-    opened["content"]["slides"][0]["content"]["title"] = "Second version"
-    saved = (
-        await client.put(
-            f"/projects/{_PROJECT_ID}/design",
-            json={
-                "base_revision_id": original_revision,
-                "idempotency_key": "save-history",
-                "content": opened["content"],
-            },
-            headers=_headers(),
-        )
-    ).json()
+    h = _Harness()
+    original = str(h.revision_id)
+    saved = (await h.save(original, _deck("Second version").model_dump(mode="json"), "s")).json()
 
-    history = await client.get(f"/projects/{_PROJECT_ID}/design/revisions", headers=_headers())
+    history = await h.client.get(f"/projects/{_PROJECT_ID}/design/revisions", headers=_headers())
     assert history.status_code == 200
     assert len(history.json()["revisions"]) == 2
 
-    restored = await client.post(
+    restored = await h.client.post(
         f"/projects/{_PROJECT_ID}/design/restore",
         json={
-            "revision_id": original_revision,
+            "revision_id": original,
             "base_revision_id": saved["revision_id"],
             "idempotency_key": "restore-original",
         },
         headers=_headers(),
     )
     assert restored.status_code == 200
-    assert restored.json()["revision_id"] not in {
-        original_revision,
-        saved["revision_id"],
-    }
+    assert restored.json()["revision_id"] not in {original, saved["revision_id"]}
     assert restored.json()["content"]["slides"][0]["content"]["title"] == "Learning"
+    head = await h.store.head(_PROJECT_ID, DocumentKind.PRESENTATION)
+    assert head is not None and head.revision.kind.value == "restore"
 
 
 async def test_restore_rejects_revision_from_another_document() -> None:
-    client, _db, _queue = _client()
-    opened = (await client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())).json()
-    response = await client.post(
+    h = _Harness()
+    response = await h.client.post(
         f"/projects/{_PROJECT_ID}/design/restore",
         json={
             "revision_id": str(uuid4()),
-            "base_revision_id": opened["revision_id"],
+            "base_revision_id": h.revision_id,
             "idempotency_key": "restore-missing",
         },
         headers=_headers(),
@@ -333,31 +382,14 @@ async def test_restore_rejects_revision_from_another_document() -> None:
     assert response.json()["detail"] == "revision_not_found"
 
 
-async def test_manual_save_is_rejected_while_ai_edit_owns_the_deck() -> None:
-    client, _db, queue = _client()
-    opened = (await client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())).json()
-    queue.active = GenerationJob(
-        id="edit-1",
-        project_id=_PROJECT_ID,
-        user_id=str(_USER_ID),
-        job_type=JobType.PRESENTATION_EDIT,
-        status=JobStatus.PROCESSING,
-        payload={},
-    )
-    response = await client.put(
-        f"/projects/{_PROJECT_ID}/design",
-        json={
-            "base_revision_id": opened["revision_id"],
-            "idempotency_key": "save-while-busy",
-            "content": opened["content"],
-        },
-        headers=_headers(),
-    )
+async def test_a_legacy_invalid_head_is_reported_not_crashed() -> None:
+    h = _Harness(head={"legacy_raw": ["not", "a", "deck"]})
+    response = await h.client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers())
     assert response.status_code == 409
-    assert response.json()["detail"]["reason"] == "design_busy"
+    assert response.json()["detail"] == {"reason": "legacy_invalid", "revision_id": h.revision_id}
 
 
 async def test_other_user_cannot_open_design() -> None:
-    client, _db, _queue = _client()
-    response = await client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers(uuid4()))
+    h = _Harness()
+    response = await h.client.get(f"/projects/{_PROJECT_ID}/design", headers=_headers(uuid4()))
     assert response.status_code == 404

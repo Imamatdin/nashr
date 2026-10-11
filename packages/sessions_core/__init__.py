@@ -19,6 +19,7 @@ Rewiring the bot onto this core is a follow-on with its own gate.
 
 from __future__ import annotations
 
+from packages.sessions_core.apply import FixStatus
 from packages.sessions_core.chat import (
     ChatSessionView,
     FixDispatchResult,
@@ -38,6 +39,7 @@ __all__ = [
     "ChatSessionView",
     "FixDispatchResult",
     "FixRunner",
+    "FixStatus",
     "PendingActionView",
     "TurnKind",
     "TurnResult",

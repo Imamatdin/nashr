@@ -1,29 +1,23 @@
-"""Live droplet gate for Build 2, Stage 0 — deck persistence.
+"""Live gate for canonical deck state (ADR 0001, migration 016).
 
-Run against the REAL Supabase (with migration 003 applied) to prove the
-guarantees the unit suite structurally cannot, because ``FakeSupabaseClient``
-models neither the ``decks_project_id_key`` UNIQUE constraint nor the
-``trg_decks_updated_at`` trigger:
+Originally the Build 2 Stage 0 gate for the single mutable ``decks`` row. That
+contract is retired: ``decks`` is now a view of the presentation document's head
+revision. Run against a Supabase project WITH migration 016 applied to prove,
+on real PostgreSQL + PostgREST, what the unit fakes cannot:
 
-  1. save_deck inserts exactly ONE deck row for a project, and get_deck
-     reloads a DeckSpec equal to the one persisted (real jsonb round-trip).
-  2. A SECOND save_deck for the same project UPDATES that row in place
-     (still one row) rather than appending history.
-  3. The update advances ``updated_at`` (trigger) while leaving ``created_at``
-     untouched — the on-conflict-DO-UPDATE path behaving as designed.
+  1. A committed revision becomes the head, and the ``decks`` view returns
+     exactly its content and revision id.
+  2. A second commit on that base advances the head; the view follows.
+  3. A commit on a stale base conflicts and changes nothing.
+  4. Committing content identical to the head is a no-op (``unchanged``).
+  5. A direct INSERT into ``decks`` is refused, even with the service key.
 
-The behaviour under test goes through the public DatabaseClient API
-(create_user / create_project / save_deck / get_deck); a separate raw Supabase
-client is used only for test scaffolding (counting rows, cleanup) the public
-API does not expose.
-
-Usage (on the droplet, after `supabase db push` has applied migration 003):
+Usage:
 
     SUPABASE_URL=... SUPABASE_SERVICE_KEY=... python scripts/gate_build2_stage0.py
 
-Creates a throwaway user + project, runs the checks, and deletes the user
-(cascading to the project and its deck) so the gate leaves no residue. Exits
-0 on PASS, 1 on any failed check or setup error.
+Creates a throwaway user + project, runs the checks, deletes the user (cascading
+to the project and its document), and exits 0 on PASS, 1 otherwise.
 """
 
 from __future__ import annotations
@@ -31,15 +25,21 @@ from __future__ import annotations
 import asyncio
 import random
 import sys
-from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from packages.core.enums import (
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from postgrest.exceptions import APIError  # noqa: E402
+
+from packages.core.enums import (  # noqa: E402
     BackgroundTreatment,
     PresentationMood,
     SlideType,
 )
-from packages.core.models.presentation import (
+from packages.core.models.presentation import (  # noqa: E402
     ColorPalette,
     DeckSpec,
     DesignDirectionSpec,
@@ -47,9 +47,17 @@ from packages.core.models.presentation import (
     SlideContent,
     SlideSpec,
 )
-from packages.platform.config import PlatformConfig
-from packages.platform.database import DatabaseClient
-from supabase import Client, create_client
+from packages.platform.config import PlatformConfig  # noqa: E402
+from packages.platform.database import DatabaseClient  # noqa: E402
+from packages.platform.document_models import (  # noqa: E402
+    CommitStatus,
+    DocumentKind,
+    RevisionKind,
+    user_actor,
+)
+from packages.platform.document_store import DocumentStore  # noqa: E402
+from scripts._gate_documents import seed_deck_revision  # noqa: E402
+from supabase import Client, create_client  # noqa: E402
 
 try:
     from dotenv import load_dotenv
@@ -94,15 +102,6 @@ def _build_deck(project_id: str, title: str, slide_count: int) -> DeckSpec:
     )
 
 
-async def _count_deck_rows(raw: Client, project_id: str) -> int:
-    """Count every deck row for a project (not just the current one)."""
-
-    result = await asyncio.to_thread(
-        lambda: raw.table("decks").select("id").eq("project_id", project_id).execute()
-    )
-    return len(list(result.data))
-
-
 class _GateReporter:
     """Collects pass/fail checks so every assertion runs and is reported."""
 
@@ -120,45 +119,85 @@ class _GateReporter:
 async def _run_gate(
     db: DatabaseClient, raw: Client, project_id: str, reporter: _GateReporter
 ) -> None:
-    """Run the three persistence checks against ``project_id``."""
+    """Run the canonical-state checks against ``project_id``."""
 
+    store = DocumentStore(db)
     deck_v1 = _build_deck(project_id, "Gate deck v1", slide_count=3)
-    await db.save_deck(project_id, deck_v1)
-
-    reporter.check("one row after first save", await _count_deck_rows(raw, project_id) == 1)
+    rev1 = await seed_deck_revision(db, project_id, deck_v1)
+    head = await store.head(project_id, DocumentKind.PRESENTATION)
+    reporter.check("first commit is the head", head is not None and head.revision_id == rev1)
     row1 = await db.get_deck(project_id)
-    if row1 is None:
-        reporter.check("get_deck returns the persisted row", False, "got None")
-        return
-    restored1 = DeckSpec.model_validate(row1["deck_json"])
-    reporter.check("reloaded DeckSpec round-trips equal", restored1 == deck_v1)
-    created_at_1 = str(row1["created_at"])
-    updated_at_1 = str(row1["updated_at"])
-
-    # A visible wall-clock gap so the trigger's updated_at is unambiguously
-    # later than the original created_at when we re-save below.
-    await asyncio.sleep(1.1)
+    reporter.check(
+        "decks view returns the head",
+        row1 is not None
+        and str(row1["revision_id"]) == rev1
+        and DeckSpec.model_validate(row1["deck_json"]) == deck_v1,
+    )
 
     deck_v2 = _build_deck(project_id, "Gate deck v2 EDITED", slide_count=4)
-    await db.save_deck(project_id, deck_v2)
-
-    reporter.check("still one row after second save", await _count_deck_rows(raw, project_id) == 1)
+    rev2 = await seed_deck_revision(db, project_id, deck_v2)
     row2 = await db.get_deck(project_id)
-    if row2 is None:
-        reporter.check("get_deck returns the updated row", False, "got None")
-        return
-    restored2 = DeckSpec.model_validate(row2["deck_json"])
-    reporter.check("update replaced deck_json", restored2 == deck_v2)
     reporter.check(
-        "created_at unchanged across update",
-        str(row2["created_at"]) == created_at_1,
-        f"{created_at_1} -> {row2['created_at']}",
+        "second commit advances the head and the view",
+        row2 is not None
+        and str(row2["revision_id"]) == rev2
+        and DeckSpec.model_validate(row2["deck_json"]) == deck_v2,
+    )
+
+    document_id = await store.document_id(project_id, DocumentKind.PRESENTATION)
+    assert document_id is not None
+    actor = user_actor(str((await db.get_project(project_id) or {})["user_id"]))
+    stale = await store.commit(
+        document_id,
+        rev1,
+        _build_deck(project_id, "Gate deck stale", slide_count=2).model_dump(mode="json"),
+        kind=RevisionKind.MANUAL,
+        actor=actor,
+        idempotency_key="gate0-stale",
+    )
+    row3 = await db.get_deck(project_id)
+    reporter.check(
+        "stale base conflicts and changes nothing",
+        stale.status is CommitStatus.CONFLICT
+        and stale.head_revision_id == rev2
+        and row3 is not None
+        and str(row3["revision_id"]) == rev2,
+        f"status={stale.status.value}",
+    )
+
+    same = await store.commit(
+        document_id,
+        rev2,
+        deck_v2.model_dump(mode="json"),
+        kind=RevisionKind.AUTOSAVE,
+        actor=actor,
+        idempotency_key="gate0-same",
     )
     reporter.check(
-        "updated_at advanced (trg_decks_updated_at fired)",
-        datetime.fromisoformat(str(row2["updated_at"])) > datetime.fromisoformat(updated_at_1),
-        f"{updated_at_1} -> {row2['updated_at']}",
+        "identical content is unchanged",
+        same.status is CommitStatus.UNCHANGED and same.revision_id == rev2,
+        f"status={same.status.value}",
     )
+
+    try:
+        await asyncio.to_thread(
+            lambda: (
+                raw.table("decks")
+                .insert(
+                    {
+                        "project_id": project_id,
+                        "title": "forged",
+                        "language": "uz",
+                        "audience": "talaba",
+                        "deck_json": {},
+                    }
+                )
+                .execute()
+            )
+        )
+        reporter.check("direct INSERT into decks is refused", False, "insert succeeded")
+    except APIError as exc:
+        reporter.check("direct INSERT into decks is refused", True, str(exc.code))
 
 
 async def _cleanup(raw: Client, user_id: str) -> None:
@@ -183,7 +222,7 @@ async def main() -> int:
         user = await db.create_user(telegram_id=random.randint(10_000_000, 2_000_000_000))
         project = await db.create_project(
             user_id=user["id"],
-            title="Build2 Stage0 gate",
+            title="Canonical deck state gate",
             project_type="presentation",
             language="uz",
             audience="talaba",
@@ -198,7 +237,7 @@ async def main() -> int:
     if reporter.failures:
         print(f"\nGATE FAILED: {reporter.failures} check(s) failed.")
         return 1
-    print("\nGATE PASSED: one current deck row per project, trigger-maintained updated_at.")
+    print("\nGATE PASSED: decks is the head revision; stale and forged writes are refused.")
     return 0
 
 

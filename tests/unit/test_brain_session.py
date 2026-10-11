@@ -13,17 +13,19 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import uuid4
 
-import pytest
 from aiogram.types import CallbackQuery, Message
 
 import packages.bot.handlers.presentation_flow as pf
 from packages.bot.keyboards import presentation_chat_keyboard
-from packages.bot.orchestrators.article_orchestrator import SourceProcessingResult
+from packages.bot.orchestrators.article_orchestrator import (
+    SourceProcessingResult,
+    _OrchestratorError,
+)
 from packages.bot.orchestrators.presentation_orchestrator import (
-    FixAndRenderResult,
+    FixBatchResult,
     PresentationRenderResult,
 )
 from packages.bot.sessions import (
@@ -46,6 +48,7 @@ from packages.bot.sessions.models import (
     TurnOutcome,
 )
 from packages.bot.sessions.serialization import deserialize_sources, serialize_sources
+from packages.bot.sessions.store import move_session_to_head
 from packages.bot.states import PresentationStates
 from packages.core.enums import (
     AudienceType,
@@ -62,7 +65,15 @@ from packages.core.models.source import (
     SourceFigure,
     SourceMetadataExtracted,
 )
-from tests.unit.test_database_client import _make_db, _make_deck, _seed_project
+from packages.platform.document_models import CommitStatus, DocumentKind, RevisionKind
+from packages.platform.document_store import DocumentStore
+from tests.unit.fake_documents import seed_presentation
+from tests.unit.test_database_client import (
+    OWNER_TELEGRAM_ID,
+    _make_db,
+    _make_deck,
+    _seed_project,
+)
 
 _RAW_PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff\xd8\xff\xe0JFIF"
 _FORMATS = [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
@@ -110,10 +121,10 @@ def _make_sources(*, with_figure: bool = True) -> SourceProcessingResult:
 
 
 class _FakeOrchestrator:
-    """Stands in for the real fix-chain; records calls and returns a fixed result.
+    """Stands in for the real fix-chain and renderer; records calls.
 
-    ``deliver=False`` simulates render() recording per-format failures and
-    returning a result with ZERO output files (the partial-delivery case).
+    ``deliver=False`` makes ``render`` fail the way the real one now does when a
+    requested format does not render: it raises (ADR 0001, all-or-nothing).
     """
 
     def __init__(
@@ -124,18 +135,18 @@ class _FakeOrchestrator:
         self._images = images
         self._deliver = deliver
         self.calls: list[dict[str, Any]] = []
+        self.renders: list[list[ExportFormat]] = []
 
-    async def apply_fixes_and_render(
+    async def apply_fixes(
         self,
         deck: Any,
         fixes: Any,
         sources: SourceProcessingResult,
         project_id: str,
-        formats: Any,
         progress: Any,
         *,
         package: GenerationPackage,
-    ) -> FixAndRenderResult:
+    ) -> FixBatchResult:
         del deck, progress
         self.calls.append(
             {
@@ -143,26 +154,30 @@ class _FakeOrchestrator:
                 "project_id": project_id,
                 "package": package,
                 "figures_seen": len(sources.figures),
-                "formats": list(formats),
             }
         )
-        render = (
-            PresentationRenderResult(html_path=Path("nashr_fake.html"))
-            if self._deliver
-            else PresentationRenderResult(warnings=["html: render timed out"])
-        )
-        return FixAndRenderResult(
-            deck=self._deck,
-            render=render,
+        # A real edit changes the deck; an identical deck would be a no-op commit.
+        edited = self._deck.model_copy(update={"subtitle": f"edit {len(self.calls)}"})
+        return FixBatchResult(
+            deck=edited,
             estimated_cost_usd=self._cost,
             image_count=self._images,
         )
 
+    async def render(
+        self, deck: Any, formats: list[ExportFormat], progress: Any
+    ) -> PresentationRenderResult:
+        del deck, progress
+        self.renders.append(list(formats))
+        if not self._deliver:
+            raise _OrchestratorError("render", RuntimeError("html: render timed out"))
+        return PresentationRenderResult(html_path=Path("nashr_fake.html"))
+
 
 class _RaisingOrchestrator:
-    """Stands in for a fix-chain that fails — apply_fixes_and_render raises."""
+    """Stands in for a fix-chain that fails — apply_fixes raises."""
 
-    async def apply_fixes_and_render(self, *_args: Any, **_kwargs: Any) -> Any:
+    async def apply_fixes(self, *_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("editorial regen failed")
 
 
@@ -171,17 +186,45 @@ async def _provision(
     package: GenerationPackage = GenerationPackage.PRESENTATION_PREMIUM,
     with_figure: bool = True,
 ) -> tuple[Any, Any, Any, SourceProcessingResult]:
-    """Seed project + deck, create a session, return (db, fake, deck, sources)."""
+    """Seed project + a committed deck revision, open a session on it."""
 
     db, fake = _make_db()
     _seed_project(fake)
     deck = _make_deck(title="Cooling", audience=AudienceType.UNDERGRADUATE)
-    await db.save_deck("proj-1", deck)
+    _document_id, revision_id = seed_presentation(
+        fake.tables, project_id="proj-1", content=deck.model_dump(mode="json")
+    )
     sources = _make_sources(with_figure=with_figure)
     await create_session(
-        db, project_id="proj-1", sources=sources, package=package, formats=_FORMATS
+        db,
+        project_id="proj-1",
+        sources=sources,
+        package=package,
+        formats=_FORMATS,
+        revision_id=revision_id,
+        deck=deck,
     )
     return db, fake, deck, sources
+
+
+async def _web_edit(db: Any, title: str) -> str:
+    """A manual web save on the current head (as the owner); returns the new head."""
+
+    store = DocumentStore(db)
+    head = await store.head("proj-1", DocumentKind.PRESENTATION)
+    assert head is not None
+    edited = dict(head.content)
+    edited["title"] = title
+    outcome = await store.commit(
+        head.document_id,
+        head.revision_id,
+        edited,
+        kind=RevisionKind.IMPORT,
+        actor="system:test-web",
+        idempotency_key=f"web-{title}",
+    )
+    assert outcome.status is CommitStatus.COMMITTED and outcome.revision_id is not None
+    return outcome.revision_id
 
 
 # --------------------------------------------------------------- serialization
@@ -230,36 +273,33 @@ async def test_create_then_load_session_reconstructs() -> None:
     assert session.sources.warnings == ["one source skipped"]
 
 
-async def test_session_load_prefers_versioned_presentation_document() -> None:
-    db, fake, deck, _sources = await _provision()
-    edited = deck.model_copy(update={"title": "Edited in the design workspace"})
-    fake.seed(
-        "documents",
-        [
-            {
-                "id": "document-1",
-                "project_id": "proj-1",
-                "kind": "presentation",
-                "head_revision_id": "revision-1",
-            }
-        ],
-    )
-    fake.seed(
-        "document_revisions",
-        [
-            {
-                "id": "revision-1",
-                "document_id": "document-1",
-                "content": edited.model_dump(mode="json"),
-            }
-        ],
-    )
+async def test_session_loads_its_own_revision_not_a_newer_head() -> None:
+    # The session edits the revision it was opened on (ADR 0001): a newer head
+    # written elsewhere must not silently replace the deck the brain is editing.
+    db, _fake, deck, _sources = await _provision()
+    await _web_edit(db, "Edited in the design workspace")
 
     session = await load_session(db, "proj-1")
 
     assert session is not None
     assert session.deck is not None
-    assert session.deck.title == "Edited in the design workspace"
+    assert session.deck.title == deck.title
+
+
+async def test_move_session_to_head_follows_a_newer_revision() -> None:
+    db, _fake, _deck, _sources = await _provision()
+    newer = await _web_edit(db, "Edited in the design workspace")
+    session = await load_session(db, "proj-1")
+    assert session is not None
+
+    moved = await move_session_to_head(db, session)
+
+    assert moved is True
+    reloaded = await load_session(db, "proj-1")
+    assert reloaded is not None
+    assert reloaded.revision_id == newer
+    assert reloaded.deck is not None
+    assert reloaded.deck.title == "Edited in the design workspace"
 
 
 async def test_load_session_returns_none_when_absent() -> None:
@@ -383,6 +423,7 @@ async def test_chat_turn_reply_persists_history() -> None:
         project_id="proj-1",
         user_text="hi",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.REPLY
@@ -414,6 +455,7 @@ async def test_chat_turn_small_fix_auto_applies_and_accumulates() -> None:
         project_id="proj-1",
         user_text="fix slide",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.REDELIVERED
@@ -452,6 +494,7 @@ async def test_chat_turn_model_proposed_fix_gates_even_at_one_slide() -> None:
         project_id="proj-1",
         user_text="ok",
         user_initiated=False,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.AWAITING_APPROVAL
@@ -481,10 +524,13 @@ async def test_approve_fires_pending_and_clears_gate() -> None:
         project_id="proj-1",
         user_text="ok",
         user_initiated=False,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
     assert orch.calls == []  # still gated (model-proposed)
 
-    result = await pf._apply_pending(orchestrator=orch, db=db, project_id="proj-1")
+    result = await pf._apply_pending(
+        orchestrator=orch, db=db, project_id="proj-1", telegram_id=OWNER_TELEGRAM_ID
+    )
 
     assert result.outcome is pf._ChatOutcome.REDELIVERED
     assert len(orch.calls) == 1
@@ -513,6 +559,7 @@ async def test_reject_discards_pending_without_firing_tool() -> None:
         project_id="proj-1",
         user_text="ok",
         user_initiated=False,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     result = await pf._reject_pending(db=db, project_id="proj-1")
@@ -545,6 +592,7 @@ async def test_turn_still_runs_when_the_fix_allowance_is_spent() -> None:
         project_id="proj-1",
         user_text="a question",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.REPLY
@@ -573,6 +621,7 @@ async def test_fix_counter_refuses_once_the_tier_allowance_is_spent() -> None:
         project_id="proj-1",
         user_text="fix",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
     assert first.outcome is pf._ChatOutcome.REDELIVERED
 
@@ -584,6 +633,7 @@ async def test_fix_counter_refuses_once_the_tier_allowance_is_spent() -> None:
         project_id="proj-1",
         user_text="again",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
     assert second.outcome is pf._ChatOutcome.FIXES_EXHAUSTED
     assert second.fix_limit == 1
@@ -607,6 +657,7 @@ async def test_premium_allows_three_fixes_then_refuses_the_fourth() -> None:
             project_id="proj-1",
             user_text="fix",
             user_initiated=True,
+            telegram_id=OWNER_TELEGRAM_ID,
         )
         assert result.outcome is pf._ChatOutcome.REDELIVERED
     assert len(orch.calls) == 3
@@ -619,6 +670,7 @@ async def test_premium_allows_three_fixes_then_refuses_the_fourth() -> None:
         project_id="proj-1",
         user_text="fix",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
     assert fourth.outcome is pf._ChatOutcome.FIXES_EXHAUSTED
     assert len(orch.calls) == 3  # the fourth never fired
@@ -628,7 +680,7 @@ async def test_premium_allows_three_fixes_then_refuses_the_fourth() -> None:
 
 
 async def test_failed_fix_degrades_gracefully_without_consuming_counter() -> None:
-    # A fix that RAISES (apply_fixes_and_render fails: a hallucinated slide_id, an
+    # A fix that RAISES (apply_fixes fails: a hallucinated slide_id, an
     # empty editorial regen) must NOT crash the turn and must NOT burn an edit: it
     # degrades to a graceful RENDER_FAILED, the counter stays put, and the brain's
     # edit_slides call is answered with an error so the next turn's history coheres.
@@ -644,6 +696,7 @@ async def test_failed_fix_degrades_gracefully_without_consuming_counter() -> Non
         project_id="proj-1",
         user_text="fix",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.RENDER_FAILED  # graceful, not a crash
@@ -656,10 +709,9 @@ async def test_failed_fix_degrades_gracefully_without_consuming_counter() -> Non
 
 
 async def test_zero_file_render_is_a_failed_fix_not_a_delivered_one() -> None:
-    # DELIVERY BOUNDARY: apply_fixes_and_render RETURNS (no raise) with zero output
-    # files when every render format fails. That is NOT a delivered fix: the count
-    # must not be consumed, the user is told it failed (not "applied"), and the
-    # prior good download paths are preserved (not clobbered with an empty map).
+    # DELIVERY BOUNDARY: a render that cannot produce every format raises. That is
+    # NOT a delivered fix: the count must not be consumed, the user is told it
+    # failed (not "applied"), and the prior good download paths are preserved.
     db, _fake, deck, _sources = await _provision(package=GenerationPackage.PRESENTATION_PREMIUM)
     pf._PROJECT_CACHE["proj-1"] = {"files": {"html": "/prior/good.html"}}
     driver = ScriptedStubDriver()
@@ -673,6 +725,7 @@ async def test_zero_file_render_is_a_failed_fix_not_a_delivered_one() -> None:
         project_id="proj-1",
         user_text="fix",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.RENDER_FAILED
@@ -774,6 +827,7 @@ async def test_delivered_fix_feeds_result_back_to_history() -> None:
         project_id="proj-1",
         user_text="fix slide",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.REDELIVERED
@@ -791,7 +845,7 @@ async def test_delivered_fix_feeds_result_back_to_history() -> None:
 
 
 async def test_render_failed_fix_feeds_error_back_to_history() -> None:
-    # A zero-file render is a FAILED fix: the function_response records the error
+    # A failed render is a FAILED fix: the function_response records the error
     # (not a delivery) so the brain's next turn knows the edit did not land.
     db, _fake, deck, _sources = await _provision()
     driver = ScriptedStubDriver()
@@ -810,6 +864,7 @@ async def test_render_failed_fix_feeds_error_back_to_history() -> None:
         project_id="proj-1",
         user_text="fix slide",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.RENDER_FAILED
@@ -823,181 +878,138 @@ async def test_render_failed_fix_feeds_error_back_to_history() -> None:
 # ------------------------------------------------ eager session creation (5a)
 
 
-async def test_open_brain_session_true_when_deck_persisted() -> None:
+async def test_open_brain_session_starts_on_the_committed_revision() -> None:
     db, fake = _make_db()
     _seed_project(fake)
-    await db.save_deck("proj-1", _make_deck(title="Cooling", audience=AudienceType.UNDERGRADUATE))
+    deck = _make_deck(title="Cooling", audience=AudienceType.UNDERGRADUATE)
+    _document_id, revision_id = seed_presentation(
+        fake.tables, project_id="proj-1", content=deck.model_dump(mode="json")
+    )
 
     can_edit = await pf._open_brain_session(
-        db, "proj-1", _make_sources(with_figure=False), GenerationPackage.PRESENTATION_STANDARD
+        db,
+        "proj-1",
+        _make_sources(with_figure=False),
+        GenerationPackage.PRESENTATION_STANDARD,
+        revision_id=revision_id,
+        deck=deck,
     )
 
     assert can_edit is True
     session = await load_session(db, "proj-1")
     assert session is not None
-    assert session.deck is not None
+    assert session.revision_id == revision_id
+    assert session.deck == deck
 
 
-async def test_open_brain_session_false_when_deck_absent() -> None:
-    # The deck persist is best-effort; if it never landed, editing is NOT offered
-    # (the guard returns False) rather than seeding a session that cannot edit.
+async def test_open_brain_session_false_when_the_session_write_fails() -> None:
+    # Session creation is best-effort: a failed write means no "Edit with AI"
+    # button, never a crashed delivery.
     db, fake = _make_db()
-    _seed_project(fake)  # project seeded, but NO deck saved
+    _seed_project(fake)
+    deck = _make_deck(title="Cooling", audience=AudienceType.UNDERGRADUATE)
+
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("database unavailable")
+
+    db.save_brain_session = broken
 
     can_edit = await pf._open_brain_session(
-        db, "proj-1", _make_sources(with_figure=False), GenerationPackage.PRESENTATION_STANDARD
+        db,
+        "proj-1",
+        _make_sources(with_figure=False),
+        GenerationPackage.PRESENTATION_STANDARD,
+        revision_id="revision-x",
+        deck=deck,
     )
 
     assert can_edit is False
+    assert await db.get_brain_session("proj-1") is None
 
 
-async def test_create_session_refuses_without_a_persisted_deck() -> None:
-    # RISK 1 / the deck-implies-row invariant: no deck ⇒ raise ⇒ NO brain_sessions row.
-    db, fake = _make_db()
-    _seed_project(fake)  # project exists, but no deck was ever saved
-
-    with pytest.raises(ValueError):
-        await create_session(
-            db,
-            project_id="proj-1",
-            sources=_make_sources(with_figure=False),
-            package=GenerationPackage.PRESENTATION_STANDARD,
-            formats=_FORMATS,
-        )
-
-    assert await db.get_brain_session("proj-1") is None  # the row was never written
+# ------------------------------------------- canonical state from the bot (ADR 0001)
 
 
-# --------------------------------------------- parked-fix coherence + multi-call (5a)
-
-
-async def test_parked_fix_survives_restart_and_routes_to_approval() -> None:
-    # BUG 1: a parked fix leaves its edit_slides call UNANSWERED in persisted history.
-    # No brain turn may run against it (that would resend a dangling call and 400 —
-    # the sharp case is a restart that dropped the FSM pointer). The user is routed
-    # back to the approval decision until approve/reject answers the call.
+async def test_bot_edit_on_a_stale_revision_conflicts_and_offers_reload() -> None:
+    # Bug (b): the bot used to write the decks table while the head stayed put,
+    # so the web never saw the edit. Now a bot edit commits against the session's
+    # revision; if the web moved the head meanwhile, it conflicts — nothing is
+    # overwritten, no edit is consumed, and the brain's call is answered.
     db, _fake, deck, _sources = await _provision()
+    newer = await _web_edit(db, "Edited on the web")
     driver = ScriptedStubDriver()
-    driver.queue(
-        StubResponse(
-            action=TurnAction.FIX,
-            fixes=(SlideFix(slide_id="s0", instruction="a big rewrite"),),
-            reason="a significant re-delivery",
-        )
-    )
-    orch = _FakeOrchestrator(deck)
-
-    parked = await pf._run_chat_turn(
-        driver=driver,
-        orchestrator=orch,
-        db=db,
-        project_id="proj-1",
-        user_text="ok",
-        user_initiated=False,  # model-proposed → parks behind the gate
-    )
-    assert parked.outcome is pf._ChatOutcome.AWAITING_APPROVAL
-
-    # Simulate a restart: drop every in-memory pointer; the DB session survives.
-    pf._PROJECT_CACHE.clear()
-    pf._SESSION_LOCKS.clear()
-
-    class _ExplodingDriver:
-        async def run_turn(self, *_a: Any, **_k: Any) -> Any:
-            raise AssertionError("a brain turn must NOT run while a fix is parked")
-
-    blocked = await pf._run_chat_turn(
-        driver=cast(Any, _ExplodingDriver()),
-        orchestrator=orch,
-        db=db,
-        project_id="proj-1",
-        user_text="actually change something else",
-        user_initiated=True,
-    )
-    # The guard short-circuited (the exploding driver was never called) and re-presented
-    # the decision instead of running a turn.
-    assert blocked.outcome is pf._ChatOutcome.AWAITING_APPROVAL
-
-    # Approving answers the parked call and clears the gate.
-    approved = await pf._apply_pending(orchestrator=orch, db=db, project_id="proj-1")
-    assert approved.outcome is pf._ChatOutcome.REDELIVERED
-    cleared = await load_session(db, "proj-1")
-    assert cleared is not None
-    assert cleared.pending_action is None
-
-
-async def test_multi_call_fix_answers_every_call_part() -> None:
-    # BUG 2: a turn with TWO edit_slides call parts must be answered with TWO
-    # function_response parts (Gemini requires one per call), else the next turn 400s.
-    db, _fake, deck, _sources = await _provision()
-    driver = ScriptedStubDriver()
-    driver.queue(
-        StubResponse(
-            action=TurnAction.FIX,
-            fixes=(
-                SlideFix(slide_id="s0", instruction="edit one"),
-                SlideFix(slide_id="s1", instruction="edit two"),
-            ),
-            call_count=2,  # this turn stands in for TWO edit_slides call parts
-        )
-    )
-    orch = _FakeOrchestrator(deck)
+    _queue_fix(driver)
+    orch = _FakeOrchestrator(deck.model_copy(update={"title": "Bot edit"}))
 
     result = await pf._run_chat_turn(
         driver=driver,
         orchestrator=orch,
         db=db,
         project_id="proj-1",
-        user_text="two edits at once",
+        user_text="fix",
         user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
+    )
+
+    assert result.outcome is pf._ChatOutcome.DECK_CHANGED
+    head = await DocumentStore(db).head("proj-1", DocumentKind.PRESENTATION)
+    assert head is not None and head.revision_id == newer
+    assert head.content["title"] == "Edited on the web"
+    assert orch.renders == []
+    reloaded = await load_session(db, "proj-1")
+    assert reloaded is not None
+    assert reloaded.fixes_used == 0
+    response = reloaded.history[-1].parts[0].function_response  # type: ignore[union-attr]
+    assert response is not None
+    assert response.response["error"] == "deck_changed_elsewhere"
+
+
+async def test_bot_edit_after_reload_advances_the_head_the_web_reads() -> None:
+    db, _fake, deck, _sources = await _provision()
+    newer = await _web_edit(db, "Edited on the web")
+    session = await load_session(db, "proj-1")
+    assert session is not None
+    await move_session_to_head(db, session)
+    driver = ScriptedStubDriver()
+    _queue_fix(driver)
+    orch = _FakeOrchestrator(deck.model_copy(update={"title": "Bot edit on top"}))
+
+    result = await pf._run_chat_turn(
+        driver=driver,
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="fix",
+        user_initiated=True,
+        telegram_id=OWNER_TELEGRAM_ID,
     )
 
     assert result.outcome is pf._ChatOutcome.REDELIVERED
-    reloaded = await load_session(db, "proj-1")
-    assert reloaded is not None
-    responses = [p for p in (reloaded.history[-1].parts or []) if p.function_response is not None]
-    assert len(responses) == 2  # one response part per call part
-    assert all(p.function_response.name == "edit_slides" for p in responses)  # type: ignore[union-attr]
+    head = await DocumentStore(db).head("proj-1", DocumentKind.PRESENTATION)
+    assert head is not None
+    assert head.revision.parent_revision_id == newer
+    assert head.revision.kind is RevisionKind.BOT_EDIT
+    assert head.revision.actor == f"bot:{OWNER_TELEGRAM_ID}"
+    assert head.content["title"] == "Bot edit on top"
 
 
-@pytest.mark.asyncio
-async def test_redelivered_renders_reply_text_before_label() -> None:
-    from unittest.mock import AsyncMock, MagicMock
+async def test_bot_edit_by_someone_who_is_not_the_owner_is_refused() -> None:
+    db, fake, deck, _sources = await _provision()
+    fake.tables["users"].append({"id": "u2", "telegram_id": 999_999})
+    driver = ScriptedStubDriver()
+    _queue_fix(driver)
+    orch = _FakeOrchestrator(deck.model_copy(update={"title": "Hijack"}))
 
-    from packages.bot.labels import get_bot_labels
-
-    msg = MagicMock(spec=Message)
-    msg.answer = AsyncMock(return_value=msg)
-    labels = get_bot_labels("en")
-    await pf._render_chat_result(
-        msg,
-        "en",
-        labels,
-        pf._ChatResult(
-            pf._ChatOutcome.REDELIVERED,
-            slides_changed=1,
-            reply_text="Heads up — your source says 44%, not 40%.",
-        ),
+    result = await pf._run_chat_turn(
+        driver=driver,
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        user_text="fix",
+        user_initiated=True,
+        telegram_id=999_999,
     )
-    sent = msg.answer.await_args.args[0]
-    assert "Heads up — your source says 44%, not 40%." in sent
-    assert "Updated 1 slide(s)" in sent
-    assert sent.index("Heads up") < sent.index("Updated 1 slide(s)")
 
-
-@pytest.mark.asyncio
-async def test_redelivered_without_reply_text_stays_label_only() -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
-    from packages.bot.labels import get_bot_labels
-
-    msg = MagicMock(spec=Message)
-    msg.answer = AsyncMock(return_value=msg)
-    labels = get_bot_labels("en")
-    await pf._render_chat_result(
-        msg,
-        "en",
-        labels,
-        pf._ChatResult(pf._ChatOutcome.REDELIVERED, slides_changed=2),
-    )
-    sent = msg.answer.await_args.args[0]
-    assert sent == "✅ Updated 2 slide(s). Download:"
+    assert result.outcome is pf._ChatOutcome.RENDER_FAILED
+    head = await DocumentStore(db).head("proj-1", DocumentKind.PRESENTATION)
+    assert head is not None and head.content["title"] == deck.title

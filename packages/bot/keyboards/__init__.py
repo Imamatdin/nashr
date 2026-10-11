@@ -230,6 +230,18 @@ def presentation_chat_keyboard(lang: str) -> InlineKeyboardMarkup:
     )
 
 
+def deck_changed_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Reload the latest version, or stop editing (ADR 0001 conflict on a bot edit)."""
+
+    labels = get_bot_labels(lang)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=labels.reload_deck_button, callback_data="reload_deck")],
+            [InlineKeyboardButton(text=labels.done, callback_data="done")],
+        ]
+    )
+
+
 def presentation_approval_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Approve / reject buttons for the brain's code-side approval gate.
 

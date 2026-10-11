@@ -112,6 +112,10 @@ class BrainSession(BaseModel):
     project_id: str = Field(min_length=1)
     history: list[genai_types.Content] = Field(default_factory=list[genai_types.Content])
     sources: SourceProcessingResult
+    # The revision being edited (ADR 0001). ``deck`` is that revision's content,
+    # loaded from it rather than from the head, so an edit always commits against
+    # the deck the brain actually saw.
+    revision_id: str | None = None
     deck: DeckSpec | None = None
     package: GenerationPackage
     formats: list[ExportFormat] = Field(min_length=1)

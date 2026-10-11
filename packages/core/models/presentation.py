@@ -637,7 +637,7 @@ class SlideRegenResult(BaseModel):
     # of paid generated image slots (figure/background, not free Commons
     # portraits) it filled. Both default to zero so the quality-judge path that
     # has no cost interest stays valid; the brain session accumulates them across
-    # a fix batch for billing/analytics (see FixAndRenderResult) — the edit cap
+    # a fix batch for billing/analytics (see FixBatchResult) — the edit cap
     # itself is a per-tier fix counter, not a cost.
     estimated_cost_usd: float = Field(default=0.0, ge=0.0)
     image_count: int = Field(default=0, ge=0)

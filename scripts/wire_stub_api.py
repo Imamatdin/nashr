@@ -54,8 +54,12 @@ from packages.core.models.presentation import (
 from packages.core.models.source import SourceChunkCreate, SourceClaimCreate
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditAction, CreditEntry, CreditLedger
+from packages.platform.document_models import ExportFileFormat, export_storage_key
+from packages.platform.exports import renderer_version
 from packages.platform.jobs import GenerationJob, JobStatus, JobType
 from packages.platform.rate_limit import RateDecision
+from tests.unit.fake_documents import seed_presentation
+from tests.unit.test_database_client import FakeSupabaseClient
 
 _SECRET = "wire-stub-jwt-secret"
 USER_ID = UUID("11111111-1111-1111-1111-111111111111")
@@ -231,16 +235,41 @@ class StubDb:
             }
         }
         self.session_figures: dict[str, list[dict[str, Any]]] = {PROJECT_READY: figures}
-        self.decks: dict[str, dict[str, Any]] = {
-            PROJECT_READY: {"deck_json": _deck(PROJECT_READY).model_dump(mode="json")}
-        }
-        self.files: dict[str, list[dict[str, Any]]] = {
-            PROJECT_READY: [
-                {"file_type": "html", "storage_path": f"generated/{PROJECT_READY}/deck.html"},
-                {"file_type": "pptx", "storage_path": f"generated/{PROJECT_READY}/deck.pptx"},
-                {"file_type": "pdf", "storage_path": f"generated/{PROJECT_READY}/deck.pdf"},
-            ]
-        }
+        # Canonical documents (ADR 0001) live in the same in-memory emulation the
+        # unit tests use, so DocumentStore and the session store run unchanged.
+        self._documents = FakeSupabaseClient()
+        self._documents.seed(
+            "projects", [{"id": PROJECT_READY, "user_id": str(USER_ID), "type": "presentation"}]
+        )
+        document_id, revision_id = seed_presentation(
+            self._documents.tables,
+            project_id=PROJECT_READY,
+            content=_deck(PROJECT_READY).model_dump(mode="json"),
+        )
+        self.brain_sessions[PROJECT_READY]["revision_id"] = revision_id
+        self._documents.seed(
+            "revision_exports",
+            [
+                {
+                    "revision_id": revision_id,
+                    "format": fmt,
+                    "renderer_version": renderer_version(),
+                    "storage_key": export_storage_key(
+                        document_id,
+                        revision_id,
+                        renderer_version(),
+                        ExportFileFormat(fmt),
+                        fmt[0] * 64,
+                    ),
+                    "sha256": fmt[0] * 64,
+                    "byte_size": 1,
+                    "page_count": None,
+                    "created_by_job": None,
+                    "created_at": now,
+                }
+                for fmt in ("html", "pptx", "pdf")
+            ],
+        )
         self.sources: dict[str, list[dict[str, Any]]] = {
             PROJECT_READY: [
                 {
@@ -278,9 +307,6 @@ class StubDb:
     async def get_project_sources(self, project_id: str) -> list[dict[str, Any]]:
         return self.sources.get(project_id, [])
 
-    async def get_project_files(self, project_id: str) -> list[dict[str, Any]]:
-        return self.files.get(project_id, [])
-
     async def set_project_share_token(self, project_id: str, token: str | None) -> None:
         self.projects[project_id]["share_token"] = token
 
@@ -310,13 +336,11 @@ class StubDb:
                 continue
             row[key] = value
 
-    async def get_deck(self, project_id: str) -> dict[str, Any] | None:
-        return self.decks.get(project_id)
+    def _query(self, table: str) -> Any:
+        return self._documents.table(table)
 
-    async def save_deck(self, project_id: str, deck_spec: DeckSpec) -> dict[str, Any]:
-        row = {"deck_json": deck_spec.model_dump(mode="json")}
-        self.decks[project_id] = row
-        return row
+    def rpc(self, fn: str, params: dict[str, Any]) -> Any:
+        return self._documents.rpc(fn, params).execute()
 
 
 class StubCredits:

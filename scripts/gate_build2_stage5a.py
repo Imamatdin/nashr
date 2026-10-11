@@ -7,7 +7,7 @@ a real plan-bearing deck, real sources, real Sonnet/Gemini/Node calls:
   WAY 2 (conversational editing) — a real user-edit message is driven through the
   REAL :func:`presentation_flow._brain_driver` (a live GeminiBrainDriver). The
   mechanical proof: the brain CALLED ``edit_slides`` (its call turn is in the
-  history), the fix routed through ``apply_fixes_and_render`` and re-delivered,
+  history), the fix routed through the shared fix path and re-delivered,
   the fix counter incremented, the download cache refreshed, AND the fix's outcome
   was fed back as an ``edit_slides`` function_response (so the next turn is
   coherent — no dangling call → no Gemini 400).
@@ -74,6 +74,7 @@ from packages.platform.config import PlatformConfig  # noqa: E402
 from packages.platform.database import DatabaseClient  # noqa: E402
 from packages.platform.storage import FileStorage  # noqa: E402
 from packages.presentation.editorial import EditorialPass  # noqa: E402
+from scripts._gate_documents import owner_telegram_id, seed_deck_revision  # noqa: E402
 from scripts.gate_build2_stage0 import _cleanup, _GateReporter  # noqa: E402
 from scripts.gate_build2_stage3 import _pick_two_targets, _slide_by_id  # noqa: E402
 from scripts.proof_slide_regen import (  # noqa: E402
@@ -174,9 +175,16 @@ async def _run_gate(
     sources = await _sources_from_sco2()
     print(f"  {deck.slide_count} slides; sources figures={len(sources.figures)}")
 
-    await db.save_deck(project_id, deck)
+    revision_id = await seed_deck_revision(db, project_id, deck)
+    telegram_id = await owner_telegram_id(db, project_id)
     await create_session(
-        db, project_id=project_id, sources=sources, package=_PACKAGE, formats=_FORMATS
+        db,
+        project_id=project_id,
+        sources=sources,
+        package=_PACKAGE,
+        formats=_FORMATS,
+        revision_id=revision_id,
+        deck=deck,
     )
     orch = PresentationOrchestrator(
         bot=cast(Any, MagicMock()),
@@ -200,6 +208,7 @@ async def _run_gate(
         project_id=project_id,
         user_text=edit_text,
         user_initiated=True,
+        telegram_id=telegram_id,
     )
     reporter.check(
         "brain edit re-delivered",

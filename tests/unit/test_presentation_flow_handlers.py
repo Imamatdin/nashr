@@ -46,6 +46,8 @@ from packages.bot.orchestrators.presentation_orchestrator import (
     PresentationRenderResult,
 )
 from packages.bot.states import PresentationStates
+from packages.core.enums import AudienceType
+from tests.unit.test_database_client import _make_db, _make_deck
 
 # ---------------------------------------------------------------------------
 # Spy helpers
@@ -206,24 +208,51 @@ async def test_choose_tier_basic_and_premium(state: FSMContext) -> None:
 
 
 class _FakeOrchestrator:
-    """Records calls and returns a canned pipeline result (render + sources)."""
+    """Records calls; builds a canned deck and renders canned files (or raises)."""
 
     def __init__(
         self,
         files: PresentationRenderResult,
         raises: Exception | None = None,
         sources: SourceProcessingResult | None = None,
+        render_raises: Exception | None = None,
     ) -> None:
         self._files = files
         self._raises = raises
+        self._render_raises = render_raises
         self._sources = sources if sources is not None else SourceProcessingResult()
         self.run_calls: list[dict[str, Any]] = []
 
-    async def run_full_pipeline(self, **kwargs: Any) -> PresentationPipelineResult:
+    async def build_deck(self, **kwargs: Any) -> PresentationPipelineResult:
         self.run_calls.append(kwargs)
         if self._raises is not None:
             raise self._raises
-        return PresentationPipelineResult(render=self._files, sources=self._sources)
+        deck = _make_deck(title="Generated", audience=AudienceType.UNDERGRADUATE)
+        return PresentationPipelineResult(deck=deck, sources=self._sources)
+
+    async def render(self, deck: Any, formats: Any, progress: Any) -> PresentationRenderResult:
+        if self._render_raises is not None:
+            raise self._render_raises
+        return self._files
+
+
+_TELEGRAM_ID = 4242
+
+
+def _generation_db(project_id: str) -> tuple[Any, Any]:
+    """A DatabaseClient over the emulated client with the project and its owner."""
+
+    db, fake = _make_db()
+    fake.seed(
+        "projects",
+        [{"id": project_id, "user_id": "user_x", "type": "presentation", "status": "draft"}],
+    )
+    fake.seed("users", [{"id": "user_x", "telegram_id": _TELEGRAM_ID}])
+    return db, fake
+
+
+def _status(fake: Any) -> str:
+    return str(fake.tables["projects"][0]["status"])
 
 
 async def test_start_generation_caches_outputs_and_advances_state(
@@ -250,9 +279,7 @@ async def test_start_generation_caches_outputs_and_advances_state(
 
     monkeypatch.setattr(presentation_flow, "_orchestrator", _factory)
 
-    db_spy = MagicMock()
-    db_spy.create_generated_file = AsyncMock()
-    db_spy.update_project_status = AsyncMock()
+    db, fake_db = _generation_db("proj_x")
     credits_spy = MagicMock()
 
     target = _make_message_spy()
@@ -260,7 +287,7 @@ async def test_start_generation_caches_outputs_and_advances_state(
         cast(Any, target),
         state,
         cast(Any, MagicMock()),
-        cast(Any, db_spy),
+        cast(Any, db),
         cast(Any, credits_spy),
     )
 
@@ -269,13 +296,14 @@ async def test_start_generation_caches_outputs_and_advances_state(
     assert cache["files"]["html"] == str(html)
     assert cache["files"]["pptx"] == str(pptx)
     # The handler caches the LOCAL paths (Telegram delivery serves those files)
-    # and writes NO generated_files row (G40). Registration belongs to whoever
-    # uploaded the bytes: the orchestrator's render() already upserts the stable
-    # R2 key. This assertion previously required the opposite — two rows written
-    # here, carrying local /tmp paths that GET /projects/{id}/deck cannot sign
-    # and that violate migration 007's unique constraint anyway.
-    assert db_spy.create_generated_file.await_count == 0
-    db_spy.update_project_status.assert_awaited_with("proj_x", "ready")
+    # and commits the deck as the project's head revision, as the owner's bot
+    # identity (ADR 0001); it writes no generated_files row (G40).
+    head_id = fake_db.tables["documents"][0]["head_revision_id"]
+    head = next(r for r in fake_db.tables["document_revisions"] if r["id"] == head_id)
+    assert head["kind"] == "generation" and head["actor"] == f"bot:{_TELEGRAM_ID}"
+    assert head["content"]["title"] == "Generated"
+    assert fake_db.tables.get("generated_files", []) == []
+    assert _status(fake_db) == "ready"
 
 
 async def test_start_generation_refunds_on_failure(
@@ -297,8 +325,7 @@ async def test_start_generation_refunds_on_failure(
 
     monkeypatch.setattr(presentation_flow, "_orchestrator", _factory)
 
-    db_spy = MagicMock()
-    db_spy.update_project_status = AsyncMock()
+    db, fake_db = _generation_db("proj_fail")
     credits_spy = MagicMock()
     credits_spy.refund = AsyncMock()
 
@@ -307,11 +334,11 @@ async def test_start_generation_refunds_on_failure(
         cast(Any, target),
         state,
         cast(Any, MagicMock()),
-        cast(Any, db_spy),
+        cast(Any, db),
         cast(Any, credits_spy),
     )
 
-    db_spy.update_project_status.assert_awaited_with("proj_fail", "failed")
+    assert _status(fake_db) == "failed"
     credits_spy.refund.assert_awaited_once()
     call_kwargs = credits_spy.refund.await_args.kwargs
     assert call_kwargs["amount_uzs"] == 5_000  # presentation_basic price
@@ -339,15 +366,14 @@ async def test_start_generation_refunds_on_orchestrator_render_failure(
     err = _OrchestratorError(
         "render", RuntimeError("render produced no deliverable files — html: boom")
     )
-    fake = _FakeOrchestrator(PresentationRenderResult(), raises=err)
+    fake = _FakeOrchestrator(PresentationRenderResult(), render_raises=err)
 
     def _factory(_bot: Any, _db: Any, _credits: Any, **_kwargs: Any) -> Any:
         return fake
 
     monkeypatch.setattr(presentation_flow, "_orchestrator", _factory)
 
-    db_spy = MagicMock()
-    db_spy.update_project_status = AsyncMock()
+    db, fake_db = _generation_db("proj_render_fail")
     credits_spy = MagicMock()
     credits_spy.refund = AsyncMock()
 
@@ -356,11 +382,11 @@ async def test_start_generation_refunds_on_orchestrator_render_failure(
         cast(Any, target),
         state,
         cast(Any, MagicMock()),
-        cast(Any, db_spy),
+        cast(Any, db),
         cast(Any, credits_spy),
     )
 
-    db_spy.update_project_status.assert_awaited_with("proj_render_fail", "failed")
+    assert _status(fake_db) == "failed"
     credits_spy.refund.assert_awaited_once()
     assert credits_spy.refund.await_args.kwargs["amount_uzs"] == 5_000  # basic price
     labels = get_bot_labels("uz")
@@ -457,17 +483,23 @@ async def test_cancel_clears_state_and_cache(state: FSMContext) -> None:
 async def test_edit_with_ai_opens_conversational_editor(state: FSMContext) -> None:
     from packages.bot.sessions import create_session
     from packages.core.enums import AudienceType, ExportFormat, GenerationPackage
+    from tests.unit.fake_documents import seed_presentation
     from tests.unit.test_database_client import _make_db, _make_deck, _seed_project
 
     db, fake = _make_db()
     _seed_project(fake)  # seeds project id "proj-1"
-    await db.save_deck("proj-1", _make_deck(title="X", audience=AudienceType.UNDERGRADUATE))
+    deck = _make_deck(title="X", audience=AudienceType.UNDERGRADUATE)
+    _document_id, revision_id = seed_presentation(
+        fake.tables, project_id="proj-1", content=deck.model_dump(mode="json")
+    )
     await create_session(
         db,
         project_id="proj-1",
         sources=SourceProcessingResult(),
         package=GenerationPackage.PRESENTATION_STANDARD,
         formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+        revision_id=revision_id,
+        deck=deck,
     )
 
     await state.set_state(PresentationStates.reviewing_output)
@@ -554,6 +586,8 @@ async def test_chat_turn_shows_typing_indicator(
     msg.text = "make slide 2 bold"
     msg.chat = MagicMock()
     msg.chat.id = 22
+    msg.from_user = MagicMock()
+    msg.from_user.id = 22
 
     await presentation_flow.chat_turn(
         cast(Any, msg),

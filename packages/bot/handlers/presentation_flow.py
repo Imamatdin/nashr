@@ -40,6 +40,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from aiogram import Bot, F, Router
 from aiogram.filters import StateFilter
@@ -48,6 +49,7 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from packages.bot.keyboards import (
+    deck_changed_keyboard,
     main_menu_keyboard,
     payment_provider_keyboard,
     presentation_approval_keyboard,
@@ -64,6 +66,8 @@ from packages.bot.orchestrators import (
     SourceProcessingResult,
 )
 from packages.bot.orchestrators.article_orchestrator import _OrchestratorError
+from packages.bot.orchestrators.deck_revisions import commit_generated_deck, renderable
+from packages.bot.orchestrators.inline_publish import fetch_exports, owner_bot_actor, publish_inline
 from packages.bot.sessions import (
     ApprovalState,
     BrainDriver,
@@ -71,25 +75,35 @@ from packages.bot.sessions import (
     GeminiBrainDriver,
     PendingAction,
     create_session,
-    hydrate_figures,
     load_session,
     persist_session,
     requires_approval,
 )
-from packages.bot.sessions.budget import has_fixes_remaining, session_fix_limit
-from packages.bot.sessions.roster_format import render_roster_payload
+from packages.bot.sessions.budget import session_fix_limit
+from packages.bot.sessions.store import move_session_to_head
 from packages.bot.states import PresentationStates
-from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
 from packages.core.enums import ExportFormat, GenerationPackage
 from packages.core.gemini import GeminiClient
-from packages.core.gemini_tools import FunctionResult, build_function_responses_content
-from packages.core.models.presentation import SlideFix
+from packages.core.models.presentation import DeckSpec, SlideFix
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
+from packages.platform.document_models import (
+    CommitOutcome,
+    CommitStatus,
+    DocumentKind,
+    DocumentStoreError,
+    RevisionKind,
+    bot_actor,
+)
+from packages.platform.document_store import DocumentStore
 from packages.platform.storage import FileStorage
 from packages.presentation.editorial import EditorialContentCriticError
+from packages.sessions_core.apply import FixStatus, answer_fix_calls, apply_fix_batch
 
 logger = logging.getLogger("nashr.bot.presentation")
+
+# Telegram delivery formats; renders are all-or-nothing (ADR 0001).
+_BOT_FORMATS: list[ExportFormat] = [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
 
 router = Router()
 
@@ -444,17 +458,34 @@ async def start_generation(
     package = _package_for_generation(data)
     await state.set_state(PresentationStates.generating)
 
+    store = DocumentStore(db)
+    render: PresentationRenderResult | None = None
     try:
-        result = await orchestrator.run_full_pipeline(
+        # The head as generation starts: a regeneration commits against it, so a
+        # deck changed elsewhere meanwhile is never overwritten (ADR 0001).
+        head = await store.head(project_id, DocumentKind.PRESENTATION)
+        built = await orchestrator.build_deck(
             file_infos=sources_meta,
             project_id=project_id,
             user_id=user_id,
             language=lang,
             raw_answers=raw_answers,
-            requested_formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
             progress=progress,
             package=package,
         )
+        outcome = await commit_generated_deck(
+            store,
+            project_id=project_id,
+            deck=built.deck,
+            actor=await owner_bot_actor(db, user_id),
+            base_revision_id=head.revision_id if head is not None else None,
+            idempotency_key=f"bot-generation:{uuid4()}",
+        )
+        revision_id = renderable(outcome) or (
+            outcome.revision_id if outcome.status is CommitStatus.UNCHANGED else None
+        )
+        if revision_id is not None:
+            render = await orchestrator.render(built.deck, _BOT_FORMATS, progress)
     except _OrchestratorError as exc:
         if _is_content_grounding_failure(exc):
             logger.warning(
@@ -488,7 +519,25 @@ async def start_generation(
         await state.clear()
         return
 
-    _stash_outputs(project_id, result.render)
+    if revision_id is None or render is None:
+        # The deck changed elsewhere while this one was generated: it was kept as
+        # a proposal for the owner to review on the web, not written over theirs.
+        with contextlib.suppress(Exception):
+            await progress_msg.edit_text(labels.deck_regeneration_proposed)
+        await state.set_state(PresentationStates.reviewing_output)
+        return
+
+    await publish_inline(
+        db=db,
+        storage=storage,
+        project_id=project_id,
+        user_id=user_id,
+        document_id=outcome.document_id,
+        revision_id=revision_id,
+        render=render,
+        formats=_BOT_FORMATS,
+    )
+    _stash_outputs(project_id, render)
     try:
         await db.update_project_status(project_id, "ready")
     except Exception as exc:
@@ -500,7 +549,9 @@ async def start_generation(
     # Seed the brain editing session eagerly (sources in hand) but keep the user in
     # reviewing_output; the "Edit with AI" button opens the chat loop on demand, so
     # the download / regenerate affordances are preserved and editing is opt-in.
-    can_edit = await _open_brain_session(db, project_id, result.sources, package)
+    can_edit = await _open_brain_session(
+        db, project_id, built.sources, package, revision_id=revision_id, deck=built.deck
+    )
     await state.update_data(can_edit=can_edit)
     keyboard = presentation_output_keyboard(lang, can_edit=can_edit)
     try:
@@ -526,18 +577,16 @@ def _stash_outputs(project_id: str, files: PresentationRenderResult) -> None:
 # generated_files row per format carrying the LOCAL rendered path. It was both
 # redundant and wrong:
 #
-#   * redundant — PresentationOrchestrator.render() is called with project_id on
-#     both bot paths (first delivery and the Way-2 fix re-delivery), and its
-#     _upload_rendered() already uploads each format to the migration-007 stable
-#     R2 key and UPSERTs the row against uq_generated_files_project_type;
+#   * redundant — the bot publishes every render as revision exports under an
+#     inline job claim (inline_publish.publish_inline, ADR 0001);
 #   * wrong — a local /tmp path is not something GET /projects/{id}/deck can
 #     sign, so any row that did land made a deck unopenable from the web.
 #
 # Post-007 the INSERT could not even succeed: it violated the unique constraint
 # the orchestrator's upsert targets, raised, and was swallowed into a warning on
-# every single delivery. Registration belongs to whoever uploaded the bytes, and
-# that is the orchestrator. _stash_outputs is untouched — Telegram delivery
-# genuinely does serve the local files.
+# every single delivery. Registration belongs to whoever holds the render job's
+# claim. _stash_outputs is untouched — Telegram delivery genuinely does serve the
+# local files.
 
 
 async def _open_brain_session(
@@ -545,13 +594,15 @@ async def _open_brain_session(
     project_id: str,
     sources: SourceProcessingResult,
     package: GenerationPackage,
+    *,
+    revision_id: str,
+    deck: DeckSpec,
 ) -> bool:
-    """Create the brain editing session; report whether conversational editing is on.
+    """Create the brain editing session on the committed revision.
 
-    Best-effort: a create failure — including a deck that never persisted, which
-    ``create_session`` refuses (no deck ⇒ raise ⇒ no row) — simply means delivery
-    proceeds WITHOUT the "Edit with AI" affordance. Downloads still work; the user
-    just cannot chat-edit, the honest state when there is no deck to edit.
+    Best-effort: a create failure simply means delivery proceeds WITHOUT the
+    "Edit with AI" affordance. Downloads still work; the user just cannot
+    chat-edit.
     """
 
     try:
@@ -560,7 +611,9 @@ async def _open_brain_session(
             project_id=project_id,
             sources=sources,
             package=package,
-            formats=[ExportFormat.HTML, ExportFormat.PPTX_EDITABLE],
+            formats=_BOT_FORMATS,
+            revision_id=revision_id,
+            deck=deck,
         )
     except Exception as exc:
         logger.warning(
@@ -818,10 +871,10 @@ async def reviewing_output_nudge(message: Message, state: FSMContext) -> None:
 #
 # After delivery the user edits the deck by talking to the brain (Stage 5). This
 # is the MACHINERY: load the DB-backed session by project_id, run ONE turn (a
-# scripted stub stands in for the brain), dispatch the brain's fix tool to the
-# orchestrator ABOVE the pipeline (apply_fixes_and_render — no run_full_pipeline
-# refactor), gate significant re-deliveries behind a user button, cap cumulative
-# spend, and persist. A per-project lock serializes concurrent turns. The core
+# scripted stub stands in for the brain), dispatch the brain's fix tool through
+# the shared fix path (sessions_core.apply: apply → commit against the session's
+# revision → render/publish), gate significant re-deliveries behind a user button,
+# cap cumulative spend, and persist. A per-project lock serializes concurrent turns. The core
 # functions below take no aiogram types so they are unit-testable directly.
 
 # Per-project async locks serialize a session's turns within this process. Like
@@ -872,6 +925,8 @@ class _ChatOutcome(StrEnum):
     FIXES_EXHAUSTED = "fixes_exhausted"
     DISCARDED = "discarded"
     NO_SESSION = "no_session"
+    DECK_CHANGED = "deck_changed"
+    UNCHANGED = "unchanged"
 
 
 @dataclass
@@ -894,6 +949,8 @@ async def _run_chat_turn(
     project_id: str,
     user_text: str,
     user_initiated: bool,
+    telegram_id: int,
+    storage: FileStorage | None = None,
 ) -> _ChatResult:
     """Run ONE brain turn: load → turn → (reply | gate | fix).
 
@@ -943,25 +1000,29 @@ async def _run_chat_turn(
         session=session,
         fixes=list(outcome.fixes),
         call_count=outcome.fix_call_count,
+        telegram_id=telegram_id,
+        storage=storage,
         reply_text=outcome.reply_text,
     )
 
 
 def _append_fix_result(session: BrainSession, response: dict[str, object], *, count: int) -> None:
-    """Answer the brain's ``edit_slides`` call(s) with the fix's real outcome.
+    """Answer the brain's ``edit_slides`` call(s) with the fix's real outcome."""
 
-    Gemini requires EVERY tool call part that ended the previous turn to be answered
-    by its own function_response part before the next user turn (else HTTP 400). A
-    turn may carry several edit_slides calls (their fixes are merged into one batch),
-    so ``count`` (the number of call parts) response parts are appended — never fewer.
-    This records delivered / exhausted / failed so the brain's NEXT turn sees a
-    coherent call → result history and can react (e.g. not re-issue an exhausted fix).
-    """
+    answer_fix_calls(session, response, count=count)
 
-    parts = [
-        FunctionResult(name=EDIT_SLIDES_TOOL_NAME, response=response) for _ in range(max(1, count))
-    ]
-    session.history = [*session.history, build_function_responses_content(parts)]
+
+_FIX_OUTCOMES: dict[FixStatus, _ChatOutcome] = {
+    FixStatus.DELIVERED: _ChatOutcome.REDELIVERED,
+    FixStatus.CONFLICT: _ChatOutcome.DECK_CHANGED,
+    # A bot edit never proposes (bot_edit conflicts instead); mapped for completeness.
+    FixStatus.PROPOSED: _ChatOutcome.DECK_CHANGED,
+    FixStatus.UNCHANGED: _ChatOutcome.UNCHANGED,
+    FixStatus.FAILED: _ChatOutcome.RENDER_FAILED,
+    FixStatus.RENDER_FAILED: _ChatOutcome.RENDER_FAILED,
+    FixStatus.EXHAUSTED: _ChatOutcome.FIXES_EXHAUSTED,
+    FixStatus.NO_SESSION: _ChatOutcome.NO_SESSION,
+}
 
 
 async def _dispatch_fix(
@@ -971,117 +1032,72 @@ async def _dispatch_fix(
     session: BrainSession,
     fixes: list[SlideFix],
     call_count: int,
+    telegram_id: int,
+    storage: FileStorage | None = None,
     reply_text: str | None = None,
 ) -> _ChatResult:
-    """Fire the orchestrator fix-chain, re-deliver, accumulate spend, persist.
+    """Apply a fix batch through the shared path, commit it as the user's bot edit, re-deliver.
 
-    ``call_count`` is the number of edit_slides call parts in the brain turn (or the
-    parked turn) being resolved; every exit path answers each call part with its own
-    function_response so the next turn's history stays coherent.
-
-    The single place a fix actually runs — reached by the auto-apply path and the
-    approve callback alike. The pre-fix gate is the fix COUNTER: refuse BEFORE the
-    expensive call if the session's tier allowance is spent. The count is consumed
-    and success reported IFF the fix produced at least one DELIVERABLE rendered
-    file — the delivery boundary. ``apply_fixes_and_render`` can RETURN (no
-    exception) with zero output files because ``render`` records per-format
-    failures as warnings rather than raising; that is a failed fix, not a delivered
-    one, so it must not consume the allowance, must not overwrite the prior good
-    downloads with an empty map, and must not claim success. An exception from the
-    fix chain likewise never reaches the increment. Figures are hydrated here
-    (lazy-loaded only now), the edited deck refreshed from the result (apply
-    persisted it internally, so a held copy would be stale), and the new files
-    re-stashed so the download buttons serve them.
+    The edit commits against the revision this session is editing
+    (``session.revision_id``), so a deck changed on the web meanwhile is never
+    overwritten: the commit conflicts and the user is offered a reload (ADR 0001).
+    Allowance, call answering and persistence follow
+    :func:`packages.sessions_core.apply.apply_fix_batch`.
     """
 
-    if not has_fixes_remaining(session.fixes_used, session.package):
-        session.pending_action = None
-        session.approval_state = ApprovalState.IDLE
-        _append_fix_result(
-            session,
-            {"error": "fixes_exhausted", "fix_limit": session_fix_limit(session.package)},
-            count=call_count,
-        )
-        await persist_session(db, session)
-        return _ChatResult(
-            _ChatOutcome.FIXES_EXHAUSTED, fix_limit=session_fix_limit(session.package)
-        )
-    if session.deck is None:
-        return _ChatResult(_ChatOutcome.NO_SESSION)
+    store = DocumentStore(db)
+    actor = bot_actor(telegram_id)
+    rendered: list[PresentationRenderResult] = []
 
-    try:
-        await hydrate_figures(db, session)
-        result = await orchestrator.apply_fixes_and_render(
-            session.deck,
-            fixes,
-            session.sources,
-            session.project_id,
-            session.formats,
-            _noop_progress,
-            package=session.package,
+    async def commit(deck: DeckSpec, base: str | None) -> CommitOutcome:
+        document_id = await store.document_id(session.project_id, DocumentKind.PRESENTATION)
+        if document_id is None:
+            raise DocumentStoreError("document_not_found")
+        return await store.commit(
+            document_id,
+            base,
+            deck.model_dump(mode="json"),
+            kind=RevisionKind.BOT_EDIT,
+            actor=actor,
+            idempotency_key=f"bot-edit:{uuid4()}",
         )
-    except Exception as exc:
-        # The fix chain can RAISE (a brain-hallucinated/typo'd slide_id, or an empty
-        # editorial regen after retry). Degrade gracefully — the way start_generation
-        # guards first-gen — instead of crashing the turn: answer the brain's call so
-        # the next turn's history stays coherent, persist the conversation, and DO NOT
-        # consume the allowance or touch the prior good downloads. apply_fixes_and_render
-        # is atomic (it raises before persist/render), so session.deck is still intact.
-        logger.warning(
-            "presentation_fix_chain_failed",
-            extra={"project_id": session.project_id, "error_type": type(exc).__name__},
-        )
-        session.pending_action = None
-        session.approval_state = ApprovalState.IDLE
-        _append_fix_result(
-            session, {"error": "fix_failed", "detail": type(exc).__name__}, count=call_count
-        )
-        await persist_session(db, session)
-        return _ChatResult(
-            _ChatOutcome.RENDER_FAILED,
-            warnings=[f"edit could not be applied: {type(exc).__name__}"],
-        )
-    # The edited deck was persisted INSIDE apply_fixes_and_render (so the next fix
-    # builds on it); keep the in-memory copy in sync regardless of render outcome.
-    session.deck = result.deck
-    session.pending_action = None
-    session.approval_state = ApprovalState.IDLE
 
-    if not result.render.by_extension():
-        # DELIVERY BOUNDARY: every render format failed — nothing downloadable.
-        # The fix was NOT delivered: do not consume the allowance, do not stash an
-        # empty map over the prior good paths (the old download buttons keep
-        # working), and do not claim success. The conversation IS persisted so the
-        # next turn sees this attempt. (Note: the deck advanced in the DB while the
-        # user saw a failure — acceptable here because the next fix grounds on the
-        # advanced deck and the allowance is intact; surfacing it is the contract.)
-        _append_fix_result(
-            session,
-            {"error": "render_failed", "warnings": list(result.render.warnings)},
-            count=call_count,
-        )
-        await persist_session(db, session)
-        return _ChatResult(_ChatOutcome.RENDER_FAILED, warnings=list(result.render.warnings))
+    async def deliver(deck: DeckSpec, revision_id: str, formats: list[ExportFormat]) -> list[str]:
+        render = await orchestrator.render(deck, formats, _noop_progress)
+        rendered.append(render)
+        project = await db.get_project(session.project_id)
+        document_id = await store.document_id(session.project_id, DocumentKind.PRESENTATION)
+        if project is not None and document_id is not None:
+            await publish_inline(
+                db=db,
+                storage=storage,
+                project_id=session.project_id,
+                user_id=str(project["user_id"]),
+                document_id=document_id,
+                revision_id=revision_id,
+                render=render,
+                formats=formats,
+            )
+        return list(render.warnings)
 
-    session.fixes_used += 1  # consume one edit — only on a DELIVERED fix
-    session.accumulated_cost_usd += result.estimated_cost_usd  # analytics, not the cap
-    session.accumulated_image_count += result.image_count
-    _stash_outputs(session.project_id, result.render)
-    _append_fix_result(
-        session,
-        {
-            "delivered": True,
-            "slides_changed": len(fixes),
-            "roster": render_roster_payload(session.deck),
-        },
-        count=call_count,
+    result = await apply_fix_batch(
+        runner=orchestrator,
+        db=db,
+        session=session,
+        fixes=fixes,
+        call_count=call_count,
+        progress=_noop_progress,
+        commit=commit,
+        deliver=deliver,
     )
-    await persist_session(db, session)
+    if result.status is FixStatus.DELIVERED and rendered:
+        _stash_outputs(session.project_id, rendered[-1])
     return _ChatResult(
-        _ChatOutcome.REDELIVERED,
-        slides_changed=len(fixes),
-        warnings=list(result.render.warnings),
+        _FIX_OUTCOMES[result.status],
+        slides_changed=result.slides_changed,
+        warnings=list(result.warnings),
         reply_text=reply_text,
+        fix_limit=session_fix_limit(session.package),
     )
 
 
@@ -1090,6 +1106,8 @@ async def _apply_pending(
     orchestrator: PresentationOrchestrator,
     db: DatabaseClient,
     project_id: str,
+    telegram_id: int,
+    storage: FileStorage | None = None,
 ) -> _ChatResult:
     """Approve path: fire the parked change. A button — not the model — got here."""
 
@@ -1102,6 +1120,8 @@ async def _apply_pending(
         session=session,
         fixes=list(session.pending_action.fixes),
         call_count=session.pending_action.call_count,
+        telegram_id=telegram_id,
+        storage=storage,
     )
 
 
@@ -1141,6 +1161,10 @@ async def _render_chat_result(
         await target.answer(labels.edit_fixes_exhausted.format(limit=result.fix_limit))
     elif result.outcome is _ChatOutcome.DISCARDED:
         await target.answer(labels.change_discarded)
+    elif result.outcome is _ChatOutcome.DECK_CHANGED:
+        await target.answer(labels.deck_changed_elsewhere, reply_markup=deck_changed_keyboard(lang))
+    elif result.outcome is _ChatOutcome.UNCHANGED:
+        await target.answer(labels.edit_unchanged, reply_markup=presentation_chat_keyboard(lang))
     else:
         await target.answer(labels.edit_session_not_found)
 
@@ -1192,6 +1216,8 @@ async def chat_turn(
             project_id=project_id,
             user_text=message.text or "",
             user_initiated=True,
+            telegram_id=message.from_user.id if message.from_user else message.chat.id,
+            storage=storage,
         )
     await _render_chat_result(message, lang, labels, result)
     if result.outcome is _ChatOutcome.AWAITING_APPROVAL:
@@ -1246,7 +1272,13 @@ async def approve_redeliver(
     ):
         # Applying the parked fix runs the fix-chain + a full re-render (minutes):
         # keep a typing indicator up so the user sees the bot is working.
-        result = await _apply_pending(orchestrator=orchestrator, db=db, project_id=project_id)
+        result = await _apply_pending(
+            orchestrator=orchestrator,
+            db=db,
+            project_id=project_id,
+            telegram_id=callback.from_user.id,
+            storage=storage,
+        )
     await _render_chat_result(callback.message, lang, labels, result)
     await state.set_state(PresentationStates.talking_to_brain)
     await callback.answer()
@@ -1267,4 +1299,48 @@ async def reject_redeliver(callback: CallbackQuery, state: FSMContext, db: Datab
         result = await _reject_pending(db=db, project_id=project_id)
     await _render_chat_result(callback.message, lang, labels, result)
     await state.set_state(PresentationStates.talking_to_brain)
+    await callback.answer()
+
+
+@router.callback_query(
+    StateFilter(PresentationStates.talking_to_brain, PresentationStates.reviewing_output),
+    F.data == "reload_deck",
+)
+async def reload_deck(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: DatabaseClient,
+    storage: FileStorage | None = None,
+) -> None:
+    """Move the editing session to the latest version after a conflict (ADR 0001).
+
+    The download buttons serve cached local files; they belonged to the old
+    revision, so they are replaced by the new head's published exports, or
+    dropped when that revision has none yet.
+    """
+
+    data = await state.get_data()
+    project_id = str(data.get("project_id", ""))
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    async with _session_lock(project_id):
+        session = await load_session(db, project_id) if project_id else None
+        if session is None:
+            await callback.message.answer(labels.edit_session_not_found)
+            await callback.answer()
+            return
+        await move_session_to_head(db, session)
+        slot = _cache(project_id)
+        slot.pop("files", None)
+        if session.revision_id is not None:
+            files = await fetch_exports(db, storage, session.revision_id)
+            if files:
+                slot["files"] = {ext: str(path) for ext, path in files.items()}
+    await state.set_state(PresentationStates.talking_to_brain)
+    await callback.message.answer(
+        labels.deck_reloaded, reply_markup=presentation_chat_keyboard(lang)
+    )
     await callback.answer()
