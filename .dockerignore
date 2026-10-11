@@ -1,0 +1,37 @@
+# Default deny: only backend runtime inputs enter this image.
+**
+!requirements.txt
+!fonts/
+!fonts/**
+!packages/
+!packages/**
+!scripts/
+scripts/**
+!scripts/__init__.py
+!scripts/worker_run_job.py
+!scripts/healthcheck.py
+!scripts/backup_db.py
+!scripts/backup_restore_verify.py
+!scripts/release_preflight.py
+
+# Vercel builds the web app separately. Never import host dependencies.
+packages/web
+**/node_modules
+**/dist
+**/build
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.next
+**/__tests__
+**/.review-build-*
+
+# Deny secrets even when placed below an allowed runtime directory.
+**/.env
+**/.env.*
+**/vertex-key.json
+**/*.pem
+**/*.key
+**/credentials.json
+**/.git
+**/.npmrc

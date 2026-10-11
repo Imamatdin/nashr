@@ -4,6 +4,7 @@
 # --- Core / data ---
 pydantic==2.12.5
 httpx==0.28.1
+python-dotenv==1.2.1
 
 # --- LLM clients ---
 anthropic==0.84.0
