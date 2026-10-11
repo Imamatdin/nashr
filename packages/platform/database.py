@@ -498,17 +498,18 @@ class DatabaseClient:
         table = "source_claims" if claims else "source_chunks"
         columns = "id,source_chunk_id" if claims else "id,source_id,page"
         rows: list[dict[str, Any]] = []
-        for start in range(0, len(ids), 100):
-            batch = ids[start : start + 100]
-            result = await asyncio.to_thread(
-                lambda batch=batch: (
-                    self._client.table(table)
-                    .select(columns)
-                    .eq("project_id", project_id)
-                    .in_("id", batch)
-                    .execute()
-                )
+
+        def run(batch: list[str]) -> Any:
+            return (
+                self._client.table(table)
+                .select(columns)
+                .eq("project_id", project_id)
+                .in_("id", batch)
+                .execute()
             )
+
+        for start in range(0, len(ids), 100):
+            result = await asyncio.to_thread(run, ids[start : start + 100])
             rows.extend(cast(list[dict[str, Any]], result.data))
         return rows
 
