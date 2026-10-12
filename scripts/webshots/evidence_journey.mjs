@@ -210,7 +210,7 @@ try {
 
   // ------------------------------------------------------- recovery scenarios
   await step("recovery: save failure keeps a device draft, survives reload, then saves", async () => {
-    await page.route((url) => saveRoute(url), (route) => route.request().method() === "PUT" ? route.abort("internetdisconnected") : route.fallback());
+    await page.route(saveRoute, (route) => route.request().method() === "PUT" ? route.abort("internetdisconnected") : route.fallback());
     await paragraph(page).locator("textarea").fill(`${blockText} Oflayn tahrir.`);
     await page.locator(".article-alert", { hasText: "nusxasi shu qurilmada turibdi" }).waitFor({ timeout: 30_000 });
     assert.equal(await draftCount(page), 1);
@@ -220,7 +220,7 @@ try {
     await page.locator(".article-alert", { hasText: "saqlanmagan o‘zgarishlar tiklandi" }).waitFor({ timeout: 30_000 });
     assert.ok((await blockTexts(page)).includes(`${blockText} Oflayn tahrir.`), "draft text not restored");
     await shot(page, "04-recovery-resumed");
-    await page.unroute((url) => saveRoute(url));
+    await page.unroute(saveRoute);
     await page.getByRole("button", { name: "Hozir qayta urinish" }).click().catch(() => {});
     await status(page, "Saqlandi");
     assert.ok((await article(uz)).content.blocks.some((block) => block.text.endsWith("Oflayn tahrir.")));
@@ -230,7 +230,7 @@ try {
   await step("recovery: a save whose response is lost replays instead of conflicting", async () => {
     const before = await revisions(uz);
     let dropped = false;
-    await page.route((url) => saveRoute(url), async (route) => {
+    await page.route(saveRoute, async (route) => {
       if (route.request().method() !== "PUT" || dropped) return route.fallback();
       dropped = true;
       await route.fetch();
@@ -238,7 +238,7 @@ try {
     });
     await paragraph(page).locator("textarea").fill(`${blockText} Javob yo‘qoldi.`);
     await status(page, "Saqlandi");
-    await page.unroute((url) => saveRoute(url));
+    await page.unroute(saveRoute);
     assert.ok(dropped, "response was never dropped");
     assert.equal(await page.locator(".article-alert", { hasText: "boshqa joyda o‘zgardi" }).count(), 0, "false conflict");
     assert.equal(await revisions(uz), before + 1, "replay created an extra revision");
@@ -257,11 +257,11 @@ try {
   });
 
   await step("recovery: a stale draft found on reopen is offered, not silently applied", async () => {
-    await page.route((url) => saveRoute(url), (route) => route.request().method() === "PUT" ? route.abort("internetdisconnected") : route.fallback());
+    await page.route(saveRoute, (route) => route.request().method() === "PUT" ? route.abort("internetdisconnected") : route.fallback());
     await paragraph(page).locator("textarea").fill(`${blockText} Eskirgan qoralama.`);
     await page.locator(".article-alert", { hasText: "nusxasi shu qurilmada turibdi" }).waitFor({ timeout: 30_000 });
     await saveElsewhere(uz, "Serverdagi yangi xatboshi.");
-    await page.unroute((url) => saveRoute(url));
+    await page.unroute(saveRoute);
     await page.reload();
     await ready(page);
     await page.locator(".article-alert", { hasText: "boshqa joyda o‘zgardi" }).waitFor({ timeout: 30_000 });
@@ -274,14 +274,14 @@ try {
   });
 
   await step("history: restore is blocked while changes are unsaved", async () => {
-    await page.route((url) => saveRoute(url), (route) => route.request().method() === "PUT" ? route.abort("internetdisconnected") : route.fallback());
+    await page.route(saveRoute, (route) => route.request().method() === "PUT" ? route.abort("internetdisconnected") : route.fallback());
     await paragraph(page).locator("textarea").fill(`${blockText} Tarix sinovi.`);
     await page.locator(".article-alert", { hasText: "nusxasi shu qurilmada turibdi" }).waitFor({ timeout: 30_000 });
     await page.getByRole("button", { name: "Versiyalar tarixi" }).click();
     await page.locator(".article-history", { hasText: "saqlanishini kuting" }).waitFor();
     assert.ok(await page.locator(".article-history button", { hasText: "Tiklash" }).first().isDisabled());
     await page.locator(".article-history header button").click();
-    await page.unroute((url) => saveRoute(url));
+    await page.unroute(saveRoute);
     await page.getByRole("button", { name: "Hozir qayta urinish" }).click();
     await status(page, "Saqlandi");
   });
