@@ -16,23 +16,23 @@
     },
     "test_e_reusing_an_idempotency_key_for_other_content_is_refused": {
       "expect": "fail",
-      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.UniqueViolationError'>"
+      "match": "DID NOT RAISE .*\\bUniqueViolationError\\b"
     },
     "test_f_a_worker_without_the_claim_cannot_publish": {
       "expect": "fail",
-      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.ObjectNotInPrerequisiteStateError'>"
+      "match": "DID NOT RAISE .*\\bObjectNotInPrerequisiteStateError\\b"
     },
     "test_g_a_job_cannot_publish_a_revision_it_does_not_target": {
       "expect": "fail",
-      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.InsufficientPrivilegeError'>"
+      "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
     "test_h_a_job_cannot_be_refunded_twice": {
       "expect": "fail",
-      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.UniqueViolationError'>"
+      "match": "DID NOT RAISE .*\\bUniqueViolationError\\b"
     },
     "test_k_an_api_user_cannot_write_revisions_or_decks_directly": {
       "expect": "fail",
-      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.InsufficientPrivilegeError'>"
+      "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
     "test_export_key_shape": {
       "expect": "pass"
