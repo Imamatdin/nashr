@@ -101,6 +101,18 @@
     "test_even_the_view_owner_cannot_write_the_decks_view": {
       "expect": "fail",
       "match": "\\bObjectNotInPrerequisiteStateError\\b: cannot update view \\\"decks\\\""
+    },
+    "test_every_security_definer_function_resolves_names_through_public_then_pg_temp": {
+      "expect": "fail",
+      "match": "definer functions without pg_temp last: \\['claim_next_job', 'consume_rate_limit', 'heartbeat_job', 'reap_stale_jobs'\\]"
+    },
+    "test_016_takes_create_on_public_away_from_api_roles": {
+      "expect": "fail",
+      "match": "roles that can still create in public: \\['public', 'anon', 'authenticated', 'authenticator'\\]"
+    },
+    "test_a_system_actor_is_only_a_migration_identity": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*\\bDataError\\b"
     }
   }
 }

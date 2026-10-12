@@ -220,7 +220,7 @@ async def _web_edit(db: Any, title: str) -> str:
         head.revision_id,
         edited,
         kind=RevisionKind.IMPORT,
-        actor="system:test-web",
+        actor="system:migration-016",
         idempotency_key=f"web-{title}",
     )
     assert outcome.status is CommitStatus.COMMITTED and outcome.revision_id is not None

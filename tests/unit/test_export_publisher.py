@@ -205,7 +205,7 @@ async def test_a_job_for_revision_x_cannot_register_revision_y(tmp_path: Path) -
             "p_content": {"title": "two"},
             "p_kind": "import",
             "p_schema_version": 1,
-            "p_actor": "system:test",
+            "p_actor": "system:migration-016",
             "p_idempotency_key": "second",
         }
     )[0]["revision_id"]

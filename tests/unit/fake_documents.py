@@ -90,7 +90,7 @@ class DocumentRpcEmulator:
             if user is None or str(user["id"]) != owner:
                 raise refuse("not_document_owner")
             allowed = {"bot_edit", "generation", "regeneration"}
-        elif re.fullmatch(r"system:[a-z0-9_.:-]{1,64}", actor):
+        elif re.fullmatch(r"system:migration-[0-9]{3}", actor):
             allowed = {"import"}
         else:
             raise refuse("invalid_actor")
@@ -688,7 +688,7 @@ def seed_presentation(
     *,
     project_id: str,
     content: dict[str, Any],
-    actor: str = "system:test",
+    actor: str = "system:migration-016",
 ) -> tuple[str, str]:
     """Give a project a presentation document whose head is ``content``.
 

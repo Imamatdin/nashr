@@ -685,7 +685,7 @@ async def test_ai_edit_racing_a_manual_save_becomes_a_proposal_and_loses_nothing
         head.revision_id,
         manual,
         kind=RevisionKind.IMPORT,
-        actor="system:test-manual",
+        actor="system:migration-016",
         idempotency_key="manual-save",
     )
     runner = _FakeOrchestrator(deck)

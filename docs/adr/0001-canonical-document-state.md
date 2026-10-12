@@ -128,7 +128,9 @@ idempotency_key) → (status, document_id, revision_id, head_revision_id, propos
    `finish_generation_job` below. The remaining rule text is the pre-fix design:
    `worker:<job>` had to name a
    `processing` job of the same project whose `user_id` owns it; `bot:<telegram id>`
-   must map through `users.telegram_id` to the owner; `system:` only for `import`.
+   must map through `users.telegram_id` to the owner; `system:migration-NNN` only
+   for `import` (B1-FIX: narrowed from any `system:*`; it is a migration's identity,
+   reachable only by privileged callers, and is not independently authenticated).
 3. Validate kind, `schema_version` against the registry, content is a JSON object,
    size ≤ 2 MiB (real decks are 20–55 KB; see Appendix B).
 4. Idempotency: same key with same hash on a revision → `duplicate` (original id);
@@ -305,6 +307,17 @@ renderer's source tree and lockfile (`packages/presentation-worker/src/**`,
 `package-lock.json`). The package version is `0.1.0` and has never been bumped, so it
 can't identify a renderer. A source hash changes exactly when output can change, and
 the API, worker and bot all ship `packages/`, so they compute the same value.
+
+### 4.5b Schema hardening (B1-FIX)
+
+Every SECURITY DEFINER function runs with `search_path = public, pg_temp`, including
+the queue functions kept from 006 (`claim_next_job`, `consume_rate_limit`;
+`heartbeat_job` and `reap_stale_jobs` are redefined by 016). A fixed search path is
+only safe if untrusted roles cannot create objects in `public`: PostgreSQL 15 dropped
+PUBLIC's CREATE for new databases but keeps it on upgraded or restored ones. 016
+revokes CREATE on `public` from PUBLIC, `anon`, `authenticated` and `authenticator`
+and aborts if any of them can still create there. `system:` actors are narrowed to
+`system:migration-NNN`, the backfill's identity.
 
 ### 4.6 Lock order (B1-FIX)
 

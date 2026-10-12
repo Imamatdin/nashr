@@ -172,6 +172,28 @@ async def test_j_owner_reads_and_commits_as_themselves_only(world: dict[str, str
     assert impersonated.status_code >= 400 and "actor_mismatch" in impersonated.text
 
 
+async def test_a_write_with_no_subject_is_refused(world: dict[str, str]) -> None:
+    # An authenticated token without `sub` resolves app_uid() to NULL; the
+    # function must refuse it rather than treat NULL as "not a different user".
+    response = await _call(
+        "POST",
+        "/rpc/commit_revision",
+        None,
+        {
+            "p_document_id": world["document"],
+            "p_base_revision_id": world["revision"],
+            "p_content": {"title": "anonymous"},
+            "p_kind": "manual",
+            "p_schema_version": 1,
+            "p_actor": world["owner"],
+            "p_idempotency_key": "no-sub",
+        },
+    )
+    assert response.status_code == 403, response.text
+    assert response.json().get("code") == "42501", response.text
+    assert "not_document_owner" in response.text
+
+
 async def test_k_direct_writes_through_postgrest_are_refused(world: dict[str, str]) -> None:
     forged = await _call(
         "POST",

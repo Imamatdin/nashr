@@ -103,7 +103,7 @@ async def test_b_bot_edit_after_web_import_advances_the_head_the_web_reads(world
         world.r0,
         {"title": "imported"},
         kind="import",
-        actor="system:test",
+        actor="system:migration-016",
         key="import",
     )
     bot = await commit(

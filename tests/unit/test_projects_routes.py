@@ -157,7 +157,7 @@ def _seed_deck(db: _FakeDb, content: dict[str, Any] | None = None) -> str:
             "p_content": content or {"title": f"deck {len(db.fake.tables['document_revisions'])}"},
             "p_kind": "import",
             "p_schema_version": 1,
-            "p_actor": "system:test",
+            "p_actor": "system:migration-016",
             "p_idempotency_key": f"seed-{uuid4()}",
         }
     )

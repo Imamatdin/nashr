@@ -760,3 +760,62 @@ async def test_even_the_view_owner_cannot_write_the_decks_view(deck: Deck) -> No
     assert await admin.fetchval(
         "select deck_json from decks where project_id = $1", uuid.UUID(deck.project)
     ) == {"t": "r0"}
+
+
+# ------------------------------------------------- 8. security hardening
+
+
+async def test_every_security_definer_function_resolves_names_through_public_then_pg_temp(
+    deck: Deck,
+) -> None:
+    admin = await deck.db.admin()
+    rows = await admin.fetch(
+        "select p.proname, coalesce(array_to_string(p.proconfig, ','), '') as config"
+        " from pg_proc p join pg_namespace n on n.oid = p.pronamespace"
+        " where n.nspname = 'public' and p.prosecdef order by p.proname"
+    )
+    unpinned = [r["proname"] for r in rows if "search_path=public, pg_temp" not in r["config"]]
+    assert unpinned == [], f"definer functions without pg_temp last: {unpinned}"
+
+
+async def test_016_takes_create_on_public_away_from_api_roles() -> None:
+    # An upgraded or restored database keeps PUBLIC's CREATE on public (PG < 15
+    # default); then anyone could plant a function a definer function resolves.
+    from tests.db.support import (
+        apply,
+        connect,
+        create_database,
+        database_url,
+        drop_database,
+        migration_016,
+        migrations_through,
+    )
+
+    name = await create_database(migrations_through("015"))
+    try:
+        conn = await connect(database_url(name))
+        await conn.execute("grant create on schema public to public, anon, authenticated")
+        await apply(conn, migration_016())
+        able = [
+            role
+            for role in ("public", "anon", "authenticated", "authenticator")
+            if await conn.fetchval("select has_schema_privilege($1, 'public', 'CREATE')", role)
+        ]
+        await conn.close()
+        assert able == [], f"roles that can still create in public: {able}"
+    finally:
+        await drop_database(name)
+
+
+async def test_a_system_actor_is_only_a_migration_identity(deck: Deck) -> None:
+    with pytest.raises(asyncpg.DataError, match="invalid_actor"):
+        await commit(
+            deck.service,
+            deck.document,
+            deck.r0,
+            {"t": "imported"},
+            kind="import",
+            actor="system:anything",
+            key="sys",
+        )
+    assert await head(deck.service, deck.document) == deck.r0

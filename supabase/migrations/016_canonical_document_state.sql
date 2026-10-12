@@ -306,7 +306,9 @@ begin
         if p_kind is null or p_kind not in ('bot_edit', 'generation', 'regeneration') then
             raise exception 'kind_not_allowed' using errcode = '42501';
         end if;
-    elsif p_actor ~ '^system:[a-z0-9_.:-]{1,64}$' then
+    elsif p_actor ~ '^system:migration-[0-9]{3}$' then
+        -- A system actor is a migration's identity, for its backfill imports only;
+        -- it is reachable solely by privileged (non end-user) callers.
         if p_kind is distinct from 'import' then
             raise exception 'kind_not_allowed' using errcode = '42501';
         end if;
@@ -1231,6 +1233,35 @@ grant execute on function register_export(
 grant execute on function record_revision_validation(uuid, text, text, text) to service_role;
 
 -- ---------------------------------------------------------------------------
+-- 10b. Schema hardening (Codex B1 review: SECURITY DEFINER search_path)
+-- ---------------------------------------------------------------------------
+-- Every SECURITY DEFINER function resolves names through `public, pg_temp`. That
+-- is only safe if no untrusted role can create objects in public: PostgreSQL 15
+-- removed PUBLIC's CREATE for new databases but keeps it on upgraded or restored
+-- ones. 016 takes CREATE away from the API roles and refuses to finish otherwise.
+-- The queue functions kept from 006 get the same fixed search_path.
+
+alter function claim_next_job(text) set search_path = public, pg_temp;
+alter function consume_rate_limit(text, text, text, timestamptz) set search_path = public, pg_temp;
+
+revoke create on schema public from public, anon, authenticated;
+do $$
+declare
+    v_role text;
+begin
+    if exists (select 1 from pg_roles where rolname = 'authenticator') then
+        execute 'revoke create on schema public from authenticator';
+    end if;
+    foreach v_role in array array['public', 'anon', 'authenticated', 'authenticator'] loop
+        if (v_role = 'public' or exists (select 1 from pg_roles where rolname = v_role))
+           and has_schema_privilege(v_role, 'public', 'CREATE') then
+            raise exception '016: role % can still create objects in schema public', v_role;
+        end if;
+    end loop;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- 11. Render-job dedupe on the revision, not the project
 -- ---------------------------------------------------------------------------
 
@@ -1524,6 +1555,7 @@ alter table documents replica identity full;
 -- drop function if exists _settle_failure(generation_jobs, text);
 -- -- then re-apply 006's reap_stale_jobs(integer) body (refunds move back to Python)
 -- -- credit_ledger_legacy_duplicate_refunds and the refund index stay (ledger history)
+-- -- schema hardening is kept on rollback (CREATE on public is not re-granted)
 -- drop function if exists finish_generation_job(uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]);
 -- drop function if exists complete_job(uuid, text, integer, jsonb);
 -- drop function if exists claim_job(uuid, text);

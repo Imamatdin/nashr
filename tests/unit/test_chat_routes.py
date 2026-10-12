@@ -351,7 +351,7 @@ async def test_fix_job_is_stamped_with_the_head_the_web_turn_edited() -> None:
         head.revision_id,
         edited,
         kind=RevisionKind.IMPORT,
-        actor="system:test-web",
+        actor="system:migration-016",
         idempotency_key="web-save",
     )
 

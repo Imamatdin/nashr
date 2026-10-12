@@ -374,7 +374,7 @@ class _World:
                 "p_content": _render_deck(title).model_dump(mode="json"),
                 "p_kind": "import",
                 "p_schema_version": 1,
-                "p_actor": "system:test",
+                "p_actor": "system:migration-016",
                 "p_idempotency_key": f"seed-{title}",
             }
         )
