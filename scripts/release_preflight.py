@@ -68,6 +68,10 @@ def _valid_payload(name: str, payload: object) -> bool:
             "/rpc/accept_proposal",
             "/rpc/reject_proposal",
             "/rpc/register_export",
+            "/rpc/finish_generation_job",
+            "/rpc/complete_job",
+            "/rpc/claim_job",
+            "/rpc/heartbeat_job",
         }
         return isinstance(paths, dict) and expected <= paths.keys()
     return isinstance(payload, list) and not payload

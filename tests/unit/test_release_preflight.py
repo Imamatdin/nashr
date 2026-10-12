@@ -84,6 +84,10 @@ async def test_all_expected_schema_surfaces_present() -> None:
                     "/rpc/accept_proposal": {},
                     "/rpc/reject_proposal": {},
                     "/rpc/register_export": {},
+                    "/rpc/finish_generation_job": {},
+                    "/rpc/complete_job": {},
+                    "/rpc/claim_job": {},
+                    "/rpc/heartbeat_job": {},
                 }
             }
         else:
