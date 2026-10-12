@@ -22,10 +22,12 @@ pytest.importorskip("hypothesis", reason="hypothesis runs in the CI database job
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from tests.db.conftest import LEGACY
+from tests.db.conftest import CURRENT
 from tests.db.support import Db, commit, ensure_document, head
 
-pytestmark = pytest.mark.skipif(LEGACY, reason="exercises migration 016's functions")
+pytestmark = pytest.mark.skipif(
+    not CURRENT, reason="exercises migration 016's functions (current schema only)"
+)
 
 KINDS = ["manual", "autosave", "ai_edit", "regeneration", "bot_edit", "restore"]
 PROPOSING = {"ai_edit", "regeneration"}

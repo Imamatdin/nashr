@@ -182,6 +182,9 @@ async def test_a_rendering_an_older_revision_does_not_change_the_heads_downloads
     job_new = await db.job(project, owner, payload={"revision_id": newer})
     await system.publish(doc, newer, job_new, "w1")
     before = await system.downloads_for(doc, newer)
+    # The first render finished before the second was asked for, so both schemas
+    # accept the second job; only what it publishes can differ.
+    await db.finish_job(job_new)
 
     job_old = await db.job(project, owner, payload={"revision_id": older})
     await system.publish(doc, older, job_old, "w1")
@@ -207,7 +210,7 @@ async def test_c_an_ai_edit_that_loses_the_race_is_kept(db: Db) -> None:
 async def test_e_reusing_an_idempotency_key_for_other_content_is_refused(db: Db) -> None:
     system, _project, _owner = await _system(db)
     doc, base = await system.start({"title": "base"})
-    with pytest.raises(asyncpg.PostgresError):
+    with pytest.raises(asyncpg.UniqueViolationError, match="idempotency_key_reused"):
         await system.reuse_key(doc, base)
 
 
@@ -215,7 +218,7 @@ async def test_f_a_worker_without_the_claim_cannot_publish(db: Db) -> None:
     system, project, owner = await _system(db)
     doc, revision = await system.start({"title": "deck"})
     job = await db.job(project, owner, worker="someone-else", payload={"revision_id": revision})
-    with pytest.raises(asyncpg.PostgresError):
+    with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="claim_lost"):
         await system.publish(doc, revision, job, "w1")
 
 
@@ -224,7 +227,7 @@ async def test_g_a_job_cannot_publish_a_revision_it_does_not_target(db: Db) -> N
     doc, x = await system.start({"title": "x"})
     y = await system.manual(doc, x, {"title": "y"}, "y")
     job = await db.job(project, owner, payload={"revision_id": x})
-    with pytest.raises(asyncpg.PostgresError):
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="job_revision_mismatch"):
         await system.publish(doc, str(y), job, "w1")
 
 

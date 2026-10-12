@@ -104,7 +104,9 @@ jobs:
           NASHR_TEST_SCHEMA=legacy python -m pytest tests/db/test_bug_regressions.py -v -ra \
             --junitxml=artifacts/prechange.xml 2>&1 | tee artifacts/prechange.log
           set -e
-          python -m tests.db.expect_failures artifacts/prechange.xml | tee artifacts/prechange-verdict.log
+          python -m tests.db.expect_failures artifacts/prechange.xml tests/db/inventory_legacy.json \
+            | tee artifacts/prechange-verdict.log
+          exit ${PIPESTATUS[0]}
       - name: Post-change run — full suite on migrations 001–016
         run: |
           set -o pipefail

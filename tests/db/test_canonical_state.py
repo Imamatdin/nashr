@@ -18,10 +18,12 @@ from typing import Any
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import pytest
 
-from tests.db.conftest import LEGACY
+from tests.db.conftest import CURRENT
 from tests.db.support import Db, accept, commit, ensure_document, head, register
 
-pytestmark = pytest.mark.skipif(LEGACY, reason="exercises migration 016's functions")
+pytestmark = pytest.mark.skipif(
+    not CURRENT, reason="exercises migration 016's functions (current schema only)"
+)
 
 OWNER_TG = 111_000_111
 OTHER_TG = 222_000_222

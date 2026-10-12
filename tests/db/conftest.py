@@ -1,21 +1,23 @@
 """Real-PostgreSQL suite: runs in CI against a Postgres service, skipped elsewhere.
 
 Set ``NASHR_TEST_DATABASE_URL`` to a superuser URL on a cluster bootstrapped
-with ``bootstrap_roles.sql``. ``NASHR_TEST_SCHEMA=legacy`` builds databases
-from migrations 001–015 only: the pre-change schema the bug-regression tests
-must fail against.
+with ``bootstrap_roles.sql``. ``NASHR_TEST_SCHEMA`` picks the chain:
+``legacy`` (001–015, the pre-B1 schema test_bug_regressions must fail against),
+``baseline`` (001–015 plus the reviewed 016, the schema test_b1_fix_regressions
+must fail against) or ``current`` (default, every migration).
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 
 import pytest
 
-from tests.db.support import ADMIN_URL, Db, create_database, drop_database, migrations_through
+from tests.db.support import ADMIN_URL, SCHEMA, Db, create_database, drop_database, migrations_for
 
-LEGACY = os.environ.get("NASHR_TEST_SCHEMA") == "legacy"
+LEGACY = SCHEMA == "legacy"
+BASELINE = SCHEMA == "baseline"
+CURRENT = SCHEMA == "current"
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -31,9 +33,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 @pytest.fixture
 async def db() -> AsyncIterator[Db]:
-    """A fresh database with the migration chain applied (001–015 under legacy)."""
+    """A fresh database with the schema mode's migration chain applied."""
 
-    name = await create_database(migrations_through("015" if LEGACY else None))
+    name = await create_database(migrations_for())
     database = Db(name)
     try:
         yield database

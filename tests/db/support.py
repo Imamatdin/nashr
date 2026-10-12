@@ -19,7 +19,14 @@ import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = sorted((ROOT / "supabase" / "migrations").glob("*.sql"))
 BOOTSTRAP = Path(__file__).with_name("bootstrap_database.sql")
+# Migration 016 exactly as the first B1 review saw it (blob e2863406 at 848a3c9).
+# The B1-FIX regression tests must fail against it and pass against the fixed 016.
+BASELINE_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_848a3c9.sql"
 ADMIN_URL = os.environ.get("NASHR_TEST_DATABASE_URL", "")
+# legacy = 001–015 (pre-B1); baseline = 001–015 + the reviewed 016; current = all.
+SCHEMA = os.environ.get("NASHR_TEST_SCHEMA", "current")
+if SCHEMA not in ("legacy", "baseline", "current"):
+    raise RuntimeError(f"NASHR_TEST_SCHEMA must be legacy, baseline or current, not {SCHEMA!r}")
 
 
 def migrations_through(last_prefix: str | None) -> list[Path]:
@@ -28,6 +35,24 @@ def migrations_through(last_prefix: str | None) -> list[Path]:
     if last_prefix is None:
         return list(MIGRATIONS)
     return [path for path in MIGRATIONS if path.name[:3] <= last_prefix]
+
+
+def migrations_for(schema: str = SCHEMA) -> list[Path]:
+    """The migration chain a schema mode builds."""
+
+    if schema == "legacy":
+        return migrations_through("015")
+    if schema == "baseline":
+        return [*migrations_through("015"), BASELINE_016]
+    return migrations_through(None)
+
+
+def migration_016(schema: str = SCHEMA) -> Path:
+    """The 016 file a schema mode applies (legacy has none)."""
+
+    if schema == "legacy":
+        raise RuntimeError("the legacy schema has no migration 016")
+    return BASELINE_016 if schema == "baseline" else migrations_through(None)[-1]
 
 
 def database_url(name: str) -> str:
@@ -139,15 +164,21 @@ class Db:
         status: str = "processing",
         job_type: str = "presentation_render",
         payload: dict[str, Any] | None = None,
+        attempts: int = 1,
     ) -> str:
+        """A job row; a processing one holds a live claim (``worker``, attempt ``attempts``)."""
+
         conn = await self.admin()
         job_id = str(uuid.uuid4())
         body = payload if payload is not None else {}
         if job_type == "presentation_render":
             body = {"renderer_version": "pw-test", "formats": ["html"], **body}
         await conn.execute(
-            "insert into generation_jobs (id, project_id, user_id, job_type, status, worker_id, payload)"
-            " values ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+            "insert into generation_jobs (id, project_id, user_id, job_type, status, worker_id,"
+            " payload, attempts, max_attempts, claimed_at, heartbeat_at)"
+            " values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, greatest($8, 1),"
+            " case when $5 = 'processing' then now() end,"
+            " case when $5 = 'processing' then now() end)",
             uuid.UUID(job_id),
             uuid.UUID(project_id),
             uuid.UUID(user_id),
@@ -155,8 +186,19 @@ class Db:
             status,
             worker,
             body,
+            attempts,
         )
         return job_id
+
+    async def finish_job(self, job_id: str, status: str = "completed") -> None:
+        """Land a job on a terminal status as an operator would (no claim involved)."""
+
+        conn = await self.admin()
+        await conn.execute(
+            "update generation_jobs set status = $2, completed_at = now() where id = $1",
+            uuid.UUID(job_id),
+            status,
+        )
 
 
 # ------------------------------------------------------------------ calls

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from tests.db.conftest import LEGACY
+from tests.db.conftest import CURRENT
 from tests.db.support import (
     MIGRATIONS,
     Db,
@@ -25,7 +25,7 @@ from tests.db.support import (
     migrations_through,
 )
 
-pytestmark = pytest.mark.skipif(LEGACY, reason="applies migration 016")
+pytestmark = pytest.mark.skipif(not CURRENT, reason="applies migration 016 (current schema only)")
 
 MIGRATION_016 = next(path for path in MIGRATIONS if path.name.startswith("016"))
 

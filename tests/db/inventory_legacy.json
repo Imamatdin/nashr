@@ -1,0 +1,41 @@
+{
+  "schema": "legacy (migrations 001-015)",
+  "module": "tests/db/test_bug_regressions.py",
+  "tests": {
+    "test_a_rendering_an_older_revision_does_not_change_the_heads_downloads": {
+      "expect": "fail",
+      "match": "AssertionError: assert \\['generated/[^]]*\\] == \\['generated/"
+    },
+    "test_b_a_bot_edit_reaches_the_head_the_web_reads": {
+      "expect": "fail",
+      "match": "assert \\{'title': 'imported'\\} == \\{'title': 'bot edit'\\}"
+    },
+    "test_c_an_ai_edit_that_loses_the_race_is_kept": {
+      "expect": "fail",
+      "match": "assert 0 == 1"
+    },
+    "test_e_reusing_an_idempotency_key_for_other_content_is_refused": {
+      "expect": "fail",
+      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.UniqueViolationError'>"
+    },
+    "test_f_a_worker_without_the_claim_cannot_publish": {
+      "expect": "fail",
+      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.ObjectNotInPrerequisiteStateError'>"
+    },
+    "test_g_a_job_cannot_publish_a_revision_it_does_not_target": {
+      "expect": "fail",
+      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.InsufficientPrivilegeError'>"
+    },
+    "test_h_a_job_cannot_be_refunded_twice": {
+      "expect": "fail",
+      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.UniqueViolationError'>"
+    },
+    "test_k_an_api_user_cannot_write_revisions_or_decks_directly": {
+      "expect": "fail",
+      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.InsufficientPrivilegeError'>"
+    },
+    "test_export_key_shape": {
+      "expect": "pass"
+    }
+  }
+}
