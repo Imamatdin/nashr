@@ -82,7 +82,11 @@ class _World:
         )
         # The user edited slide b after the AI edit started (the head moved).
         self.head = self._commit(
-            self.base, _deck(("a", "Intro"), ("b", "Method, by hand")), "import", "system:migration-016", "h"
+            self.base,
+            _deck(("a", "Intro"), ("b", "Method, by hand")),
+            "import",
+            "system:migration-016",
+            "h",
         )
         # The AI rewrote slide a from the old base: stored as a proposal.
         proposed = self.emulator.finish_generation_job(
@@ -188,7 +192,9 @@ async def test_accept_against_the_head_the_user_saw_commits_on_top_of_it() -> No
 async def test_accept_after_the_head_moved_conflicts_and_changes_nothing() -> None:
     w = _World()
     seen = w.head
-    moved = w._commit(w.head, _deck(("a", "Intro"), ("b", "Again")), "import", "system:migration-016", "x")
+    moved = w._commit(
+        w.head, _deck(("a", "Intro"), ("b", "Again")), "import", "system:migration-016", "x"
+    )
 
     response = await w.accept(seen)
 
