@@ -1,0 +1,26 @@
+{
+  "schema": "baseline (migrations 001-015 + 016 as reviewed, blob e2863406)",
+  "module": "tests/db/test_b1_fix_regressions.py",
+  "tests": {
+    "test_a_worker_whose_job_was_reclaimed_writes_nothing": {
+      "expect": "fail",
+      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.ObjectNotInPrerequisiteStateError'>"
+    },
+    "test_a_worker_whose_claim_expired_writes_nothing": {
+      "expect": "fail",
+      "match": "DID NOT RAISE <class 'asyncpg\\.exceptions\\.ObjectNotInPrerequisiteStateError'>"
+    },
+    "test_a_reclaim_racing_a_finish_leaves_nothing_from_the_old_claim": {
+      "expect": "fail",
+      "match": "AssertionError: a revision was written by a reclaimed worker"
+    },
+    "test_a_status_change_during_finish_never_leaves_a_revision_beside_a_failed_job": {
+      "expect": "fail",
+      "match": "AssertionError: a revision was written beside a failed job"
+    },
+    "test_a_fault_inside_finish_rolls_back_the_revision": {
+      "expect": "fail",
+      "match": "AssertionError: a revision survived a failed completion"
+    }
+  }
+}

@@ -66,7 +66,11 @@ class _World:
                     "id": _JOB_ID,
                     "project_id": _PROJECT_ID,
                     "user_id": str(_USER_ID),
+                    "job_type": "presentation_edit",
                     "status": "processing",
+                    "worker_id": "w1",
+                    "attempts": 1,
+                    "heartbeat_at": "2026-01-01T00:00:00+00:00",
                 }
             ],
         )
@@ -81,15 +85,18 @@ class _World:
             self.base, _deck(("a", "Intro"), ("b", "Method, by hand")), "import", "system:web", "h"
         )
         # The AI rewrote slide a from the old base: stored as a proposal.
-        proposed = self.emulator.commit_revision(
+        proposed = self.emulator.finish_generation_job(
             {
-                "p_document_id": self.document_id,
+                "p_job_id": _JOB_ID,
+                "p_worker_id": "w1",
+                "p_claim_token": 1,
                 "p_base_revision_id": self.base,
                 "p_content": _deck(("a", "Intro, by the AI"), ("b", "Method")),
                 "p_kind": "ai_edit",
                 "p_schema_version": 1,
-                "p_actor": f"worker:{_JOB_ID}",
                 "p_idempotency_key": "ai",
+                "p_renderer_version": None,
+                "p_render_formats": [],
             }
         )[0]
         assert proposed["status"] == "proposed"

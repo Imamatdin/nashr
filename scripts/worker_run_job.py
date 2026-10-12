@@ -42,7 +42,6 @@ from packages.platform.document_models import (
     CommitOutcome,
     DocumentKind,
     RevisionKind,
-    worker_actor,
 )
 from packages.platform.document_store import DocumentStore
 from packages.platform.exports import ExportPublisher, renderer_version
@@ -64,6 +63,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("nashr.worker")
 
 POLL_INTERVAL_SECONDS = 5.0
+# What a web edit is rendered into: every primary format (SPEC §0 rule 7).
+WEB_FILE_FORMATS: tuple[str, ...] = ("html", "pdf", "pptx")
 
 
 def _worker_id() -> str:
@@ -139,17 +140,17 @@ class JobRunner:
         self._liveness = liveness if liveness is not None else LivenessFile()
 
     async def run(self, job: GenerationJob) -> None:
-        heartbeat = asyncio.create_task(self._heartbeat_forever(job.id))
+        heartbeat = asyncio.create_task(self._heartbeat_forever(job.id, job.attempts))
         try:
             await self._execute(job)
         finally:
             heartbeat.cancel()
 
-    async def _heartbeat_forever(self, job_id: str) -> None:
+    async def _heartbeat_forever(self, job_id: str, claim_token: int) -> None:
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
             try:
-                alive = await self._queue.heartbeat(job_id, self._worker_id)
+                alive = await self._queue.heartbeat(job_id, self._worker_id, claim_token)
                 # Same tick, same evidence: the container is healthy exactly
                 # when the worker is still talking to the queue.
                 self._liveness.touch()
@@ -177,6 +178,7 @@ class JobRunner:
             failed_by_us = await self._queue.fail(
                 job.id,
                 self._worker_id,
+                job.attempts,
                 step="dispatch",
                 message=f"job_type {job.job_type.value} has no worker executor yet",
             )
@@ -195,7 +197,7 @@ class JobRunner:
                 json.dumps({"job_id": job.id, "step": step}),
             )
             failed_by_us = await self._queue.fail(
-                job.id, self._worker_id, step=str(step), message=message
+                job.id, self._worker_id, job.attempts, step=str(step), message=message
             )
             if failed_by_us and refundable:
                 await _refund_job(self._credits, job, f"refund:job:{job.id}:{step}")
@@ -242,16 +244,18 @@ class JobRunner:
             await self._queue.set_progress(
                 job.id,
                 self._worker_id,
+                job.attempts,
                 {"step": step, "current": current, "total": total},
             )
 
         return progress
 
     async def _finish_completed(self, job: GenerationJob, outcome: dict[str, Any]) -> None:
-        """Record the outcome where the UI reads it, then land the guarded completion."""
+        """Land the guarded completion of a job that committed nothing, with its outcome."""
 
-        await self._queue.set_progress(job.id, self._worker_id, {"step": "done", **outcome})
-        completed_by_us = await self._queue.complete(job.id, self._worker_id, telemetry={})
+        completed_by_us = await self._queue.complete(
+            job.id, self._worker_id, job.attempts, {"step": "done", **outcome}
+        )
         if not completed_by_us:
             logger.warning(
                 "worker_complete_suppressed_row_not_ours %s", json.dumps({"job_id": job.id})
@@ -314,7 +318,7 @@ class JobRunner:
         )
 
     async def _run_presentation_edit(self, job: GenerationJob) -> None:
-        """Apply a parked fix batch against its base revision; commit or propose; publish.
+        """Apply a parked fix batch against its base revision; commit or propose with the job.
 
         No charge and no refund: an edit spends the tier's fix allowance, not
         money. The API stamped ``base_revision_id`` (the revision the brain saw);
@@ -324,7 +328,6 @@ class JobRunner:
 
         from aiogram import Bot
 
-        from packages.bot.orchestrators.deck_revisions import render_and_publish
         from packages.core.models.presentation import DeckSpec, SlideFix
         from packages.sessions_core import FixStatus, dispatch_fix, park_pending_for_apply
 
@@ -358,37 +361,30 @@ class JobRunner:
             raise RuntimeError("presentation_edit carries no document revision to edit")
 
         store = DocumentStore(self._db)
-        publisher = ExportPublisher(store, self._storage)
-        actor = worker_actor(job.id)
         bot = Bot(token=self._config.telegram_bot_token)
         orchestrator = self._orchestrator(bot)
         progress = self._progress(job)
 
         async def commit(deck: DeckSpec, base: str | None) -> CommitOutcome:
-            return await store.commit(
-                document_id,
-                base,
-                deck.model_dump(mode="json"),
+            # Commit and job completion are one fenced transaction; the render of
+            # the committed revision is queued with it (ADR §6.3).
+            return await store.finish_generation_job(
+                job_id=job.id,
+                worker_id=self._worker_id,
+                claim_token=job.attempts,
+                base_revision_id=base,
+                content=deck.model_dump(mode="json"),
                 kind=RevisionKind.AI_EDIT,
-                actor=actor,
                 idempotency_key=f"chat-edit:{job.id}",
+                renderer_version=renderer_version(),
+                render_formats=list(WEB_FILE_FORMATS),
             )
 
         async def deliver(
             deck: DeckSpec, revision_id: str, formats: list[ExportFormat]
         ) -> list[str]:
-            published = await render_and_publish(
-                orchestrator=orchestrator,
-                publisher=publisher,
-                job_id=job.id,
-                worker_id=self._worker_id,
-                document_id=document_id,
-                revision_id=revision_id,
-                deck=deck,
-                formats=formats,
-                progress=progress,
-            )
-            return list(published.render.warnings)
+            # Rendering is the presentation_render job finish_generation_job queued.
+            return []
 
         try:
             result = await dispatch_fix(
@@ -406,15 +402,18 @@ class JobRunner:
             await bot.session.close()
 
         if result.status in (FixStatus.DELIVERED, FixStatus.PROPOSED, FixStatus.UNCHANGED):
-            await self._finish_completed(
-                job,
-                {
-                    "outcome": result.status.value,
-                    "revision_id": result.revision_id,
-                    "proposal_id": result.proposal_id,
-                    "slides_changed": result.slides_changed,
-                    "warnings": list(result.warnings),
-                },
+            # finish_generation_job already completed the job with this outcome.
+            logger.info(
+                "worker_job_completed %s",
+                json.dumps(
+                    {
+                        "job_id": job.id,
+                        "outcome": result.status.value,
+                        "revision_id": result.revision_id,
+                        "proposal_id": result.proposal_id,
+                        "slides_changed": result.slides_changed,
+                    }
+                ),
             )
             return
         # dispatch_fix already answered the parked call and persisted, so the
@@ -422,6 +421,7 @@ class JobRunner:
         failed_by_us = await self._queue.fail(
             job.id,
             self._worker_id,
+            job.attempts,
             step="apply_fixes",
             message=result.reason or result.status.value,
         )
@@ -429,17 +429,13 @@ class JobRunner:
             logger.warning("worker_edit_fail_row_not_ours %s", json.dumps({"job_id": job.id}))
 
     async def _run_presentation(self, job: GenerationJob) -> None:
-        """Generate a deck, commit it as a revision (or proposal), publish it, open the session."""
+        """Generate a deck, commit it as a revision (or proposal) with the job, open the session."""
 
         # Imported here so --help / unit tests never pull aiogram + the full
         # pipeline stack just to parse args.
         from aiogram import Bot
 
-        from packages.bot.orchestrators.deck_revisions import (
-            commit_generated_deck,
-            render_and_publish,
-            renderable,
-        )
+        from packages.bot.orchestrators.deck_revisions import file_formats, renderable
 
         payload = job.payload
         package = GenerationPackage(str(payload.get("package", "presentation_standard")))
@@ -480,34 +476,30 @@ class JobRunner:
                 package=package,
                 topic=topic,
             )
-            outcome = await commit_generated_deck(
-                store,
-                project_id=job.project_id,
-                deck=built.deck,
-                actor=worker_actor(job.id),
+            # One fenced transaction: the deck becomes a revision (or a proposal
+            # when the head moved), the job completes, and the render of the
+            # committed revision is queued. A lapsed claim writes none of it.
+            outcome = await store.finish_generation_job(
+                job_id=job.id,
+                worker_id=self._worker_id,
+                claim_token=job.attempts,
                 base_revision_id=base_revision_id,
+                content=built.deck.model_dump(mode="json"),
+                kind=RevisionKind.GENERATION
+                if base_revision_id is None
+                else RevisionKind.REGENERATION,
                 idempotency_key=f"job:{job.id}:deck",
+                renderer_version=renderer_version(),
+                render_formats=file_formats(formats),
             )
             revision_id = renderable(outcome)
-            if revision_id is not None:
-                await render_and_publish(
-                    orchestrator=orchestrator,
-                    publisher=ExportPublisher(store, self._storage),
-                    job_id=job.id,
-                    worker_id=self._worker_id,
-                    document_id=outcome.document_id,
-                    revision_id=revision_id,
-                    deck=built.deck,
-                    formats=formats,
-                    progress=progress,
-                )
         finally:
             await bot.session.close()
 
         if revision_id is not None:
-            # The editing session starts on the revision just published. Best-effort:
-            # the deck is committed and its exports registered; a failed session
-            # write only means chat editing is unavailable until the next delivery.
+            # The editing session starts on the revision just committed. Best-effort:
+            # the deck is committed and its render queued; a failed session write
+            # only means chat editing is unavailable until the next delivery.
             try:
                 from packages.bot.sessions.store import create_session
 
@@ -526,13 +518,18 @@ class JobRunner:
                     json.dumps({"job_id": job.id, "error_type": type(exc).__name__}),
                 )
 
-        await self._finish_completed(
-            job,
-            {
-                "outcome": outcome.status.value,
-                "revision_id": revision_id,
-                "proposal_id": outcome.proposal_id,
-            },
+        # finish_generation_job completed the job in the commit's transaction.
+        logger.info(
+            "worker_job_completed %s",
+            json.dumps(
+                {
+                    "job_id": job.id,
+                    "project_id": job.project_id,
+                    "outcome": outcome.status.value,
+                    "revision_id": revision_id,
+                    "proposal_id": outcome.proposal_id,
+                }
+            ),
         )
 
 

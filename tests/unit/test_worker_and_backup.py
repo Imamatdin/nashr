@@ -53,6 +53,7 @@ def _job(**overrides: Any) -> GenerationJob:
         "job_type": "presentation_generation",
         "status": "processing",
         "payload": {"product_type": "presentation_standard"},
+        "attempts": 1,
     }
     row.update(overrides)
     return GenerationJob.model_validate(row)
@@ -85,25 +86,24 @@ class _FakeQueue:
         self.fail_lands = True
 
     async def fail(
-        self,
-        job_id: str,
-        worker_id: str,
-        *,
-        step: str,
-        message: str,
-        telemetry: dict[str, Any] | None = None,
+        self, job_id: str, worker_id: str, claim_token: int, *, step: str, message: str
     ) -> bool:
         self.failed.append({"job_id": job_id, "step": step, "message": message})
         return self.fail_lands
 
-    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> bool:
+    async def complete(
+        self, job_id: str, worker_id: str, claim_token: int, progress: dict[str, Any]
+    ) -> bool:
         self.completed.append(job_id)
+        self.progress.append(progress)
         return True
 
-    async def heartbeat(self, job_id: str, worker_id: str) -> bool:
+    async def heartbeat(self, job_id: str, worker_id: str, claim_token: int) -> bool:
         return True
 
-    async def set_progress(self, job_id: str, worker_id: str, progress: dict[str, Any]) -> None:
+    async def set_progress(
+        self, job_id: str, worker_id: str, claim_token: int, progress: dict[str, Any]
+    ) -> None:
         self.progress.append(progress)
 
 
@@ -223,7 +223,7 @@ async def test_success_path_never_refunds(monkeypatch: pytest.MonkeyPatch) -> No
     runner = _runner(queue, credits)
 
     async def ok(job: GenerationJob) -> None:
-        await queue.complete(job.id, "w-test", telemetry={})
+        await queue.complete(job.id, "w-test", job.attempts, {})
 
     monkeypatch.setattr(runner, "_run_presentation", ok)
     await runner._execute(_job())  # pyright: ignore[reportPrivateUsage]
@@ -336,7 +336,14 @@ class _World:
         self.fake.seed("users", [{"id": "u1", "telegram_id": 555}])
         self.fake.seed(
             "generation_jobs",
-            [{**job.model_dump(mode="json"), "worker_id": worker_id, "status": "processing"}],
+            [
+                {
+                    **job.model_dump(mode="json"),
+                    "worker_id": worker_id,
+                    "status": "processing",
+                    "heartbeat_at": "2026-01-01T00:00:00+00:00",
+                }
+            ],
         )
         cfg = PlatformConfig(
             supabase_url="https://x.supabase.co",
@@ -402,6 +409,16 @@ class _World:
 
     def exports(self) -> list[dict[str, Any]]:
         return self.fake.tables.get("revision_exports", [])
+
+    def job_row(self, job_id: str) -> dict[str, Any]:
+        return next(r for r in self.fake.tables["generation_jobs"] if r["id"] == job_id)
+
+    def queued_renders(self) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self.fake.tables["generation_jobs"]
+            if row.get("job_type") == "presentation_render" and row.get("status") == "queued"
+        ]
 
     def head(self) -> str | None:
         documents = self.fake.tables.get("documents") or [{}]
@@ -574,7 +591,7 @@ async def test_upload_verification_failure_fails_the_render_job(
 
 
 @pytest.mark.asyncio
-async def test_generation_commits_publishes_and_opens_the_session(
+async def test_generation_commits_with_its_job_queues_the_render_and_opens_the_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     job = _job(payload={"product_type": "presentation_standard", "formats": ["html"]})
@@ -593,10 +610,17 @@ async def test_generation_commits_publishes_and_opens_the_session(
     assert head is not None
     revision = next(r for r in world.fake.tables["document_revisions"] if r["id"] == head)
     assert revision["kind"] == "generation" and revision["actor"] == f"worker:{job.id}"
-    assert [row["revision_id"] for row in world.exports()] == [head]
+    # The commit completed the job in the same step; the render is a queued job.
+    row = world.job_row(job.id)
+    assert row["status"] == "completed" and row["progress"]["outcome"] == "committed"
+    assert world.exports() == [] and world.built[0].rendered == []
+    renders = world.queued_renders()
+    assert len(renders) == 1
+    assert renders[0]["payload"]["revision_id"] == head
+    assert renders[0]["payload"]["formats"] == ["html"]
+    assert renders[0]["payload"]["renderer_version"] == renderer_version()
     assert sessions[0]["revision_id"] == head
-    assert world.queue.completed == [job.id]
-    assert world.queue.progress[-1]["outcome"] == "committed"
+    assert world.queue.completed == [] and world.queue.failed == []
 
 
 @pytest.mark.asyncio
@@ -623,10 +647,11 @@ async def test_generation_racing_a_new_head_becomes_a_proposal_not_an_overwrite(
     assert len(proposals) == 1 and proposals[0]["kind"] == "regeneration"
     assert proposals[0]["source_job_id"] == job.id
     assert proposals[0]["base_revision_id"] is None
-    assert world.exports() == []
+    assert world.exports() == [] and world.queued_renders() == []
     assert world.built[0].rendered == []
-    assert world.queue.completed == [job.id]
-    assert world.queue.progress[-1]["outcome"] == "proposed"
+    row = world.job_row(job.id)
+    assert row["status"] == "completed" and row["progress"]["outcome"] == "proposed"
+    assert world.queue.failed == []
     assert world.credits.refunds == []
 
 
@@ -768,8 +793,9 @@ async def test_edit_inline_fixes_reach_dispatch_against_the_stamped_base(
     assert kwargs["base_revision_id"] == "revision-1"
     fixes = cast(list[SlideFix], kwargs["fixes"])
     assert [f.slide_id for f in fixes] == ["s2", "s5"]
-    assert world.queue.completed == [job.id]
-    assert world.queue.progress[-1]["outcome"] == "delivered"
+    # A delivered edit was completed by its commit (finish_generation_job), so
+    # the worker neither completes nor fails the row afterwards.
+    assert world.queue.completed == [] and world.queue.failed == []
     assert cast(_FakeBot, world.built[0].bot).session.closed is True
 
 
@@ -787,6 +813,7 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     async def _dispatch(**kwargs: Any) -> FixDispatchResult:
         outcome = await kwargs["commit"](edited, kwargs["base_revision_id"])
         warnings = await kwargs["deliver"](edited, outcome.revision_id, [ExportFormat.HTML])
+        assert warnings == []  # the worker renders nothing in-process
         return FixDispatchResult(
             FixStatus.DELIVERED, revision_id=outcome.revision_id, warnings=tuple(warnings)
         )
@@ -800,8 +827,12 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     assert revision["kind"] == "ai_edit" and revision["actor"] == f"worker:{job.id}"
     assert revision["parent_revision_id"] == base
     assert revision["idempotency_key"] == f"chat-edit:{job.id}"
-    assert [row["revision_id"] for row in world.exports()] == [head]
-    assert world.queue.completed == [job.id]
+    assert world.job_row(job.id)["status"] == "completed"
+    assert world.exports() == [] and world.built[0].rendered == []
+    renders = world.queued_renders()
+    assert [r["payload"]["revision_id"] for r in renders] == [head]
+    assert renders[0]["payload"]["formats"] == ["html", "pdf", "pptx"]
+    assert world.queue.completed == [] and world.queue.failed == []
 
 
 @pytest.mark.asyncio
@@ -817,9 +848,8 @@ async def test_an_edit_that_became_a_proposal_completes_the_job(
 
     await world.runner()._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]
 
-    assert world.queue.completed == [job.id]
-    assert world.queue.progress[-1]["outcome"] == "proposed"
-    assert world.queue.progress[-1]["proposal_id"] == "proposal-1"
+    # The proposal's commit completed the job; the worker leaves the row alone.
+    assert world.queue.completed == [] and world.queue.failed == []
 
 
 @pytest.mark.asyncio
@@ -850,7 +880,7 @@ async def test_edit_from_pending_uses_the_parked_batch_and_its_call_count(
     kwargs = calls[0]
     assert [f.slide_id for f in cast(list[SlideFix], kwargs["fixes"])] == ["s9"]
     assert kwargs["call_count"] == 7
-    assert world.queue.completed == [job.id]
+    assert world.queue.failed == []
 
 
 @pytest.mark.asyncio

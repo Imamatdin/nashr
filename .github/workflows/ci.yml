@@ -107,6 +107,15 @@ jobs:
           python -m tests.db.expect_failures artifacts/prechange.xml tests/db/inventory_legacy.json \
             | tee artifacts/prechange-verdict.log
           exit ${PIPESTATUS[0]}
+      - name: Pre-fix run — B1-FIX regressions must FAIL on 016 as reviewed
+        run: |
+          set +e
+          NASHR_TEST_SCHEMA=baseline python -m pytest tests/db/test_b1_fix_regressions.py -v -ra \
+            --junitxml=artifacts/prefix.xml 2>&1 | tee artifacts/prefix.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prefix.xml tests/db/inventory_baseline.json \
+            | tee artifacts/prefix-verdict.log
+          exit ${PIPESTATUS[0]}
       - name: Post-change run — full suite on migrations 001–016
         run: |
           set -o pipefail

@@ -111,11 +111,19 @@ class Db:
         self.name = name
         self.dsn = database_url(name)
         self._open: list[Any] = []
+        self._seeder: Any = None
 
     async def admin(self) -> Any:
         conn = await connect(self.dsn)
         self._open.append(conn)
         return conn
+
+    async def _seed(self) -> Any:
+        """One shared superuser connection for seeding rows (not for concurrency)."""
+
+        if self._seeder is None or self._seeder.is_closed():
+            self._seeder = await self.admin()
+        return self._seeder
 
     async def as_role(self, role: str, sub: str | None = None) -> Any:
         """A connection acting as ``role`` the way PostgREST does."""
@@ -134,7 +142,7 @@ class Db:
     # ------------------------------------------------------------- seeding
 
     async def user(self, telegram_id: int | None = None) -> str:
-        conn = await self.admin()
+        conn = await self._seed()
         user_id = str(uuid.uuid4())
         await conn.execute(
             "insert into users (id, telegram_id) values ($1, $2)",
@@ -144,7 +152,7 @@ class Db:
         return user_id
 
     async def project(self, user_id: str, kind: str = "presentation") -> str:
-        conn = await self.admin()
+        conn = await self._seed()
         project_id = str(uuid.uuid4())
         await conn.execute(
             "insert into projects (id, user_id, type, title, language, audience)"
@@ -168,7 +176,7 @@ class Db:
     ) -> str:
         """A job row; a processing one holds a live claim (``worker``, attempt ``attempts``)."""
 
-        conn = await self.admin()
+        conn = await self._seed()
         job_id = str(uuid.uuid4())
         body = payload if payload is not None else {}
         if job_type == "presentation_render":
@@ -193,7 +201,7 @@ class Db:
     async def finish_job(self, job_id: str, status: str = "completed") -> None:
         """Land a job on a terminal status as an operator would (no claim involved)."""
 
-        conn = await self.admin()
+        conn = await self._seed()
         await conn.execute(
             "update generation_jobs set status = $2, completed_at = now() where id = $1",
             uuid.UUID(job_id),
@@ -234,6 +242,36 @@ async def commit(
         schema_version,
         actor,
         key,
+    )
+    return {k: (str(v) if isinstance(v, uuid.UUID) else v) for k, v in dict(row).items()}
+
+
+async def finish(
+    conn: Any,
+    job_id: str,
+    worker: str,
+    token: int,
+    base: str | None,
+    content: dict[str, Any],
+    *,
+    kind: str,
+    key: str,
+    render_formats: list[str] | None = None,
+    renderer_version: str | None = "pw-test",
+) -> dict[str, Any]:
+    """finish_generation_job: the fenced commit + completion a queue worker makes."""
+
+    row = await conn.fetchrow(
+        "select * from finish_generation_job($1, $2, $3, $4, $5::jsonb, $6, 1, $7, $8, $9)",
+        uuid.UUID(job_id),
+        worker,
+        token,
+        uuid.UUID(base) if base else None,
+        content,
+        kind,
+        key,
+        renderer_version,
+        render_formats if render_formats is not None else [],
     )
     return {k: (str(v) if isinstance(v, uuid.UUID) else v) for k, v in dict(row).items()}
 

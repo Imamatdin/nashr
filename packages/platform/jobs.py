@@ -283,64 +283,35 @@ class JobQueue:
     async def claim_job(self, job_id: str, worker_id: str) -> GenerationJob | None:
         """Atomically claim ONE specific queued job (the --job-id path).
 
-        A single guarded UPDATE: only a row still ``queued`` transitions, so a
+        One SQL statement (``claim_job``): only a row still ``queued``
+        transitions, and the claim token (``attempts``) increments with it, so a
         concurrent loop-worker claim makes this return None instead of
         double-running.
         """
 
-        def run() -> Any:
-            return (
-                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
-                .update(
-                    {
-                        "status": JobStatus.PROCESSING.value,
-                        "worker_id": worker_id,
-                        "claimed_at": datetime.now(UTC).isoformat(),
-                        "heartbeat_at": datetime.now(UTC).isoformat(),
-                    }
-                )
-                .eq("id", job_id)
-                .eq("status", JobStatus.QUEUED.value)
-                .execute()
-            )
-
-        result = await asyncio.to_thread(run)
+        result = await asyncio.to_thread(
+            lambda: self._db.rpc("claim_job", {"p_job_id": job_id, "p_worker_id": worker_id})
+        )
         rows = cast(list[dict[str, Any]], list(result.data or []))
         if not rows:
             return None
-        claimed = _row_to_job(rows[0])
+        return _row_to_job(rows[0])
 
-        # attempts/started_at ride a follow-up write; claim atomicity is the
-        # status CAS above, not these bookkeeping fields.
-        def bump() -> Any:
-            return (
-                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
-                .update(
-                    {
-                        "attempts": claimed.attempts + 1,
-                        "started_at": claimed.claimed_at.isoformat()
-                        if claimed.claimed_at
-                        else datetime.now(UTC).isoformat(),
-                    }
-                )
-                .eq("id", job_id)
-                .eq("worker_id", worker_id)
-                .execute()
-            )
-
-        await asyncio.to_thread(bump)
-        return claimed
-
-    async def heartbeat(self, job_id: str, worker_id: str) -> bool:
-        """Bump heartbeat_at; False means the row is no longer ours (reaped)."""
+    async def heartbeat(self, job_id: str, worker_id: str, claim_token: int) -> bool:
+        """Bump heartbeat_at; False means the claim is no longer ours (reaped or reclaimed)."""
 
         result = await asyncio.to_thread(
-            lambda: self._db.rpc("heartbeat_job", {"p_job_id": job_id, "p_worker_id": worker_id})
+            lambda: self._db.rpc(
+                "heartbeat_job",
+                {"p_job_id": job_id, "p_worker_id": worker_id, "p_claim_token": claim_token},
+            )
         )
         return bool(result.data)
 
-    async def set_progress(self, job_id: str, worker_id: str, progress: dict[str, Any]) -> None:
-        """Write the UI-polling progress blob, guarded by worker identity."""
+    async def set_progress(
+        self, job_id: str, worker_id: str, claim_token: int, progress: dict[str, Any]
+    ) -> None:
+        """Write the UI-polling progress blob, guarded by the caller's claim."""
 
         def run() -> Any:
             return (
@@ -348,25 +319,43 @@ class JobQueue:
                 .update({"progress": progress})
                 .eq("id", job_id)
                 .eq("worker_id", worker_id)
+                .eq("attempts", claim_token)
                 .eq("status", JobStatus.PROCESSING.value)
                 .execute()
             )
 
         await asyncio.to_thread(run)
 
-    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, Any]) -> bool:
-        """Land the job on ``completed``; False means the row was no longer ours."""
+    async def complete(
+        self, job_id: str, worker_id: str, claim_token: int, progress: dict[str, Any]
+    ) -> bool:
+        """Complete a job that commits no revision; False means the claim was lost.
 
-        return await self._finish(job_id, worker_id, JobStatus.COMPLETED, None, telemetry)
+        Generation and edit jobs complete only through
+        ``DocumentStore.finish_generation_job``, together with their revision.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: self._db.rpc(
+                "complete_job",
+                {
+                    "p_job_id": job_id,
+                    "p_worker_id": worker_id,
+                    "p_claim_token": claim_token,
+                    "p_progress": progress,
+                },
+            )
+        )
+        return bool(result.data)
 
     async def fail(
         self,
         job_id: str,
         worker_id: str,
+        claim_token: int,
         *,
         step: str,
         message: str,
-        telemetry: dict[str, Any] | None = None,
     ) -> bool:
         """Land the job on ``failed`` with an honest step-named error message.
 
@@ -377,37 +366,26 @@ class JobQueue:
         """
 
         error = f"{step}: {message}"[:4000]
-        return await self._finish(job_id, worker_id, JobStatus.FAILED, error, telemetry or {})
-
-    async def _finish(
-        self,
-        job_id: str,
-        worker_id: str,
-        status: JobStatus,
-        error_message: str | None,
-        telemetry: dict[str, Any],
-    ) -> bool:
-        payload: dict[str, Any] = {
-            "status": status.value,
-            "completed_at": datetime.now(UTC).isoformat(),
-            **telemetry,
-        }
-        if error_message is not None:
-            payload["error_message"] = error_message
 
         def run() -> Any:
             return (
                 self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
-                .update(payload)
+                .update(
+                    {
+                        "status": JobStatus.FAILED.value,
+                        "completed_at": datetime.now(UTC).isoformat(),
+                        "error_message": error,
+                    }
+                )
                 .eq("id", job_id)
                 .eq("worker_id", worker_id)
+                .eq("attempts", claim_token)
                 .eq("status", JobStatus.PROCESSING.value)
                 .execute()
             )
 
         result = await asyncio.to_thread(run)
-        rows = cast(list[dict[str, Any]], list(result.data or []))
-        return bool(rows)
+        return bool(cast(list[dict[str, Any]], list(result.data or [])))
 
     async def reap_stale(self, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[GenerationJob]:
         """Reap zombie processing rows; returns the jobs that were FAILED.
@@ -429,6 +407,7 @@ async def heartbeat_while(
     queue: JobQueue,
     job_id: str,
     worker_id: str,
+    claim_token: int,
     interval: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> AsyncGenerator[None]:
     """Keep ``job_id``'s claim alive while the body runs (for inline runners).
@@ -443,7 +422,7 @@ async def heartbeat_while(
         while True:
             await asyncio.sleep(interval)
             try:
-                if not await queue.heartbeat(job_id, worker_id):
+                if not await queue.heartbeat(job_id, worker_id, claim_token):
                     logger.warning("inline_job_heartbeat_lost job=%s", job_id)
             except Exception as exc:
                 logger.warning(

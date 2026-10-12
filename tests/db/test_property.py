@@ -23,7 +23,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from tests.db.conftest import CURRENT
-from tests.db.support import Db, commit, ensure_document, head
+from tests.db.support import Db, commit, ensure_document, finish, head
 
 pytestmark = pytest.mark.skipif(
     not CURRENT, reason="exercises migration 016's functions (current schema only)"
@@ -46,12 +46,10 @@ def plans(draw: Any) -> tuple[list[str], list[tuple[int, str]]]:
     return writers, steps
 
 
-def _actor(kind: str, owner: str, job: str, telegram: int) -> str:
-    if kind in ("manual", "autosave", "restore"):
-        return owner
+def _actor(kind: str, owner: str, telegram: int) -> str:
     if kind == "bot_edit":
         return f"bot:{telegram}"
-    return f"worker:{job}"
+    return owner
 
 
 @settings(
@@ -67,7 +65,6 @@ async def test_n_interleaved_writers_never_lose_work(
     owner = await db.user()  # a fresh Telegram id per example
     admin = await db.admin()
     project = await db.project(owner)
-    job = await db.job(project, owner, job_type="presentation_edit")
     conn = await db.as_role("service_role")
     telegram = await admin.fetchval("select telegram_id from users where id = $1", uuid.UUID(owner))
     document = await ensure_document(conn, project, owner)
@@ -83,16 +80,24 @@ async def test_n_interleaved_writers_never_lose_work(
             bases[writer] = model_head
             continue
         kind = writers[writer]
-        actor = _actor(kind, owner, job, telegram)
-        result = await commit(
-            conn,
-            document,
-            bases[writer],
-            {"step": index, "writer": writer},
-            kind=kind,
-            actor=actor,
-            key=f"op-{index}",
-        )
+        content = {"step": index, "writer": writer}
+        if kind in PROPOSING:
+            # A worker writes through its fenced finish, one claimed job per write.
+            job_type = "presentation_edit" if kind == "ai_edit" else "presentation_generation"
+            job = await db.job(project, owner, job_type=job_type)
+            result = await finish(
+                conn, job, "w1", 1, bases[writer], content, kind=kind, key=f"op-{index}"
+            )
+        else:
+            result = await commit(
+                conn,
+                document,
+                bases[writer],
+                content,
+                kind=kind,
+                actor=_actor(kind, owner, telegram),
+                key=f"op-{index}",
+            )
         if bases[writer] == model_head:
             assert result["status"] == "committed", (index, result)
             model_head = str(result["revision_id"])

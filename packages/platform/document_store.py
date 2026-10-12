@@ -104,6 +104,44 @@ class DocumentStore:
         )
         return _outcome(rows)
 
+    async def finish_generation_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        claim_token: int,
+        base_revision_id: str | None,
+        content: dict[str, Any],
+        kind: RevisionKind,
+        idempotency_key: str,
+        renderer_version: str | None,
+        render_formats: list[str],
+        schema_version: int = CONTENT_SCHEMA_VERSION,
+    ) -> CommitOutcome:
+        """Commit a job's deck and complete the job in one claim-fenced transaction.
+
+        Raises ``claim_lost``/``claim_expired`` when the caller no longer holds the
+        job; then nothing was written. A committed revision gets a queued render
+        job for ``render_formats`` in the same transaction.
+        """
+
+        rows = await self._rpc(
+            "finish_generation_job",
+            {
+                "p_job_id": job_id,
+                "p_worker_id": worker_id,
+                "p_claim_token": claim_token,
+                "p_base_revision_id": base_revision_id,
+                "p_content": content,
+                "p_kind": kind.value,
+                "p_schema_version": schema_version,
+                "p_idempotency_key": idempotency_key,
+                "p_renderer_version": renderer_version,
+                "p_render_formats": render_formats,
+            },
+        )
+        return _outcome(rows)
+
     async def accept_proposal(
         self, proposal_id: str, expected_head_revision_id: str | None, actor: str, key: str
     ) -> CommitOutcome:

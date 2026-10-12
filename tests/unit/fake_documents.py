@@ -84,10 +84,7 @@ class DocumentRpcEmulator:
                 raise refuse("not_document_owner")
             allowed = {"manual", "autosave", "restore"}
         elif re.fullmatch(f"worker:{_UUID}", actor):
-            job = self._one("generation_jobs", id=actor[7:], project_id=project_id)
-            if job is None or job.get("status") != "processing" or str(job.get("user_id")) != owner:
-                raise refuse("actor_job_not_active")
-            allowed = {"generation", "regeneration", "ai_edit"}
+            raise refuse("worker_must_finish_job")
         elif re.fullmatch(r"bot:[0-9]{1,20}", actor):
             user = self._one("users", telegram_id=int(actor[4:]))
             if user is None or str(user["id"]) != owner:
@@ -178,6 +175,17 @@ class DocumentRpcEmulator:
             raise refuse("invalid_revision_kind")
         actor = str(params["p_actor"])
         owner = self._owner(str(document["project_id"]), actor, kind)
+        return self._commit_core(document, params, kind, actor, owner, None)
+
+    def _commit_core(
+        self,
+        document: dict[str, Any],
+        params: dict[str, Any],
+        kind: str,
+        actor: str,
+        owner: str,
+        source_job: str | None,
+    ) -> list[dict[str, Any]]:
         if params["p_schema_version"] != 1:
             raise refuse("unsupported_schema_version")
         raw = params["p_content"]
@@ -230,7 +238,7 @@ class DocumentRpcEmulator:
                     "schema_version": 1,
                     "kind": kind,
                     "actor": actor,
-                    "source_job_id": actor[7:] if actor.startswith("worker:") else None,
+                    "source_job_id": source_job,
                     "idempotency_key": key,
                     "status": "pending",
                     "created_at": self._now(),
@@ -241,6 +249,181 @@ class DocumentRpcEmulator:
             )
             return self._result("proposed", document["id"], None, head, proposal_id)
         return self._result("conflict", document["id"], None, head, None)
+
+    # ------------------------------------------------------------- job claims
+
+    def _claimed_job(self, params: dict[str, Any], *, fresh: bool) -> dict[str, Any]:
+        """The job, if the caller holds its live claim; SQL NULL never matches."""
+
+        job = self._one("generation_jobs", id=params["p_job_id"])
+        worker = params.get("p_worker_id")
+        token = params.get("p_claim_token")
+        if (
+            job is None
+            or job.get("status") != "processing"
+            or worker is None
+            or job.get("worker_id") is None
+            or job["worker_id"] != worker
+            or token is None
+            or int(job.get("attempts") or 0) != token
+        ):
+            raise refuse("claim_lost")
+        if fresh and job.get("heartbeat_at") is None:
+            raise refuse("claim_expired")
+        return job
+
+    def claim_job(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Claim one queued job, incrementing its claim token."""
+
+        job = self._one("generation_jobs", id=params["p_job_id"])
+        if job is None or job.get("status") != "queued" or params.get("p_worker_id") is None:
+            return []
+        now = self._now()
+        job.update(
+            status="processing",
+            worker_id=params["p_worker_id"],
+            claimed_at=now,
+            heartbeat_at=now,
+            started_at=job.get("started_at") or now,
+            attempts=int(job.get("attempts") or 0) + 1,
+        )
+        return [dict(job)]
+
+    def heartbeat_job(self, params: dict[str, Any]) -> bool:
+        """Bump the heartbeat of a job the caller still holds."""
+
+        try:
+            job = self._claimed_job(params, fresh=False)
+        except APIError:
+            return False
+        job["heartbeat_at"] = self._now()
+        return True
+
+    def complete_job(self, params: dict[str, Any]) -> bool:
+        """Complete a job that commits nothing; False when the claim is gone."""
+
+        try:
+            job = self._claimed_job(params, fresh=False)
+        except APIError:
+            return False
+        if job["job_type"] in ("presentation_generation", "presentation_edit"):
+            raise refuse("job_must_finish_with_revision")
+        job.update(
+            status="completed",
+            completed_at=self._now(),
+            progress={**(job.get("progress") or {}), **(params.get("p_progress") or {})},
+        )
+        return True
+
+    def finish_generation_job(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Fenced commit + completion + render enqueue, as one step."""
+
+        job = self._one("generation_jobs", id=params["p_job_id"])
+        key = str(params["p_idempotency_key"])
+        if (
+            job is not None
+            and job.get("status") == "completed"
+            and job.get("worker_id") == params.get("p_worker_id")
+            and int(job.get("attempts") or 0) == params.get("p_claim_token")
+        ):
+            document = self._one("documents", project_id=job["project_id"], kind="presentation")
+            if document is not None:
+                prior = self._one(
+                    "document_revisions", document_id=document["id"], idempotency_key=key
+                )
+                if prior is not None:
+                    head = document.get("head_revision_id")
+                    return self._result("duplicate", document["id"], prior["id"], head, None)
+                for candidate in (key, f"{key}:proposal"):
+                    proposal = self._one(
+                        "revision_proposals", document_id=document["id"], idempotency_key=candidate
+                    )
+                    if proposal is not None:
+                        head = document.get("head_revision_id")
+                        return self._result("proposed", document["id"], None, head, proposal["id"])
+        job = self._claimed_job(params, fresh=True)
+        kind = str(params["p_kind"])
+        allowed = {
+            "presentation_generation": {"generation", "regeneration"},
+            "presentation_edit": {"ai_edit"},
+        }.get(str(job["job_type"]), set())
+        if kind not in allowed:
+            raise refuse("kind_not_allowed")
+        project = self._one("projects", id=job["project_id"])
+        if project is None:
+            raise refuse("document_not_found")
+        owner = str(project["user_id"])
+        if job.get("user_id") is None or str(job["user_id"]) != owner:
+            raise refuse("not_document_owner")
+        document = self._one("documents", project_id=job["project_id"], kind="presentation")
+        if document is None:
+            now = self._now()
+            document = {
+                "id": str(uuid.uuid4()),
+                "project_id": job["project_id"],
+                "kind": "presentation",
+                "schema_version": 1,
+                "head_revision_id": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._rows("documents").append(document)
+        document_id = str(document["id"])
+        actor = f"worker:{job['id']}"
+        result = self._commit_core(document, params, kind, actor, owner, str(job["id"]))
+        if result[0]["status"] == "conflict" and kind == "generation":
+            retry = {**params, "p_base_revision_id": None, "p_idempotency_key": f"{key}:proposal"}
+            result = self._commit_core(
+                document, retry, "regeneration", actor, owner, str(job["id"])
+            )
+        outcome = result[0]
+        job.update(
+            status="completed",
+            completed_at=self._now(),
+            progress={
+                **(job.get("progress") or {}),
+                "step": "done",
+                "outcome": outcome["status"],
+                "revision_id": outcome["revision_id"],
+                "proposal_id": outcome["proposal_id"],
+            },
+        )
+        formats = sorted(set(params.get("p_render_formats") or []))
+        if outcome["revision_id"] is not None and params.get("p_renderer_version") and formats:
+            if not set(formats) <= {"html", "pptx", "pdf"}:
+                raise refuse("invalid_render_formats")
+            payload = {
+                "document_id": document_id,
+                "revision_id": outcome["revision_id"],
+                "renderer_version": params["p_renderer_version"],
+                "formats": formats,
+                "requested_by_job": job["id"],
+            }
+            active = any(
+                row.get("job_type") == "presentation_render"
+                and row.get("status") in ("queued", "processing")
+                and all(
+                    (row.get("payload") or {}).get(k) == payload[k]
+                    for k in ("revision_id", "renderer_version", "formats")
+                )
+                for row in self._rows("generation_jobs")
+            )
+            if not active:
+                self._rows("generation_jobs").append(
+                    {
+                        "id": str(uuid.uuid4()),
+                        "project_id": job["project_id"],
+                        "user_id": owner,
+                        "job_type": "presentation_render",
+                        "status": "queued",
+                        "payload": payload,
+                        "attempts": 0,
+                        "max_attempts": 1,
+                        "progress": {},
+                        "created_at": self._now(),
+                    }
+                )
+        return result
 
     def accept_proposal(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Replace the head the caller saw with the proposal's content."""
@@ -385,6 +568,10 @@ class DocumentRpcEmulator:
             "reject_proposal": self.reject_proposal,
             "register_export": self.register_export,
             "record_revision_validation": self.record_revision_validation,
+            "claim_job": self.claim_job,
+            "heartbeat_job": self.heartbeat_job,
+            "complete_job": self.complete_job,
+            "finish_generation_job": self.finish_generation_job,
         }.get(fn)
         if handler is None:
             return None

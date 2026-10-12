@@ -12,6 +12,7 @@ if the apply actually delivered a file.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -175,31 +176,43 @@ def _fake_of(db: DatabaseClient) -> Any:
 
 
 async def _dispatch(*, fake: Any, **kwargs: Any) -> Any:
-    """dispatch_fix wired the way the worker wires it (ADR 0001).
+    """dispatch_fix with an AI-edit commit wired the way the worker wires it (ADR 0001).
 
-    The base is the session's revision; ``commit`` writes an AI edit as a worker
-    holding a processing job; ``deliver`` is the runner's (strict) render.
+    The base is the session's revision; ``commit`` goes through
+    finish_generation_job under a fresh claimed edit job (commit and completion
+    are one fenced step); ``deliver`` is a strict render, as the bot's inline
+    path does it.
     """
 
-    if not any(row.get("id") == _JOB_ID for row in fake.tables.get("generation_jobs", [])):
-        fake.tables.setdefault("generation_jobs", []).append(
-            {"id": _JOB_ID, "project_id": "proj-1", "user_id": "u1", "status": "processing"}
-        )
+    job_id = str(uuid.uuid4())
+    fake.tables.setdefault("generation_jobs", []).append(
+        {
+            "id": job_id,
+            "project_id": "proj-1",
+            "user_id": "u1",
+            "job_type": "presentation_edit",
+            "status": "processing",
+            "worker_id": "w1",
+            "attempts": 1,
+            "heartbeat_at": "2026-01-01T00:00:00+00:00",
+        }
+    )
     db: DatabaseClient = kwargs["db"]
     runner = kwargs["runner"]
     session = await _session(db)
     store = DocumentStore(db)
-    document_id = await store.document_id("proj-1", DocumentKind.PRESENTATION)
-    assert document_id is not None
 
     async def commit(deck: Any, base: str | None) -> Any:
-        return await store.commit(
-            document_id,
-            base,
-            deck.model_dump(mode="json"),
+        return await store.finish_generation_job(
+            job_id=job_id,
+            worker_id="w1",
+            claim_token=1,
+            base_revision_id=base,
+            content=deck.model_dump(mode="json"),
             kind=RevisionKind.AI_EDIT,
-            actor=f"worker:{_JOB_ID}",
-            idempotency_key=f"chat-edit:{len(fake.tables.get('document_revisions', []))}",
+            idempotency_key=f"chat-edit:{job_id}",
+            renderer_version=None,
+            render_formats=[],
         )
 
     async def deliver(deck: Any, revision_id: str, formats: list[Any]) -> list[str]:

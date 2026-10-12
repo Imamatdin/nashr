@@ -57,6 +57,7 @@ disagree about which one is authoritative (full inventory in Appendix A).
 | I8 | Only the worker currently holding a job's claim can register that job's exports, only for a revision that job targets | `register_export` locks the job row and checks `worker_id`, `status = processing`, and the revision link |
 | I9 | Only known content schema versions are stored; content size is bounded | `document_schema_versions` registry; `octet_length(content::text) <= 2 MiB` |
 | I10 | A user can read and commit only their own documents | owner-only SELECT RLS; `commit_revision` resolves the caller (`app_uid()` or the actor) to the project owner |
+| I12 | A queue worker's revision or proposal exists only if its job completed, under the claim that produced it | workers cannot use `commit_revision`; `finish_generation_job` locks the job, checks the live claim (worker, attempt token, fresh heartbeat), commits and completes in one transaction (§4.3, §4.6) |
 | I11 | At most one refund ledger row per job | partial unique index on `credit_ledger(generation_job_id) where action = 'refund'` (created only if legacy data has no duplicates; see §8) |
 
 ## 3. Decision summary
@@ -122,7 +123,10 @@ idempotency_key) → (status, document_id, revision_id, head_revision_id, propos
 2. Resolve the caller. If the session role is `authenticated`, the owner must be
    `app_uid()`, the actor must equal it, and kind is limited to
    `manual, autosave, restore`. Otherwise (service role, or the migration owner) the
-   actor is parsed: a user uuid must own the project; `worker:<job>` must name a
+   actor is parsed: a user uuid must own the project; a `worker:<job>` actor is
+   refused (`worker_must_finish_job`, B1-FIX): queue workers write only through
+   `finish_generation_job` below. The remaining rule text is the pre-fix design:
+   `worker:<job>` had to name a
    `processing` job of the same project whose `user_id` owns it; `bot:<telegram id>`
    must map through `users.telegram_id` to the owner; `system:` only for `import`.
 3. Validate kind, `schema_version` against the registry, content is a JSON object,
@@ -136,6 +140,31 @@ idempotency_key) → (status, document_id, revision_id, head_revision_id, propos
 6. `base = head` → insert revision (`parent = head`), advance head, `committed`.
 7. `base ≠ head` → for `ai_edit`/`regeneration`/`import` insert a proposal, `proposed`; for any
    other kind, `conflict` with the current head id. Nothing is written on conflict.
+
+`finish_generation_job(job_id, worker_id, claim_token, base_revision_id, content, kind,
+schema_version, idempotency_key, renderer_version, render_formats)` (B1-FIX, Codex finding 1):
+the only way a queue worker changes canonical state.
+
+1. Lock the job row. A claim is `(worker_id, attempts)`: every claim increments
+   `attempts`, so the attempt number is a monotonic claim token. The claim is live when
+   the job is `processing` under that worker and token and `heartbeat_at` is younger
+   than `_claim_ttl()` (120 s, the reaper's default window). Otherwise `claim_lost` or
+   `claim_expired`, and nothing is written.
+2. The job type fixes the allowed kinds (`presentation_generation`: generation or
+   regeneration; `presentation_edit`: ai_edit); the job's user must own the project.
+3. Ensure and lock the presentation document, then run the same compare-and-swap as
+   `commit_revision` with actor `worker:<job>`. A first `generation` that conflicts is
+   stored as a `regeneration` proposal (key `<key>:proposal`), so paid output is kept.
+4. Complete the job (`progress.outcome` = the status) and, for a committed, duplicate or
+   unchanged revision, queue a `presentation_render` job for exactly that revision.
+5. A retry with the same claim after a lost response finds the job completed and
+   returns the stored outcome (`duplicate` / `proposed`).
+
+So a revision or proposal from a job never coexists with a failed, refunded or
+re-queued job: a fault anywhere in the transaction rolls all of it back. Jobs that
+commit nothing (render, source processing) complete through `complete_job(job_id,
+worker_id, claim_token, progress)`, which refuses generation and edit jobs.
+`claim_job` and `heartbeat_job(job_id, worker_id, claim_token)` carry the same token.
 
 `ensure_document(project_id, kind) → document_id`: creates the row with a null head
 if missing (ownership-checked the same way). Replaces the creation half of
@@ -238,6 +267,14 @@ renderer's source tree and lockfile (`packages/presentation-worker/src/**`,
 can't identify a renderer. A source hash changes exactly when output can change, and
 the API, worker and bot all ship `packages/`, so they compute the same value.
 
+### 4.6 Lock order (B1-FIX)
+
+Every function that takes more than one row lock takes them in the order
+**job → document → proposal**: `finish_generation_job` and `register_export` lock the
+job first; `commit_revision`, `accept_proposal` and `reject_proposal` lock the document
+(then the proposal) and never a job; `_commit_core` takes no locks of its own. The
+reaper locks only job rows (`SKIP LOCKED`). With one order there is no lock cycle.
+
 ## 5. Read paths
 
 - Design/article GET return the head revision. A head that fails current model
@@ -255,13 +292,17 @@ the API, worker and bot all ship `packages/`, so they compute the same value.
 ### 6.1 Generation (worker and bot)
 
 At job start the runner reads the head `H0`. With no head the commit is
-`kind=generation, base=null`; otherwise `kind=regeneration, base=H0`. If a generation
-loses the race (a head appeared mid-run), it is re-submitted once as
-`regeneration, base=null`, which stores it as a proposal. Paid output is never dropped.
-Then the committed revision is rendered and its exports registered under the
-generation job's claim. On `proposed` the job completes without rendering, with
-`outcome: proposed` in telemetry, and no refund (the output was delivered as a
-proposal).
+`kind=generation, base=null`; otherwise `kind=regeneration, base=H0`. The worker calls
+`finish_generation_job` with its claim (B1-FIX): the deck is committed (or stored as a
+proposal when the head moved), the job completes, and a `presentation_render` job for
+the committed revision is queued, all in one transaction. A worker whose claim lapsed
+writes nothing and the job's next claim (or the reaper) owns the outcome. On `proposed`
+the job completes without a render and without a refund (the output was delivered as a
+proposal). Rendering is therefore always a render job (§6.5), never part of the
+generation job: a generation job cannot hold a claim after its commit completed it.
+
+The bot still commits through `commit_revision` as `bot:<telegram id>` and renders
+in-process (§6.4); it has no queue claim to fence.
 
 ### 6.2 Manual, autosave, restore (web)
 
@@ -273,9 +314,11 @@ already has a document.
 ### 6.3 AI edit (web chat → worker)
 
 Base stamped at enqueue (`chat.py:243`). The worker no longer abandons on a stale base
-before running. It runs the fix, commits `kind=ai_edit, actor=worker:<job>`; `proposed`
-completes the job with `outcome: proposed`. A chat edit on a project without a
-document is no longer possible (backfill), which removes the `save_deck` fallback.
+before running. It runs the fix and commits through `finish_generation_job`
+(`kind=ai_edit`, key `chat-edit:<job>`): committed, proposed or unchanged, the job is
+completed in the same transaction, and a committed edit's render (html, pdf, pptx) is a
+queued render job. A chat edit on a project without a document is no longer possible
+(backfill), which removes the `save_deck` fallback.
 
 ### 6.4 Bot
 

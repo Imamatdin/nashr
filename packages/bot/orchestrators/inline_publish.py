@@ -87,7 +87,7 @@ async def publish_inline(
         logger.info("inline_publish_deferred project=%s job=%s", project_id, exc.existing.id)
         return False
     try:
-        async with heartbeat_while(queue, job.id, worker_id):
+        async with heartbeat_while(queue, job.id, worker_id, job.attempts):
             await ExportPublisher(DocumentStore(db), storage).publish(
                 job_id=job.id,
                 worker_id=worker_id,
@@ -101,10 +101,11 @@ async def publish_inline(
             "inline_publish_failed %s",
             json.dumps({"job_id": job.id, "error_type": type(exc).__name__}),
         )
-        await queue.fail(job.id, worker_id, step="publish", message=f"{type(exc).__name__}: {exc}")
+        await queue.fail(
+            job.id, worker_id, job.attempts, step="publish", message=f"{type(exc).__name__}: {exc}"
+        )
         return False
-    await queue.complete(job.id, worker_id, telemetry={})
-    return True
+    return await queue.complete(job.id, worker_id, job.attempts, {"outcome": "rendered"})
 
 
 async def fetch_exports(

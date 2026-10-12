@@ -18,7 +18,7 @@ import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import pytest
 
 from tests.db.conftest import LEGACY
-from tests.db.support import Db, commit, ensure_document, export_key, register
+from tests.db.support import Db, commit, ensure_document, export_key, finish, register
 
 OWNER_TG = 333_000_333
 
@@ -132,7 +132,7 @@ class Current:
 
     async def ai_edit(self, doc: str, base: str, content: dict[str, Any], key: str) -> None:
         job = await self.db.job(self.project, self.owner, job_type="presentation_edit")
-        await commit(self.conn, doc, base, content, kind="ai_edit", actor=f"worker:{job}", key=key)
+        await finish(self.conn, job, "w1", 1, base, content, kind="ai_edit", key=key)
 
     async def bot_edit(self, doc: str, base: str, content: dict[str, Any]) -> None:
         await commit(

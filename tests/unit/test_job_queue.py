@@ -167,22 +167,27 @@ async def test_claim_next_empty_queue_returns_none() -> None:
     assert await queue.claim_next("w1") is None
 
 
-async def test_heartbeat_reports_row_no_longer_ours() -> None:
+async def test_heartbeat_reports_claim_no_longer_ours() -> None:
     queue, fake = _queue()
     fake.rpc_data = False
-    assert await queue.heartbeat("j1", "w1") is False
+    assert await queue.heartbeat("j1", "w1", 2) is False
     fake.rpc_data = True
-    assert await queue.heartbeat("j1", "w1") is True
+    assert await queue.heartbeat("j1", "w1", 2) is True
+    assert fake.rpc_calls[-1] == (
+        "heartbeat_job",
+        {"p_job_id": "j1", "p_worker_id": "w1", "p_claim_token": 2},
+    )
 
 
-async def test_fail_writes_step_named_error_guarded_by_worker_identity() -> None:
+async def test_fail_writes_step_named_error_guarded_by_the_claim() -> None:
     queue, fake = _queue()
-    await queue.fail("j1", "w1", step="render", message="boom")
+    await queue.fail("j1", "w1", 3, step="render", message="boom")
     update = next(b for b in fake.builders if b.op == "update")
     sent = cast(dict[str, Any], update.op_payload)
     assert sent["status"] == "failed"
     assert sent["error_message"] == "render: boom"
     assert ("eq", "worker_id", "w1") in update.filters
+    assert ("eq", "attempts", 3) in update.filters
     assert ("eq", "status", "processing") in update.filters
 
 
@@ -191,30 +196,42 @@ async def test_fail_returns_true_only_when_guarded_transition_lands() -> None:
     # from under us and the reaping side owns the refund.
     queue, fake = _queue()
     fake.update_rows = [dict(_JOB_ROW, status="failed")]
-    assert await queue.fail("j1", "w1", step="render", message="boom") is True
+    assert await queue.fail("j1", "w1", 1, step="render", message="boom") is True
     fake.update_rows = []
-    assert await queue.fail("j1", "w1", step="render", message="boom") is False
+    assert await queue.fail("j1", "w1", 1, step="render", message="boom") is False
 
 
-async def test_complete_returns_false_when_row_no_longer_ours() -> None:
+async def test_complete_goes_through_the_claim_fenced_rpc() -> None:
     queue, fake = _queue()
-    fake.update_rows = []
-    assert await queue.complete("j1", "w1", telemetry={}) is False
+    fake.rpc_data = False
+    assert await queue.complete("j1", "w1", 1, {"outcome": "rendered"}) is False
+    fake.rpc_data = True
+    assert await queue.complete("j1", "w1", 1, {"outcome": "rendered"}) is True
+    assert fake.rpc_calls[-1] == (
+        "complete_job",
+        {
+            "p_job_id": "j1",
+            "p_worker_id": "w1",
+            "p_claim_token": 1,
+            "p_progress": {"outcome": "rendered"},
+        },
+    )
 
 
 async def test_fail_truncates_error_to_column_cap() -> None:
     queue, fake = _queue()
-    await queue.fail("j1", "w1", step="render", message="x" * 5000)
+    await queue.fail("j1", "w1", 1, step="render", message="x" * 5000)
     update = next(b for b in fake.builders if b.op == "update")
     assert len(cast(dict[str, Any], update.op_payload)["error_message"]) == 4000
 
 
-async def test_set_progress_guarded_by_worker_and_status() -> None:
+async def test_set_progress_guarded_by_the_claim_and_status() -> None:
     queue, fake = _queue()
-    await queue.set_progress("j1", "w1", {"step": "Rendering", "current": 7, "total": 7})
+    await queue.set_progress("j1", "w1", 4, {"step": "Rendering", "current": 7, "total": 7})
     update = next(b for b in fake.builders if b.op == "update")
     assert cast(dict[str, Any], update.op_payload)["progress"]["step"] == "Rendering"
     assert ("eq", "worker_id", "w1") in update.filters
+    assert ("eq", "attempts", 4) in update.filters
 
 
 async def test_reap_stale_returns_failed_jobs_for_refund() -> None:
@@ -225,19 +242,19 @@ async def test_reap_stale_returns_failed_jobs_for_refund() -> None:
     assert len(reaped) == 1 and reaped[0].status is JobStatus.FAILED
 
 
-async def test_claim_job_cas_returns_none_when_not_queued() -> None:
+async def test_claim_job_returns_none_when_not_queued() -> None:
     queue, fake = _queue()
-    fake.update_rows = []
+    fake.rpc_data = []
     assert await queue.claim_job("j1", "w1") is None
+    assert fake.rpc_calls == [("claim_job", {"p_job_id": "j1", "p_worker_id": "w1"})]
 
 
-async def test_claim_job_cas_claims_and_bumps_attempts() -> None:
+async def test_claim_job_returns_the_row_with_its_new_claim_token() -> None:
     queue, fake = _queue()
-    fake.update_rows = [dict(_JOB_ROW, status="processing", worker_id="w1")]
+    fake.rpc_data = [dict(_JOB_ROW, status="processing", worker_id="w1", attempts=2)]
     job = await queue.claim_job(_JOB_ROW["id"], "w1")
-    assert job is not None and job.worker_id == "w1"
-    updates = [b for b in fake.builders if b.op == "update"]
-    assert any("attempts" in cast(dict[str, Any], b.op_payload) for b in updates)
+    assert job is not None and job.worker_id == "w1" and job.attempts == 2
+    assert [b for b in fake.builders if b.op == "update"] == []
 
 
 async def test_get_active_job_filters_on_active_statuses() -> None:

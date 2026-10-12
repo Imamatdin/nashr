@@ -41,11 +41,12 @@ async def ingest_sources(
             raise ValueError("source_not_found")
         if source.get("evidence_processed_at"):
             continue
-        if not await queue.heartbeat(job.id, worker_id):
+        if not await queue.heartbeat(job.id, worker_id, job.attempts):
             return
         await queue.set_progress(
             job.id,
             worker_id,
+            job.attempts,
             {
                 "stage": "source_processing",
                 "source_id": str(source_id),
@@ -73,6 +74,7 @@ async def ingest_sources(
     await queue.set_progress(
         job.id,
         worker_id,
+        job.attempts,
         {
             "stage": "failed" if failures else "complete",
             "completed_sources": len(payload.source_ids) - len(failures),
@@ -82,4 +84,4 @@ async def ingest_sources(
     )
     if failures:
         raise ValueError("source_extraction_failed")
-    await queue.complete(job.id, worker_id, {})
+    await queue.complete(job.id, worker_id, job.attempts, {})

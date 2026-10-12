@@ -265,17 +265,9 @@ begin
             raise exception 'kind_not_allowed' using errcode = '42501';
         end if;
     elsif p_actor ~ ('^worker:' || v_uuid || '$') then
-        perform 1 from generation_jobs j
-         where j.id = substr(p_actor, 8)::uuid
-           and j.project_id = p_project_id
-           and j.user_id = v_owner
-           and j.status = 'processing';
-        if not found then
-            raise exception 'actor_job_not_active' using errcode = '42501';
-        end if;
-        if p_kind not in ('generation', 'regeneration', 'ai_edit') then
-            raise exception 'kind_not_allowed' using errcode = '42501';
-        end if;
+        -- A queue worker writes only through finish_generation_job, which fences
+        -- its claim and completes the job in the same transaction (ADR §6.1).
+        raise exception 'worker_must_finish_job' using errcode = '42501';
     elsif p_actor ~ '^bot:[0-9]{1,20}$' then
         select u.id into v_mapped from users u where u.telegram_id = substr(p_actor, 5)::bigint;
         if v_mapped is null then
@@ -352,46 +344,42 @@ $$;
 -- 7. commit_revision
 -- ---------------------------------------------------------------------------
 
-create or replace function commit_revision(
+-- The compare-and-swap itself. The caller has already locked the document row
+-- (FOR UPDATE) and resolved the owner; this function takes no locks, so every
+-- entry point keeps the global order job -> document -> proposal (ADR §4.6).
+create or replace function _commit_core(
     p_document_id uuid,
     p_base_revision_id uuid,
     p_content jsonb,
     p_kind text,
     p_schema_version integer,
     p_actor text,
-    p_idempotency_key text
+    p_owner uuid,
+    p_idempotency_key text,
+    p_source_job uuid
 )
 returns table (
     status text, document_id uuid, revision_id uuid,
     head_revision_id uuid, proposal_id uuid
 )
-language plpgsql security definer
+language plpgsql
 set search_path = public, pg_temp
 as $$
 #variable_conflict use_column
 declare
     v_doc documents%rowtype;
-    v_owner uuid;
+    v_owner uuid := p_owner;
     v_hash text;
     v_existing_id uuid;
     v_existing_hash text;
     v_head_hash text;
     v_new uuid;
-    v_job uuid;
+    v_job uuid := p_source_job;
 begin
-    select * into v_doc from documents d where d.id = p_document_id for update;
+    select * into v_doc from documents d where d.id = p_document_id;
     if not found then
         raise exception 'document_not_found' using errcode = 'P0002';
     end if;
-
-    if p_kind is null or p_kind not in (
-        'generation', 'regeneration', 'manual', 'autosave',
-        'ai_edit', 'bot_edit', 'import', 'restore'
-    ) then
-        raise exception 'invalid_revision_kind' using errcode = '22023';
-    end if;
-    v_owner := _document_write_owner(v_doc.project_id, p_actor, p_kind);
-
     if p_idempotency_key is null or char_length(p_idempotency_key) not between 1 and 128 then
         raise exception 'invalid_idempotency_key' using errcode = '22023';
     end if;
@@ -458,9 +446,6 @@ begin
     end if;
 
     if p_kind in ('ai_edit', 'regeneration', 'import') then
-        if p_actor like 'worker:%' then
-            v_job := substr(p_actor, 8)::uuid;
-        end if;
         insert into revision_proposals (
             document_id, base_revision_id, content, content_sha256, schema_version,
             kind, actor, source_job_id, idempotency_key
@@ -475,6 +460,275 @@ begin
 
     return query select 'conflict'::text, p_document_id, null::uuid,
                         v_doc.head_revision_id, null::uuid;
+end;
+$$;
+
+create or replace function commit_revision(
+    p_document_id uuid,
+    p_base_revision_id uuid,
+    p_content jsonb,
+    p_kind text,
+    p_schema_version integer,
+    p_actor text,
+    p_idempotency_key text
+)
+returns table (
+    status text, document_id uuid, revision_id uuid,
+    head_revision_id uuid, proposal_id uuid
+)
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+#variable_conflict use_column
+declare
+    v_project uuid;
+    v_owner uuid;
+begin
+    select d.project_id into v_project from documents d where d.id = p_document_id for update;
+    if not found then
+        raise exception 'document_not_found' using errcode = 'P0002';
+    end if;
+    if p_kind is null or p_kind not in (
+        'generation', 'regeneration', 'manual', 'autosave',
+        'ai_edit', 'bot_edit', 'import', 'restore'
+    ) then
+        raise exception 'invalid_revision_kind' using errcode = '22023';
+    end if;
+    v_owner := _document_write_owner(v_project, p_actor, p_kind);
+    return query select * from _commit_core(
+        p_document_id, p_base_revision_id, p_content, p_kind, p_schema_version,
+        p_actor, v_owner, p_idempotency_key, null
+    );
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- 7b. Job claims: claim, heartbeat, finish (commit + complete), complete
+-- ---------------------------------------------------------------------------
+-- A claim is (worker_id, attempts): every claim increments attempts, so the
+-- attempt number is a monotonic claim token. A claim is live while the job is
+-- processing under that worker and token and its heartbeat is younger than
+-- _claim_ttl(); the reaper uses the same window by default.
+
+create or replace function _claim_ttl() returns interval
+language sql immutable
+set search_path = public, pg_temp
+as $$ select interval '120 seconds' $$;
+
+-- Lock the job and require the caller's live claim; raises claim_lost otherwise.
+create or replace function _lock_claimed_job(
+    p_job_id uuid, p_worker_id text, p_claim_token integer, p_require_fresh boolean
+) returns generation_jobs
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+    v_job generation_jobs%rowtype;
+begin
+    select * into v_job from generation_jobs j where j.id = p_job_id for update;
+    if not found
+       or v_job.status is distinct from 'processing'
+       or p_worker_id is null or v_job.worker_id is null or v_job.worker_id <> p_worker_id
+       or p_claim_token is null or v_job.attempts <> p_claim_token then
+        raise exception 'claim_lost' using errcode = '55000';
+    end if;
+    if p_require_fresh
+       and (v_job.heartbeat_at is null or v_job.heartbeat_at < now() - _claim_ttl()) then
+        raise exception 'claim_expired' using errcode = '55000';
+    end if;
+    return v_job;
+end;
+$$;
+
+create or replace function claim_job(p_job_id uuid, p_worker_id text)
+returns setof generation_jobs
+language sql security definer
+set search_path = public, pg_temp
+as $$
+    update generation_jobs
+       set status       = 'processing',
+           worker_id    = p_worker_id,
+           claimed_at   = now(),
+           heartbeat_at = now(),
+           started_at   = coalesce(started_at, now()),
+           attempts     = attempts + 1
+     where id = p_job_id and status = 'queued' and p_worker_id is not null
+    returning *;
+$$;
+
+drop function if exists heartbeat_job(uuid, text);
+create or replace function heartbeat_job(p_job_id uuid, p_worker_id text, p_claim_token integer)
+returns boolean
+language sql security definer
+set search_path = public, pg_temp
+as $$
+    with bumped as (
+        update generation_jobs
+           set heartbeat_at = now()
+         where id = p_job_id
+           and worker_id = p_worker_id
+           and attempts = p_claim_token
+           and status = 'processing'
+        returning id
+    )
+    select exists (select 1 from bumped);
+$$;
+
+-- The only way a queue worker changes canonical document state. Locks the job,
+-- proves the caller's live claim, commits through the same compare-and-swap as
+-- commit_revision, completes the job and queues the render of what it committed,
+-- all in one transaction: a revision or proposal from a job exists only if that
+-- job completed, and a worker whose claim lapsed writes nothing.
+create or replace function finish_generation_job(
+    p_job_id uuid,
+    p_worker_id text,
+    p_claim_token integer,
+    p_base_revision_id uuid,
+    p_content jsonb,
+    p_kind text,
+    p_schema_version integer,
+    p_idempotency_key text,
+    p_renderer_version text,
+    p_render_formats text[]
+)
+returns table (
+    status text, document_id uuid, revision_id uuid,
+    head_revision_id uuid, proposal_id uuid
+)
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+#variable_conflict use_column
+declare
+    v_job generation_jobs%rowtype;
+    v_owner uuid;
+    v_type text;
+    v_doc uuid;
+    v_actor text;
+    v_result record;
+    v_formats jsonb;
+begin
+    select * into v_job from generation_jobs j where j.id = p_job_id for update;
+    -- A retry of a finish whose response was lost: same claim, job completed.
+    if found and v_job.status = 'completed' and v_job.worker_id = p_worker_id
+       and v_job.attempts = p_claim_token then
+        select d.id into v_doc from documents d
+         where d.project_id = v_job.project_id and d.kind = 'presentation';
+        return query
+            select 'duplicate'::text, v_doc, r.id, d.head_revision_id, null::uuid
+              from document_revisions r join documents d on d.id = r.document_id
+             where r.document_id = v_doc and r.idempotency_key = p_idempotency_key
+            union all
+            select 'proposed'::text, v_doc, null::uuid, d.head_revision_id, q.id
+              from revision_proposals q join documents d on d.id = q.document_id
+             where q.document_id = v_doc
+               and q.idempotency_key in (p_idempotency_key, p_idempotency_key || ':proposal')
+            limit 1;
+        if found then
+            return;
+        end if;
+    end if;
+    v_job := _lock_claimed_job(p_job_id, p_worker_id, p_claim_token, true);
+
+    if not (
+        (v_job.job_type = 'presentation_generation' and p_kind in ('generation', 'regeneration'))
+        or (v_job.job_type = 'presentation_edit' and p_kind = 'ai_edit')
+    ) then
+        raise exception 'kind_not_allowed' using errcode = '42501';
+    end if;
+    select p.user_id, p.type into v_owner, v_type from projects p where p.id = v_job.project_id;
+    if v_owner is null then
+        raise exception 'document_not_found' using errcode = 'P0002';
+    end if;
+    if v_job.user_id is null or v_job.user_id <> v_owner then
+        raise exception 'not_document_owner' using errcode = '42501';
+    end if;
+    if v_type not in ('presentation', 'research_package') then
+        raise exception 'document_kind_mismatch' using errcode = '22023';
+    end if;
+
+    insert into documents (project_id, kind, schema_version)
+    values (
+        v_job.project_id, 'presentation',
+        (select max(v.version) from document_schema_versions v where v.kind = 'presentation')
+    )
+    on conflict (project_id, kind) do nothing;
+    select d.id into v_doc from documents d
+     where d.project_id = v_job.project_id and d.kind = 'presentation' for update;
+
+    v_actor := 'worker:' || p_job_id::text;
+    select * into v_result from _commit_core(
+        v_doc, p_base_revision_id, p_content, p_kind, p_schema_version,
+        v_actor, v_owner, p_idempotency_key, p_job_id
+    );
+    -- A first generation that lost the race to another head is kept as a
+    -- regeneration proposal, never dropped: the owner paid for it.
+    if v_result.status = 'conflict' and p_kind = 'generation' then
+        select * into v_result from _commit_core(
+            v_doc, null, p_content, 'regeneration', p_schema_version,
+            v_actor, v_owner, p_idempotency_key || ':proposal', p_job_id
+        );
+    end if;
+    if v_result.status not in ('committed', 'duplicate', 'unchanged', 'proposed') then
+        raise exception 'finish_unexpected_status %', v_result.status using errcode = 'XX000';
+    end if;
+
+    update generation_jobs
+       set status = 'completed',
+           completed_at = now(),
+           progress = progress || jsonb_build_object(
+               'step', 'done', 'outcome', v_result.status,
+               'revision_id', v_result.revision_id, 'proposal_id', v_result.proposal_id)
+     where id = p_job_id;
+
+    if v_result.revision_id is not null and p_renderer_version is not null
+       and coalesce(cardinality(p_render_formats), 0) > 0 then
+        if exists (select 1 from unnest(p_render_formats) f where f not in ('html', 'pptx', 'pdf')) then
+            raise exception 'invalid_render_formats' using errcode = '22023';
+        end if;
+        select to_jsonb(array_agg(distinct f order by f)) into v_formats
+          from unnest(p_render_formats) f;
+        insert into generation_jobs (project_id, user_id, job_type, status, payload, max_attempts)
+        values (
+            v_job.project_id, v_owner, 'presentation_render', 'queued',
+            jsonb_build_object(
+                'document_id', v_doc, 'revision_id', v_result.revision_id,
+                'renderer_version', p_renderer_version, 'formats', v_formats,
+                'requested_by_job', p_job_id),
+            1
+        )
+        on conflict do nothing;
+    end if;
+
+    return query select v_result.status, v_doc, v_result.revision_id,
+                        v_result.head_revision_id, v_result.proposal_id;
+end;
+$$;
+
+-- Complete a job that commits nothing (render, source processing). Jobs that
+-- produce a revision complete only through finish_generation_job.
+create or replace function complete_job(
+    p_job_id uuid, p_worker_id text, p_claim_token integer, p_progress jsonb
+) returns boolean
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_job generation_jobs%rowtype;
+begin
+    begin
+        v_job := _lock_claimed_job(p_job_id, p_worker_id, p_claim_token, false);
+    exception when sqlstate '55000' then
+        return false;
+    end;
+    if v_job.job_type in ('presentation_generation', 'presentation_edit') then
+        raise exception 'job_must_finish_with_revision' using errcode = '55000';
+    end if;
+    update generation_jobs
+       set status = 'completed', completed_at = now(),
+           progress = progress || coalesce(p_progress, '{}'::jsonb)
+     where id = p_job_id;
+    return true;
 end;
 $$;
 
@@ -716,6 +970,23 @@ revoke all on function _caller_is_end_user() from public, anon, authenticated, s
 revoke all on function _document_write_owner(uuid, text, text)
     from public, anon, authenticated, service_role;
 revoke all on function _content_sha256(jsonb) from public, anon, authenticated, service_role;
+revoke all on function _commit_core(uuid, uuid, jsonb, text, integer, text, uuid, text, uuid)
+    from public, anon, authenticated, service_role;
+revoke all on function _claim_ttl() from public, anon, authenticated, service_role;
+revoke all on function _lock_claimed_job(uuid, text, integer, boolean)
+    from public, anon, authenticated, service_role;
+revoke all on function claim_job(uuid, text) from public, anon, authenticated;
+revoke all on function heartbeat_job(uuid, text, integer) from public, anon, authenticated;
+revoke all on function finish_generation_job(
+    uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]
+) from public, anon, authenticated;
+revoke all on function complete_job(uuid, text, integer, jsonb) from public, anon, authenticated;
+grant execute on function claim_job(uuid, text) to service_role;
+grant execute on function heartbeat_job(uuid, text, integer) to service_role;
+grant execute on function finish_generation_job(
+    uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]
+) to service_role;
+grant execute on function complete_job(uuid, text, integer, jsonb) to service_role;
 revoke all on function ensure_document(uuid, text, text) from public, anon;
 revoke all on function commit_revision(uuid, uuid, jsonb, text, integer, text, text)
     from public, anon;
@@ -949,6 +1220,14 @@ alter table documents replica identity full;
 -- drop function if exists reject_proposal(uuid, text);
 -- drop function if exists register_export(uuid, text, uuid, text, text, text, text, bigint, integer);
 -- drop function if exists record_revision_validation(uuid, text, text, text);
+-- drop function if exists finish_generation_job(uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]);
+-- drop function if exists complete_job(uuid, text, integer, jsonb);
+-- drop function if exists claim_job(uuid, text);
+-- drop function if exists heartbeat_job(uuid, text, integer);
+-- -- then re-apply 006's heartbeat_job(uuid, text) body (pre-016 workers call it)
+-- drop function if exists _lock_claimed_job(uuid, text, integer, boolean);
+-- drop function if exists _claim_ttl();
+-- drop function if exists _commit_core(uuid, uuid, jsonb, text, integer, text, uuid, text, uuid);
 -- drop function if exists ensure_document(uuid, text, text);
 -- drop function if exists _document_write_owner(uuid, text, text);
 -- drop function if exists _caller_is_end_user();

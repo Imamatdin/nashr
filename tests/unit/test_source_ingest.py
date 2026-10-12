@@ -53,18 +53,29 @@ class Queue:
         self.alive = True
         self.completed: list[str] = []
         self.failed: list[str] = []
+        self.tokens: list[int] = []
 
-    async def heartbeat(self, job_id: str, worker_id: str) -> bool:
+    async def heartbeat(self, job_id: str, worker_id: str, claim_token: int) -> bool:
+        self.tokens.append(claim_token)
         return self.alive
 
-    async def set_progress(self, job_id: str, worker_id: str, progress: dict[str, object]) -> None:
+    async def set_progress(
+        self, job_id: str, worker_id: str, claim_token: int, progress: dict[str, object]
+    ) -> None:
+        self.tokens.append(claim_token)
         self.progress = progress
 
-    async def complete(self, job_id: str, worker_id: str, telemetry: dict[str, object]) -> bool:
+    async def complete(
+        self, job_id: str, worker_id: str, claim_token: int, progress: dict[str, object]
+    ) -> bool:
+        self.tokens.append(claim_token)
         self.completed.append(job_id)
         return True
 
-    async def fail(self, job_id: str, worker_id: str, *, step: str, message: str) -> bool:
+    async def fail(
+        self, job_id: str, worker_id: str, claim_token: int, *, step: str, message: str
+    ) -> bool:
+        self.tokens.append(claim_token)
         self.failed.append(message)
         return True
 
@@ -96,6 +107,7 @@ async def setup(
         job_type="source_processing",
         status="processing",
         payload={"source_ids": [SOURCE]},
+        attempts=3,
     )
     return runner, job, db, queue
 
@@ -107,6 +119,8 @@ async def test_source_job_persists_exact_text_and_completes(
     await runner.run(job)
     assert queue.completed == [job.id]
     assert not queue.failed
+    # Every queue call is made under this claim (attempt 3), never a stale one.
+    assert queue.tokens and set(queue.tokens) == {3}
     chunks = cast(list[dict[str, Any]], db.committed[0][3])
     assert chunks[0]["text"].startswith("Education research evidence.")
     assert chunks[0]["page"] is None  # plain text has no page locations

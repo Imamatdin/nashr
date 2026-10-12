@@ -19,7 +19,7 @@ import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import pytest
 
 from tests.db.conftest import CURRENT
-from tests.db.support import Db, accept, commit, ensure_document, head, register
+from tests.db.support import Db, accept, commit, ensure_document, finish, head, register
 
 pytestmark = pytest.mark.skipif(
     not CURRENT, reason="exercises migration 016's functions (current schema only)"
@@ -138,13 +138,14 @@ async def test_c_concurrent_manual_save_and_ai_edit_on_one_base_lose_nothing(wor
         key="manual",
     )
     ai_task = asyncio.create_task(
-        commit(
+        finish(
             ai_conn,
-            world.document,
+            job,
+            "w1",
+            1,
             world.r0,
             {"title": "ai"},
             kind="ai_edit",
-            actor=f"worker:{job}",
             key="ai",
         )
     )
@@ -250,22 +251,24 @@ async def test_e_retried_proposal_and_accept_and_register_are_idempotent(world: 
         actor=world.owner,
         key="move",
     )
-    proposed = await commit(
+    proposed = await finish(
         world.service,
-        world.document,
+        job,
+        "w1",
+        1,
         world.r0,
         {"title": "ai"},
         kind="ai_edit",
-        actor=f"worker:{job}",
         key="ai",
     )
-    again = await commit(
+    again = await finish(
         world.service,
-        world.document,
+        job,
+        "w1",
+        1,
         world.r0,
         {"title": "ai"},
         kind="ai_edit",
-        actor=f"worker:{job}",
         key="ai",
     )
     assert again["status"] == "proposed" and again["proposal_id"] == proposed["proposal_id"]
@@ -309,13 +312,14 @@ async def test_identical_content_is_unchanged_and_does_not_turn_an_ai_edit_into_
     )
     assert same["status"] == "unchanged" and same["revision_id"] == world.r0
     assert await head(world.service, world.document) == world.r0
-    ai = await commit(
+    ai = await finish(
         world.service,
-        world.document,
+        job,
+        "w1",
+        1,
         world.r0,
         {"title": "ai"},
         kind="ai_edit",
-        actor=f"worker:{job}",
         key="ai",
     )
     assert ai["status"] == "committed"
@@ -425,13 +429,14 @@ async def test_j_another_user_cannot_read_or_write_the_document(world: World) ->
         actor=world.owner,
         key="m",
     )
-    proposal = await commit(
+    proposal = await finish(
         world.service,
-        world.document,
+        job,
+        "w1",
+        1,
         world.r0,
         {"title": "ai"},
         kind="ai_edit",
-        actor=f"worker:{job}",
         key="ai",
     )
     render = await world.db.job(world.project, world.owner, payload={"revision_id": world.r0})
@@ -529,13 +534,14 @@ async def test_accept_replaces_the_head_the_user_saw_and_a_moved_head_conflicts(
         actor=world.owner,
         key="hand",
     )
-    proposal = await commit(
+    proposal = await finish(
         world.service,
-        world.document,
+        job,
+        "w1",
+        1,
         world.r0,
         {"title": "ai"},
         kind="ai_edit",
-        actor=f"worker:{job}",
         key="ai",
     )
 
@@ -589,13 +595,14 @@ async def test_accept_refuses_a_schema_mismatch(world: World) -> None:
         actor=world.owner,
         key="m",
     )
-    proposal = await commit(
+    proposal = await finish(
         world.service,
-        world.document,
+        job,
+        "w1",
+        1,
         world.r0,
         {"title": "ai"},
         kind="ai_edit",
-        actor=f"worker:{job}",
         key="ai",
     )
     admin = await world.db.admin()
@@ -653,21 +660,30 @@ async def test_content_limits_and_schema_versions_are_enforced(world: World) -> 
     )
 
 
-async def test_worker_actor_needs_a_processing_job_of_the_project(world: World) -> None:
-    finished = await world.db.job(
-        world.project, world.owner, status="completed", job_type="presentation_edit"
-    )
+async def test_a_worker_writes_only_through_its_fenced_finish(world: World) -> None:
+    live = await world.worker_job()
     await _refused(
-        "actor_job_not_active",
+        "worker_must_finish_job",
         commit(
             world.service,
             world.document,
             world.r0,
             {"t": 1},
             kind="ai_edit",
-            actor=f"worker:{finished}",
+            actor=f"worker:{live}",
             key="w",
         ),
+    )
+    finished = await world.db.job(
+        world.project, world.owner, status="completed", job_type="presentation_edit"
+    )
+    await _refused(
+        "claim_lost",
+        finish(world.service, finished, "w1", 1, world.r0, {"t": 1}, kind="ai_edit", key="w"),
+    )
+    await _refused(
+        "kind_not_allowed",
+        finish(world.service, live, "w1", 1, world.r0, {"t": 1}, kind="manual", key="m"),
     )
     await _refused(
         "not_document_owner",
@@ -681,6 +697,7 @@ async def test_worker_actor_needs_a_processing_job_of_the_project(world: World) 
             key="b",
         ),
     )
+    assert await head(world.service, world.document) == world.r0
 
 
 # ---------------------------------------------------------------- latency
