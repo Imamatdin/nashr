@@ -315,6 +315,40 @@ class DocumentRpcEmulator:
         )
         return True
 
+    def _settle_failure(self, job: dict[str, Any], error: str) -> None:
+        """Fail the job and refund its stamped charge once (one SQL transaction)."""
+
+        job.update(status="failed", completed_at=self._now(), error_message=error[:4000])
+        amount = (job.get("payload") or {}).get("deducted_amount")
+        refunded = any(
+            row.get("generation_job_id") == job["id"] and row.get("action") == "refund"
+            for row in self._rows("credit_ledger")
+        )
+        if isinstance(amount, int) and amount > 0 and job.get("user_id") and not refunded:
+            self._rows("credit_ledger").append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "user_id": job["user_id"],
+                    "project_id": job.get("project_id"),
+                    "amount": amount,
+                    "reason": "refund",
+                    "action": "refund",
+                    "generation_job_id": job["id"],
+                    "status": "confirmed",
+                    "created_at": self._now(),
+                }
+            )
+
+    def fail_job(self, params: dict[str, Any]) -> bool:
+        """Fail and refund under the caller's claim; False when the claim is gone."""
+
+        try:
+            job = self._claimed_job(params, fresh=False)
+        except APIError:
+            return False
+        self._settle_failure(job, f"{params.get('p_step')}: {params.get('p_message')}")
+        return True
+
     def finish_generation_job(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Fenced commit + completion + render enqueue, as one step."""
 
@@ -586,6 +620,7 @@ class DocumentRpcEmulator:
             "heartbeat_job": self.heartbeat_job,
             "complete_job": self.complete_job,
             "finish_generation_job": self.finish_generation_job,
+            "fail_job": self.fail_job,
         }.get(fn)
         if handler is None:
             return None

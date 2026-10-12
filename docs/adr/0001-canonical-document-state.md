@@ -58,7 +58,7 @@ disagree about which one is authoritative (full inventory in Appendix A).
 | I9 | Only known content schema versions are stored; content size is bounded | `document_schema_versions` registry; `octet_length(content::text) <= 2 MiB` |
 | I10 | A user can read and commit only their own documents | owner-only SELECT RLS; `commit_revision` resolves the caller (`app_uid()` or the actor) to the project owner |
 | I12 | A queue worker's revision or proposal exists only if its job completed, under the claim that produced it | workers cannot use `commit_revision`; `finish_generation_job` locks the job, checks the live claim (worker, attempt token, fresh heartbeat), commits and completes in one transaction (§4.3, §4.6) |
-| I11 | At most one refund ledger row per job | partial unique index on `credit_ledger(generation_job_id) where action = 'refund'` (created only if legacy data has no duplicates; see §8) |
+| I11 | A failed paid job has exactly one refund ledger row | `fail_job` and the reaper fail the job and insert its refund in one transaction under the job row lock (§6.6); partial unique index on `credit_ledger(generation_job_id) where action = 'refund'`, always installed (§8) |
 
 ## 3. Decision summary
 
@@ -376,6 +376,24 @@ different renderer than the payload names refuses before rendering. A lost claim
 aborts without registering and without completing; the reaper owns that job's
 outcome.
 
+### 6.6 Failure and refund (B1-FIX, Codex finding 4)
+
+A refund used to be a second write after the failure: `JobQueue.fail()` committed
+`failed`, then the worker inserted the ledger row. A crash or insert error between
+them left a failed, charged job with no refund, and the reaper never revisits a
+terminal row. Now the database settles both in one transaction:
+
+- `fail_job(job_id, worker_id, claim_token, step, message)` locks the job, requires
+  the caller's claim (returns false otherwise: the job's holder settles it), marks it
+  `failed` and, if `payload.deducted_amount` is a positive amount, inserts the
+  `refund` row stamped with the job, unless one exists.
+- `reap_stale_jobs` re-queues stale jobs with attempts left and settles the rest
+  through the same internal `_settle_failure`, skipping rows another transaction
+  holds (a worker mid-finish or mid-fail). A missing heartbeat counts as stale.
+- The job row lock serializes every settler, and the unique index backs it up.
+- The worker no longer refunds anything. The one application refund left is the
+  enqueue route's undo of a losing duplicate deduction, which belongs to no job.
+
 ## 7. Bugs this fixes (each gets a test that fails before the change)
 
 | Test | Today | After |
@@ -415,9 +433,13 @@ blocks that check catalog state):
    counted and left in `decks_legacy`. Counts are emitted with `raise notice`.
    Re-running returns `duplicate` / `proposed` by idempotency key and adds nothing.
    Then the `decks` view is created and `documents` is published instead.
-7. Create `uq_credit_ledger_refund_per_job` if no duplicate refund rows exist;
-   otherwise emit a warning with the count and skip it (it must not block the
-   migration; the count goes in the report).
+7. Create `uq_credit_ledger_refund_per_job`, failing closed (B1-FIX, Codex finding 5):
+   legacy duplicate refund rows are kept (the ledger is append-only) and every row
+   after the first per job is recorded in `credit_ledger_legacy_duplicate_refunds`;
+   the index predicate excludes exactly those row ids, so all other and all future
+   refunds are covered. 016 raises rather than finish without the index. Active
+   legacy jobs without `deducted_amount` get it stamped from the price list in force,
+   so the database can settle their refund.
 
 `scripts/backfill_validate_revisions.py` then validates every `import` revision
 against `DeckSpec` / `ArticleDocumentContent` in keyset-paginated batches, inserting a

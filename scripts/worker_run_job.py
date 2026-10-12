@@ -12,8 +12,9 @@ orchestrator handles both), and reaps zombie ``processing`` rows every tick,
 refunding the honest-failed ones through the existing ledger path.
 
 Failure contract: an ``_OrchestratorError`` lands the job on ``failed`` with
-its step name in ``error_message`` AND refunds the enqueue-time deduction —
-exactly the bot handler's refund discipline, moved queue-side.
+its step name in ``error_message``. The refund of the enqueue-time deduction is
+written by the database in the same transaction (``fail_job`` / the reaper), so
+a crash can never leave a failed paid job unrefunded (ADR 0001 §6.6).
 """
 
 from __future__ import annotations
@@ -32,7 +33,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from postgrest.exceptions import APIError
 
 from packages.core.enums import ExportFormat, GenerationPackage
 from packages.platform.config import PlatformConfig
@@ -69,53 +69,6 @@ WEB_FILE_FORMATS: tuple[str, ...] = ("html", "pdf", "pptx")
 
 def _worker_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
-
-
-def _refund_amount(payload: dict[str, Any]) -> int | None:
-    # Prefer the amount actually deducted at enqueue time (stamped into the
-    # payload by the route); PRICING is only the fallback for rows enqueued
-    # before deducted_amount existed. Refunding current-price on a stale row
-    # would mismatch the ledger after a price change.
-    deducted = payload.get("deducted_amount")
-    if isinstance(deducted, int) and deducted > 0:
-        return deducted
-    product_type = payload.get("product_type")
-    if isinstance(product_type, str) and product_type in CreditLedger.PRICING:
-        return CreditLedger.PRICING[product_type]
-    return None
-
-
-async def _refund_job(credits: CreditLedger, job: GenerationJob, reason: str) -> None:
-    """Refund a failed job's deduction; a job with no priced payload is skipped."""
-
-    amount = _refund_amount(job.payload)
-    if amount is None or job.user_id is None:
-        logger.warning(
-            "worker_refund_skipped %s",
-            json.dumps({"job_id": job.id, "reason": "no product_type or user_id"}),
-        )
-        return
-    # Stamped with the job id so GET /jobs can state the refund as a FACT
-    # rather than inferring it from timestamps (JobView.refunded). Migration 016
-    # makes a second refund row for the same job a unique violation: a retried
-    # refund is then already done, not an error.
-    try:
-        await credits.refund(
-            job.user_id,
-            job.project_id,
-            amount,
-            reason=reason[:200],
-            generation_job_id=job.id,
-        )
-    except APIError as exc:
-        if exc.code != "23505":
-            raise
-        logger.info("worker_refund_already_recorded %s", json.dumps({"job_id": job.id}))
-        return
-    logger.info(
-        "worker_job_refunded %s",
-        json.dumps({"job_id": job.id, "amount": amount, "reason": reason[:200]}),
-    )
 
 
 class JobRunner:
@@ -166,26 +119,18 @@ class JobRunner:
                 )
 
     async def _execute(self, job: GenerationJob) -> None:
-        # Refunds are gated on OUR guarded fail() transition landing: if the
-        # reaper already took the row (stalled-but-alive worker), the reaping
-        # side owns the refund and ours must not fire — one refund per job.
-        #
-        # An EDIT job is never refundable: no credit was taken for it (a fix
-        # spends the tier's fix allowance, not money), so its payload carries no
-        # price and a refund attempt would be a no-op with a misleading log.
+        # fail_job refunds a paid job in the failing transaction, once; when our
+        # claim is already gone it changes nothing and the holder settles the job.
         runner = self._executor_for(job.job_type)
         if runner is None:
-            failed_by_us = await self._queue.fail(
+            await self._queue.fail(
                 job.id,
                 self._worker_id,
                 job.attempts,
                 step="dispatch",
                 message=f"job_type {job.job_type.value} has no worker executor yet",
             )
-            if failed_by_us:
-                await _refund_job(self._credits, job, f"refund:job:{job.id}:unsupported_type")
             return
-        refundable = job.job_type is JobType.PRESENTATION_GENERATION
         try:
             await runner(job)
         except Exception as exc:
@@ -199,11 +144,9 @@ class JobRunner:
             failed_by_us = await self._queue.fail(
                 job.id, self._worker_id, job.attempts, step=str(step), message=message
             )
-            if failed_by_us and refundable:
-                await _refund_job(self._credits, job, f"refund:job:{job.id}:{step}")
-            elif not failed_by_us:
+            if not failed_by_us:
                 logger.warning(
-                    "worker_refund_suppressed_row_not_ours %s",
+                    "worker_fail_row_not_ours %s",
                     json.dumps({"job_id": job.id, "step": str(step)}),
                 )
 
@@ -543,18 +486,18 @@ class JobRunner:
         )
 
 
-async def _reap(queue: JobQueue, credits: CreditLedger, stale_seconds: int) -> None:
+async def _reap(queue: JobQueue, stale_seconds: int) -> None:
     try:
         failed = await queue.reap_stale(stale_seconds)
     except Exception as exc:
         logger.warning("worker_reap_error %s", json.dumps({"error_type": type(exc).__name__}))
         return
     for job in failed:
+        # Failed and, when paid, refunded by reap_stale_jobs itself.
         logger.warning(
             "worker_job_reaped %s",
             json.dumps({"job_id": job.id, "error_message": job.error_message}),
         )
-        await _refund_job(credits, job, f"refund:job:{job.id}:reaped")
 
 
 async def _amain(args: argparse.Namespace) -> int:
@@ -591,7 +534,7 @@ async def _amain(args: argparse.Namespace) -> int:
         return 0 if final is not None and final.status.value == "completed" else 1
 
     while True:
-        await _reap(queue, credits, args.stale_seconds)
+        await _reap(queue, args.stale_seconds)
         # Touched per cycle, BEFORE the claim: the file then proves the loop is
         # turning even when the queue is empty, which is the worker's normal
         # state. Touching only on a claimed job would report an idle worker as

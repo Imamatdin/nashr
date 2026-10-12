@@ -439,3 +439,176 @@ async def test_a_recovery_render_after_a_crash_mid_publish_completes_the_set(dec
         export_key(deck.document, deck.r0, "pdf", "c" * 64),
     ]
     assert sorted(_orphans(uploaded, rows)) == sorted([uploaded[1], uploaded[2]])
+
+
+# ------------------------------------------------- 4. exactly-once refunds
+
+
+async def _old_fail(conn: Any, job: str, worker: str, *, crash_before_refund: bool) -> None:
+    """JobQueue.fail then _refund_job, as two autocommitted writes (reviewed code)."""
+
+    row = await conn.fetchrow(
+        "update generation_jobs set status = 'failed', completed_at = now(),"
+        " error_message = 'render: boom' where id = $1 and worker_id = $2"
+        " and status = 'processing' returning user_id, project_id, payload",
+        uuid.UUID(job),
+        worker,
+    )
+    if row is None or crash_before_refund:
+        return
+    await _old_refund(conn, job, row)
+
+
+async def _old_refund(conn: Any, job: str, row: Any) -> None:
+    await conn.execute(
+        "insert into credit_ledger (user_id, project_id, amount, reason, action,"
+        " generation_job_id, status) values ($1, $2, $3, 'refund', 'refund', $4, 'confirmed')",
+        row["user_id"],
+        row["project_id"],
+        int(row["payload"]["deducted_amount"]),
+        uuid.UUID(job),
+    )
+
+
+async def _reap(conn: Any) -> None:
+    """The reaper: reap_stale_jobs, plus the reviewed worker's refund of each row."""
+
+    rows = await conn.fetch("select * from reap_stale_jobs(60)")
+    if BASELINE:
+        for row in rows:
+            await _old_refund(conn, str(row["id"]), row)
+
+
+async def _worker_fail(conn: Any, job: str, worker: str) -> None:
+    if BASELINE:
+        await _old_fail(conn, job, worker, crash_before_refund=False)
+    else:
+        await conn.fetchval("select fail_job($1, $2, 1, 'render', 'boom')", uuid.UUID(job), worker)
+
+
+async def _paid_job(deck: Deck) -> str:
+    return await deck.db.job(
+        deck.project,
+        deck.owner,
+        job_type="presentation_generation",
+        worker="A",
+        payload={"product_type": "presentation_standard", "deducted_amount": 10_000},
+    )
+
+
+async def _refunds(deck: Deck, job: str) -> list[int]:
+    rows = await deck.service.fetch(
+        "select amount from credit_ledger where generation_job_id = $1 and action = 'refund'",
+        uuid.UUID(job),
+    )
+    return [int(row["amount"]) for row in rows]
+
+
+async def _make_stale(deck: Deck, job: str) -> None:
+    admin = await deck.db.admin()
+    await admin.execute(
+        "update generation_jobs set heartbeat_at = now() - interval '10 minutes' where id = $1",
+        uuid.UUID(job),
+    )
+
+
+async def test_a_crash_after_the_failure_is_decided_still_ends_with_one_refund(
+    deck: Deck,
+) -> None:
+    job = await _paid_job(deck)
+    worker = await deck.db.as_role("service_role")
+    if BASELINE:
+        # The failure committed on its own; the process died before the refund.
+        await _old_fail(worker, job, "A", crash_before_refund=True)
+    else:
+        # The failure and refund are decided inside one transaction, then the
+        # process dies before COMMIT.
+        await worker.execute("begin")
+        assert await worker.fetchval(
+            "select fail_job($1, 'A', 1, 'render', 'boom')", uuid.UUID(job)
+        )
+        pid = await worker.fetchval("select pg_backend_pid()")
+        admin = await deck.db.admin()
+        await admin.execute("select pg_terminate_backend($1)", pid)
+        await asyncio.sleep(0.2)
+    await _make_stale(deck, job)
+    await _reap(await deck.db.as_role("service_role"))
+
+    assert await _refunds(deck, job) == [10_000], "a failed paid job has no refund"
+    assert (
+        await deck.service.fetchval(
+            "select status from generation_jobs where id = $1", uuid.UUID(job)
+        )
+        == "failed"
+    )
+
+
+async def test_a_worker_failing_while_the_reaper_reaps_refunds_exactly_once(deck: Deck) -> None:
+    job = await _paid_job(deck)
+    await _make_stale(deck, job)
+    worker = await deck.db.as_role("service_role")
+    reaper = await deck.db.as_role("service_role")
+
+    await asyncio.gather(_worker_fail(worker, job, "A"), _reap(reaper))
+
+    assert await _refunds(deck, job) == [10_000]
+
+
+async def test_016_installs_the_refund_index_even_over_legacy_duplicate_refunds() -> None:
+    from tests.db.support import (
+        apply,
+        connect,
+        create_database,
+        database_url,
+        drop_database,
+        migration_016,
+        migrations_through,
+    )
+
+    name = await create_database(migrations_through("015"))
+    try:
+        conn = await connect(database_url(name))
+        owner = uuid.uuid4()
+        project = uuid.uuid4()
+        await conn.execute("insert into users (id, telegram_id) values ($1, 4242)", owner)
+        await conn.execute(
+            "insert into projects (id, user_id, type, title, language, audience)"
+            " values ($1, $2, 'presentation', 'T', 'uz', 'talaba')",
+            project,
+            owner,
+        )
+        jobs = [uuid.uuid4() for _ in range(3)]
+        for job in jobs:
+            await conn.execute(
+                "insert into generation_jobs (id, project_id, user_id, job_type, status)"
+                " values ($1, $2, $3, 'presentation_generation', 'failed')",
+                job,
+                project,
+                owner,
+            )
+        refund = (
+            "insert into credit_ledger (user_id, amount, reason, action, generation_job_id,"
+            " status, created_at) values ($1, 5000, 'refund', 'refund', $2, 'confirmed',"
+            " now() - make_interval(mins => $3))"
+        )
+        for minutes in (30, 20, 10):  # job 0 was refunded three times by the old code
+            await conn.execute(refund, owner, jobs[0], minutes)
+        await conn.execute(refund, owner, jobs[1], 5)
+
+        await apply(conn, migration_016())
+
+        index = await conn.fetchval("select to_regclass('public.uq_credit_ledger_refund_per_job')")
+        assert index is not None, "016 finished without the refund index"
+        assert await conn.fetchval("select count(*) from credit_ledger") == 4  # history kept
+        marked = await conn.fetchval(
+            "select count(*) from credit_ledger_legacy_duplicate_refunds where generation_job_id = $1",
+            jobs[0],
+        )
+        assert marked == 2
+        for job in (jobs[0], jobs[1]):
+            with pytest.raises(asyncpg.UniqueViolationError):
+                await conn.execute(refund, owner, job, 0)
+        await conn.execute(refund, owner, jobs[2], 0)  # a first refund is still allowed
+        await conn.close()
+    finally:
+        await drop_database(name)

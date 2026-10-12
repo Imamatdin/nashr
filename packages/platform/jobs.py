@@ -357,42 +357,33 @@ class JobQueue:
         step: str,
         message: str,
     ) -> bool:
-        """Land the job on ``failed`` with an honest step-named error message.
+        """Fail the job and refund what it charged, in one transaction (``fail_job``).
 
-        Returns True iff OUR guarded transition landed. False means the row
-        was already taken from us (reaped, possibly re-queued and refunded) —
-        the caller must NOT refund on False or a stalled-but-alive worker
-        racing the reaper double-refunds.
+        Returns True iff the caller still held the claim and the job is now
+        failed (and, if it was paid, refunded exactly once). False means the claim
+        was gone: whoever holds the job (the reaper, another worker) settles it.
         """
 
-        error = f"{step}: {message}"[:4000]
-
-        def run() -> Any:
-            return (
-                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
-                .update(
-                    {
-                        "status": JobStatus.FAILED.value,
-                        "completed_at": datetime.now(UTC).isoformat(),
-                        "error_message": error,
-                    }
-                )
-                .eq("id", job_id)
-                .eq("worker_id", worker_id)
-                .eq("attempts", claim_token)
-                .eq("status", JobStatus.PROCESSING.value)
-                .execute()
+        result = await asyncio.to_thread(
+            lambda: self._db.rpc(
+                "fail_job",
+                {
+                    "p_job_id": job_id,
+                    "p_worker_id": worker_id,
+                    "p_claim_token": claim_token,
+                    "p_step": step,
+                    "p_message": message[:3900],
+                },
             )
-
-        result = await asyncio.to_thread(run)
-        return bool(cast(list[dict[str, Any]], list(result.data or [])))
+        )
+        return bool(result.data)
 
     async def reap_stale(self, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[GenerationJob]:
         """Reap zombie processing rows; returns the jobs that were FAILED.
 
-        Retryable zombies are silently re-queued inside the SQL function; only
-        the terminally failed ones come back, and only to the single caller
-        whose UPDATE won — the refund hook fires exactly once per job.
+        Retryable zombies are re-queued inside the SQL function; exhausted ones
+        are failed and, when paid, refunded in the same transaction. The rows come
+        back for logging only.
         """
 
         result = await asyncio.to_thread(

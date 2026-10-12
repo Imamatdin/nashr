@@ -179,25 +179,29 @@ async def test_heartbeat_reports_claim_no_longer_ours() -> None:
     )
 
 
-async def test_fail_writes_step_named_error_guarded_by_the_claim() -> None:
+async def test_fail_settles_through_the_claim_fenced_rpc() -> None:
     queue, fake = _queue()
-    await queue.fail("j1", "w1", 3, step="render", message="boom")
-    update = next(b for b in fake.builders if b.op == "update")
-    sent = cast(dict[str, Any], update.op_payload)
-    assert sent["status"] == "failed"
-    assert sent["error_message"] == "render: boom"
-    assert ("eq", "worker_id", "w1") in update.filters
-    assert ("eq", "attempts", 3) in update.filters
-    assert ("eq", "status", "processing") in update.filters
+    fake.rpc_data = True
+    assert await queue.fail("j1", "w1", 3, step="render", message="boom") is True
+    assert fake.rpc_calls == [
+        (
+            "fail_job",
+            {
+                "p_job_id": "j1",
+                "p_worker_id": "w1",
+                "p_claim_token": 3,
+                "p_step": "render",
+                "p_message": "boom",
+            },
+        )
+    ]
+    assert [b for b in fake.builders if b.op == "update"] == []
 
 
-async def test_fail_returns_true_only_when_guarded_transition_lands() -> None:
-    # F1: the boolean is the refund gate — False means the row was reaped
-    # from under us and the reaping side owns the refund.
+async def test_fail_returns_false_when_the_claim_is_gone() -> None:
+    # The holder of the job (reaper, another worker) settles it instead.
     queue, fake = _queue()
-    fake.update_rows = [dict(_JOB_ROW, status="failed")]
-    assert await queue.fail("j1", "w1", 1, step="render", message="boom") is True
-    fake.update_rows = []
+    fake.rpc_data = False
     assert await queue.fail("j1", "w1", 1, step="render", message="boom") is False
 
 
@@ -218,11 +222,11 @@ async def test_complete_goes_through_the_claim_fenced_rpc() -> None:
     )
 
 
-async def test_fail_truncates_error_to_column_cap() -> None:
+async def test_fail_bounds_the_message_it_sends() -> None:
     queue, fake = _queue()
+    fake.rpc_data = True
     await queue.fail("j1", "w1", 1, step="render", message="x" * 5000)
-    update = next(b for b in fake.builders if b.op == "update")
-    assert len(cast(dict[str, Any], update.op_payload)["error_message"]) == 4000
+    assert len(fake.rpc_calls[0][1]["p_message"]) == 3900
 
 
 async def test_set_progress_guarded_by_the_claim_and_status() -> None:

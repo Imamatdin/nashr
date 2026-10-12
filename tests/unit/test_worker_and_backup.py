@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from postgrest.exceptions import APIError
 
 from packages.core.enums import (
     AudienceType,
@@ -25,9 +24,8 @@ from packages.core.models.presentation import (
     SlideFix,
     SlideSpec,
 )
-from packages.platform.credits import CreditLedger
 from packages.platform.exports import renderer_version
-from packages.platform.jobs import GenerationJob, JobType
+from packages.platform.jobs import GenerationJob, JobQueue, JobType
 from packages.platform.storage import StorageVerificationError
 from packages.sessions_core import FixDispatchResult, FixStatus, PendingActionView
 from scripts.backup_db import (
@@ -38,8 +36,6 @@ from scripts.backup_db import (
 )
 from scripts.worker_run_job import (
     JobRunner,
-    _refund_amount,  # pyright: ignore[reportPrivateUsage]
-    _refund_job,  # pyright: ignore[reportPrivateUsage]
 )
 from tests.unit.fake_documents import DocumentRpcEmulator, seed_presentation
 from tests.unit.test_database_client import FakeSupabaseClient
@@ -107,57 +103,20 @@ class _FakeQueue:
         self.progress.append(progress)
 
 
-def test_refund_amount_reads_product_type_pricing() -> None:
-    assert (
-        _refund_amount({"product_type": "presentation_standard"})
-        == (CreditLedger.PRICING["presentation_standard"])
-    )
-    assert _refund_amount({"product_type": "nonsense"}) is None
-    assert _refund_amount({}) is None
-
-
-def test_refund_amount_prefers_recorded_deduction_over_pricing() -> None:
-    # F3: refund what was actually charged, not the current price.
-    payload = {"product_type": "presentation_standard", "deducted_amount": 8_000}
-    assert _refund_amount(payload) == 8_000
-    assert (
-        _refund_amount({"deducted_amount": 0, "product_type": "presentation_standard"})
-        == (CreditLedger.PRICING["presentation_standard"])
-    )
-
-
 @pytest.mark.asyncio
-async def test_refund_job_writes_priced_refund() -> None:
-    credits = _FakeCredits()
-    job = _job()
-    await _refund_job(cast(Any, credits), job, "refund:job:x:render")
-    assert credits.refunds == [("u1", "p1", 10_000, "refund:job:x:render")]
-    # The refund row is stamped with the job it settles: JobView.refunded is
-    # read off this link, so an unstamped refund would make a real refund
-    # invisible to the user it belongs to.
-    assert credits.stamped_jobs == [job.id]
-
-
-@pytest.mark.asyncio
-async def test_refund_job_skips_unpriced_payload() -> None:
-    credits = _FakeCredits()
-    await _refund_job(cast(Any, credits), _job(payload={}), "refund:job:x:render")
-    assert credits.refunds == []
-
-
-@pytest.mark.asyncio
-async def test_unsupported_job_type_fails_honestly_and_refunds() -> None:
+async def test_unsupported_job_type_fails_honestly() -> None:
     queue, credits = _FakeQueue(), _FakeCredits()
     runner = _runner(queue, credits)
     job = _job(job_type=JobType.IMAGE_REGEN.value)
     await runner._execute(job)  # pyright: ignore[reportPrivateUsage]
     assert queue.failed[0]["step"] == "dispatch"
     assert "image_regen" in queue.failed[0]["message"]
-    assert len(credits.refunds) == 1
+    # The refund is written by fail_job in the failing transaction, not here.
+    assert credits.refunds == []
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_error_lands_step_named_failure_and_refund(
+async def test_orchestrator_error_lands_step_named_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     queue, credits = _FakeQueue(), _FakeCredits()
@@ -176,25 +135,23 @@ async def test_orchestrator_error_lands_step_named_failure_and_refund(
     await runner._execute(_job())  # pyright: ignore[reportPrivateUsage]
     assert queue.failed[0]["step"] == "editorial"
     assert "schema cascade" in queue.failed[0]["message"]
-    assert credits.refunds[0][3].endswith(":editorial")
+    assert credits.refunds == []
 
 
 @pytest.mark.asyncio
-async def test_reaped_then_worker_fails_produces_exactly_one_refund(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("fail_lands", [True, False])
+async def test_the_worker_never_writes_a_refund_itself(
+    monkeypatch: pytest.MonkeyPatch, fail_lands: bool
 ) -> None:
-    """F1: a stalled-but-alive worker racing the reaper must not double-refund.
+    """Exactly-once refunds live in the database (fail_job, reap_stale_jobs).
 
-    Sequence: the reaper already took the row (and refunded it); the worker's
-    pipeline then raises and calls fail(), whose guarded transition does NOT
-    land. The worker's refund must be suppressed — the ledger ends with
-    exactly the reaper's single refund row.
+    Whether the worker's fail lands or the reaper got there first, the worker
+    process writes no ledger row: a crash between "failed" and "refunded" is
+    impossible because there is no such gap in the worker any more.
     """
 
     queue, credits = _FakeQueue(), _FakeCredits()
-    # The reaper's refund has already been written.
-    await credits.refund("u1", "p1", 10_000, "refund:job:x:reaped")
-    queue.fail_lands = False
+    queue.fail_lands = fail_lands
     runner = _runner(queue, credits)
 
     async def boom(job: GenerationJob) -> None:
@@ -203,18 +160,34 @@ async def test_reaped_then_worker_fails_produces_exactly_one_refund(
     monkeypatch.setattr(runner, "_run_presentation", boom)
     await runner._execute(_job())  # pyright: ignore[reportPrivateUsage]
 
-    assert len(queue.failed) == 1  # the attempt was made...
-    assert len(credits.refunds) == 1  # ...but only the reaper's refund exists
-    assert credits.refunds[0][3] == "refund:job:x:reaped"
+    assert len(queue.failed) == 1
+    assert credits.refunds == []
 
 
 @pytest.mark.asyncio
-async def test_unsupported_type_refund_also_gated_on_fail_landing() -> None:
-    queue, credits = _FakeQueue(), _FakeCredits()
-    queue.fail_lands = False
-    runner = _runner(queue, credits)
-    await runner._execute(_job(job_type=JobType.IMAGE_REGEN.value))  # pyright: ignore[reportPrivateUsage]
-    assert credits.refunds == []
+async def test_a_failed_paid_job_is_refunded_its_stamped_charge_once(tmp_path: Path) -> None:
+    # Through the real queue client and the emulated fail_job: the refund is
+    # the amount deducted at enqueue (not today's price), stamped with the job,
+    # and a repeated fail of the same job writes nothing more.
+    job = _job(payload={"product_type": "presentation_standard", "deducted_amount": 8_000})
+    world = _World(tmp_path, job)
+    queue = JobQueue(world.db)
+
+    assert await queue.fail(job.id, "w-test", 1, step="render", message="boom") is True
+    assert await queue.fail(job.id, "w-test", 1, step="render", message="again") is False
+
+    refunds = [r for r in world.fake.tables["credit_ledger"] if r["action"] == "refund"]
+    assert [(r["amount"], r["generation_job_id"]) for r in refunds] == [(8_000, job.id)]
+    assert world.job_row(job.id)["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_unpaid_edit_is_not_refunded(tmp_path: Path) -> None:
+    job = _edit_job({"document_id": "d", "base_revision_id": "r"})
+    world = _World(tmp_path, job)
+
+    assert await JobQueue(world.db).fail(job.id, "w-test", 1, step="x", message="y") is True
+    assert world.fake.tables.get("credit_ledger", []) == []
 
 
 @pytest.mark.asyncio
@@ -745,7 +718,7 @@ async def test_presentation_payload_topic_reaches_the_pipeline_verbatim(
 async def test_failed_edit_refunds_nothing_but_failed_generation_does(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """W1: the refundable gate must discriminate by job type, not by payload."""
+    """W1: neither job type is refunded by the worker; fail_job settles paid ones."""
 
     priced = {"product_type": "presentation_standard"}
 
@@ -765,20 +738,7 @@ async def test_failed_edit_refunds_nothing_but_failed_generation_does(
     monkeypatch.setattr(gen_runner, "_run_presentation", boom)
     await gen_runner._execute(_job(payload=priced))  # pyright: ignore[reportPrivateUsage]
     assert len(gen_queue.failed) == 1
-    assert len(gen_credits.refunds) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_refund_already_recorded_for_the_job_is_not_an_error() -> None:
-    # (h) Migration 016 makes a second refund row for a job a unique violation;
-    # a retried refund must treat it as done, not crash the worker loop.
-    class _AlreadyRefunded(_FakeCredits):
-        async def refund(self, *args: Any, **kwargs: Any) -> None:
-            raise APIError(
-                {"message": "duplicate key", "code": "23505", "hint": None, "details": None}
-            )
-
-    await _refund_job(cast(Any, _AlreadyRefunded()), _job(), "refund:job:x:publish")
+    assert gen_credits.refunds == []
 
 
 def test_executor_for_routes_by_job_type() -> None:
@@ -792,13 +752,13 @@ def test_executor_for_routes_by_job_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_export_job_has_no_executor_and_is_failed_with_refund() -> None:
+async def test_export_job_has_no_executor_and_is_failed() -> None:
     queue, credits = _FakeQueue(), _FakeCredits()
     runner = _runner(queue, credits)
     await runner._execute(_job(job_type=JobType.EXPORT.value))  # pyright: ignore[reportPrivateUsage]
     assert queue.failed[0]["step"] == "dispatch"
     assert "export" in queue.failed[0]["message"]
-    assert len(credits.refunds) == 1
+    assert credits.refunds == []
 
 
 def _edit_payload(**extra: Any) -> dict[str, Any]:

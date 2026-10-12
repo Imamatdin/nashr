@@ -65,6 +65,18 @@
     "test_a_recovery_render_after_a_crash_mid_publish_completes_the_set": {
       "expect": "fail",
       "match": "UniqueViolationError: export_conflict"
+    },
+    "test_a_crash_after_the_failure_is_decided_still_ends_with_one_refund": {
+      "expect": "fail",
+      "match": "AssertionError: a failed paid job has no refund"
+    },
+    "test_a_worker_failing_while_the_reaper_reaps_refunds_exactly_once": {
+      "expect": "pass",
+      "why": "coverage: the reviewed guarded updates already prevented a double refund; the fix must keep it"
+    },
+    "test_016_installs_the_refund_index_even_over_legacy_duplicate_refunds": {
+      "expect": "fail",
+      "match": "AssertionError: 016 finished without the refund index"
     }
   }
 }

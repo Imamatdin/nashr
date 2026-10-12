@@ -733,6 +733,121 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
+-- 7c. Failure and refund: one transaction, exactly once (Codex B1 finding 4)
+-- ---------------------------------------------------------------------------
+-- A job that charged credits (payload.deducted_amount > 0) and fails is refunded
+-- in the same transaction that marks it failed, so a crash can never leave a
+-- failed, charged job without its refund. The job row lock serializes every
+-- settler (worker fail_job, the reaper), and uq_credit_ledger_refund_per_job is
+-- the safety net under it.
+
+-- The caller holds the job row lock.
+create or replace function _settle_failure(p_job generation_jobs, p_error text)
+returns generation_jobs
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+    v_amount integer;
+    v_row generation_jobs%rowtype;
+begin
+    update generation_jobs
+       set status = 'failed', completed_at = now(), error_message = left(p_error, 4000)
+     where id = p_job.id
+    returning * into v_row;
+
+    if jsonb_typeof(p_job.payload -> 'deducted_amount') = 'number' then
+        v_amount := (p_job.payload ->> 'deducted_amount')::numeric::integer;
+    end if;
+    if v_amount is not null and v_amount > 0 and p_job.user_id is not null
+       and not exists (
+           select 1 from credit_ledger l
+            where l.generation_job_id = p_job.id and l.action = 'refund'
+       ) then
+        insert into credit_ledger (
+            user_id, project_id, amount, reason, action, generation_job_id, status
+        ) values (
+            p_job.user_id, p_job.project_id, v_amount, 'refund', 'refund', p_job.id, 'confirmed'
+        );
+    end if;
+    return v_row;
+end;
+$$;
+
+-- A worker gives up on its job. False when the claim is no longer the caller's
+-- (reaped, re-queued or claimed again): then whoever holds the job settles it.
+create or replace function fail_job(
+    p_job_id uuid, p_worker_id text, p_claim_token integer, p_step text, p_message text
+) returns boolean
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_job generation_jobs%rowtype;
+begin
+    begin
+        v_job := _lock_claimed_job(p_job_id, p_worker_id, p_claim_token, false);
+    exception when sqlstate '55000' then
+        return false;
+    end;
+    perform _settle_failure(
+        v_job, coalesce(p_step, 'unknown') || ': ' || coalesce(p_message, '')
+    );
+    return true;
+end;
+$$;
+
+-- The reaper (replaces 006's): stale processing jobs go back to the queue while
+-- attempts remain, otherwise they are failed and refunded through the same
+-- settlement. A job whose heartbeat is missing is as stale as an old one. Rows
+-- another transaction holds (a worker mid-finish or mid-fail) are skipped this
+-- round: that transaction decides them.
+create or replace function reap_stale_jobs(p_stale_seconds integer default 120)
+returns setof generation_jobs
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_job generation_jobs%rowtype;
+begin
+    for v_job in
+        select * from generation_jobs j
+         where j.status = 'processing'
+           and (j.heartbeat_at is null
+                or j.heartbeat_at < now() - make_interval(secs => p_stale_seconds))
+         order by j.created_at
+         for update skip locked
+    loop
+        if v_job.attempts < v_job.max_attempts then
+            update generation_jobs
+               set status = 'queued', worker_id = null, claimed_at = null, heartbeat_at = null
+             where id = v_job.id;
+        else
+            return next _settle_failure(
+                v_job,
+                'reaped: worker heartbeat lost at step '
+                    || coalesce(v_job.progress ->> 'step', 'unknown')
+            );
+        end if;
+    end loop;
+end;
+$$;
+
+-- Jobs enqueued before deducted_amount was stamped carry only product_type. The
+-- settlement refunds exactly the stamped amount, so active legacy jobs get it now
+-- from the price list in force when they were charged (CreditLedger.PRICING).
+update generation_jobs j
+   set payload = j.payload || jsonb_build_object('deducted_amount', price.amount)
+  from (values
+      ('article_basic', 60000), ('article_standard', 90000), ('article_premium', 150000),
+      ('presentation_basic', 5000), ('presentation_standard', 10000),
+      ('presentation_premium', 15000)
+  ) as price(product_type, amount)
+ where j.status in ('queued', 'processing')
+   and j.payload ->> 'product_type' = price.product_type
+   and not (j.payload ? 'deducted_amount');
+
+-- ---------------------------------------------------------------------------
 -- 8. accept_proposal / reject_proposal (replace-head-with-consent)
 -- ---------------------------------------------------------------------------
 
@@ -1015,6 +1130,12 @@ grant execute on function finish_generation_job(
     uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]
 ) to service_role;
 grant execute on function complete_job(uuid, text, integer, jsonb) to service_role;
+revoke all on function _settle_failure(generation_jobs, text)
+    from public, anon, authenticated, service_role;
+revoke all on function fail_job(uuid, text, integer, text, text) from public, anon, authenticated;
+revoke all on function reap_stale_jobs(integer) from public, anon, authenticated;
+grant execute on function fail_job(uuid, text, integer, text, text) to service_role;
+grant execute on function reap_stale_jobs(integer) to service_role;
 revoke all on function ensure_document(uuid, text, text) from public, anon;
 revoke all on function commit_revision(uuid, uuid, jsonb, text, integer, text, text)
     from public, anon;
@@ -1080,27 +1201,60 @@ alter table generation_jobs add constraint generation_jobs_render_payload_check
     ) not valid;
 
 -- ---------------------------------------------------------------------------
--- 12. One refund per job
+-- 12. One refund per job, installed unconditionally (fail closed)
 -- ---------------------------------------------------------------------------
+-- Legacy data may already hold several refund rows for one job. The ledger is
+-- append-only, so they are neither deleted nor rewritten: every row after the
+-- first per job is recorded in credit_ledger_legacy_duplicate_refunds, and the
+-- unique index excludes exactly those row ids. Every other refund row, and every
+-- future one, is covered. 016 never finishes without the index.
+
+create table if not exists credit_ledger_legacy_duplicate_refunds (
+    ledger_id          uuid primary key references credit_ledger(id) on delete cascade,
+    generation_job_id  uuid not null,
+    kept_ledger_id     uuid not null references credit_ledger(id) on delete cascade,
+    recorded_at        timestamptz not null default now()
+);
+alter table credit_ledger_legacy_duplicate_refunds enable row level security;
+revoke all on table credit_ledger_legacy_duplicate_refunds
+    from public, anon, authenticated, service_role;
+grant select on table credit_ledger_legacy_duplicate_refunds to service_role;
 
 do $$
 declare
-    v_dupes integer;
+    v_ids text;
+    v_predicate text := 'action = ''refund'' and generation_job_id is not null';
+    v_count integer;
 begin
     if to_regclass('public.uq_credit_ledger_refund_per_job') is null then
-        select count(*) into v_dupes from (
-            select generation_job_id from credit_ledger
-             where action = 'refund' and generation_job_id is not null
-             group by generation_job_id having count(*) > 1
-        ) d;
-        if v_dupes = 0 then
-            create unique index uq_credit_ledger_refund_per_job
-                on credit_ledger (generation_job_id)
-                where action = 'refund' and generation_job_id is not null;
-        else
-            raise warning '016: % jobs already hold duplicate refund rows; uq_credit_ledger_refund_per_job NOT created',
-                v_dupes;
+        insert into credit_ledger_legacy_duplicate_refunds (ledger_id, generation_job_id, kept_ledger_id)
+        select r.id, r.generation_job_id, r.first_id
+          from (
+              select l.id, l.generation_job_id,
+                     first_value(l.id) over w as first_id,
+                     row_number() over w as n
+                from credit_ledger l
+               where l.action = 'refund' and l.generation_job_id is not null
+              window w as (partition by l.generation_job_id order by l.created_at, l.id)
+          ) r
+         where r.n > 1
+        on conflict (ledger_id) do nothing;
+
+        select count(*), string_agg(ledger_id::text, ',' order by ledger_id)
+          into v_count, v_ids
+          from credit_ledger_legacy_duplicate_refunds;
+        if v_count > 0 then
+            v_predicate := v_predicate || format(' and id <> all (%L::uuid[])', '{' || v_ids || '}');
+            raise warning '016: % legacy duplicate refund rows kept and recorded in credit_ledger_legacy_duplicate_refunds; the refund index excludes exactly them',
+                v_count;
         end if;
+        execute format(
+            'create unique index uq_credit_ledger_refund_per_job on credit_ledger (generation_job_id) where %s',
+            v_predicate
+        );
+    end if;
+    if to_regclass('public.uq_credit_ledger_refund_per_job') is null then
+        raise exception '016: uq_credit_ledger_refund_per_job is missing; refusing to finish';
     end if;
 end;
 $$;
@@ -1270,6 +1424,10 @@ alter table documents replica identity full;
 -- drop function if exists reject_proposal(uuid, text);
 -- drop function if exists register_export(uuid, text, integer, uuid, text, text, text, text, bigint, integer);
 -- drop function if exists record_revision_validation(uuid, text, text, text);
+-- drop function if exists fail_job(uuid, text, integer, text, text);
+-- drop function if exists _settle_failure(generation_jobs, text);
+-- -- then re-apply 006's reap_stale_jobs(integer) body (refunds move back to Python)
+-- -- credit_ledger_legacy_duplicate_refunds and the refund index stay (ledger history)
 -- drop function if exists finish_generation_job(uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]);
 -- drop function if exists complete_job(uuid, text, integer, jsonb);
 -- drop function if exists claim_job(uuid, text);
