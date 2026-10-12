@@ -397,6 +397,10 @@ Open:
 3. **R2 SHA-256 checksum support** on PutObject/HEAD is assumed and unverified without
    R2 access. If R2 does not return the checksum on HEAD, verification falls back to a
    full GET and re-hash, which costs one extra download per export.
+4. **CI S3 stand-in.** S3 stand-in is a community MinIO rebuild because upstream stopped
+   publishing images; replace with an official-publisher image (e.g. Chainguard) if one
+   is adopted. It is pinned by digest and used only by the CI journey job, with
+   throwaway credentials.
 
 ## 11. Verification
 

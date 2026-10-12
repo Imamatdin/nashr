@@ -165,11 +165,17 @@ jobs:
         run: |
           mkdir -p artifacts
           bash scripts/local_stack/up.sh 2>&1 | tee artifacts/stack.log
+      # S3 stand-in is a community MinIO rebuild because upstream stopped publishing
+      # images; replace with an official-publisher image (e.g. Chainguard) if one is
+      # adopted. Pinned by digest, CI only: never used by the local stack or anything
+      # in the handover, and this job gets only throwaway loopback credentials (no R2,
+      # model, payment or deploy secrets).
       - name: MinIO as the R2 stand-in
         run: |
           docker run -d --name s3 -p 54322:9000 \
             -e MINIO_ROOT_USER=local-access -e MINIO_ROOT_PASSWORD=local-secret \
-            minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 \
+            server /data
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:54322/minio/health/live && break; sleep 1; done
           python - <<'PY'
           import boto3
