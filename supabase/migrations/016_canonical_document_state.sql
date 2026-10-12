@@ -277,7 +277,7 @@ begin
         if p_actor <> v_uid::text then
             raise exception 'actor_mismatch' using errcode = '42501';
         end if;
-        if p_kind not in ('manual', 'autosave', 'restore') then
+        if p_kind is null or p_kind not in ('manual', 'autosave', 'restore') then
             raise exception 'kind_not_allowed' using errcode = '42501';
         end if;
         return v_owner;
@@ -287,7 +287,7 @@ begin
         if p_actor::uuid <> v_owner then
             raise exception 'not_document_owner' using errcode = '42501';
         end if;
-        if p_kind not in ('manual', 'autosave', 'restore') then
+        if p_kind is null or p_kind not in ('manual', 'autosave', 'restore') then
             raise exception 'kind_not_allowed' using errcode = '42501';
         end if;
     elsif p_actor ~ ('^worker:' || v_uuid || '$') then
@@ -303,11 +303,11 @@ begin
         if v_mapped is distinct from v_owner then
             raise exception 'not_document_owner' using errcode = '42501';
         end if;
-        if p_kind not in ('bot_edit', 'generation', 'regeneration') then
+        if p_kind is null or p_kind not in ('bot_edit', 'generation', 'regeneration') then
             raise exception 'kind_not_allowed' using errcode = '42501';
         end if;
     elsif p_actor ~ '^system:[a-z0-9_.:-]{1,64}$' then
-        if p_kind <> 'import' then
+        if p_kind is distinct from 'import' then
             raise exception 'kind_not_allowed' using errcode = '42501';
         end if;
     else
@@ -339,7 +339,7 @@ declare
     v_id uuid;
     v_probe_kind text;
 begin
-    if p_kind not in ('article', 'presentation') then
+    if p_kind is null or p_kind not in ('article', 'presentation') then
         raise exception 'invalid_document_kind' using errcode = '22023';
     end if;
     v_probe_kind := case
@@ -679,9 +679,10 @@ begin
     end if;
     v_job := _lock_claimed_job(p_job_id, p_worker_id, p_claim_token, true);
 
-    if not (
+    if not coalesce(
         (v_job.job_type = 'presentation_generation' and p_kind in ('generation', 'regeneration'))
-        or (v_job.job_type = 'presentation_edit' and p_kind = 'ai_edit')
+        or (v_job.job_type = 'presentation_edit' and p_kind = 'ai_edit'),
+        false
     ) then
         raise exception 'kind_not_allowed' using errcode = '42501';
     end if;
@@ -732,7 +733,10 @@ begin
 
     if v_result.revision_id is not null and p_renderer_version is not null
        and coalesce(cardinality(p_render_formats), 0) > 0 then
-        if exists (select 1 from unnest(p_render_formats) f where f not in ('html', 'pptx', 'pdf')) then
+        if exists (
+            select 1 from unnest(p_render_formats) f
+             where f is null or f not in ('html', 'pptx', 'pdf')
+        ) then
             raise exception 'invalid_render_formats' using errcode = '22023';
         end if;
         select to_jsonb(array_agg(distinct f order by f)) into v_formats
@@ -1262,11 +1266,12 @@ alter table generation_jobs drop constraint if exists generation_jobs_render_pay
 alter table generation_jobs add constraint generation_jobs_render_payload_check
     check (
         job_type <> 'presentation_render'
-        or (jsonb_typeof(payload -> 'revision_id') = 'string'
+        or coalesce(jsonb_typeof(payload -> 'revision_id') = 'string'
             and (payload ->> 'revision_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
             and jsonb_typeof(payload -> 'renderer_version') = 'string'
             and case when jsonb_typeof(payload -> 'formats') = 'array'
-                     then jsonb_array_length(payload -> 'formats') > 0 else false end)
+                     then jsonb_array_length(payload -> 'formats') > 0 else false end,
+            false)
     ) not valid;
 
 -- ---------------------------------------------------------------------------

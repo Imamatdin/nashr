@@ -307,6 +307,26 @@ job first; `commit_revision`, `accept_proposal` and `reject_proposal` lock the d
 (then the proposal) and never a job; `_commit_core` takes no locks of its own. The
 reaper locks only job rows (`SKIP LOCKED`). With one order there is no lock cycle.
 
+### 4.7 NULL-comparison audit (B1-FIX)
+
+PL/pgSQL skips an `IF` whose condition is NULL, and a `CHECK` passes when its
+expression is NULL, so every comparison that can see NULL must be written to fail
+closed. Every function and constraint in 016 was checked (2026-10-12):
+
+| Object | Verdict |
+|---|---|
+| `register_export` | was the reported hole; rewritten so each test refuses unless provably true (§4.3) |
+| render-job `CHECK` | fixed: an absent `revision_id` key made the expression NULL and passed; now `coalesce(…, false)` |
+| `finish_generation_job` | fixed: a NULL kind made the allowed-kinds test NULL (skipped); a NULL format passed the format filter |
+| `ensure_document` | fixed: a NULL kind skipped the kind check (then failed later on NOT NULL) |
+| `_document_write_owner` | fixed defensively: a NULL kind skipped the kind-allowed checks (callers validate first) |
+| `_lock_claimed_job`, `claim_job`, `heartbeat_job`, `complete_job`, `fail_job` | already explicit: NULL worker or token is a lost claim; WHERE clauses treat NULL as no match |
+| `_commit_core`, `commit_revision` | already explicit (`is null` checks, `is not distinct from` for the base); a NULL head hash correctly means "no no-op" |
+| `accept_proposal`, `reject_proposal` | already explicit (`is distinct from` for expected head and receipt proposal; compared columns are NOT NULL) |
+| `_settle_failure`, `reap_stale_jobs` | written NULL-safe: amount parsed only from a JSON number; a NULL heartbeat counts as stale |
+| `record_revision_validation`, `_content_sha256`, `_caller_is_end_user` | no NULL-sensitive branch (`coalesce` in the caller test; NULL status fails the column CHECK) |
+| backfill and view `DO` blocks | NULL `deck_json` is wrapped as `{"legacy_raw": null}`; other comparisons read NOT NULL columns |
+
 ## 5. Read paths
 
 - Design/article GET return the head revision. A head that fails current model

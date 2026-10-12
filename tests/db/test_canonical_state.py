@@ -13,7 +13,7 @@ import statistics
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import pytest
@@ -705,6 +705,64 @@ async def test_a_worker_writes_only_through_its_fenced_finish(world: World) -> N
         ),
     )
     assert await head(world.service, world.document) == world.r0
+
+
+# ------------------------------------------------- NULL safety (B1-FIX audit)
+
+
+async def test_a_render_job_with_no_target_key_cannot_be_created(world: World) -> None:
+    # A CHECK passes when its expression is NULL; the render-job CHECK is
+    # coalesced so an absent key fails it like a JSON null does.
+    admin = await world.db.admin()
+    with pytest.raises(asyncpg.CheckViolationError, match="generation_jobs_render_payload_check"):
+        await admin.execute(
+            "insert into generation_jobs (project_id, user_id, job_type, status, payload)"
+            " values ($1, $2, 'presentation_render', 'queued',"
+            ' \'{"renderer_version": "pw-test", "formats": ["html"]}\'::jsonb)',
+            uuid.UUID(world.project),
+            uuid.UUID(world.owner),
+        )
+
+
+async def test_a_null_document_kind_is_refused(world: World) -> None:
+    await _refused(
+        "invalid_document_kind",
+        world.service.fetchval(
+            "select ensure_document($1, null, $2)", uuid.UUID(world.project), world.owner
+        ),
+    )
+
+
+async def test_a_finish_with_a_null_kind_or_format_writes_nothing(world: World) -> None:
+    job = await world.worker_job()
+    await _refused(
+        "kind_not_allowed",
+        world.service.fetchrow(
+            "select * from finish_generation_job($1, 'w1', 1, $2, '{\"t\": 1}'::jsonb,"
+            " null, 1, 'k', null, '{}')",
+            uuid.UUID(job),
+            uuid.UUID(world.r0),
+        ),
+    )
+    await _refused(
+        "invalid_render_formats",
+        finish(
+            world.service,
+            job,
+            "w1",
+            1,
+            world.r0,
+            {"t": 2},
+            kind="ai_edit",
+            key="k2",
+            render_formats=["html", cast(str, None)],
+        ),
+    )
+    assert await head(world.service, world.document) == world.r0
+    status = await world.service.fetchval(
+        "select status from generation_jobs where id = $1", uuid.UUID(job)
+    )
+    assert status == "processing"
 
 
 # ---------------------------------------------------------------- latency
