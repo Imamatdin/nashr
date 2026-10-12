@@ -89,6 +89,18 @@
     "test_a_replayed_no_op_accept_returns_its_result": {
       "expect": "fail",
       "match": "ObjectNotInPrerequisiteStateError: proposal_not_pending"
+    },
+    "test_no_api_role_holds_any_write_privilege_on_canonical_state": {
+      "expect": "pass",
+      "why": "coverage: the reviewed 016 already revoked these; this pins every table, role and column privilege"
+    },
+    "test_an_api_user_writing_the_decks_view_is_refused_with_42501": {
+      "expect": "fail",
+      "match": "\\bObjectNotInPrerequisiteStateError\\b: cannot insert into view \\\"decks\\\""
+    },
+    "test_even_the_view_owner_cannot_write_the_decks_view": {
+      "expect": "fail",
+      "match": "\\bObjectNotInPrerequisiteStateError\\b: cannot update view \\\"decks\\\""
     }
   }
 }

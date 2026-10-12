@@ -60,7 +60,9 @@ async def test_l_empty_database_migrates_cleanly() -> None:
     try:
         conn = await connect(database_url(name))
         assert await _counts(conn) == {"documents": 0, "revisions": 0, "proposals": 0, "legacy": 0}
-        relkind = await conn.fetchval("select relkind::text from pg_class where relname = 'decks'")
+        relkind = await conn.fetchval(
+            "select relkind::text from pg_class where oid = 'public.decks'::regclass"
+        )
         assert relkind == "v"
         await conn.close()
     finally:

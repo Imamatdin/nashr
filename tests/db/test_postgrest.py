@@ -200,11 +200,8 @@ async def test_k_direct_writes_through_postgrest_are_refused(world: dict[str, st
             "deck_json": {},
         },
     )
-    # decks is a join view: PostgreSQL refuses the insert as non-updatable
-    # (SQLSTATE 55000) before checking privileges, and PostgREST v12 maps 55000
-    # to HTTP 500. Accept exactly that refusal, never an arbitrary server error.
-    view_refusal = deck.status_code == 500 and deck.json().get("code") == "55000"
-    assert deck.status_code in (401, 403, 405) or view_refusal, deck.text
+    # decks has an INSTEAD OF trigger, so the privilege check refuses: 42501, 403.
+    assert deck.status_code == 403 and deck.json().get("code") == "42501", deck.text
     export = await _call(
         "POST",
         "/rpc/register_export",

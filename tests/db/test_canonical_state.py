@@ -515,13 +515,7 @@ async def test_k_no_application_role_can_write_the_tables_directly(world: World,
         ("update revision_proposals set status = 'accepted'", []),
     ]
     for sql, args in statements:
-        with pytest.raises(
-            (
-                asyncpg.InsufficientPrivilegeError,
-                asyncpg.ObjectNotInPrerequisiteStateError,
-                asyncpg.FeatureNotSupportedError,
-            )
-        ):
+        with pytest.raises(asyncpg.InsufficientPrivilegeError):
             await conn.execute(sql, *args)
 
 

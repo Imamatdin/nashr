@@ -271,8 +271,15 @@ Costs and how each is paid:
 - **Row security on a view** needs `security_invoker = true` (PostgreSQL ≥ 15). The
   migration asserts `server_version_num >= 150000` and aborts otherwise. Production's
   version is **unverified** from here.
-- **Writes.** A join view is not auto-updatable, and INSERT/UPDATE/DELETE are revoked
-  as well (test k).
+- **Writes.** INSERT/UPDATE/DELETE are revoked (test k). A join view is not
+  auto-updatable, so on its own PostgreSQL refused a write in the rewriter
+  (SQLSTATE 55000, HTTP 500 through PostgREST) before checking privileges. An
+  `INSTEAD OF INSERT OR UPDATE OR DELETE` trigger (`decks_refuse_writes`, security
+  invoker, fixed `search_path`, no other logic) makes the privilege check run first,
+  so an API caller gets 42501 / HTTP 403, and even a caller holding every privilege
+  reaches the trigger, which raises the same 42501. Test k accepts exactly that, and a
+  catalog test pins that no API role (`authenticated`, `anon`, `PUBLIC`) holds table
+  or column INSERT/UPDATE/DELETE/TRUNCATE on any canonical table.
 
 Legacy rows: `decks` is renamed `decks_legacy` (privileges revoked, kept for audit
 and rollback) after the backfill imports every row.

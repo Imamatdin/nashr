@@ -1432,6 +1432,27 @@ select d.id,
 revoke all on table decks from public, anon, authenticated, service_role;
 grant select on table decks to authenticated, service_role;
 
+-- A join view is not updatable, so without a trigger PostgreSQL refuses a write
+-- in the rewriter (SQLSTATE 55000, which PostgREST reports as HTTP 500) before it
+-- ever checks privileges. With this trigger the executor's privilege check runs
+-- and refuses with 42501 (HTTP 403); a caller that does hold privileges (the
+-- table owner) still reaches the trigger, which refuses with the same code. It
+-- has no other logic and runs as the caller.
+create or replace function decks_refuse_writes() returns trigger
+language plpgsql security invoker
+set search_path = public, pg_temp
+as $$
+begin
+    raise exception 'decks is a read-only view of the document head; write through commit_revision'
+        using errcode = '42501';
+end;
+$$;
+revoke all on function decks_refuse_writes() from public, anon, authenticated, service_role;
+drop trigger if exists decks_refuse_writes on decks;
+create trigger decks_refuse_writes
+    instead of insert or update or delete on decks
+    for each row execute function decks_refuse_writes();
+
 -- Realtime: the web listened on decks; a view cannot be published. documents
 -- changes exactly when a head moves.
 do $$
@@ -1456,7 +1477,8 @@ alter table documents replica identity full;
 -- begin;
 -- -- decks back to a table, re-projected from the current heads (rows edited
 -- -- after 016 exist only as revisions; this copies the head of each).
--- drop view if exists decks;
+-- drop view if exists decks;  -- drops its trigger with it
+-- drop function if exists decks_refuse_writes();
 -- alter table decks_legacy rename to decks;
 -- insert into decks (project_id, title, language, audience, deck_json)
 -- select d.project_id, p.title, p.language, p.audience, r.content

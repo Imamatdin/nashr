@@ -699,3 +699,64 @@ async def test_a_replayed_no_op_accept_returns_its_result(deck: Deck) -> None:
     )
 
     assert (again["status"], again["revision_id"]) == ("unchanged", saved["revision_id"])
+
+
+# ------------------------------------------- P2: privileges on canonical state
+
+# `projects` is deliberately absent: owners edit their own projects through the
+# existing owner RLS policies, so API roles legitimately hold DML on it. What must
+# be unwritable is the canonical document state below.
+CANONICAL_TABLES = (
+    "decks",
+    "documents",
+    "document_revisions",
+    "revision_exports",
+    "revision_proposals",
+    "revision_validations",
+)
+API_ROLES = ("authenticated", "anon", "public")
+
+
+async def test_no_api_role_holds_any_write_privilege_on_canonical_state(deck: Deck) -> None:
+    admin = await deck.db.admin()
+    held: list[str] = []
+    for table in CANONICAL_TABLES:
+        for role in API_ROLES:
+            for privilege in ("INSERT", "DELETE", "TRUNCATE", "UPDATE"):
+                if await admin.fetchval(
+                    "select has_table_privilege($1, $2, $3)", role, f"public.{table}", privilege
+                ):
+                    held.append(f"{role} {privilege} on {table}")
+            for privilege in ("INSERT", "UPDATE"):
+                if await admin.fetchval(
+                    "select has_any_column_privilege($1, $2, $3)",
+                    role,
+                    f"public.{table}",
+                    privilege,
+                ):
+                    held.append(f"{role} column {privilege} on {table}")
+    assert held == []
+
+
+async def test_an_api_user_writing_the_decks_view_is_refused_with_42501(deck: Deck) -> None:
+    user = await deck.db.as_role("authenticated", deck.owner)
+    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+        await user.execute(
+            "insert into decks (project_id, title, language, audience, deck_json)"
+            " values ($1, 'T', 'uz', 'talaba', '{}')",
+            uuid.UUID(deck.project),
+        )
+
+
+async def test_even_the_view_owner_cannot_write_the_decks_view(deck: Deck) -> None:
+    # The superuser holds every privilege, so only the INSTEAD OF trigger stands
+    # between it and a write; it must refuse with the same code.
+    admin = await deck.db.admin()
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="read-only view"):
+        await admin.execute(
+            "update decks set deck_json = '{}'::jsonb where project_id = $1",
+            uuid.UUID(deck.project),
+        )
+    assert await admin.fetchval(
+        "select deck_json from decks where project_id = $1", uuid.UUID(deck.project)
+    ) == {"t": "r0"}
