@@ -25,6 +25,7 @@ from packages.platform.document_models import (
     DocumentStoreError,
     ExportFileFormat,
     ExportRecord,
+    ExportRegistration,
     ProposalRecord,
     ProposalStatus,
     RevisionKind,
@@ -168,6 +169,7 @@ class DocumentStore:
         *,
         job_id: str,
         worker_id: str,
+        claim_token: int,
         revision_id: str,
         file_format: ExportFileFormat,
         renderer_version: str,
@@ -175,14 +177,20 @@ class DocumentStore:
         sha256: str,
         byte_size: int,
         page_count: int | None,
-    ) -> str:
-        """Record a verified upload; ``registered`` or ``exists`` (identical row)."""
+    ) -> ExportRegistration:
+        """Record a verified upload under the render job's claim.
+
+        ``registered``: this file is now the export. ``existing``: another render
+        registered this (revision, format, renderer) first; the returned row is the
+        export, and this call's upload is an orphan for the sweep.
+        """
 
         data = await self._rpc(
             "register_export",
             {
                 "p_job_id": job_id,
                 "p_worker_id": worker_id,
+                "p_claim_token": claim_token,
                 "p_revision_id": revision_id,
                 "p_format": file_format.value,
                 "p_renderer_version": renderer_version,
@@ -192,7 +200,10 @@ class DocumentStore:
                 "p_page_count": page_count,
             },
         )
-        return str(data)
+        rows = cast(list[dict[str, Any]], data if isinstance(data, list) else [data])
+        if not rows:
+            raise DocumentStoreError("revision_not_found")
+        return ExportRegistration.model_validate(rows[0])
 
     async def record_validation(
         self, revision_id: str, validator: str, valid: bool, detail: str | None

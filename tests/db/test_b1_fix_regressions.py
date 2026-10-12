@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import pytest
 
+from packages.platform.storage import StoredObject
+from scripts.gc_orphan_exports import find_orphans
 from tests.db.conftest import BASELINE, LEGACY
-from tests.db.support import Db, commit, ensure_document, finish, head
+from tests.db.support import Db, commit, ensure_document, export_key, finish, head
 
 pytestmark = pytest.mark.skipif(LEGACY, reason="B1-FIX regressions compare 016 before and after")
 
@@ -226,3 +229,213 @@ async def test_a_fault_inside_finish_rolls_back_the_revision(deck: Deck) -> None
         await deck.finish_as_a(deck.service)
     assert await deck.written_by_job() == 0, "a revision survived a failed completion"
     assert await deck.job_status() == "processing"
+
+
+# ------------------------------------------------- 2. register_export contract
+
+
+async def _register(
+    conn: Any,
+    job: str,
+    worker: str | None,
+    token: int,
+    document: str,
+    revision: str,
+    *,
+    fmt: str = "html",
+    sha: str = "a" * 64,
+    version: str = "pw-test",
+) -> str:
+    """register_export as each schema exposes it; returns the status."""
+
+    key = export_key(document, revision, fmt, sha, version)
+    if BASELINE:
+        return str(
+            await conn.fetchval(
+                "select register_export($1, $2, $3, $4, $5, $6, $7, 10, null)",
+                uuid.UUID(job),
+                worker,
+                uuid.UUID(revision),
+                fmt,
+                version,
+                key,
+                sha,
+            )
+        )
+    row = await conn.fetchrow(
+        "select * from register_export($1, $2, $3, $4, $5, $6, $7, $8, 10, null)",
+        uuid.UUID(job),
+        worker,
+        token,
+        uuid.UUID(revision),
+        fmt,
+        version,
+        key,
+        sha,
+    )
+    return str(row["status"])
+
+
+async def _exports(deck: Deck) -> list[dict[str, Any]]:
+    rows = await deck.service.fetch(
+        "select format, storage_key, sha256 from revision_exports order by format"
+    )
+    return [dict(row) for row in rows]
+
+
+async def test_a_render_job_cannot_be_created_with_a_null_target(deck: Deck) -> None:
+    with pytest.raises(asyncpg.CheckViolationError, match="generation_jobs_render_payload_check"):
+        await deck.db.job(
+            deck.project,
+            deck.owner,
+            payload={"revision_id": None, "renderer_version": "pw-test", "formats": ["html"]},
+        )
+
+
+async def test_a_job_whose_payload_has_no_target_cannot_register(deck: Deck) -> None:
+    # A generation job carries no render target: the reviewed predicate was
+    # FALSE OR NOT (NULL OR FALSE) = NULL, and PL/pgSQL skips an IF on NULL.
+    job = await deck.db.job(
+        deck.project, deck.owner, job_type="presentation_generation", worker="R", payload={}
+    )
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="job_type_not_allowed"):
+        await _register(deck.service, job, "R", 1, deck.document, deck.r0)
+    assert await _exports(deck) == []
+
+
+async def test_a_legacy_render_job_with_a_json_null_target_cannot_register(deck: Deck) -> None:
+    # A row from before the CHECK existed (it is NOT VALID for old rows).
+    admin = await deck.db.admin()
+    await admin.execute(
+        "alter table generation_jobs drop constraint generation_jobs_render_payload_check"
+    )
+    job = await deck.db.job(
+        deck.project,
+        deck.owner,
+        worker="R",
+        payload={"revision_id": None, "renderer_version": "pw-test", "formats": ["html"]},
+    )
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="job_revision_mismatch"):
+        await _register(deck.service, job, "R", 1, deck.document, deck.r0)
+    assert await _exports(deck) == []
+
+
+async def test_a_render_job_of_another_user_cannot_register(deck: Deck) -> None:
+    stranger = await deck.db.user()
+    job = await deck.db.job(deck.project, stranger, worker="R", payload={"revision_id": deck.r0})
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="not_document_owner"):
+        await _register(deck.service, job, "R", 1, deck.document, deck.r0)
+    assert await _exports(deck) == []
+
+
+async def test_a_job_without_a_claim_cannot_register(deck: Deck) -> None:
+    # worker_id NULL on the job and NULL from the caller are not "the same claim".
+    job = await deck.db.job(deck.project, deck.owner, worker=None, payload={"revision_id": deck.r0})
+    with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="claim_lost"):
+        await _register(deck.service, job, None, 1, deck.document, deck.r0)
+    assert await _exports(deck) == []
+
+
+async def test_a_job_of_another_type_cannot_register(deck: Deck) -> None:
+    job = await deck.db.job(
+        deck.project,
+        deck.owner,
+        job_type="source_processing",
+        worker="R",
+        payload={"revision_id": deck.r0},
+    )
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="job_type_not_allowed"):
+        await _register(deck.service, job, "R", 1, deck.document, deck.r0)
+    assert await _exports(deck) == []
+
+
+async def test_a_format_the_job_did_not_request_cannot_be_registered(deck: Deck) -> None:
+    job = await deck.db.job(deck.project, deck.owner, worker="R", payload={"revision_id": deck.r0})
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="format_not_requested"):
+        await _register(deck.service, job, "R", 1, deck.document, deck.r0, fmt="pdf")
+    assert await _exports(deck) == []
+
+
+async def test_a_renderer_version_the_job_did_not_request_cannot_be_registered(
+    deck: Deck,
+) -> None:
+    job = await deck.db.job(deck.project, deck.owner, worker="R", payload={"revision_id": deck.r0})
+    with pytest.raises(asyncpg.InsufficientPrivilegeError, match="renderer_version_mismatch"):
+        await _register(deck.service, job, "R", 1, deck.document, deck.r0, version="pw-other")
+    assert await _exports(deck) == []
+
+
+async def test_a_stale_claim_token_cannot_register(deck: Deck) -> None:
+    # Same worker id, but the job has been claimed again since (attempt 2).
+    job = await deck.db.job(
+        deck.project, deck.owner, worker="R", attempts=2, payload={"revision_id": deck.r0}
+    )
+    with pytest.raises(asyncpg.ObjectNotInPrerequisiteStateError, match="claim_lost"):
+        await _register(deck.service, job, "R", 1, deck.document, deck.r0)
+    assert await _exports(deck) == []
+
+
+# ------------------------------------------------ 3. first writer wins
+
+
+def _orphans(uploaded: list[str], registered: list[dict[str, Any]]) -> list[str]:
+    old = datetime.now(UTC) - timedelta(days=2)
+    objects = [
+        StoredObject(key=key, size=10, sha256_b64=None, last_modified=old) for key in uploaded
+    ]
+    keys = {str(row["storage_key"]) for row in registered}
+    found = find_orphans(objects, keys, now=datetime.now(UTC), min_age=timedelta(hours=24))
+    return [item.key for item in found]
+
+
+async def test_rendering_a_revision_twice_keeps_the_first_export(deck: Deck) -> None:
+    first = await deck.db.job(
+        deck.project, deck.owner, worker="R", payload={"revision_id": deck.r0}
+    )
+    assert await _register(deck.service, first, "R", 1, deck.document, deck.r0) == "registered"
+    await deck.db.finish_job(first)
+    # A second render of the same revision produced different bytes (PPTX
+    # timestamps): it must succeed and leave the first export in place.
+    second = await deck.db.job(
+        deck.project, deck.owner, worker="R2", payload={"revision_id": deck.r0}
+    )
+    status = await _register(deck.service, second, "R2", 1, deck.document, deck.r0, sha="b" * 64)
+
+    assert status == "existing"
+    rows = await _exports(deck)
+    assert [row["sha256"] for row in rows] == ["a" * 64]
+    uploaded = [
+        export_key(deck.document, deck.r0, "html", "a" * 64),
+        export_key(deck.document, deck.r0, "html", "b" * 64),
+    ]
+    assert _orphans(uploaded, rows) == [uploaded[1]]
+
+
+async def test_a_recovery_render_after_a_crash_mid_publish_completes_the_set(deck: Deck) -> None:
+    # The first render registered html, uploaded pdf, and died before
+    # registering it; the reaper failed the job. The recovery render produces
+    # both formats again with new bytes.
+    formats = {"revision_id": deck.r0, "formats": ["html", "pdf"]}
+    crashed = await deck.db.job(deck.project, deck.owner, worker="R", payload=formats)
+    await _register(deck.service, crashed, "R", 1, deck.document, deck.r0)
+    await deck.db.finish_job(crashed, "failed")
+    recovery = await deck.db.job(deck.project, deck.owner, worker="R2", payload=formats)
+
+    html = await _register(deck.service, recovery, "R2", 1, deck.document, deck.r0, sha="b" * 64)
+    pdf = await _register(
+        deck.service, recovery, "R2", 1, deck.document, deck.r0, fmt="pdf", sha="c" * 64
+    )
+
+    assert (html, pdf) == ("existing", "registered")
+    rows = await _exports(deck)
+    assert [(row["format"], row["sha256"]) for row in rows] == [
+        ("html", "a" * 64),
+        ("pdf", "c" * 64),
+    ]
+    uploaded = [
+        export_key(deck.document, deck.r0, "html", "a" * 64),
+        export_key(deck.document, deck.r0, "pdf", "d" * 64),  # the crashed upload
+        export_key(deck.document, deck.r0, "html", "b" * 64),
+        export_key(deck.document, deck.r0, "pdf", "c" * 64),
+    ]
+    assert sorted(_orphans(uploaded, rows)) == sorted([uploaded[1], uploaded[2]])

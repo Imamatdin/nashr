@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -94,6 +94,9 @@ ERROR_CODES: frozenset[str] = frozenset(
         "job_revision_mismatch",
         "invalid_storage_key",
         "export_conflict",
+        "job_type_not_allowed",
+        "renderer_version_mismatch",
+        "format_not_requested",
         "invalid_citation",
     }
 )
@@ -219,6 +222,17 @@ class ExportRecord(BaseModel):
     page_count: int | None = None
     created_by_job: str | None = None
     created_at: datetime
+
+
+class ExportRegistration(BaseModel):
+    """What register_export recorded: this call's file, or the first writer's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["registered", "existing"]
+    storage_key: str
+    sha256: str
+    byte_size: int
 
 
 def export_storage_key(

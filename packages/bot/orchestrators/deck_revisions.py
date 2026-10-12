@@ -111,6 +111,7 @@ async def render_and_publish(
     publisher: ExportPublisher,
     job_id: str,
     worker_id: str,
+    claim_token: int,
     document_id: str,
     revision_id: str,
     deck: DeckSpec,
@@ -130,6 +131,7 @@ async def render_and_publish(
         exports = await publisher.publish(
             job_id=job_id,
             worker_id=worker_id,
+            claim_token=claim_token,
             document_id=document_id,
             revision_id=revision_id,
             files=files,

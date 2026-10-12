@@ -869,12 +869,26 @@ end;
 $$;
 
 -- ---------------------------------------------------------------------------
--- 9. register_export (claim-fenced, write-once)
+-- 9. register_export (claim-fenced, first writer wins)
 -- ---------------------------------------------------------------------------
 
+-- The caller's render job must hold its live claim (worker and attempt token) and
+-- must be a presentation_render job owned by the project's owner whose payload
+-- names exactly this revision, this renderer version and this format. Every
+-- comparison is written so that a NULL on either side refuses (Codex B1 finding
+-- 2): PL/pgSQL skips an IF whose condition is NULL, so each test is phrased as
+-- "refuse unless provably equal".
+--
+-- First writer wins (finding 3): the export for (revision, format, renderer) is
+-- immutable once registered. A later registration of the same identity returns
+-- status 'existing' with the stored row; the caller treats its own upload as an
+-- orphan (scripts/gc_orphan_exports.py reclaims it). Retries and recovery renders
+-- therefore succeed even when a re-render produced different bytes.
+drop function if exists register_export(uuid, text, uuid, text, text, text, text, bigint, integer);
 create or replace function register_export(
     p_job_id uuid,
     p_worker_id text,
+    p_claim_token integer,
     p_revision_id uuid,
     p_format text,
     p_renderer_version text,
@@ -883,7 +897,7 @@ create or replace function register_export(
     p_byte_size bigint,
     p_page_count integer
 )
-returns text
+returns table (status text, storage_key text, sha256 text, byte_size bigint)
 language plpgsql security definer
 set search_path = public, pg_temp
 as $$
@@ -892,32 +906,49 @@ declare
     v_job generation_jobs%rowtype;
     v_document_id uuid;
     v_project uuid;
-    v_actor text;
+    v_owner uuid;
     v_key text;
     v_row revision_exports%rowtype;
 begin
-    select * into v_job from generation_jobs j where j.id = p_job_id for update;
-    if not found or v_job.worker_id is distinct from p_worker_id or v_job.status <> 'processing' then
-        raise exception 'claim_lost' using errcode = '55000';
+    v_job := _lock_claimed_job(p_job_id, p_worker_id, p_claim_token, false);
+
+    if v_job.job_type is distinct from 'presentation_render' then
+        raise exception 'job_type_not_allowed' using errcode = '42501';
+    end if;
+    if p_revision_id is null
+       or (v_job.payload ->> 'revision_id') is null
+       or (v_job.payload ->> 'revision_id') is distinct from p_revision_id::text then
+        raise exception 'job_revision_mismatch' using errcode = '42501';
+    end if;
+    if p_renderer_version is null
+       or (v_job.payload ->> 'renderer_version') is distinct from p_renderer_version then
+        raise exception 'renderer_version_mismatch' using errcode = '42501';
+    end if;
+    if p_format is null
+       or jsonb_typeof(v_job.payload -> 'formats') is distinct from 'array'
+       or not coalesce((v_job.payload -> 'formats') ? p_format, false) then
+        raise exception 'format_not_requested' using errcode = '42501';
     end if;
 
-    select r.document_id, d.project_id, r.actor into v_document_id, v_project, v_actor
-      from document_revisions r join documents d on d.id = r.document_id
+    select r.document_id, d.project_id, p.user_id
+      into v_document_id, v_project, v_owner
+      from document_revisions r
+      join documents d on d.id = r.document_id
+      join projects p on p.id = d.project_id
      where r.id = p_revision_id;
     if v_document_id is null then
         raise exception 'revision_not_found' using errcode = 'P0002';
     end if;
-    if v_project <> v_job.project_id
-       or not (
-           v_job.payload ->> 'revision_id' = p_revision_id::text
-           or v_actor = 'worker:' || p_job_id::text
-       ) then
+    if v_project is distinct from v_job.project_id then
         raise exception 'job_revision_mismatch' using errcode = '42501';
+    end if;
+    if v_owner is null or v_job.user_id is null or v_job.user_id <> v_owner then
+        raise exception 'not_document_owner' using errcode = '42501';
     end if;
 
     v_key := format('exports/%s/%s/%s/%s/%s.%s',
         v_document_id, p_revision_id, p_renderer_version, p_format, p_sha256, p_format);
-    if p_storage_key is distinct from v_key then
+    if p_storage_key is null or p_sha256 is null or p_storage_key <> v_key then
         raise exception 'invalid_storage_key' using errcode = '22023';
     end if;
 
@@ -930,17 +961,14 @@ begin
     )
     on conflict (revision_id, format, renderer_version) do nothing;
     if found then
-        return 'registered';
+        return query select 'registered'::text, p_storage_key, p_sha256, p_byte_size;
+        return;
     end if;
 
     select * into v_row from revision_exports e
      where e.revision_id = p_revision_id and e.format = p_format
        and e.renderer_version = p_renderer_version;
-    if v_row.sha256 = p_sha256 and v_row.storage_key = p_storage_key
-       and v_row.byte_size = p_byte_size then
-        return 'exists';
-    end if;
-    raise exception 'export_conflict' using errcode = '23505';
+    return query select 'existing'::text, v_row.storage_key, v_row.sha256, v_row.byte_size;
 end;
 $$;
 
@@ -992,8 +1020,9 @@ revoke all on function commit_revision(uuid, uuid, jsonb, text, integer, text, t
     from public, anon;
 revoke all on function accept_proposal(uuid, uuid, text, text) from public, anon;
 revoke all on function reject_proposal(uuid, text) from public, anon;
-revoke all on function register_export(uuid, text, uuid, text, text, text, text, bigint, integer)
-    from public, anon, authenticated;
+revoke all on function register_export(
+    uuid, text, integer, uuid, text, text, text, text, bigint, integer
+) from public, anon, authenticated;
 revoke all on function record_revision_validation(uuid, text, text, text)
     from public, anon, authenticated;
 
@@ -1002,8 +1031,9 @@ grant execute on function commit_revision(uuid, uuid, jsonb, text, integer, text
     to authenticated, service_role;
 grant execute on function accept_proposal(uuid, uuid, text, text) to authenticated, service_role;
 grant execute on function reject_proposal(uuid, text) to authenticated, service_role;
-grant execute on function register_export(uuid, text, uuid, text, text, text, text, bigint, integer)
-    to service_role;
+grant execute on function register_export(
+    uuid, text, integer, uuid, text, text, text, text, bigint, integer
+) to service_role;
 grant execute on function record_revision_validation(uuid, text, text, text) to service_role;
 
 -- ---------------------------------------------------------------------------
@@ -1021,12 +1051,32 @@ create unique index if not exists uq_generation_jobs_active_render
     )
     where status in ('queued', 'processing') and job_type = 'presentation_render';
 
+-- The CHECK below is NOT VALID (terminal legacy rows from 012 keep whatever they
+-- had) but it is enforced on every insert and update. An active legacy render job
+-- without a target could then never be updated by the reaper, so it is failed here,
+-- honestly, before the constraint exists. Render jobs are never charged.
+update generation_jobs
+   set status = 'failed', completed_at = now(),
+       error_message = '016: render job has no target revision; re-request the render'
+ where job_type = 'presentation_render'
+   and status in ('queued', 'processing')
+   and not coalesce(
+       jsonb_typeof(payload -> 'revision_id') = 'string'
+       and (payload ->> 'revision_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       and jsonb_typeof(payload -> 'renderer_version') = 'string'
+       and case when jsonb_typeof(payload -> 'formats') = 'array'
+                then jsonb_array_length(payload -> 'formats') > 0 else false end,
+       false);
+
 alter table generation_jobs drop constraint if exists generation_jobs_render_payload_check;
 alter table generation_jobs add constraint generation_jobs_render_payload_check
     check (
         job_type <> 'presentation_render'
-        or (payload ? 'revision_id' and payload ? 'renderer_version'
-            and jsonb_typeof(payload -> 'formats') = 'array')
+        or (jsonb_typeof(payload -> 'revision_id') = 'string'
+            and (payload ->> 'revision_id') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            and jsonb_typeof(payload -> 'renderer_version') = 'string'
+            and case when jsonb_typeof(payload -> 'formats') = 'array'
+                     then jsonb_array_length(payload -> 'formats') > 0 else false end)
     ) not valid;
 
 -- ---------------------------------------------------------------------------
@@ -1218,7 +1268,7 @@ alter table documents replica identity full;
 -- drop function if exists commit_revision(uuid, uuid, jsonb, text, integer, text, text);
 -- drop function if exists accept_proposal(uuid, uuid, text, text);
 -- drop function if exists reject_proposal(uuid, text);
--- drop function if exists register_export(uuid, text, uuid, text, text, text, text, bigint, integer);
+-- drop function if exists register_export(uuid, text, integer, uuid, text, text, text, text, bigint, integer);
 -- drop function if exists record_revision_validation(uuid, text, text, text);
 -- drop function if exists finish_generation_job(uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]);
 -- drop function if exists complete_job(uuid, text, integer, jsonb);

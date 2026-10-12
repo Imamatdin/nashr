@@ -305,19 +305,22 @@ async def register(
     sha: str = "a" * 64,
     fmt: str = "html",
     size: int = 10,
+    token: int = 1,
 ) -> str:
-    return str(
-        await conn.fetchval(
-            "select register_export($1, $2, $3, $4, 'pw-test', $5, $6, $7, null)",
-            uuid.UUID(job_id),
-            worker,
-            uuid.UUID(revision_id),
-            fmt,
-            export_key(document_id, revision_id, fmt, sha),
-            sha,
-            size,
-        )
+    """register_export under the job's claim (attempt ``token``); returns the status."""
+
+    row = await conn.fetchrow(
+        "select * from register_export($1, $2, $3, $4, $5, 'pw-test', $6, $7, $8, null)",
+        uuid.UUID(job_id),
+        worker,
+        token,
+        uuid.UUID(revision_id),
+        fmt,
+        export_key(document_id, revision_id, fmt, sha),
+        sha,
+        size,
     )
+    return str(row["status"])
 
 
 async def head(conn: Any, document_id: str) -> str | None:

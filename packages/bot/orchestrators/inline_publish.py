@@ -91,6 +91,7 @@ async def publish_inline(
             await ExportPublisher(DocumentStore(db), storage).publish(
                 job_id=job.id,
                 worker_id=worker_id,
+                claim_token=job.attempts,
                 document_id=document_id,
                 revision_id=revision_id,
                 files=files,

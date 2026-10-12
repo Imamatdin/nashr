@@ -281,39 +281,49 @@ class JobRunner:
             raise RuntimeError("presentation_render job is missing its revision or formats")
         version = renderer_version()
         if payload.get("renderer_version") != version:
-            logger.warning(
-                "worker_render_version_changed %s",
-                json.dumps({"job_id": job.id, "requested": payload.get("renderer_version")}),
+            # register_export binds exports to the payload's renderer; a worker
+            # running other renderer code must not publish under that name.
+            raise RuntimeError(
+                f"presentation_render was requested for renderer {payload.get('renderer_version')}"
+                f" but this worker is {version}"
             )
         store = DocumentStore(self._db)
         found = await store.revision_in_project(job.project_id, revision_id)
         if found is None:
             raise RuntimeError("presentation_render revision is not in this project")
         revision = found[1]
-        deck = DeckSpec.model_validate(revision.content)
-
-        bot = Bot(token=self._config.telegram_bot_token)
-        try:
-            published = await render_and_publish(
-                orchestrator=self._orchestrator(bot),
-                publisher=ExportPublisher(store, self._storage),
-                job_id=job.id,
-                worker_id=self._worker_id,
-                document_id=revision.document_id,
-                revision_id=revision_id,
-                deck=deck,
-                formats=render_formats([str(name) for name in cast(list[Any], names)]),
-                progress=self._progress(job),
-            )
-        finally:
-            await bot.session.close()
+        publisher = ExportPublisher(store, self._storage)
+        requested = sorted({str(name) for name in cast(list[Any], names)})
+        # A retry or recovery render publishes only what is not registered yet;
+        # the formats an earlier attempt registered are immutable and reused.
+        already = await publisher.registered_formats(revision_id, version)
+        missing = [name for name in requested if name not in {f.value for f in already}]
+        if missing:
+            deck = DeckSpec.model_validate(revision.content)
+            bot = Bot(token=self._config.telegram_bot_token)
+            try:
+                await render_and_publish(
+                    orchestrator=self._orchestrator(bot),
+                    publisher=publisher,
+                    job_id=job.id,
+                    worker_id=self._worker_id,
+                    claim_token=job.attempts,
+                    document_id=revision.document_id,
+                    revision_id=revision_id,
+                    deck=deck,
+                    formats=render_formats(missing),
+                    progress=self._progress(job),
+                )
+            finally:
+                await bot.session.close()
         await self._finish_completed(
             job,
             {
                 "outcome": "rendered",
                 "revision_id": revision_id,
                 "renderer_version": version,
-                "formats": [item.format.value for item in published.exports],
+                "formats": requested,
+                "rendered_formats": missing,
             },
         )
 

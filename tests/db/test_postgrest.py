@@ -212,6 +212,7 @@ async def test_k_direct_writes_through_postgrest_are_refused(world: dict[str, st
         {
             "p_job_id": str(uuid.uuid4()),
             "p_worker_id": "w",
+            "p_claim_token": 1,
             "p_revision_id": world["revision"],
             "p_format": "html",
             "p_renderer_version": "pw-x",
@@ -221,4 +222,5 @@ async def test_k_direct_writes_through_postgrest_are_refused(world: dict[str, st
             "p_page_count": None,
         },
     )
-    assert export.status_code in (401, 403, 404), export.text
+    # The function exists with exactly these parameters; an end user lacks EXECUTE.
+    assert export.status_code == 403 and export.json().get("code") == "42501", export.text

@@ -287,14 +287,20 @@ async def test_e_retried_proposal_and_accept_and_register_are_idempotent(world: 
     )
     assert (
         await register(world.service, render, "w1", world.document, accepted["revision_id"])
-        == "exists"
+        == "existing"
     )
-    await _refused(
-        "export_conflict",
-        register(
+    # First writer wins: other bytes for the same export never replace it.
+    assert (
+        await register(
             world.service, render, "w1", world.document, accepted["revision_id"], sha="b" * 64
-        ),
+        )
+        == "existing"
     )
+    stored = await world.service.fetchval(
+        "select sha256 from revision_exports where revision_id = $1",
+        uuid.UUID(accepted["revision_id"]),
+    )
+    assert stored == "a" * 64
 
 
 async def test_identical_content_is_unchanged_and_does_not_turn_an_ai_edit_into_a_proposal(
@@ -357,7 +363,8 @@ async def test_g_a_job_for_revision_x_cannot_register_revision_y(world: World) -
         register(world.service, render, "w1", world.document, y["revision_id"]),
     )
     bad_key = world.service.fetchval(
-        "select register_export($1, 'w1', $2, 'html', 'pw-test', 'exports/elsewhere.html', $3, 10, null)",
+        "select status from register_export($1, 'w1', 1, $2, 'html', 'pw-test',"
+        " 'exports/elsewhere.html', $3, 10, null)",
         uuid.UUID(render),
         uuid.UUID(world.r0),
         "a" * 64,

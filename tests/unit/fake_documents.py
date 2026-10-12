@@ -485,46 +485,56 @@ class DocumentRpcEmulator:
         proposal.update(status="rejected", resolved_at=self._now(), resolved_by=owner)
         return "rejected"
 
-    def register_export(self, params: dict[str, Any]) -> str:
-        """Claim-fenced, write-once export registration."""
+    def register_export(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Claim-fenced, first-writer-wins export registration.
 
-        job = self._one("generation_jobs", id=params["p_job_id"])
-        if (
-            job is None
-            or job.get("worker_id") != params["p_worker_id"]
-            or job.get("status") != "processing"
-        ):
-            raise refuse("claim_lost")
+        Mirrors the SQL's three-valued logic: a missing (None) value on either side
+        of a comparison refuses, never matches.
+        """
+
+        job = self._claimed_job(params, fresh=False)
+        payload = cast(dict[str, Any], job.get("payload") or {})
+        if job.get("job_type") != "presentation_render":
+            raise refuse("job_type_not_allowed")
+        target = payload.get("revision_id")
+        if params.get("p_revision_id") is None or target is None:
+            raise refuse("job_revision_mismatch")
+        if str(target) != str(params["p_revision_id"]):
+            raise refuse("job_revision_mismatch")
+        version = params.get("p_renderer_version")
+        if version is None or payload.get("renderer_version") is None:
+            raise refuse("renderer_version_mismatch")
+        if payload["renderer_version"] != version:
+            raise refuse("renderer_version_mismatch")
+        fmt = params.get("p_format")
+        formats = payload.get("formats")
+        if fmt is None or not isinstance(formats, list) or fmt not in formats:
+            raise refuse("format_not_requested")
         revision = self._one("document_revisions", id=params["p_revision_id"])
         if revision is None:
             raise refuse("revision_not_found")
         document = self._one("documents", id=revision["document_id"])
         assert document is not None
-        payload = cast(dict[str, Any], job.get("payload") or {})
-        if document["project_id"] != job["project_id"] or not (
-            payload.get("revision_id") == revision["id"]
-            or revision["actor"] == f"worker:{params['p_job_id']}"
-        ):
+        if document["project_id"] != job.get("project_id"):
             raise refuse("job_revision_mismatch")
-        fmt = params["p_format"]
+        project = self._one("projects", id=document["project_id"])
+        owner = project.get("user_id") if project is not None else None
+        if owner is None or job.get("user_id") is None or str(job["user_id"]) != str(owner):
+            raise refuse("not_document_owner")
         expected = (
-            f"exports/{document['id']}/{revision['id']}/{params['p_renderer_version']}/"
-            f"{fmt}/{params['p_sha256']}.{fmt}"
+            f"exports/{document['id']}/{revision['id']}/{version}/{fmt}/{params['p_sha256']}.{fmt}"
         )
-        if params["p_storage_key"] != expected:
+        if params.get("p_storage_key") is None or params["p_storage_key"] != expected:
             raise refuse("invalid_storage_key")
         existing = self._one(
-            "revision_exports",
-            revision_id=revision["id"],
-            format=fmt,
-            renderer_version=params["p_renderer_version"],
+            "revision_exports", revision_id=revision["id"], format=fmt, renderer_version=version
         )
         if existing is None:
             self._rows("revision_exports").append(
                 {
                     "revision_id": revision["id"],
                     "format": fmt,
-                    "renderer_version": params["p_renderer_version"],
+                    "renderer_version": version,
                     "storage_key": params["p_storage_key"],
                     "sha256": params["p_sha256"],
                     "byte_size": params["p_byte_size"],
@@ -533,14 +543,18 @@ class DocumentRpcEmulator:
                     "created_at": self._now(),
                 }
             )
-            return "registered"
-        same = all(
-            existing[column] == params[f"p_{column}"]
-            for column in ("sha256", "storage_key", "byte_size")
-        )
-        if same:
-            return "exists"
-        raise refuse("export_conflict")
+            existing = self._rows("revision_exports")[-1]
+            status = "registered"
+        else:
+            status = "existing"
+        return [
+            {
+                "status": status,
+                "storage_key": existing["storage_key"],
+                "sha256": existing["sha256"],
+                "byte_size": existing["byte_size"],
+            }
+        ]
 
     def record_revision_validation(self, params: dict[str, Any]) -> str:
         """Write-once validation verdict."""

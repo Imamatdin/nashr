@@ -530,6 +530,48 @@ async def test_render_of_an_older_revision_publishes_only_that_revisions_exports
 
 
 @pytest.mark.asyncio
+async def test_a_retried_render_publishes_only_formats_not_yet_registered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The first render registered html; a recovery render of the same revision
+    # renders and uploads nothing more, and completes.
+    world = _World(tmp_path, _render_job("x"))
+    _doc, revision = world.seed_revision("Deck")
+    job = _render_job(revision)
+    world.fake.tables["generation_jobs"][0]["payload"] = job.payload
+    world.patch(monkeypatch)
+    await world.runner()._run_presentation_render(job)  # pyright: ignore[reportPrivateUsage]
+    first_upload = list(world.storage.uploads)
+
+    row = world.job_row(job.id)
+    row.update(status="processing", worker_id="w-test", attempts=2)
+    retry = job.model_copy(update={"attempts": 2})
+    await world.runner()._run_presentation_render(retry)  # pyright: ignore[reportPrivateUsage]
+
+    assert len(world.exports()) == 1
+    assert world.storage.uploads == first_upload
+    assert len(world.built) == 1  # the retry built no renderer at all
+    assert world.queue.progress[-1]["rendered_formats"] == []
+    assert world.queue.completed == [job.id, job.id]
+
+
+@pytest.mark.asyncio
+async def test_a_render_requested_for_another_renderer_fails_before_rendering(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    world = _World(tmp_path, _render_job("x"))
+    _doc, revision = world.seed_revision("Deck")
+    job = _render_job(revision)
+    job.payload["renderer_version"] = "pw-0000000000000000"
+    world.fake.tables["generation_jobs"][0]["payload"] = job.payload
+    world.patch(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="requested for renderer pw-0000000000000000"):
+        await world.runner()._run_presentation_render(job)  # pyright: ignore[reportPrivateUsage]
+    assert world.exports() == [] and world.built == []
+
+
+@pytest.mark.asyncio
 async def test_render_with_a_lost_claim_registers_nothing_and_never_completes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

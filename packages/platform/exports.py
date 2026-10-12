@@ -3,7 +3,11 @@
 A rendered file becomes downloadable only after three things hold: its bytes are
 in the object store at the content-addressed key, a HEAD request has shown the
 same size and SHA-256, and ``register_export`` has accepted it under a job claim
-the publishing worker still holds. Any failure raises; nothing is half-published.
+the publishing worker still holds. Any failure raises.
+
+The first registered file of a (revision, format, renderer) is the export, for
+good: a format already registered is reused, never re-uploaded, and a file that
+loses a registration race is reported as an orphan upload for the sweep.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from packages.platform.document_models import ExportFileFormat, export_storage_key
+from packages.platform.document_models import ExportFileFormat, ExportRecord, export_storage_key
 from packages.platform.document_store import DocumentStore
 from packages.platform.storage import FileStorage
 
@@ -65,6 +69,8 @@ class PublishedExport(BaseModel):
     byte_size: int
     page_count: int | None
     newly_registered: bool
+    # This call's upload, when another render registered the format first.
+    orphaned_upload: str | None = None
 
 
 def _digest(path: Path) -> tuple[str, int]:
@@ -92,11 +98,24 @@ class ExportPublisher:
         self._store = store
         self._storage = storage
 
+    async def registered_formats(
+        self, revision_id: str, version: str | None = None
+    ) -> dict[ExportFileFormat, ExportRecord]:
+        """The formats of ``revision_id`` already registered by this renderer."""
+
+        renderer = version or renderer_version()
+        return {
+            record.format: record
+            for record in await self._store.exports([revision_id])
+            if record.renderer_version == renderer
+        }
+
     async def publish(
         self,
         *,
         job_id: str,
         worker_id: str,
+        claim_token: int,
         document_id: str,
         revision_id: str,
         files: Mapping[ExportFileFormat, Path],
@@ -107,16 +126,31 @@ class ExportPublisher:
         if not files:
             raise ValueError("publish requires at least one rendered file")
         renderer = version or renderer_version()
+        already = await self.registered_formats(revision_id, renderer)
         published: list[PublishedExport] = []
         for fmt in sorted(files, key=lambda item: item.value):
+            if fmt in already:
+                record = already[fmt]
+                published.append(
+                    PublishedExport(
+                        format=fmt,
+                        storage_key=record.storage_key,
+                        sha256=record.sha256,
+                        byte_size=record.byte_size,
+                        page_count=record.page_count,
+                        newly_registered=False,
+                    )
+                )
+                continue
             path = files[fmt]
             sha256, size = await asyncio.to_thread(_digest, path)
             pages = await asyncio.to_thread(_page_count, fmt, path)
             key = export_storage_key(document_id, revision_id, renderer, fmt, sha256)
             await self._storage.put_verified(path, key, sha256, size)
-            status = await self._store.register_export(
+            registration = await self._store.register_export(
                 job_id=job_id,
                 worker_id=worker_id,
+                claim_token=claim_token,
                 revision_id=revision_id,
                 file_format=fmt,
                 renderer_version=renderer,
@@ -128,11 +162,12 @@ class ExportPublisher:
             published.append(
                 PublishedExport(
                     format=fmt,
-                    storage_key=key,
-                    sha256=sha256,
-                    byte_size=size,
-                    page_count=pages,
-                    newly_registered=status == "registered",
+                    storage_key=registration.storage_key,
+                    sha256=registration.sha256,
+                    byte_size=registration.byte_size,
+                    page_count=pages if registration.status == "registered" else None,
+                    newly_registered=registration.status == "registered",
+                    orphaned_upload=key if registration.storage_key != key else None,
                 )
             )
         return published

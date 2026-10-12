@@ -53,8 +53,8 @@ disagree about which one is authoritative (full inventory in Appendix A).
 | I4 | Retrying an operation with the same idempotency key never duplicates; reusing a key for different content is an error | key unique per document across revisions **and** proposals, checked under the document lock; hash compared |
 | I5 | A losing AI, regeneration or import write is stored, not discarded | `kind in (ai_edit, regeneration, import)` with stale base inserts a `revision_proposals` row |
 | I6 | The deck read model always equals head content | `decks` becomes a VIEW over the head (§4.4); it cannot diverge |
-| I7 | An export belongs to exactly one (revision, format, renderer_version) and is never overwritten | PK on that triple; different hash for the same key raises |
-| I8 | Only the worker currently holding a job's claim can register that job's exports, only for a revision that job targets | `register_export` locks the job row and checks `worker_id`, `status = processing`, and the revision link |
+| I7 | An export belongs to exactly one (revision, format, renderer_version) and is never overwritten | PK on that triple; the first registration wins and a later one returns `existing` with the stored row (B1-FIX; previously a different hash raised) |
+| I8 | Only the worker currently holding a render job's claim can register that job's exports, only for the revision, renderer and formats the job names, for the project's owner | `register_export` locks the job row and checks every field NULL-safely (§4.3) |
 | I9 | Only known content schema versions are stored; content size is bounded | `document_schema_versions` registry; `octet_length(content::text) <= 2 MiB` |
 | I10 | A user can read and commit only their own documents | owner-only SELECT RLS; `commit_revision` resolves the caller (`app_uid()` or the actor) to the project owner |
 | I12 | A queue worker's revision or proposal exists only if its job completed, under the claim that produced it | workers cannot use `commit_revision`; `finish_generation_job` locks the job, checks the live claim (worker, attempt token, fresh heartbeat), commits and completes in one transaction (§4.3, §4.6) |
@@ -201,16 +201,40 @@ are slide-level for presentations (by `slide_id`: added, removed, changed, moved
 and block-level for articles (by block id). Element-level rebase arrives with the
 scene-graph editor (B3/B4) and will reuse this API.
 
-`register_export(job_id, worker_id, revision_id, format, renderer_version,
-storage_key, sha256, byte_size, page_count)`: locks the job row; requires
-`worker_id` match and `status = processing`; requires the job to target the revision
-(`payload->>'revision_id' = revision_id`, or the revision's actor is
-`worker:<job_id>`, i.e. the job committed it); requires the storage key to have the
-canonical shape for that revision. Inserts if absent; identical row → no-op; same PK
-with different hash or key → `export_conflict` error.
+`register_export(job_id, worker_id, claim_token, revision_id, format, renderer_version,
+storage_key, sha256, byte_size, page_count) → (status, storage_key, sha256, byte_size)`
+(B1-FIX, Codex findings 2 and 3):
+
+1. Lock the job and require its live claim (status `processing`, same worker, same
+   attempt token; NULL on either side is a lost claim, never a match).
+2. The job must be a `presentation_render` job whose payload names exactly this
+   revision (`job_revision_mismatch`), this renderer version
+   (`renderer_version_mismatch`) and a format list containing this format
+   (`format_not_requested`). Generation and edit jobs never register exports: they
+   complete when they commit, and their render is a render job (§6.1).
+3. The revision must belong to the job's project, and the job's user must own it.
+4. The storage key must have the canonical shape for the revision.
+
+Every check is phrased as "refuse unless provably equal": the reviewed version
+compared `payload->>'revision_id' = …` inside `NOT (… OR …)`, which is NULL for a
+payload without a target, and PL/pgSQL skips an `IF` whose condition is NULL, so a
+generation job could register any revision of its project. The render-job CHECK now
+requires a UUID-shaped string target, a string renderer version and a non-empty
+format array (`NOT VALID` for terminal legacy rows; active legacy render jobs that
+fail it are failed by 016 before the constraint is added).
+
+**First writer wins.** If `(revision, format, renderer_version)` is already
+registered, the call returns `existing` and the stored row; the caller's upload is
+an orphan for `scripts/gc_orphan_exports.py`. A retry or a recovery render after a
+crash between upload and registration therefore succeeds even though PPTX output is
+not byte-stable (PptxGenJS 4.0.1 writes wall-clock timestamps into
+`docProps/core.xml`). Correctness does not depend on determinism. The publisher
+also reuses formats already registered for the revision and renderer without
+uploading them, and a render job renders only the formats still missing (§6.5).
 
 Grants: `commit_revision`, `ensure_document`, `accept_proposal`, `reject_proposal` to
-`service_role` and `authenticated`; `register_export` to `service_role` only.
+`service_role` and `authenticated`; `register_export`, `finish_generation_job`,
+`complete_job`, `claim_job` and `heartbeat_job` to `service_role` only.
 `PUBLIC` and `anon` revoked on all.
 
 ### 4.4 `decks`: VIEW, not a locked projection
@@ -344,9 +368,13 @@ Payload carries `document_id, revision_id, renderer_version, formats` (sorted).
 Active-job dedupe moves from `(project_id, job_type)` to `(revision_id,
 renderer_version, formats)` for `presentation_render` (a new partial unique index),
 because the per-project index would hand a request for the head an already-running
-render of an older revision. Every requested format must render, upload, verify and
-register, or the job fails. A lost claim aborts without registering and without
-completing; the reaper owns that job's outcome and refund.
+render of an older revision. A render job first reads which requested formats are
+already registered for its (revision, renderer) and renders only the missing ones; if
+none are missing it completes at once. Every rendered format must upload, verify and
+register (or find its first writer), or the job fails. A worker whose code is a
+different renderer than the payload names refuses before rendering. A lost claim
+aborts without registering and without completing; the reaper owns that job's
+outcome.
 
 ## 7. Bugs this fixes (each gets a test that fails before the change)
 
