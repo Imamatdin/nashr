@@ -60,6 +60,10 @@ alter table document_revisions add column if not exists actor text;
 alter table document_revisions add column if not exists accepted_from_proposal_id uuid;
 
 update document_revisions set kind = 'import' where kind is null;
+update document_revisions r
+   set schema_version = d.schema_version
+  from documents d
+ where d.id = r.document_id and r.schema_version is null;
 update document_revisions set schema_version = 1 where schema_version is null;
 update document_revisions
    set actor = coalesce(created_by::text, 'system:legacy')
@@ -146,6 +150,26 @@ create table if not exists document_operation_receipts (
     unique (document_id, idempotency_key)
 );
 
+create table if not exists migration_reports (
+    id          uuid primary key default gen_random_uuid(),
+    migration   text not null check (char_length(migration) between 1 and 64),
+    item        text not null check (char_length(item) between 1 and 128),
+    value       bigint not null,
+    recorded_at timestamptz not null default now(),
+    unique (migration, item)
+);
+alter table migration_reports enable row level security;
+revoke all on table migration_reports from public, anon, authenticated, service_role;
+grant select on table migration_reports to service_role;
+
+create table if not exists proposal_validations (
+    proposal_id  uuid primary key references revision_proposals(id) on delete cascade,
+    validator    text not null check (char_length(validator) between 1 and 64),
+    status       text not null check (status in ('valid', 'legacy_invalid')),
+    detail       text check (detail is null or char_length(detail) <= 4000),
+    created_at   timestamptz not null default now()
+);
+
 create table if not exists revision_validations (
     revision_id  uuid primary key references document_revisions(id) on delete cascade,
     validator    text not null check (char_length(validator) between 1 and 64),
@@ -168,6 +192,7 @@ alter table revision_proposals enable row level security;
 alter table revision_exports enable row level security;
 alter table revision_validations enable row level security;
 alter table document_operation_receipts enable row level security;
+alter table proposal_validations enable row level security;
 
 drop policy if exists document_schema_versions_read on document_schema_versions;
 create policy document_schema_versions_read on document_schema_versions
@@ -212,6 +237,15 @@ create policy document_operation_receipts_owner_select on document_operation_rec
                 where d.id = document_operation_receipts.document_id and p.user_id = app_uid())
     );
 
+drop policy if exists proposal_validations_owner_select on proposal_validations;
+create policy proposal_validations_owner_select on proposal_validations
+    for select using (
+        exists (select 1 from revision_proposals q
+                join documents d on d.id = q.document_id
+                join projects p on p.id = d.project_id
+                where q.id = proposal_validations.proposal_id and p.user_id = app_uid())
+    );
+
 drop policy if exists revision_validations_owner_select on revision_validations;
 create policy revision_validations_owner_select on revision_validations
     for select using (
@@ -222,10 +256,12 @@ create policy revision_validations_owner_select on revision_validations
     );
 
 revoke all on table documents, document_revisions, revision_proposals, revision_exports,
-    revision_validations, document_schema_versions, document_operation_receipts
+    revision_validations, document_schema_versions, document_operation_receipts,
+    proposal_validations
     from public, anon, authenticated, service_role;
 grant select on table documents, document_revisions, revision_proposals, revision_exports,
-    revision_validations, document_schema_versions, document_operation_receipts
+    revision_validations, document_schema_versions, document_operation_receipts,
+    proposal_validations
     to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
@@ -1162,6 +1198,22 @@ begin
 end;
 $$;
 
+-- Pending import proposals (divergent legacy decks) get a verdict too, so the
+-- owner never accepts one blind.
+create or replace function record_proposal_validation(
+    p_proposal_id uuid, p_validator text, p_status text, p_detail text
+) returns text
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+begin
+    insert into proposal_validations (proposal_id, validator, status, detail)
+    values (p_proposal_id, p_validator, p_status, left(p_detail, 4000))
+    on conflict (proposal_id) do nothing;
+    return case when found then 'recorded' else 'exists' end;
+end;
+$$;
+
 create or replace function record_revision_validation(
     p_revision_id uuid, p_validator text, p_status text, p_detail text
 ) returns text
@@ -1231,6 +1283,9 @@ grant execute on function register_export(
     uuid, text, integer, uuid, text, text, text, text, bigint, integer
 ) to service_role;
 grant execute on function record_revision_validation(uuid, text, text, text) to service_role;
+revoke all on function record_proposal_validation(uuid, text, text, text)
+    from public, anon, authenticated;
+grant execute on function record_proposal_validation(uuid, text, text, text) to service_role;
 
 -- ---------------------------------------------------------------------------
 -- 10b. Schema hardening (Codex B1 review: SECURITY DEFINER search_path)
@@ -1442,6 +1497,46 @@ begin
     end loop;
     raise notice '016 backfill: legacy decks=%, imported as head=%, already imported (re-run)=%, equal to existing head=%, divergent kept as proposals=%, non-object wrapped=%, skipped (non-presentation project)=%',
         v_total, v_imported, v_already, v_in_sync, v_diverged, v_wrapped, v_type_mismatch;
+    insert into migration_reports (migration, item, value)
+    values ('016', 'legacy_decks', v_total),
+           ('016', 'imported_as_head', v_imported),
+           ('016', 'already_imported', v_already),
+           ('016', 'equal_to_existing_head', v_in_sync),
+           ('016', 'divergent_kept_as_proposals', v_diverged),
+           ('016', 'non_object_wrapped', v_wrapped),
+           ('016', 'skipped_non_presentation_project', v_type_mismatch)
+    on conflict (migration, item) do update set value = excluded.value, recorded_at = now();
+end;
+$$;
+
+-- Inventory of revision content versions, and how many are not in the registry
+-- (such a revision is kept and readable; new writes of that version are refused).
+do $$
+declare
+    v_row record;
+    v_unregistered bigint := 0;
+begin
+    for v_row in
+        select d.kind, r.schema_version, count(*) as n,
+               bool_or(not exists (
+                   select 1 from document_schema_versions v
+                    where v.kind = d.kind and v.version = r.schema_version)) as unregistered
+          from document_revisions r join documents d on d.id = r.document_id
+         group by d.kind, r.schema_version
+    loop
+        insert into migration_reports (migration, item, value)
+        values ('016', format('revisions:%s:v%s', v_row.kind, v_row.schema_version), v_row.n)
+        on conflict (migration, item) do update set value = excluded.value, recorded_at = now();
+        if v_row.unregistered then
+            v_unregistered := v_unregistered + v_row.n;
+        end if;
+    end loop;
+    insert into migration_reports (migration, item, value)
+    values ('016', 'revisions_with_unregistered_schema_version', v_unregistered)
+    on conflict (migration, item) do update set value = excluded.value, recorded_at = now();
+    if v_unregistered > 0 then
+        raise warning '016: % revisions carry a schema_version that is not registered', v_unregistered;
+    end if;
 end;
 $$;
 
@@ -1551,6 +1646,7 @@ alter table documents replica identity full;
 -- drop function if exists reject_proposal(uuid, text);
 -- drop function if exists register_export(uuid, text, integer, uuid, text, text, text, text, bigint, integer);
 -- drop function if exists record_revision_validation(uuid, text, text, text);
+-- drop function if exists record_proposal_validation(uuid, text, text, text);
 -- drop function if exists fail_job(uuid, text, integer, text, text);
 -- drop function if exists _settle_failure(generation_jobs, text);
 -- -- then re-apply 006's reap_stale_jobs(integer) body (refunds move back to Python)

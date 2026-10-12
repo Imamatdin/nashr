@@ -221,6 +221,22 @@ class DocumentStore:
         )
         return str(data)
 
+    async def record_proposal_validation(
+        self, proposal_id: str, validator: str, valid: bool, detail: str | None
+    ) -> str:
+        """Write-once validation verdict for a pending import proposal."""
+
+        data = await self._rpc(
+            "record_proposal_validation",
+            {
+                "p_proposal_id": proposal_id,
+                "p_validator": validator,
+                "p_status": "valid" if valid else "legacy_invalid",
+                "p_detail": detail,
+            },
+        )
+        return str(data)
+
     # ----------------------------------------------------------------- reads
 
     async def _rows(self, table: str, build: Callable[[Any], Any]) -> list[dict[str, Any]]:

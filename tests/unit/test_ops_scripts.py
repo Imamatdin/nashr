@@ -100,8 +100,20 @@ async def test_validation_backfill_flags_invalid_imports_and_resumes() -> None:
     _d2, invalid = seed_presentation(fake.tables, project_id="p2", content={"legacy_raw": [1, 2]})
     db = DatabaseClient(_config(), client=cast(Any, fake))
 
+    no_proposals = {
+        "proposals_scanned": 0,
+        "proposals_already_validated": 0,
+        "proposals_valid": 0,
+        "proposals_legacy_invalid": 0,
+    }
     dry = await backfill(db, apply=False)
-    assert dry == {"scanned": 2, "already_validated": 0, "valid": 1, "legacy_invalid": 1}
+    assert dry == {
+        "scanned": 2,
+        "already_validated": 0,
+        "valid": 1,
+        "legacy_invalid": 1,
+        **no_proposals,
+    }
     assert fake.tables.get("revision_validations", []) == []
 
     applied = await backfill(db, apply=True)
@@ -110,5 +122,54 @@ async def test_validation_backfill_flags_invalid_imports_and_resumes() -> None:
     assert verdicts == {valid: "valid", invalid: "legacy_invalid"}
 
     again = await backfill(db, apply=True)
-    assert again == {"scanned": 2, "already_validated": 2, "valid": 0, "legacy_invalid": 0}
+    assert again == {
+        "scanned": 2,
+        "already_validated": 2,
+        "valid": 0,
+        "legacy_invalid": 0,
+        **no_proposals,
+    }
     assert len(fake.tables["revision_validations"]) == 2
+
+
+async def test_validation_backfill_also_judges_pending_import_proposals() -> None:
+    # A divergent legacy deck became a pending import proposal: it gets a verdict
+    # before the owner is asked to accept it; resolved proposals are skipped.
+    fake = FakeSupabaseClient()
+    fake.seed("projects", [{"id": "p1", "user_id": "u1"}])
+    document, _head = seed_presentation(
+        fake.tables,
+        project_id="p1",
+        content=_make_deck(title="Head", audience=AudienceType.UNDERGRADUATE).model_dump(
+            mode="json"
+        ),
+    )
+    base = {"document_id": document, "kind": "import", "content_sha256": "0" * 64}
+    fake.seed(
+        "revision_proposals",
+        [
+            {
+                **base,
+                "id": "00000000-0000-4000-8000-000000000001",
+                "status": "pending",
+                "content": {"legacy_raw": "broken"},
+            },
+            {
+                **base,
+                "id": "00000000-0000-4000-8000-000000000002",
+                "status": "rejected",
+                "content": {"legacy_raw": "old"},
+            },
+        ],
+    )
+    db = DatabaseClient(_config(), client=cast(Any, fake))
+
+    counts = await backfill(db, apply=True)
+
+    assert counts["proposals_scanned"] == 1 and counts["proposals_legacy_invalid"] == 1
+    assert [(r["proposal_id"], r["status"]) for r in fake.tables["proposal_validations"]] == [
+        ("00000000-0000-4000-8000-000000000001", "legacy_invalid")
+    ]
+    again = await backfill(db, apply=True)
+    assert again["proposals_already_validated"] == 1
+    assert len(fake.tables["proposal_validations"]) == 1

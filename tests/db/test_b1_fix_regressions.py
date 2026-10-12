@@ -819,3 +819,115 @@ async def test_a_system_actor_is_only_a_migration_identity(deck: Deck) -> None:
             key="sys",
         )
     assert await head(deck.service, deck.document) == deck.r0
+
+
+# ------------------------------------------------- 10. backfill truthfulness
+
+
+async def _legacy_database() -> tuple[str, Any]:
+    """A database at migration 015 with one user, ready for legacy rows."""
+
+    from tests.db.support import connect, create_database, database_url, migrations_through
+
+    name = await create_database(migrations_through("015"))
+    conn = await connect(database_url(name))
+    return name, conn
+
+
+async def _project(conn: Any, owner: uuid.UUID, kind: str) -> uuid.UUID:
+    project = uuid.uuid4()
+    await conn.execute(
+        "insert into projects (id, user_id, type, title, language, audience)"
+        " values ($1, $2, $3, 'T', 'uz', 'talaba')",
+        project,
+        owner,
+        kind,
+    )
+    return project
+
+
+async def test_016_keeps_each_revisions_schema_version_and_inventories_it() -> None:
+    from tests.db.support import apply, drop_database, migration_016
+
+    name, conn = await _legacy_database()
+    try:
+        owner = uuid.uuid4()
+        await conn.execute("insert into users (id, telegram_id) values ($1, 5151)", owner)
+        project = await _project(conn, owner, "presentation")
+        document = uuid.uuid4()
+        revision = uuid.uuid4()
+        await conn.execute(
+            "insert into documents (id, project_id, kind, schema_version)"
+            " values ($1, $2, 'presentation', 2)",
+            document,
+            project,
+        )
+        await conn.execute(
+            "insert into document_revisions (id, document_id, idempotency_key, content, content_hash)"
+            " values ($1, $2, 'v2', '{\"t\": 2}'::jsonb, repeat('b', 64))",
+            revision,
+            document,
+        )
+        await conn.execute(
+            "update documents set head_revision_id = $1 where id = $2", revision, document
+        )
+
+        await apply(conn, migration_016())
+
+        version = await conn.fetchval(
+            "select schema_version from document_revisions where id = $1", revision
+        )
+        assert version == 2, "a version-2 document's revision was relabelled"
+        report = {
+            row["item"]: row["value"]
+            for row in await conn.fetch(
+                "select item, value from migration_reports where migration = '016'"
+            )
+        }
+        assert report["revisions:presentation:v2"] == 1
+        assert report["revisions_with_unregistered_schema_version"] == 1
+        await conn.close()
+    finally:
+        await drop_database(name)
+
+
+async def test_016_persists_its_backfill_counts_including_skipped_rows() -> None:
+    from tests.db.support import apply, drop_database, migration_016
+
+    name, conn = await _legacy_database()
+    try:
+        owner = uuid.uuid4()
+        await conn.execute("insert into users (id, telegram_id) values ($1, 5252)", owner)
+        for kind in ("presentation", "article"):
+            project = await _project(conn, owner, kind)
+            await conn.execute(
+                "insert into decks (project_id, title, language, audience, deck_json)"
+                " values ($1, 'T', 'uz', 'talaba', '{\"title\": \"legacy\"}'::jsonb)",
+                project,
+            )
+
+        await apply(conn, migration_016())
+
+        rows = await conn.fetch("select item, value from migration_reports where migration = '016'")
+        report = {row["item"]: row["value"] for row in rows}
+        assert (report["legacy_decks"], report["imported_as_head"]) == (2, 1)
+        assert report["skipped_non_presentation_project"] == 1
+        kept = await conn.fetchval("select count(*) from decks_legacy")
+        assert kept == 2  # the skipped row is kept, not dropped
+        await conn.close()
+    finally:
+        await drop_database(name)
+
+
+async def test_a_pending_import_proposal_can_carry_a_validation_verdict(deck: Deck) -> None:
+    proposal = await deck.service.fetchrow(
+        "select * from commit_revision($1, null, '{\"legacy\": true}'::jsonb, 'import', 1,"
+        " 'system:migration-016', 'import:legacy-deck:x')",
+        uuid.UUID(deck.document),
+    )
+    assert proposal["status"] == "proposed"
+    recorded = await deck.service.fetchval(
+        "select record_proposal_validation($1, 'content-models-v1', 'legacy_invalid', 'bad')",
+        proposal["proposal_id"],
+    )
+    assert recorded == "recorded"

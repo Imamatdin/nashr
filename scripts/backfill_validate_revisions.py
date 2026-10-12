@@ -3,8 +3,10 @@
 Migration 016 imports every legacy deck through ``commit_revision`` and never
 drops content, valid or not. DeckSpec / ArticleDocumentContent validation is
 Python, so it runs here, after the migration: every ``import`` revision without a
-``revision_validations`` row is validated and a write-once verdict is recorded
-(``valid`` or ``legacy_invalid`` with the first errors). Keyset-paginated, so it
+``revision_validations`` row, and every pending ``import`` proposal (a divergent
+legacy deck) without a ``proposal_validations`` row, is validated and a write-once
+verdict is recorded (``valid`` or ``legacy_invalid`` with the first errors), so an
+owner never accepts a legacy proposal blind. Keyset-paginated, so it
 resumes where it stopped; already-validated revisions are skipped, so a second
 run changes nothing. Dry-run by default; ``--apply`` records verdicts.
 
@@ -60,17 +62,16 @@ def judge(revision_id: str, kind: DocumentKind, content: Any) -> Verdict:
     return Verdict(revision_id=revision_id, valid=True, detail=None)
 
 
-async def _page(db: DatabaseClient, after: str) -> list[dict[str, Any]]:
+async def _page(db: DatabaseClient, after: str, *, proposals: bool) -> list[dict[str, Any]]:
     def run() -> Any:
-        return (
-            db._query("document_revisions")  # pyright: ignore[reportPrivateUsage]
+        query = (
+            db._query("revision_proposals" if proposals else "document_revisions")  # pyright: ignore[reportPrivateUsage]
             .select("id,document_id,content")
             .eq("kind", "import")
-            .gt("id", after)
-            .order("id")
-            .limit(_PAGE)
-            .execute()
         )
+        if proposals:
+            query = query.eq("status", "pending")
+        return query.gt("id", after).order("id").limit(_PAGE).execute()
 
     result = await asyncio.to_thread(run)
     return cast(list[dict[str, Any]], list(result.data or []))
@@ -92,18 +93,29 @@ async def _lookup(
 
 
 async def backfill(db: DatabaseClient, *, apply: bool) -> dict[str, int]:
-    """Validate every unvalidated import revision; record verdicts when ``apply``."""
+    """Validate unvalidated import revisions and pending import proposals."""
+
+    counts = await _validate(db, apply=apply, proposals=False)
+    for key, value in (await _validate(db, apply=apply, proposals=True)).items():
+        counts[f"proposals_{key}"] = value
+    return counts
+
+
+async def _validate(db: DatabaseClient, *, apply: bool, proposals: bool) -> dict[str, int]:
+    """One pass over revisions or pending proposals; record verdicts when ``apply``."""
 
     store = DocumentStore(db)
+    table, column = (
+        ("proposal_validations", "proposal_id")
+        if proposals
+        else ("revision_validations", "revision_id")
+    )
     counts = {"scanned": 0, "already_validated": 0, "valid": 0, "legacy_invalid": 0}
     after = "00000000-0000-0000-0000-000000000000"
-    while rows := await _page(db, after):
+    while rows := await _page(db, after, proposals=proposals):
         after = str(rows[-1]["id"])
         ids = [str(row["id"]) for row in rows]
-        done = {
-            str(r["revision_id"])
-            for r in await _lookup(db, "revision_validations", "revision_id", ids)
-        }
+        done = {str(r[column]) for r in await _lookup(db, table, column, ids)}
         documents = {
             str(d["id"]): DocumentKind(str(d["kind"]))
             for d in await _lookup(
@@ -118,8 +130,20 @@ async def backfill(db: DatabaseClient, *, apply: bool) -> dict[str, int]:
             verdict = judge(str(row["id"]), documents[str(row["document_id"])], row["content"])
             counts["valid" if verdict.valid else "legacy_invalid"] += 1
             if not verdict.valid:
-                print(json.dumps({"legacy_invalid": verdict.revision_id, "detail": verdict.detail}))
-            if apply:
+                print(
+                    json.dumps(
+                        {
+                            "legacy_invalid": verdict.revision_id,
+                            "proposal": proposals,
+                            "detail": verdict.detail,
+                        }
+                    )
+                )
+            if apply and proposals:
+                await store.record_proposal_validation(
+                    verdict.revision_id, VALIDATOR, verdict.valid, verdict.detail
+                )
+            elif apply:
                 await store.record_validation(
                     verdict.revision_id, VALIDATOR, verdict.valid, verdict.detail
                 )

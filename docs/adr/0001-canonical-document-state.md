@@ -80,7 +80,7 @@ disagree about which one is authoritative (full inventory in Appendix A).
 | Column | Change | Notes |
 |---|---|---|
 | `kind` | add, `text not null` | `generation, regeneration, manual, autosave, ai_edit, bot_edit, import, restore`; legacy rows backfilled to `import` |
-| `schema_version` | add, `int not null` | checked against `document_schema_versions` for the document's kind inside `commit_revision`; legacy rows = 1 |
+| `schema_version` | add, `int not null` | checked against `document_schema_versions` for the document's kind inside `commit_revision`; legacy rows inherit their document's `schema_version` (B1-FIX: 011 allowed other versions; they were labelled 1), and 016 inventories versions in `migration_reports` |
 | `content_sha256` | rename of `content_hash` | DB-computed `sha256(content::text)` (jsonb text is canonical: keys sorted, whitespace normalized) |
 | `actor` | add, `text not null` | `<user uuid>`, `worker:<job uuid>`, `bot:<telegram id>`, or `system:<name>` (import only); legacy = `created_by` or `system:legacy` |
 | `created_by` | kept | the resolved owning user, so history can show a person even for worker/bot actors |
@@ -269,7 +269,11 @@ Costs and how each is paid:
   changes exactly when the head moves (`updated_at` trigger). `documents` is added to
   `supabase_realtime` with replica identity full.
 - **`design_directions` FK.** Nothing to do: foreign keys bind to the table, not the
-  name, so after the rename it points at `decks_legacy` and keeps its rows valid.
+  name, so after the rename `design_directions.deck_id` points at `decks_legacy.id`
+  and keeps its rows valid. Note the mapping (Codex review): a `design_directions`
+  row refers to a *legacy* deck id, while `decks.id` in the new view is the document
+  id, so the two ids are not interchangeable. No code reads or writes
+  `design_directions` today; a future reader must join through `decks_legacy`.
 - **Row security on a view** needs `security_invoker = true` (PostgreSQL ≥ 15). The
   migration asserts `server_version_num >= 150000` and aborts otherwise. Production's
   version is **unverified** from here.
@@ -489,9 +493,17 @@ blocks that check catalog state):
    legacy jobs without `deducted_amount` get it stamped from the price list in force,
    so the database can settle their refund.
 
+016 persists what it found in `migration_reports` (B1-FIX): every backfill count,
+including legacy rows skipped because their project is not a presentation (they stay
+in `decks_legacy`), the revision count per (kind, schema_version), and how many
+revisions carry an unregistered version (kept and readable; new writes of that
+version are refused).
+
 `scripts/backfill_validate_revisions.py` then validates every `import` revision
 against `DeckSpec` / `ArticleDocumentContent` in keyset-paginated batches, inserting a
-`revision_validations` row (`valid` or `legacy_invalid` with the first errors). It
+`revision_validations` row (`valid` or `legacy_invalid` with the first errors), and
+every pending `import` proposal (a divergent legacy deck) into `proposal_validations`
+(B1-FIX), so an owner never accepts a legacy proposal blind. It
 skips revisions already validated (resumable, idempotent), defaults to dry-run, and
 prints counts. DeckSpec validation is Python; it cannot run inside the migration,
 which is why flagging is a separate pass and why the import itself never depends on

@@ -113,6 +113,18 @@
     "test_a_system_actor_is_only_a_migration_identity": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bDataError\\b"
+    },
+    "test_016_keeps_each_revisions_schema_version_and_inventories_it": {
+      "expect": "fail",
+      "match": "AssertionError: a version-2 document's revision was relabelled"
+    },
+    "test_016_persists_its_backfill_counts_including_skipped_rows": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \\\"migration_reports\\\" does not exist"
+    },
+    "test_a_pending_import_proposal_can_carry_a_validation_verdict": {
+      "expect": "fail",
+      "match": "UndefinedFunctionError: function record_proposal_validation"
     }
   }
 }

@@ -662,6 +662,22 @@ class DocumentRpcEmulator:
         )
         return "recorded"
 
+    def record_proposal_validation(self, params: dict[str, Any]) -> str:
+        """Write-once validation verdict for a proposal."""
+
+        if self._one("proposal_validations", proposal_id=params["p_proposal_id"]) is not None:
+            return "exists"
+        self._rows("proposal_validations").append(
+            {
+                "proposal_id": params["p_proposal_id"],
+                "validator": params["p_validator"],
+                "status": params["p_status"],
+                "detail": params["p_detail"],
+                "created_at": self._now(),
+            }
+        )
+        return "recorded"
+
     def call(self, fn: str, params: dict[str, Any]) -> SimpleNamespace | None:
         """Dispatch ``fn``; None when it is not one of the emulated functions."""
 
@@ -677,6 +693,7 @@ class DocumentRpcEmulator:
             "complete_job": self.complete_job,
             "finish_generation_job": self.finish_generation_job,
             "fail_job": self.fail_job,
+            "record_proposal_validation": self.record_proposal_validation,
         }.get(fn)
         if handler is None:
             return None
