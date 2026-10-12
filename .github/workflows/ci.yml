@@ -75,7 +75,7 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_PASSWORD: ci-postgres
-        ports: ["5432:5432"]
+        ports: ["127.0.0.1:5432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 20
@@ -128,7 +128,7 @@ jobs:
       - name: PostgREST on a migrated database
         run: |
           python -m tests.db.migrate nashr_rest
-          docker run -d --name postgrest --network host \
+          docker run -d --name postgrest --network host -e PGRST_SERVER_HOST=127.0.0.1 \
             -e PGRST_DB_URI="postgres://authenticator:local-authenticator@127.0.0.1:5432/nashr_rest" \
             -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=anon \
             -e PGRST_JWT_SECRET="$JWT_SECRET" -e PGRST_SERVER_PORT=3000 \
@@ -183,7 +183,7 @@ jobs:
       # model, payment or deploy secrets).
       - name: MinIO as the R2 stand-in
         run: |
-          docker run -d --name s3 -p 54322:9000 \
+          docker run -d --name s3 -p 127.0.0.1:54322:9000 \
             -e MINIO_ROOT_USER=local-access -e MINIO_ROOT_PASSWORD=local-secret \
             pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 \
             server /data
@@ -201,7 +201,7 @@ jobs:
           echo "TELEGRAM_BOT_TOKEN=0:ci-placeholder" >> "$GITHUB_ENV"
       - name: Start API and worker
         run: |
-          nohup python -m packages.api.run > artifacts/api.log 2>&1 &
+          API_HOST=127.0.0.1 nohup python -m packages.api.run > artifacts/api.log 2>&1 &
           nohup python scripts/worker_run_job.py --loop > artifacts/worker.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8090/health >/dev/null && break; sleep 1; done
           curl -sf http://127.0.0.1:8090/health
@@ -210,7 +210,7 @@ jobs:
         run: |
           npm ci
           npm run build 2>&1 | tee ../../artifacts/next-build.log
-          nohup npx next start -p 3100 > ../../artifacts/next.log 2>&1 &
+          nohup npx next start -H 127.0.0.1 -p 3100 > ../../artifacts/next.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:3100/ >/dev/null && break; sleep 1; done
       - name: Seed and fixtures
         run: |

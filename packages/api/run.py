@@ -14,7 +14,9 @@ def main() -> None:
 
     port_raw = os.environ.get("API_PORT", "8090")
     port = int(port_raw) if port_raw.isdigit() else 8090
-    uvicorn.run(create_app(), host="0.0.0.0", port=port, log_level="info")
+    # 0.0.0.0 inside the container (Caddy reaches it); test stacks bind loopback.
+    host = os.environ.get("API_HOST", "0.0.0.0")
+    uvicorn.run(create_app(), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
