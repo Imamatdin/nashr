@@ -15,6 +15,19 @@ const results = [];
 const consoleErrors = [];
 const failedRequests = [];
 let currentPage = null;
+// The only browser errors the journey accepts are the ones it causes on purpose,
+// matched by URL and kind. Everything else is a defect and fails the run.
+const EXPECTED_ERRORS = [
+  // recovery steps abort or reset the article save request
+  { url: /\/documents\/article$/, kind: /^net::ERR_(INTERNET_DISCONNECTED|CONNECTION_RESET|FAILED)$/ },
+  // conflict steps save elsewhere first, so the browser's stale save gets 409
+  { url: /\/documents\/article$/, kind: /^409$/ },
+  // the local stack runs no Realtime server; the client falls back to polling
+  { url: /\/realtime\/v1\//, kind: /.*/ },
+];
+const errorKind = (text) => text.match(/net::ERR_[A-Z_]+/)?.[0] ?? text.match(/status of (\d{3})/)?.[1] ?? "other";
+const expectedError = (url, kind) =>
+  EXPECTED_ERRORS.some((rule) => rule.url.test(url.split("?")[0]) && rule.kind.test(kind));
 const redact = (text) =>
   text.replace(/apikey=[^&\s']+/g, "apikey=<redacted>").replace(/X-Amz-[A-Za-z]+=[^&\s]+/g, "X-Amz=<redacted>");
 
@@ -60,9 +73,18 @@ async function openProject(browser, locale, { viewport = { width: 1440, height: 
   }, [JSON.stringify(session), locale]);
   const page = await context.newPage();
   page.on("console", (message) => {
-    if (message.type() === "error" && !message.text().includes("/realtime/v1/")) consoleErrors.push(redact(`${locale}: ${message.text().slice(0, 300)}`));
+    if (message.type() !== "error") return;
+    const text = message.text();
+    const url = message.location()?.url ?? "";
+    const kind = errorKind(text);
+    consoleErrors.push({
+      text: redact(`${locale}: ${text.slice(0, 300)} @ ${new URL(url || "about:blank").pathname}`),
+      expected: expectedError(url, kind),
+    });
   });
-  page.on("pageerror", (error) => consoleErrors.push(`${locale} pageerror: ${error.message.slice(0, 300)}`));
+  page.on("pageerror", (error) =>
+    consoleErrors.push({ text: `${locale} pageerror: ${error.message.slice(0, 300)}`, expected: false }),
+  );
   page.on("response", (response) => {
     if (response.status() >= 400) failedRequests.push(redact(`${locale} ${response.status()} ${response.request().method()} ${new URL(response.url()).pathname}`));
   });
@@ -229,6 +251,12 @@ try {
 
   await step("recovery: a save whose response is lost replays instead of conflicting", async () => {
     const before = await revisions(uz);
+    // Every browser save in this step: the replay must be the SAME operation.
+    const puts = [];
+    const onRequest = (request) => {
+      if (request.method() === "PUT" && saveRoute(new URL(request.url()))) puts.push(JSON.parse(request.postData() ?? "{}"));
+    };
+    page.on("request", onRequest);
     let dropped = false;
     await page.route(saveRoute, async (route) => {
       if (route.request().method() !== "PUT" || dropped) return route.fallback();
@@ -239,7 +267,13 @@ try {
     await paragraph(page).locator("textarea").fill(`${blockText} Javob yo‘qoldi.`);
     await status(page, "Saqlandi");
     await page.unroute(saveRoute);
+    page.off("request", onRequest);
     assert.ok(dropped, "response was never dropped");
+    assert.ok(puts.length >= 2, `expected the lost save to be replayed; saw ${puts.length} browser PUT(s)`);
+    const [first, replay] = [puts[0], puts[puts.length - 1]];
+    assert.equal(replay.idempotency_key, first.idempotency_key, "replay used a new idempotency key");
+    assert.equal(replay.base_revision_id, first.base_revision_id, "replay changed its base");
+    assert.deepEqual(replay.content, first.content, "replay changed the content");
     assert.equal(await page.locator(".article-alert", { hasText: "boshqa joyda o‘zgardi" }).count(), 0, "false conflict");
     assert.equal(await revisions(uz), before + 1, "replay created an extra revision");
   });
@@ -298,6 +332,15 @@ try {
   // ---------------------------------------------------------------- isolation
   await step("isolation: another user cannot open the article", async () => {
     const intruder = { accessToken: seed.intruderToken, expiresAt: seed.session.expiresAt, userId: "00000000-0000-4000-8000-000000000000" };
+    // The API itself refuses the other user, whatever the page renders.
+    const direct = await fetch(`${API}/projects/${uz}/documents/article`, {
+      headers: { Authorization: `Bearer ${seed.intruderToken}` },
+    });
+    assert.ok([403, 404].includes(direct.status), `intruder read the article: HTTP ${direct.status}`);
+    const listed = await fetch(`${API}/projects/${uz}/documents/article/revisions`, {
+      headers: { Authorization: `Bearer ${seed.intruderToken}` },
+    });
+    assert.ok([403, 404].includes(listed.status), `intruder listed revisions: HTTP ${listed.status}`);
     const { context: other, page: otherPage } = await openProject(browser, "uz", { session: intruder });
     await otherPage.waitForTimeout(8000);
     const body = await otherPage.locator("body").innerText();
@@ -338,8 +381,15 @@ try {
 } finally {
   await browser.close();
   const unique = [...new Set(failedRequests)];
-  await writeFile(join(outDir, "results.json"), JSON.stringify({ results, consoleErrors, failedRequests: unique }, null, 2));
-  console.log(`${results.filter((r) => r.ok).length}/${results.length} steps passed; console errors: ${consoleErrors.length}`);
-  for (const line of [...new Set(consoleErrors)].slice(0, 10)) console.log(`  ${line}`);
-  process.exitCode = results.every((result) => result.ok) ? 0 : 1;
+  const unexpected = [...new Set(consoleErrors.filter((e) => !e.expected).map((e) => e.text))];
+  const expected = consoleErrors.filter((e) => e.expected).length;
+  await writeFile(
+    join(outDir, "results.json"),
+    JSON.stringify({ results, unexpectedConsoleErrors: unexpected, expectedConsoleErrors: expected, consoleErrors, failedRequests: unique }, null, 2),
+  );
+  console.log(
+    `${results.filter((r) => r.ok).length}/${results.length} steps passed; console errors: ${unexpected.length} unexpected, ${expected} injected`,
+  );
+  for (const line of unexpected.slice(0, 20)) console.log(`  UNEXPECTED ${line}`);
+  process.exitCode = results.every((result) => result.ok) && unexpected.length === 0 ? 0 : 1;
 }
