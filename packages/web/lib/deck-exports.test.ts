@@ -17,18 +17,45 @@ const base: DeckAccessView = {
   is_head: true,
   state: "ready",
   renderer_version: "pw-1",
+  required_formats: ["html", "pdf", "pptx"],
+  available_formats: ["html", "pdf", "pptx"],
+  missing_formats: [],
   current: links("head"),
   fallback: null,
 };
 
 describe("shownExports never passes an older export off as the current one", () => {
   it("shows the head's own exports without a notice", () => {
-    expect(shownExports(base)).toEqual({ exports: links("head"), notice: null });
+    expect(shownExports(base)).toEqual({ exports: links("head"), notice: null, missing: [] });
   });
 
   it("says a render is needed when nothing exists", () => {
-    const deck = { ...base, state: "render_needed" as const, current: null };
-    expect(shownExports(deck)).toEqual({ exports: null, notice: "renderNeeded" });
+    const deck = {
+      ...base,
+      state: "render_needed" as const,
+      current: null,
+      available_formats: [],
+      missing_formats: ["html", "pdf", "pptx"],
+    };
+    expect(shownExports(deck)).toEqual({
+      exports: null,
+      notice: "renderNeeded",
+      missing: ["html", "pdf", "pptx"],
+    });
+  });
+
+  it("never presents a partial set as complete and names what is missing", () => {
+    const deck = {
+      ...base,
+      state: "partial" as const,
+      available_formats: ["html"],
+      missing_formats: ["pdf", "pptx"],
+    };
+    expect(shownExports(deck)).toEqual({
+      exports: links("head"),
+      notice: "partial",
+      missing: ["pdf", "pptx"],
+    });
   });
 
   it("labels an earlier version's export", () => {

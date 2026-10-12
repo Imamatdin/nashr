@@ -21,12 +21,15 @@ from packages.platform.storage import FileStorage
 
 DECK_HTML_TTL_SECONDS = 900
 DOWNLOAD_TTL_SECONDS = 3600
+# Every primary format is delivered (SPEC §0 rule 7); fewer is a partial set.
+REQUIRED_FORMATS: tuple[str, ...] = ("html", "pdf", "pptx")
 
 
 class DeckExportState(StrEnum):
-    """Whether the requested revision has exports from the current renderer."""
+    """How much of the required set the current renderer has made for the revision."""
 
     READY = "ready"
+    PARTIAL = "partial"
     RENDER_NEEDED = "render_needed"
 
 
@@ -76,6 +79,9 @@ class DeckAccessView(BaseModel):
     is_head: bool
     state: DeckExportState
     renderer_version: str
+    required_formats: list[str]
+    available_formats: list[str]
+    missing_formats: list[str]
     current: ExportLinks | None
     fallback: FallbackExport | None
 
@@ -138,12 +144,25 @@ async def deck_access(
     fallback: FallbackExport | None = None
     if current is None:
         fallback = await _fallback(store, storage, head.document_id, target, groups)
+    available = sorted({record.format.value for record in current or []})
+    missing = [name for name in REQUIRED_FORMATS if name not in available]
+    if not missing:
+        state = DeckExportState.READY
+    elif available:
+        # A render that failed after registering some formats (or a bot render
+        # of fewer formats) is not "ready": say exactly what is missing.
+        state = DeckExportState.PARTIAL
+    else:
+        state = DeckExportState.RENDER_NEEDED
     return DeckAccessView(
         revision_id=target,
         head_revision_id=head.revision_id,
         is_head=target == head.revision_id,
-        state=DeckExportState.READY if current is not None else DeckExportState.RENDER_NEEDED,
+        state=state,
         renderer_version=version,
+        required_formats=list(REQUIRED_FORMATS),
+        available_formats=available,
+        missing_formats=missing,
         current=await _links(storage, current) if current is not None else None,
         fallback=fallback,
     )
@@ -199,6 +218,7 @@ async def shared_head_links(
 __all__ = [
     "DECK_HTML_TTL_SECONDS",
     "DOWNLOAD_TTL_SECONDS",
+    "REQUIRED_FORMATS",
     "DeckAccessView",
     "DeckExportState",
     "DeckNotReadyError",

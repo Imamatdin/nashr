@@ -101,11 +101,14 @@ class RenderDesignView(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    job_id: str
+    # None when nothing was missing: every format is already registered.
+    job_id: str | None
     status: str
     existing: bool = False
     revision_id: UUID
     renderer_version: str
+    # The formats this render produces: only those not registered yet.
+    formats: list[str] = Field(default_factory=list)
 
 
 def _deck(content: dict[str, Any], revision_id: str) -> DeckSpec:
@@ -271,7 +274,18 @@ async def render_design(
     if not decision.allowed:
         raise HTTPException(status_code=429, detail="rate_limited")
     version = renderer_version()
-    formats = file_formats(_RENDER_FORMATS)
+    # Resume, never redo: a format already registered for this revision and
+    # renderer is immutable (first writer wins), so only the missing ones render.
+    registered = {
+        record.format.value
+        for record in await document_store(request).exports([revision.id])
+        if record.renderer_version == version
+    }
+    formats = [name for name in file_formats(_RENDER_FORMATS) if name not in registered]
+    if not formats:
+        return RenderDesignView(
+            job_id=None, status="ready", revision_id=UUID(revision.id), renderer_version=version
+        )
     existing = await request.app.state.job_queue.get_active_render_job(
         revision.id, version, formats
     )
@@ -282,6 +296,7 @@ async def render_design(
             existing=True,
             revision_id=UUID(revision.id),
             renderer_version=version,
+            formats=formats,
         )
     try:
         job = await request.app.state.job_queue.enqueue(
@@ -303,10 +318,12 @@ async def render_design(
             existing=True,
             revision_id=UUID(revision.id),
             renderer_version=version,
+            formats=formats,
         )
     return RenderDesignView(
         job_id=job.id,
         status=job.status.value,
         revision_id=UUID(revision.id),
         renderer_version=version,
+        formats=formats,
     )

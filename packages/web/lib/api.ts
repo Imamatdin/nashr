@@ -361,7 +361,9 @@ export interface DesignDocumentView {
   updated_at: string;
 }
 export interface DesignRenderView {
-  job_id: string;
+  // null when every format was already registered: nothing to render.
+  job_id: string | null;
+  formats: string[];
   status: string;
   existing: boolean;
   revision_id: string;
@@ -662,8 +664,12 @@ export interface DeckAccessView {
   revision_id: string;
   head_revision_id: string;
   is_head: boolean;
-  state: "ready" | "render_needed";
+  // partial: the current renderer made some of the required formats only.
+  state: "ready" | "partial" | "render_needed";
   renderer_version: string;
+  required_formats: string[];
+  available_formats: string[];
+  missing_formats: string[];
   current: ExportLinks | null;
   fallback: FallbackExport | null;
 }

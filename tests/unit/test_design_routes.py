@@ -332,6 +332,53 @@ async def test_render_of_another_revision_gets_its_own_job() -> None:
     assert newer.json()["revision_id"] == saved.json()["revision_id"]
 
 
+def _register(h: _Harness, formats: tuple[str, ...]) -> None:
+    """Exports of the harness revision as an earlier render registered them."""
+
+    document = h.fake.tables["documents"][0]
+    for name in formats:
+        h.fake.tables.setdefault("revision_exports", []).append(
+            {
+                "revision_id": h.revision_id,
+                "format": name,
+                "renderer_version": renderer_version(),
+                "storage_key": f"exports/{document['id']}/{h.revision_id}/x/{name}/k.{name}",
+                "sha256": "a" * 64,
+                "byte_size": 1,
+                "page_count": None,
+                "created_by_job": None,
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        )
+
+
+async def test_render_resumes_a_partial_set_with_only_the_missing_formats() -> None:
+    # An earlier render registered html, then failed before pdf and pptx.
+    h = _Harness()
+    _register(h, ("html",))
+    response = await h.client.post(
+        f"/projects/{_PROJECT_ID}/design/render",
+        json={"revision_id": h.revision_id},
+        headers=_headers(),
+    )
+    assert response.status_code == 200
+    assert response.json()["formats"] == ["pdf", "pptx"]
+    assert h.queue.enqueued[0]["payload"]["formats"] == ["pdf", "pptx"]
+
+
+async def test_render_of_a_complete_set_queues_nothing() -> None:
+    h = _Harness()
+    _register(h, ("html", "pdf", "pptx"))
+    response = await h.client.post(
+        f"/projects/{_PROJECT_ID}/design/render",
+        json={"revision_id": h.revision_id},
+        headers=_headers(),
+    )
+    body = response.json()
+    assert (body["status"], body["job_id"], body["formats"]) == ("ready", None, [])
+    assert h.queue.enqueued == []
+
+
 async def test_render_of_an_unknown_revision_is_404() -> None:
     h = _Harness()
     response = await h.client.post(

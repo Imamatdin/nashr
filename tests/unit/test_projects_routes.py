@@ -257,6 +257,36 @@ async def test_deck_access_returns_short_html_ttl_and_hour_downloads() -> None:
     assert body["fallback"] is None
 
 
+async def test_a_partial_export_set_is_reported_as_partial_with_what_is_missing() -> None:
+    # Codex B1 finding 7: html registered, the job then failed before pdf and
+    # pptx. That is not "ready".
+    client, db, _limiter = _client()
+    head = _delivered(db, formats=("html",))
+    response = await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())
+    body = response.json()
+    assert body["revision_id"] == head
+    assert body["state"] == "partial"
+    assert body["required_formats"] == ["html", "pdf", "pptx"]
+    assert body["available_formats"] == ["html"]
+    assert body["missing_formats"] == ["pdf", "pptx"]
+    assert body["current"]["downloads"] == []  # html is the viewer, not a download
+
+
+async def test_a_complete_set_is_ready_and_nothing_is_missing() -> None:
+    client, db, _limiter = _client()
+    _delivered(db)
+    body = (await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())).json()
+    assert (body["state"], body["missing_formats"]) == ("ready", [])
+
+
+async def test_no_export_at_all_is_render_needed() -> None:
+    client, db, _limiter = _client()
+    _seed_deck(db)
+    body = (await client.get(f"/projects/{_PROJECT_ID}/deck", headers=_headers())).json()
+    assert body["state"] == "render_needed"
+    assert body["available_formats"] == [] and body["missing_formats"] == ["html", "pdf", "pptx"]
+
+
 # -------------------------------------------------------------------- share
 
 

@@ -357,7 +357,13 @@ closed. Every function and constraint in 016 was checked (2026-10-12):
   validation (legacy import) returns `409 {reason: "legacy_invalid", revision_id}`
   instead of a 500.
 - Downloads (`GET /projects/{id}/deck?revision_id=`, default head):
-  exact `(revision, current renderer)` exports exist → signed URLs, `state: ready`.
+  exact `(revision, current renderer)` exports exist → signed URLs. The view states
+  `required_formats` (html, pdf, pptx), `available_formats` and `missing_formats`, and
+  `state` is `ready` only when nothing is missing, `partial` when some formats are
+  registered (a render that failed part-way, or a bot render of fewer formats; Codex
+  B1 finding 7), `render_needed` when none are. The UI names the missing formats;
+  `POST /design/render` queues only the missing ones and answers `ready` with no job
+  when nothing is missing.
   Otherwise `state: render_needed`, plus an optional `fallback` (the same revision
   rendered by an earlier renderer, or the newest older revision with exports),
   flagged so the UI must label it as older.

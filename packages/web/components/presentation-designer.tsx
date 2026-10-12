@@ -260,7 +260,11 @@ export function PresentationDesigner({
       const result = await withAuth((token) =>
         renderDesign(projectId, view.revision_id, token),
       );
-      if (result) setRenderJob(result.job_id);
+      if (result && result.job_id === null) {
+        // Every format was already registered; nothing had to render.
+        setRenderState("rendered");
+        await load();
+      } else if (result) setRenderJob(result.job_id);
     } catch {
       setRenderState("error");
     }
@@ -356,6 +360,14 @@ export function PresentationDesigner({
         {deck.state === "render_needed" && (
           <p className="designer-render-needed" role="status">
             {t.renderNeeded}
+          </p>
+        )}
+        {shown.notice === "partial" && (
+          <p className="designer-render-needed" role="status">
+            {t.partial.replace(
+              "{formats}",
+              shown.missing.map((name) => name.toUpperCase()).join(", "),
+            )}
           </p>
         )}
         {previewNote && deck.fallback && (
