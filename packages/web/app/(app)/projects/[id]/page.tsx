@@ -269,6 +269,11 @@ export default function ProjectPage() {
       .catch(() => undefined);
   }, [loadDeck, loadProvenance, loadDecisions, projectId, withAuth]);
 
+  // Only a deck project has generation jobs, a deck, decisions and a chat; an
+  // article project asked for them and collected a 404 for each (and a 404
+  // per job poll). Nothing deck-shaped is requested until the type is known.
+  const deckProject = project !== null && project.type !== "article";
+
   const {
     job,
     state: jobState,
@@ -280,6 +285,7 @@ export default function ProjectPage() {
     session,
     withAuth,
     onDeckChanged,
+    enabled: deckProject,
   });
 
   // --------------------------------------------------------------- RLS reads
@@ -293,13 +299,18 @@ export default function ProjectPage() {
       .select("*")
       .eq("id", projectId)
       .abortSignal(AbortSignal.timeout(SUPABASE_TIMEOUT_MS))
-      .single()
+      // maybeSingle, not single: a row RLS hides (another user's project) is
+      // zero rows, which .single() turns into HTTP 406 (PGRST116) and a console
+      // error. Zero rows is simply "not found".
+      .maybeSingle()
       .then(({ data, error, status }) => {
         // A PostgREST sentence is not user copy (§4 ledger row 6) — but neither
         // is a hardcoded 404. supabase-js RESOLVES on a dead network with
         // status 0, so collapsing every failure onto "project_not_found" told a
         // user with a dropped connection that their project did not exist.
         if (error) setProjectError(supabaseFailure(error, status));
+        else if (data === null)
+          setProjectError(new ApiError(404, "project_not_found"));
         else {
           const row = data as ProjectRow;
           setProject(row);
@@ -330,28 +341,24 @@ export default function ProjectPage() {
     if (!session) return;
     loadProject();
     refreshSources();
-    void loadDeck();
     void loadProvenance();
-    void loadDecisions();
-    void withAuth((token) => getChat(projectId, token))
-      .then((view) => view && setChat(view))
-      .catch(() => undefined);
     getPricing()
       .then(setPricing)
       .catch(() => undefined);
     return () => {
       if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
     };
-  }, [
-    session,
-    projectId,
-    loadProject,
-    refreshSources,
-    loadDeck,
-    loadProvenance,
-    loadDecisions,
-    withAuth,
-  ]);
+  }, [session, projectId, loadProject, refreshSources, loadProvenance]);
+
+  // The deck-shaped reads wait for the project type (see deckProject).
+  useEffect(() => {
+    if (!session || !deckProject) return;
+    void loadDeck();
+    void loadDecisions();
+    void withAuth((token) => getChat(projectId, token))
+      .then((view) => view && setChat(view))
+      .catch(() => undefined);
+  }, [session, deckProject, projectId, loadDeck, loadDecisions, withAuth]);
 
   // Re-mint the signed deck URL before it expires (G20).
   useEffect(() => {

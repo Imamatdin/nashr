@@ -48,6 +48,11 @@ export interface LiveJobOptions {
   withAuth: <T>(call: (token: string) => Promise<T>) => Promise<T | null>;
   /** Fired when the decks row changes — the workspace re-fetches signed URLs. */
   onDeckChanged: () => void;
+  /**
+   * False for a project that has no generation jobs (an article): nothing is
+   * polled or subscribed, and the state is "absent" rather than a stream of 404s.
+   */
+  enabled?: boolean;
 }
 
 export function useLiveJob({
@@ -55,6 +60,7 @@ export function useLiveJob({
   session,
   withAuth,
   onDeckChanged,
+  enabled = true,
 }: LiveJobOptions): LiveJob {
   const [job, setJob] = useState<JobView | null>(null);
   const [state, setState] = useState<JobLoadState>("loading");
@@ -119,6 +125,11 @@ export function useLiveJob({
   useEffect(() => {
     stopped.current = false;
     if (!session) return;
+    if (!enabled) {
+      setJob(null);
+      setState("absent");
+      return;
+    }
 
     void readJob().then(() => {
       if (!stopped.current) schedule(backoff.current);
@@ -172,7 +183,7 @@ export function useLiveJob({
       if (timer.current !== null) window.clearTimeout(timer.current);
       if (channel) void channel.unsubscribe();
     };
-  }, [projectId, session, readJob, schedule]);
+  }, [projectId, session, enabled, readJob, schedule]);
 
   return { job, state, error, live, refresh };
 }
