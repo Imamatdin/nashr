@@ -173,10 +173,15 @@ class Db:
         job_type: str = "presentation_render",
         payload: dict[str, Any] | None = None,
         attempts: int = 1,
+        conn: Any = None,
     ) -> str:
-        """A job row; a processing one holds a live claim (``worker``, attempt ``attempts``)."""
+        """A job row; a processing one holds a live claim (``worker``, attempt ``attempts``).
 
-        conn = await self._seed()
+        ``conn`` lets concurrent callers insert on their own connection (the shared
+        seeding connection runs one statement at a time).
+        """
+
+        conn = conn if conn is not None else await self._seed()
         job_id = str(uuid.uuid4())
         body = payload if payload is not None else {}
         if job_type == "presentation_render":
