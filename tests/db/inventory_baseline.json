@@ -77,6 +77,18 @@
     "test_016_installs_the_refund_index_even_over_legacy_duplicate_refunds": {
       "expect": "fail",
       "match": "AssertionError: 016 finished without the refund index"
+    },
+    "test_a_retried_unchanged_commit_replays_after_the_head_moved": {
+      "expect": "fail",
+      "match": "AssertionError: assert \\('conflict', None\\) == \\('unchanged'"
+    },
+    "test_an_unchanged_commits_key_cannot_be_reused_for_other_content": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*\\bUniqueViolationError\\b"
+    },
+    "test_a_replayed_no_op_accept_returns_its_result": {
+      "expect": "fail",
+      "match": "ObjectNotInPrerequisiteStateError: proposal_not_pending"
     }
   }
 }

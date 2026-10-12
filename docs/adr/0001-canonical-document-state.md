@@ -134,8 +134,11 @@ idempotency_key) → (status, document_id, revision_id, head_revision_id, propos
 4. Idempotency: same key with same hash on a revision → `duplicate` (original id);
    on a proposal → `proposed` (original proposal id); same key with different hash →
    `idempotency_key_reused` error.
-5. No-op: content hash equals the head's → `unchanged` with the head id; nothing is
-   written, whatever the base. An identical autosave would otherwise advance the head
+5. No-op: content hash equals the head's → `unchanged` with the head id; no revision
+   is written, whatever the base, but a `document_operation_receipts` row records the
+   key, hash and result (B1-FIX, Codex finding 6), so a retry after the head moved
+   replays `unchanged` instead of conflicting and the key cannot be reused for other
+   content. Step 4 consults receipts too. An identical autosave would otherwise advance the head
    and turn every in-flight AI edit on that head into a proposal.
 6. `base = head` → insert revision (`parent = head`), advance head, `committed`.
 7. `base ≠ head` → for `ai_edit`/`regeneration`/`import` insert a proposal, `proposed`; for any
@@ -188,6 +191,11 @@ unacceptable. Instead the caller states which head it showed the user:
    `accepted_from_proposal_id` set. The proposal becomes `accepted` with
    `resolved_at`/`resolved_by`. Other pending proposals stay pending. Nothing is lost,
    because the replaced head stays in history and can be restored.
+
+Accepting a proposal whose content already equals the head marks it accepted and
+returns `unchanged`; that no-op writes an `accept` receipt under the same lock, so a
+retried accept with the same key returns `unchanged` again rather than
+`proposal_not_pending`.
 
 `reject_proposal(proposal_id, actor)`: pending → rejected. `superseded` is kept in the
 status domain for the element-level rebase work; nothing sets it yet.

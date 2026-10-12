@@ -116,6 +116,29 @@ class DocumentRpcEmulator:
             }
         ]
 
+    def _receipt(
+        self,
+        document_id: str,
+        key: str,
+        operation: str,
+        digest: str,
+        revision_id: str | None,
+        proposal_id: str | None,
+    ) -> None:
+        self._rows("document_operation_receipts").append(
+            {
+                "id": str(uuid.uuid4()),
+                "document_id": document_id,
+                "idempotency_key": key,
+                "operation": operation,
+                "content_sha256": digest,
+                "result_status": "unchanged",
+                "revision_id": revision_id,
+                "proposal_id": proposal_id,
+                "created_at": self._now(),
+            }
+        )
+
     def _insert_revision(self, document: dict[str, Any], values: dict[str, Any]) -> str:
         revision_id = str(uuid.uuid4())
         self._rows("document_revisions").append(
@@ -206,9 +229,17 @@ class DocumentRpcEmulator:
             if proposal["content_sha256"] != digest:
                 raise refuse("idempotency_key_reused")
             return self._result("proposed", document["id"], None, head, proposal["id"])
+        receipt = self._one(
+            "document_operation_receipts", document_id=document["id"], idempotency_key=key
+        )
+        if receipt is not None:
+            if receipt["content_sha256"] != digest:
+                raise refuse("idempotency_key_reused")
+            return self._result("unchanged", document["id"], receipt["revision_id"], head, None)
 
         head_row = self._one("document_revisions", id=head) if head else None
         if head_row is not None and head_row["content_sha256"] == digest:
+            self._receipt(document["id"], key, "commit", digest, head, None)
             return self._result("unchanged", document["id"], head, head, None)
 
         if params["p_base_revision_id"] == head:
@@ -475,6 +506,20 @@ class DocumentRpcEmulator:
             if prior.get("accepted_from_proposal_id") != proposal["id"]:
                 raise refuse("idempotency_key_reused")
             return self._result("duplicate", document["id"], prior["id"], head, proposal["id"])
+        if self._one("revision_proposals", document_id=document["id"], idempotency_key=key):
+            raise refuse("idempotency_key_reused")
+        receipt = self._one(
+            "document_operation_receipts", document_id=document["id"], idempotency_key=key
+        )
+        if receipt is not None:
+            if (
+                receipt["proposal_id"] != proposal["id"]
+                or receipt["content_sha256"] != proposal["content_sha256"]
+            ):
+                raise refuse("idempotency_key_reused")
+            return self._result(
+                "unchanged", document["id"], receipt["revision_id"], head, proposal["id"]
+            )
         if proposal["status"] != "pending":
             raise refuse("proposal_not_pending")
         head_row = self._one("document_revisions", id=head) if head else None
@@ -482,6 +527,17 @@ class DocumentRpcEmulator:
             raise refuse("proposal_schema_mismatch")
         if params["p_expected_head_revision_id"] != head:
             return self._result("conflict", document["id"], None, head, proposal["id"])
+        if head_row is not None and head_row["content_sha256"] == proposal["content_sha256"]:
+            proposal.update(
+                status="accepted",
+                resolved_at=self._now(),
+                resolved_by=owner,
+                accepted_revision_id=head,
+            )
+            self._receipt(
+                document["id"], key, "accept", proposal["content_sha256"], head, proposal["id"]
+            )
+            return self._result("unchanged", document["id"], head, head, proposal["id"])
         revision_id = self._insert_revision(
             document,
             {

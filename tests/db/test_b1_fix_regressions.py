@@ -21,7 +21,7 @@ import pytest
 from packages.platform.storage import StoredObject
 from scripts.gc_orphan_exports import find_orphans
 from tests.db.conftest import BASELINE, LEGACY
-from tests.db.support import Db, commit, ensure_document, export_key, finish, head
+from tests.db.support import Db, accept, commit, ensure_document, export_key, finish, head
 
 pytestmark = pytest.mark.skipif(LEGACY, reason="B1-FIX regressions compare 016 before and after")
 
@@ -612,3 +612,90 @@ async def test_016_installs_the_refund_index_even_over_legacy_duplicate_refunds(
         await conn.close()
     finally:
         await drop_database(name)
+
+
+# ---------------------------------------------- 6. no-op idempotency receipts
+
+
+async def test_a_retried_unchanged_commit_replays_after_the_head_moved(deck: Deck) -> None:
+    same = await commit(
+        deck.service,
+        deck.document,
+        deck.r0,
+        {"t": "r0"},
+        kind="autosave",
+        actor=deck.owner,
+        key="k",
+    )
+    assert same["status"] == "unchanged"
+    await commit(
+        deck.service, deck.document, deck.r0, {"t": "r1"}, kind="manual", actor=deck.owner, key="m"
+    )
+    # The autosave's response was lost; the client retries the same operation.
+    replay = await commit(
+        deck.service,
+        deck.document,
+        deck.r0,
+        {"t": "r0"},
+        kind="autosave",
+        actor=deck.owner,
+        key="k",
+    )
+    assert (replay["status"], replay["revision_id"]) == ("unchanged", deck.r0)
+
+
+async def test_an_unchanged_commits_key_cannot_be_reused_for_other_content(deck: Deck) -> None:
+    await commit(
+        deck.service,
+        deck.document,
+        deck.r0,
+        {"t": "r0"},
+        kind="autosave",
+        actor=deck.owner,
+        key="k",
+    )
+    with pytest.raises(asyncpg.UniqueViolationError, match="idempotency_key_reused"):
+        await commit(
+            deck.service,
+            deck.document,
+            deck.r0,
+            {"t": "other"},
+            kind="autosave",
+            actor=deck.owner,
+            key="k",
+        )
+
+
+async def test_a_replayed_no_op_accept_returns_its_result(deck: Deck) -> None:
+    # The AI proposed P; the user then saved exactly P's content by hand, so
+    # accepting P changes nothing. The accept's response is lost and retried.
+    await commit(
+        deck.service,
+        deck.document,
+        deck.r0,
+        {"t": "mine"},
+        kind="manual",
+        actor=deck.owner,
+        key="m",
+    )
+    proposed = await deck.finish_as_a(deck.service)
+    assert proposed["status"] == "proposed"
+    saved = await commit(
+        deck.service,
+        deck.document,
+        await head(deck.service, deck.document),
+        {"t": "ai"},
+        kind="manual",
+        actor=deck.owner,
+        key="as-ai",
+    )
+    first = await accept(
+        deck.service, proposed["proposal_id"], saved["revision_id"], deck.owner, "a"
+    )
+    assert first["status"] == "unchanged"
+
+    again = await accept(
+        deck.service, proposed["proposal_id"], saved["revision_id"], deck.owner, "a"
+    )
+
+    assert (again["status"], again["revision_id"]) == ("unchanged", saved["revision_id"])

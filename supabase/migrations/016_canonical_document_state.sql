@@ -128,6 +128,24 @@ create table if not exists revision_exports (
     primary key (revision_id, format, renderer_version)
 );
 
+-- A successful operation that wrote no revision or proposal (an identical
+-- commit, accepting a proposal equal to the head) still consumes its idempotency
+-- key: the receipt records the key, the content hash and the result, so a retry
+-- after the head moved replays that result instead of conflicting, and the key
+-- cannot be reused for other content (Codex B1 finding 6).
+create table if not exists document_operation_receipts (
+    id                uuid primary key default gen_random_uuid(),
+    document_id       uuid not null references documents(id) on delete cascade,
+    idempotency_key   text not null check (char_length(idempotency_key) between 1 and 128),
+    operation         text not null check (operation in ('commit', 'accept')),
+    content_sha256    text not null check (content_sha256 ~ '^[0-9a-f]{64}$'),
+    result_status     text not null check (result_status = 'unchanged'),
+    revision_id       uuid references document_revisions(id) on delete set null,
+    proposal_id       uuid references revision_proposals(id) on delete set null,
+    created_at        timestamptz not null default now(),
+    unique (document_id, idempotency_key)
+);
+
 create table if not exists revision_validations (
     revision_id  uuid primary key references document_revisions(id) on delete cascade,
     validator    text not null check (char_length(validator) between 1 and 64),
@@ -149,6 +167,7 @@ alter table document_schema_versions enable row level security;
 alter table revision_proposals enable row level security;
 alter table revision_exports enable row level security;
 alter table revision_validations enable row level security;
+alter table document_operation_receipts enable row level security;
 
 drop policy if exists document_schema_versions_read on document_schema_versions;
 create policy document_schema_versions_read on document_schema_versions
@@ -186,6 +205,13 @@ create policy revision_exports_owner_select on revision_exports
                 where r.id = revision_exports.revision_id and p.user_id = app_uid())
     );
 
+drop policy if exists document_operation_receipts_owner_select on document_operation_receipts;
+create policy document_operation_receipts_owner_select on document_operation_receipts
+    for select using (
+        exists (select 1 from documents d join projects p on p.id = d.project_id
+                where d.id = document_operation_receipts.document_id and p.user_id = app_uid())
+    );
+
 drop policy if exists revision_validations_owner_select on revision_validations;
 create policy revision_validations_owner_select on revision_validations
     for select using (
@@ -196,10 +222,10 @@ create policy revision_validations_owner_select on revision_validations
     );
 
 revoke all on table documents, document_revisions, revision_proposals, revision_exports,
-    revision_validations, document_schema_versions
+    revision_validations, document_schema_versions, document_operation_receipts
     from public, anon, authenticated, service_role;
 grant select on table documents, document_revisions, revision_proposals, revision_exports,
-    revision_validations, document_schema_versions
+    revision_validations, document_schema_versions, document_operation_receipts
     to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
@@ -420,12 +446,31 @@ begin
                             v_doc.head_revision_id, v_existing_id;
         return;
     end if;
+    select o.revision_id, o.content_sha256 into v_existing_id, v_existing_hash
+      from document_operation_receipts o
+     where o.document_id = p_document_id and o.idempotency_key = p_idempotency_key;
+    if v_existing_hash is not null then
+        if v_existing_hash <> v_hash then
+            raise exception 'idempotency_key_reused' using errcode = '23505';
+        end if;
+        return query select 'unchanged'::text, p_document_id, v_existing_id,
+                            v_doc.head_revision_id, null::uuid;
+        return;
+    end if;
 
-    -- No-op: identical content never advances the head, whatever the base.
+    -- No-op: identical content never advances the head, whatever the base. The
+    -- receipt keeps the key and the result.
     if v_doc.head_revision_id is not null then
         select r.content_sha256 into v_head_hash
           from document_revisions r where r.id = v_doc.head_revision_id;
         if v_head_hash = v_hash then
+            insert into document_operation_receipts (
+                document_id, idempotency_key, operation, content_sha256,
+                result_status, revision_id
+            ) values (
+                p_document_id, p_idempotency_key, 'commit', v_hash,
+                'unchanged', v_doc.head_revision_id
+            );
             return query select 'unchanged'::text, p_document_id, v_doc.head_revision_id,
                                 v_doc.head_revision_id, null::uuid;
             return;
@@ -623,6 +668,10 @@ begin
               from revision_proposals q join documents d on d.id = q.document_id
              where q.document_id = v_doc
                and q.idempotency_key in (p_idempotency_key, p_idempotency_key || ':proposal')
+            union all
+            select 'unchanged'::text, v_doc, o.revision_id, d.head_revision_id, null::uuid
+              from document_operation_receipts o join documents d on d.id = o.document_id
+             where o.document_id = v_doc and o.idempotency_key = p_idempotency_key
             limit 1;
         if found then
             return;
@@ -908,6 +957,19 @@ begin
     ) then
         raise exception 'idempotency_key_reused' using errcode = '23505';
     end if;
+    select o.revision_id, o.proposal_id, o.content_sha256
+      into v_existing_id, v_existing_from, v_existing_hash
+      from document_operation_receipts o
+     where o.document_id = v_document_id and o.idempotency_key = p_idempotency_key;
+    if v_existing_hash is not null then
+        if v_existing_from is distinct from p_proposal_id
+           or v_existing_hash <> v_prop.content_sha256 then
+            raise exception 'idempotency_key_reused' using errcode = '23505';
+        end if;
+        return query select 'unchanged'::text, v_document_id, v_existing_id,
+                            v_doc.head_revision_id, p_proposal_id;
+        return;
+    end if;
 
     if v_prop.status <> 'pending' then
         raise exception 'proposal_not_pending' using errcode = '55000';
@@ -930,6 +992,13 @@ begin
            set status = 'accepted', resolved_at = now(), resolved_by = v_owner,
                accepted_revision_id = v_doc.head_revision_id
          where id = p_proposal_id;
+        insert into document_operation_receipts (
+            document_id, idempotency_key, operation, content_sha256,
+            result_status, revision_id, proposal_id
+        ) values (
+            v_document_id, p_idempotency_key, 'accept', v_prop.content_sha256,
+            'unchanged', v_doc.head_revision_id, p_proposal_id
+        );
         return query select 'unchanged'::text, v_document_id, v_doc.head_revision_id,
                             v_doc.head_revision_id, p_proposal_id;
         return;
