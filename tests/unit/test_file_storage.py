@@ -490,3 +490,91 @@ async def test_r2_without_a_reported_checksum_downloads_and_hashes(
     with pytest.raises(StorageVerificationError, match="bytes"):
         await storage.put_verified(source, "exports/k.pdf", sha_hex, 4)
     client.get_object.assert_called_once()
+
+
+def _client_error(code: str, status: int) -> Any:
+    from botocore.exceptions import ClientError  # pyright: ignore[reportMissingTypeStubs]
+
+    return ClientError(
+        {"Error": {"Code": code, "Message": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "PutObject",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_store_that_rejects_checksum_put_still_gets_verified_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from io import BytesIO
+
+    client = _patch_boto(monkeypatch)
+    source = tmp_path / "deck.pdf"
+    source.write_bytes(b"%PDF")
+    sha_hex, _ = _digest(b"%PDF")
+    calls: list[dict[str, Any]] = []
+
+    def put_object(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        if "ChecksumSHA256" in kwargs:
+            raise _client_error("NotImplemented", 501)
+        return {}
+
+    client.put_object.side_effect = put_object
+    client.head_object.return_value = {
+        "ContentLength": 4,
+        "LastModified": __import__("datetime").datetime(2026, 1, 1),
+    }
+    client.get_object.return_value = {"Body": BytesIO(b"%PDF")}
+    storage = FileStorage(_make_r2_config())
+
+    await storage.put_verified(source, "exports/k.pdf", sha_hex, 4)
+
+    assert ["ChecksumSHA256" in call for call in calls] == [True, False]
+    client.get_object.assert_called_once()  # verified by download and hash
+
+
+@pytest.mark.asyncio
+async def test_a_store_that_rejects_checksum_mode_on_head_falls_back_to_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from io import BytesIO
+
+    from packages.platform.storage import StorageVerificationError
+
+    client = _patch_boto(monkeypatch)
+    source = tmp_path / "deck.pdf"
+    source.write_bytes(b"%PDF")
+    sha_hex, _ = _digest(b"%PDF")
+    heads: list[dict[str, Any]] = []
+
+    def head_object(**kwargs: Any) -> dict[str, Any]:
+        heads.append(kwargs)
+        if "ChecksumMode" in kwargs:
+            raise _client_error("InvalidArgument", 400)
+        return {"ContentLength": 4, "LastModified": __import__("datetime").datetime(2026, 1, 1)}
+
+    client.head_object.side_effect = head_object
+    client.get_object.return_value = {"Body": BytesIO(b"%PDX")}  # the stored bytes differ
+    storage = FileStorage(_make_r2_config())
+
+    with pytest.raises(StorageVerificationError, match="bytes"):
+        await storage.put_verified(source, "exports/k.pdf", sha_hex, 4)
+    assert ["ChecksumMode" in head for head in heads] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_digest_is_a_failure_not_a_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botocore.exceptions import ClientError  # pyright: ignore[reportMissingTypeStubs]
+
+    client = _patch_boto(monkeypatch)
+    source = tmp_path / "deck.pdf"
+    source.write_bytes(b"%PDF")
+    sha_hex, _ = _digest(b"%PDF")
+    client.put_object.side_effect = _client_error("BadDigest", 400)
+    storage = FileStorage(_make_r2_config())
+
+    with pytest.raises(ClientError):
+        await storage.put_verified(source, "exports/k.pdf", sha_hex, 4)
+    assert client.put_object.call_count == 1

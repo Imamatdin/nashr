@@ -535,9 +535,12 @@ Open:
    no documents or revisions at all. Proposal: stop writing those rows (they have no
    correct reader) and leave the legacy article pipeline outside this ADR.
 2. **Production PostgreSQL version** must be ≥ 15 for the view. Unverified.
-3. **R2 SHA-256 checksum support** on PutObject/HEAD is assumed and unverified without
-   R2 access. If R2 does not return the checksum on HEAD, verification falls back to a
-   full GET and re-hash, which costs one extra download per export.
+3. **R2 SHA-256 checksum support** on PutObject/HEAD is unverified without R2 access
+   (MinIO in CI proves nothing about R2). Since B1-FIX, a store that rejects either
+   option (`NotImplemented`, `InvalidArgument`, `InvalidRequest`, `UnsupportedArgument`,
+   HTTP 501) gets a plain PUT / plain HEAD and verification falls back to a full GET and
+   re-hash (one extra download per export); a rejected digest (`BadDigest`) still fails.
+   A real R2 canary is on the handover checklist.
 4. **CI S3 stand-in.** S3 stand-in is a community MinIO rebuild because upstream stopped
    publishing images; replace with an official-publisher image (e.g. Chainguard) if one
    is adopted. It is pinned by digest and used only by the CI journey job, with

@@ -71,6 +71,26 @@ class StoredObject(BaseModel):
     last_modified: datetime
 
 
+# Codes an S3-compatible store returns when it does not support a request
+# option (as opposed to rejecting the data, e.g. BadDigest on a checksum mismatch).
+_UNSUPPORTED_OPTION_CODES = frozenset(
+    {"NotImplemented", "InvalidArgument", "InvalidRequest", "UnsupportedArgument", "501"}
+)
+
+
+def _error_code(exc: ClientError) -> str:
+    response: Any = getattr(exc, "response", {}) or {}
+    return str(response.get("Error", {}).get("Code"))
+
+
+def _unsupported_option(exc: ClientError) -> bool:
+    """True when the store refused a request option it does not implement."""
+
+    response: Any = getattr(exc, "response", {}) or {}
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return _error_code(exc) in _UNSUPPORTED_OPTION_CODES or status == 501
+
+
 class FileStorage:
     """Cloudflare R2 file storage with a local-filesystem fallback.
 
@@ -306,6 +326,37 @@ class FileStorage:
         except Exception:
             return False
 
+    async def _put_with_checksum(
+        self, remote_key: str, body: bytes, digest_b64: str, ctype: str | None
+    ) -> None:
+        """PUT with ChecksumSHA256; a store that rejects the option gets a plain PUT.
+
+        The plain PUT is still verified afterwards (HEAD size, then a full GET and
+        hash), so a store without checksum support costs a download, never a
+        weaker guarantee.
+        """
+
+        extra: dict[str, Any] = {"ContentType": ctype} if ctype else {}
+        try:
+            await asyncio.to_thread(
+                self._client.put_object,
+                Bucket=self._bucket,
+                Key=remote_key,
+                Body=body,
+                ChecksumSHA256=digest_b64,
+                **extra,
+            )
+            return
+        except ClientError as exc:
+            if not _unsupported_option(exc):
+                raise
+            logger.warning(
+                "storage_checksum_put_unsupported key=%s code=%s", remote_key, _error_code(exc)
+            )
+        await asyncio.to_thread(
+            self._client.put_object, Bucket=self._bucket, Key=remote_key, Body=body, **extra
+        )
+
     async def put_verified(
         self, local_path: Path, remote_key: str, sha256_hex: str, byte_size: int
     ) -> None:
@@ -324,14 +375,8 @@ class FileStorage:
         digest_b64 = base64.b64encode(bytes.fromhex(sha256_hex)).decode("ascii")
 
         if self._available:
-            ctype = _guess_content_type(local_path)
-            await asyncio.to_thread(
-                self._client.put_object,
-                Bucket=self._bucket,
-                Key=remote_key,
-                Body=body,
-                ChecksumSHA256=digest_b64,
-                **({"ContentType": ctype} if ctype else {}),
+            await self._put_with_checksum(
+                remote_key, body, digest_b64, _guess_content_type(local_path)
             )
         else:
             await self._local_upload(local_path, remote_key)
@@ -369,10 +414,23 @@ class FileStorage:
                 ChecksumMode="ENABLED",
             )
         except ClientError as exc:
-            error: Any = getattr(exc, "response", {}).get("Error", {})
-            if str(error.get("Code")) in ("404", "NoSuchKey", "NotFound"):
+            if _error_code(exc) in ("404", "NoSuchKey", "NotFound"):
                 return None
-            raise
+            if not _unsupported_option(exc):
+                raise
+            # The store rejects ChecksumMode: HEAD without it; with no checksum
+            # reported, put_verified downloads and hashes the object instead.
+            logger.warning(
+                "storage_checksum_head_unsupported key=%s code=%s", remote_key, _error_code(exc)
+            )
+            try:
+                response = await asyncio.to_thread(
+                    self._client.head_object, Bucket=self._bucket, Key=remote_key
+                )
+            except ClientError as retry:
+                if _error_code(retry) in ("404", "NoSuchKey", "NotFound"):
+                    return None
+                raise
         checksum = response.get("ChecksumSHA256")
         return StoredObject(
             key=remote_key,
