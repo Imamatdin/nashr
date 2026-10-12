@@ -1,0 +1,15 @@
+# Test and type-check tools, pinned to one exact version used both locally and in
+# CI (.github/workflows/ci.yml installs this file). A floating version once made
+# CI and the workstation disagree: pyright 1.1.414 found an error 1.1.409 missed,
+# and pytest 9.1 prints pytest.raises failures differently from 9.0.
+# Install: pip install -r requirements.txt -r requirements-dev.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pyright==1.1.414
+ruff==0.15.12
+# Real-PostgreSQL suite (tests/db) and its property test.
+asyncpg==0.32.0
+hypothesis==6.169.0
+docker==7.1.0
+# Fixture PDFs for unit tests and the browser journey (not in the production image).
+reportlab==4.5.0
