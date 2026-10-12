@@ -136,9 +136,12 @@ vi.mock('pptxgenjs', () => {
     }
 
     async write(_props: { outputType?: string }): Promise<Buffer> {
-      // Return a minimal placeholder buffer; the smoke test that needs a
-      // real .pptx uses vi.unmock for that suite.
-      return Buffer.from('MOCK_PPTX');
+      // A minimal zip package: the renderer normalizes the container it gets
+      // back (pptx-determinism.ts), so even the mock must hand it a real zip.
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
+      zip.file('[Content_Types].xml', '<Types/>');
+      return zip.generateAsync({ type: 'nodebuffer' });
     }
   }
 

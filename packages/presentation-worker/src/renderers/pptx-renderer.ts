@@ -26,6 +26,7 @@
  * canvas size (13.33" × 7.5") that matches DESIGN-LANGUAGE.md.
  */
 
+import { normalizePptx } from './pptx-determinism.js';
 import PptxGenJS from 'pptxgenjs';
 import { SLIDE_WIDTH, isPlaceholderImageSrc } from '../constants.js';
 import { getLabels } from '../labels.js';
@@ -88,7 +89,7 @@ export class PptxRenderer {
     this.buildFeedbackSlides(pptx, deck, layout, feedbackMap);
 
     const out = await pptx.write({ outputType: 'nodebuffer' });
-    return out as Buffer;
+    return normalizePptx(out as Buffer);
   }
 
   // -------------------------------------------------------------------------
