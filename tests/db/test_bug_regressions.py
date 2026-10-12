@@ -255,12 +255,20 @@ async def test_k_an_api_user_cannot_write_revisions_or_decks_directly(db: Db) ->
             " values ($1, 'forged', '{}', repeat('a', 64))",
             uuid.UUID(doc),
         )
-    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+    # After 016 `decks` is a join view: PostgreSQL's rewriter rejects the insert
+    # as non-updatable at prepare time, before the executor's privilege check, so
+    # either error means "refused". The privilege assertion below pins the grant
+    # itself, so a future INSTEAD OF trigger on the view could not reopen writes.
+    with pytest.raises(
+        (asyncpg.InsufficientPrivilegeError, asyncpg.ObjectNotInPrerequisiteStateError)
+    ):
         await user.execute(
             "insert into decks (project_id, title, language, audience, deck_json)"
             " values ($1, 'T', 'uz', 'talaba', '{}')",
             uuid.UUID(project),
         )
+    for privilege in ("INSERT", "UPDATE", "DELETE"):
+        assert await user.fetchval("select has_table_privilege('decks', $1)", privilege) is False
 
 
 def test_export_key_shape() -> None:
