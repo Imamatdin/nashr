@@ -85,16 +85,12 @@ export function useArticleDocument(projectId: string, title: string) {
     const draft = storage ? readDraft(storage, userId, projectId) : null;
     let view: ArticleDocumentView | null;
     try {
-      view = await withAuth(async (token) => {
-        try {
-          return await getArticle(projectId, token);
-        } catch (error) {
-          if (error instanceof ApiError && error.status === 404) {
-            return initializeArticle(projectId, title, `init:${projectId}`, token);
-          }
-          throw error;
-        }
-      });
+      // The init route is idempotent: it returns the existing head, or creates
+      // the empty article once. Asking it directly avoids a GET that 404s on
+      // every first open (and a console error each time).
+      view = await withAuth((token) =>
+        initializeArticle(projectId, title, `init:${projectId}`, token),
+      );
     } catch {
       setLoad({ kind: "failed", hasDraft: draft !== null });
       return;

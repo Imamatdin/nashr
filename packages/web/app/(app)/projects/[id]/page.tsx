@@ -341,14 +341,20 @@ export default function ProjectPage() {
     if (!session) return;
     loadProject();
     refreshSources();
-    void loadProvenance();
     getPricing()
       .then(setPricing)
       .catch(() => undefined);
     return () => {
       if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
     };
-  }, [session, projectId, loadProject, refreshSources, loadProvenance]);
+  }, [session, projectId, loadProject, refreshSources]);
+
+  // Provenance belongs to a project the caller can see: a project RLS hides
+  // (another user's) is not asked about at all.
+  useEffect(() => {
+    if (!session || project === null) return;
+    void loadProvenance();
+  }, [session, project, loadProvenance]);
 
   // The deck-shaped reads wait for the project type (see deckProject).
   useEffect(() => {
