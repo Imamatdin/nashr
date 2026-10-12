@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 import feedparser  # type: ignore[import-untyped]
 import httpx
@@ -69,7 +69,10 @@ class ArxivProvider:
             return []
 
         try:
-            parsed = await asyncio.to_thread(feedparser.parse, response.content)  # type: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            parsed = cast(
+                object,
+                await asyncio.to_thread(feedparser.parse, response.content),  # type: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            )
         except Exception as exc:
             logger.warning("arxiv_parse_failed", extra={"error": str(exc), "query": query})
             if strict_errors:
