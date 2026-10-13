@@ -23,7 +23,7 @@ import os
 import random
 import time
 from collections.abc import Awaitable, Callable
-from typing import ClassVar, Final, NamedTuple, Protocol, runtime_checkable
+from typing import ClassVar, Final, NamedTuple, Protocol, cast, runtime_checkable
 
 import google.genai as genai
 from google.genai import errors as genai_errors
@@ -337,10 +337,10 @@ class GeminiClient:
             timeout=self._timeout_seconds,
         )
 
-        content, input_tokens, output_tokens, cached_input_tokens = _extract_content_and_usage(
-            response
-        )
+        content, usage = _extract_content_and_usage(response)
+        input_tokens, output_tokens, cached_input_tokens, thinking_tokens = usage
         cost = gemini_cost_for(model, input_tokens, output_tokens)
+        stop_reason = _first_finish_reason(response)
 
         # Payload in the message string, not extra: the docker log formatter
         # drops extra, and cached_input_tokens is P0 gate evidence.
@@ -352,6 +352,8 @@ class GeminiClient:
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cached_input_tokens": cached_input_tokens,
+                    "thinking_tokens": thinking_tokens,
+                    "stop_reason": stop_reason,
                     "latency_ms": latency_ms,
                     "estimated_cost_usd": round(cost, 6),
                 }
@@ -363,6 +365,8 @@ class GeminiClient:
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            thinking_tokens=thinking_tokens,
+            stop_reason=stop_reason,
             latency_ms=latency_ms,
             estimated_cost_usd=cost,
         )
@@ -635,7 +639,7 @@ class GeminiClient:
                 "(e.g. a larger max_tokens on MAX_TOKENS)."
             )
         text = _join_text_parts(model_content)
-        input_tokens, output_tokens, cached_input_tokens = _extract_usage(response)
+        input_tokens, output_tokens, cached_input_tokens, thinking_tokens = _extract_usage(response)
         cost = gemini_cost_for(model, input_tokens, output_tokens)
 
         logger.info(
@@ -646,6 +650,7 @@ class GeminiClient:
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cached_input_tokens": cached_input_tokens,
+                    "thinking_tokens": thinking_tokens,
                     "latency_ms": latency_ms,
                     "estimated_cost_usd": round(cost, 6),
                     "function_calls": len(function_calls),
@@ -676,11 +681,16 @@ class _TokenUsage(NamedTuple):
     SUBSET of ``input_tokens``, surfaced for cache-hit observability only — cost
     accounting still bills the full ``input_tokens`` (a cache-aware discount is
     deferred to 5b). Zero when the SDK reports no cached tokens.
+
+    ``output_tokens`` is the BILLED output: visible candidates plus thinking
+    (``thoughts_token_count``), which Gemini bills at the output rate.
+    ``thinking_tokens`` is that thinking share, for observability.
     """
 
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
+    thinking_tokens: int
 
 
 def _extract_usage(response: _GenerateContentResponseLike) -> _TokenUsage:
@@ -699,35 +709,51 @@ def _extract_usage(response: _GenerateContentResponseLike) -> _TokenUsage:
     input_tokens = 0
     output_tokens = 0
     cached_input_tokens = 0
+    thinking_tokens = 0
     if usage is not None:
         prompt = getattr(usage, "prompt_token_count", 0)
         candidate = getattr(usage, "candidates_token_count", 0)
         cached = getattr(usage, "cached_content_token_count", 0)
+        thoughts = getattr(usage, "thoughts_token_count", 0)
         if isinstance(prompt, int):
             input_tokens = max(0, prompt)
         if isinstance(candidate, int):
             output_tokens = max(0, candidate)
         if isinstance(cached, int):
             cached_input_tokens = max(0, cached)
-    return _TokenUsage(input_tokens, output_tokens, cached_input_tokens)
+        if isinstance(thoughts, int):
+            thinking_tokens = max(0, thoughts)
+    return _TokenUsage(
+        input_tokens, output_tokens + thinking_tokens, cached_input_tokens, thinking_tokens
+    )
+
+
+def _first_finish_reason(response: _GenerateContentResponseLike) -> str | None:
+    """The first candidate's finish reason (``MAX_TOKENS`` means truncated), if any."""
+
+    candidates = getattr(response, "candidates", None)
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    reason = getattr(cast("list[object]", candidates)[0], "finish_reason", None)
+    value = getattr(reason, "value", reason)
+    return value if isinstance(value, str) else None
 
 
 def _extract_content_and_usage(
     response: _GenerateContentResponseLike,
-) -> tuple[str, int, int, int]:
+) -> tuple[str, _TokenUsage]:
     """Pull text and token usage from a ``GenerateContentResponse``-like object.
 
     Defensive against responses with no text content (surfaces as an empty
     string) and delegates token accounting to :func:`_extract_usage`. Returns
-    ``(text, input_tokens, output_tokens, cached_input_tokens)``. Used only by
+    ``(text, usage)``. Used only by
     :meth:`GeminiClient.complete`; the tool path reads parts directly to avoid
     the SDK's ``.text`` warning on function-call responses.
     """
 
     text_attr = getattr(response, "text", None)
     text = text_attr if isinstance(text_attr, str) else ""
-    usage = _extract_usage(response)
-    return text, usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
+    return text, _extract_usage(response)
 
 
 def _extract_tool_turn_content(
