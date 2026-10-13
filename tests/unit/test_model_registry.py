@@ -10,12 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from packages.core.llm import LLMClient, claude_request_id, thinking_config
+from packages.core.llm import (
+    LLMClient,
+    claude_request_id,
+    request_body_extras,
+    thinking_config,
+)
 from packages.core.model_registry import (
     ENV_OVERRIDES,
     MODELS,
     REFUSED_IDS,
     ROLES,
+    ClaudeEffort,
     ClaudeThinking,
     Provider,
     Role,
@@ -42,6 +48,8 @@ _SCANNED_SUFFIXES = frozenset(
 )
 _SCANNED_NAMES = frozenset({"Dockerfile", "Caddyfile", ".env.example", ".env.local.example"})
 _REGISTRY = "packages/core/model_registry.py"
+# This file: its scanner fixtures name ids that must stay unregistered.
+_SELF = "tests/unit/test_model_registry.py"
 
 
 def _tracked_files() -> list[str]:
@@ -77,7 +85,7 @@ def test_no_unknown_model_id_anywhere_in_code_or_config() -> None:
     allowed = known_ids()
     offenders: list[str] = []
     for path in files:
-        if path == _REGISTRY:
+        if path in (_REGISTRY, _SELF):
             continue
         permitted = allowed | set(REFUSED_IDS) if path.startswith("tests/") else allowed
         offenders += [f"{path}: {model_id}" for model_id in sorted(_ids_in(path) - permitted)]
@@ -258,12 +266,59 @@ def test_gemini_is_served_only_from_the_global_vertex_location() -> None:
         transport_id("gemini-3.8-flash", Transport.VERTEX_GEMINI, "us-central1")
 
 
-def test_claude_thinking_modes() -> None:
-    assert spec("claude-haiku-5-5").claude_thinking is ClaudeThinking.DISABLED
-    assert spec("claude-sonnet-5-5").claude_thinking is ClaudeThinking.BETWEEN_TOOLS
-    assert thinking_config("claude-haiku-5-5") == {"type": "disabled"}
+# The per-model thinking table (platform.claude.com build-with-claude/thinking,
+# read 2026-10-13): which thinking values each registered Claude model accepts,
+# and the effort levels at which it accepts them. Anything else is a 400.
+_DOCUMENTED_THINKING: dict[str, dict[ClaudeThinking, frozenset[ClaudeEffort]]] = {
+    "claude-sonnet-5-5": {
+        ClaudeThinking.BETWEEN_TOOLS: frozenset(ClaudeEffort),  # low/medium/high only
+    },
+    "claude-haiku-5-5": {
+        ClaudeThinking.DISABLED: frozenset(ClaudeEffort),  # "at high effort or below"
+    },
+    "claude-sonnet-5": {
+        ClaudeThinking.DISABLED: frozenset(ClaudeEffort),  # "Thinking off"
+    },
+}
+# Each model's documented default effort (build-with-claude/effort).
+_DOCUMENTED_DEFAULT_EFFORT = {
+    "claude-sonnet-5-5": ClaudeEffort.HIGH,
+    "claude-haiku-5-5": ClaudeEffort.MEDIUM,
+    "claude-sonnet-5": ClaudeEffort.HIGH,
+}
+
+
+def test_every_claude_model_sends_a_documented_thinking_and_effort_pair() -> None:
+    claude = {key for key, entry in MODELS.items() if entry.provider is Provider.ANTHROPIC}
+    assert claude == set(_DOCUMENTED_THINKING)
+    for key in claude:
+        entry = MODELS[key]
+        assert entry.claude_thinking is not None and entry.claude_effort is not None
+        accepted = _DOCUMENTED_THINKING[key]
+        assert entry.claude_thinking in accepted, key
+        assert entry.claude_effort in accepted[entry.claude_thinking], key
+        # Pinned to the default: identical to omitting effort, per the effort page.
+        assert entry.claude_effort is _DOCUMENTED_DEFAULT_EFFORT[key]
+
+
+def test_claude_request_extras() -> None:
+    assert request_body_extras("claude-haiku-5-5") == {
+        "thinking": {"type": "disabled"},
+        "output_config": {"effort": "medium"},
+    }
+    assert request_body_extras("claude-sonnet-5-5") == {
+        "thinking": {"type": "between_tools"},
+        "output_config": {"effort": "high"},
+    }
+    # Sonnet 5 (Sonnet 5.5's fallback) answers "between_tools" with a 400.
+    assert request_body_extras("claude-sonnet-5") == {
+        "thinking": {"type": "disabled"},
+        "output_config": {"effort": "high"},
+    }
     with pytest.raises(UnknownModelError):
         thinking_config("gemini-3.8-flash")
+    with pytest.raises(UnknownModelError):
+        request_body_extras("gemini-3.8-flash")
 
 
 def test_llm_client_default_is_the_registry_role() -> None:

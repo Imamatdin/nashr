@@ -14,7 +14,18 @@ Why these models (B0):
 * Claude moved to the 5.5 generation. Sonnet 4.6 is legacy and Haiku 4.5's
   retirement commitment ends 2026-10-15. Both 5.5 models think by default, so
   each records the thinking mode that reproduces the previous single-pass
-  behaviour (``ClaudeThinking``); token budgets were sized for that.
+  behaviour (``ClaudeThinking``) and pins its effort (``ClaudeEffort``) to the
+  documented default, at which that mode is accepted. Per the thinking page's
+  per-model table (build-with-claude/thinking, read 2026-10-13): Sonnet 5.5
+  rejects "disabled" and accepts "between_tools" at effort high or below; Haiku
+  5.5 and Sonnet 5 accept "disabled" (Haiku at effort high or below). Thinking
+  counts toward max_tokens (build-with-claude/thinking-steering-and-cost, "Cost
+  control"), and the 5.x tokenizer counts "approximately 30% more tokens" for
+  the same text than Haiku 4.5 (models/haiku-5-5/overview); Claude budgets were
+  scaled x1.3 for that.
+* No Claude call forces a tool: Sonnet 5.5 rejects tool_choice "any"/"tool"
+  with a 400 error (models/sonnet-5-5/overview). Every Claude call site asks for
+  JSON in text, validates it, and retries once with a repair prompt.
 * Flash moved to ``gemini-3.8-flash``. ``gemini-3.5-flash`` silently routes to
   ``gemini-3.6-flash`` (billed at 3.6's rate), which Vertex retires 2026-11-19
   with 3.8 Flash as the named upgrade; ``gemini-2.5-flash`` retires on Vertex
@@ -67,8 +78,16 @@ PROVIDER_TRANSPORTS: Final[dict[Provider, tuple[Transport, ...]]] = {
 class ClaudeThinking(StrEnum):
     """The ``thinking`` setting sent with every request to a Claude model."""
 
-    DISABLED = "disabled"  # Haiku 5.5: no thinking (allowed at effort <= high)
-    BETWEEN_TOOLS = "between_tools"  # Sonnet 5.5: no up-front thinking (effort <= high)
+    DISABLED = "disabled"  # Haiku 5.5 (effort <= high), Sonnet 5: thinking off
+    BETWEEN_TOOLS = "between_tools"  # Sonnet 5.5 only: no up-front thinking (effort <= high)
+
+
+class ClaudeEffort(StrEnum):
+    """``output_config.effort`` sent with every request to a Claude model."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class Price(BaseModel):
@@ -127,6 +146,7 @@ class ModelSpec(BaseModel):
     fallback: str | None
     price: Price
     claude_thinking: ClaudeThinking | None = None
+    claude_effort: ClaudeEffort | None = None
 
 
 class Role(StrEnum):
@@ -171,7 +191,12 @@ _CLAUDE_VERTEX_LOCATIONS = ("global", "us", "eu")  # 5.x: no single-region endpo
 
 
 def _claude(
-    key: str, not_before: date, fallback: str | None, price: Price, thinking: ClaudeThinking
+    key: str,
+    not_before: date,
+    fallback: str | None,
+    price: Price,
+    thinking: ClaudeThinking,
+    effort: ClaudeEffort,
 ) -> ModelSpec:
     return ModelSpec(
         key=key,
@@ -183,6 +208,7 @@ def _claude(
         fallback=fallback,
         price=price,
         claude_thinking=thinking,
+        claude_effort=effort,
     )
 
 
@@ -214,6 +240,7 @@ MODELS: Final[dict[str, ModelSpec]] = {
                 source=_CLAUDE_PRICING,
             ),
             ClaudeThinking.BETWEEN_TOOLS,
+            ClaudeEffort.HIGH,  # the documented default
         ),
         _claude(
             _SONNET_5,
@@ -227,7 +254,9 @@ MODELS: Final[dict[str, ModelSpec]] = {
                 cache_write_1h=4.0,
                 source=_CLAUDE_PRICING,
             ),
-            ClaudeThinking.BETWEEN_TOOLS,
+            # Sonnet 5 answers "between_tools" with a 400; it takes "disabled".
+            ClaudeThinking.DISABLED,
+            ClaudeEffort.HIGH,  # the documented default
         ),
         _claude(
             _HAIKU_5_5,
@@ -245,6 +274,7 @@ MODELS: Final[dict[str, ModelSpec]] = {
                 source=_CLAUDE_PRICING,
             ),
             ClaudeThinking.DISABLED,
+            ClaudeEffort.MEDIUM,  # the documented default
         ),
         _gemini(
             _FLASH,
@@ -531,6 +561,7 @@ __all__ = [
     "REFUSED_IDS",
     "RETRIEVED",
     "ROLES",
+    "ClaudeEffort",
     "ClaudeThinking",
     "Lifecycle",
     "ModelSpec",
