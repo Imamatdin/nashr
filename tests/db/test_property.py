@@ -196,6 +196,19 @@ class Lifecycle:
 
     def __init__(self, db: Db) -> None:
         self.db = db
+        self.pool: list[Any] = []
+        self.admin: Any = None
+
+    async def close(self) -> None:
+        """Close this example's connections, also when it failed.
+
+        Hypothesis runs hundreds of failing examples while shrinking; connections
+        left open by each would exhaust the server and mask the real failure.
+        """
+
+        for conn in [*self.pool, self.admin]:
+            if conn is not None and not conn.is_closed():
+                await conn.close()
 
     async def build(self) -> Lifecycle:
         self.owner = await self.db.user()
@@ -661,13 +674,15 @@ class Lifecycle:
 async def test_concurrent_lifecycle_preserves_every_invariant(
     db: Db, plan: list[list[tuple[str, int]]]
 ) -> None:
-    world = await Lifecycle(db).build()
-    for ops in plan:
-        await world.round(ops)
+    world = Lifecycle(db)
+    try:
+        await world.build()
+        for ops in plan:
+            await world.round(ops)
+            await world.check()
+        await world.drain()
         await world.check()
-    await world.drain()
-    await world.check()
-    # A job that took money ends completed (delivered) or refunded exactly once.
-    await world._refunds_exactly_once(allow_in_flight=False)  # pyright: ignore[reportPrivateUsage]
-    for conn in [*world.pool, world.admin]:
-        await conn.close()
+        # A job that took money ends completed (delivered) or refunded exactly once.
+        await world._refunds_exactly_once(allow_in_flight=False)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        await world.close()
