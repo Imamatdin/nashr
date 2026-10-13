@@ -30,7 +30,7 @@ from packages.core.enums import (
     NarrativeEmphasis,
     NarrativePhase,
 )
-from packages.core.gemini import GEMINI_PRO_3_1_MODEL
+from packages.core.gemini import GEMINI_PRO_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.presentation import (
     DeckPlan,
@@ -58,7 +58,7 @@ class _StubGemini:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_PRO_3_1_MODEL,
+        model: str = GEMINI_PRO_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:

@@ -50,9 +50,10 @@ def session_total_spend_usd(accumulated_cost_usd: float, accumulated_image_count
     """Total ACTUAL spend recorded for analytics — NOT the cap (the cap is the
     fix counter). Kept because the real per-fix cost is already surfaced."""
 
-    # Imported inside the function so the fix ALLOWANCE (which the API's
-    # /pricing route reads) does not drag google.genai into the API process
-    # just to name a per-image dollar figure only analytics uses.
-    from packages.core.gemini_image import IMAGE_COST_USD
+    # The registry, not gemini_image, so the API process (which reads the fix
+    # allowance for /pricing) never imports google.genai for an analytics figure.
+    from packages.core.model_registry import Role, image_cost_usd, model_for
 
-    return accumulated_cost_usd + accumulated_image_count * IMAGE_COST_USD
+    return accumulated_cost_usd + accumulated_image_count * image_cost_usd(
+        model_for(Role.IMAGE_GENERATION)
+    )

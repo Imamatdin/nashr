@@ -9,9 +9,9 @@ propagating immediately, one info log per call — and reuses
 credentials. It is the established pattern extended to a new modality, not a new
 client stack.
 
-The generation model id is read from ``NASHR_IMAGE_MODEL`` so the deployed Vertex
-model (Imagen / "Nano Banana") can change without a code edit; captioning uses
-the multimodal flash text model. Generated images depict objects/concepts/scenes
+The generation model is the registry's ``IMAGE_GENERATION`` role, which
+``NASHR_IMAGE_MODEL`` may override with another registered Gemini model (validated
+on use, not at import); captioning uses the ``VISION_CAPTION`` role. Generated images depict objects/concepts/scenes
 only — never a real identifiable person (those are sourced from Commons).
 """
 
@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, ClassVar, Final, cast
@@ -29,18 +28,12 @@ from google.genai import types as genai_types
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.core.constants import DEFAULT_LLM_MAX_RETRIES, DEFAULT_LLM_TIMEOUT_SECONDS
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, build_default_genai_client
+from packages.core.gemini import build_default_genai_client, gemini_request_id
+from packages.core.model_registry import Role, image_cost_usd, model_for
 
 logger = logging.getLogger(__name__)
 
-# Vision/captioning runs on the current-generation multimodal flash text model;
-# image generation uses a dedicated image model whose id is deployment-configurable.
-GEMINI_VISION_MODEL: Final[str] = GEMINI_FLASH_3_5_MODEL
-DEFAULT_IMAGE_MODEL: Final[str] = os.environ.get("NASHR_IMAGE_MODEL", "gemini-3-pro-image")
-
-# Flat per-image cost estimate for logging only (not billing). Carried over from
-# the prior image model; revisit against gemini-3-pro-image's published price.
-IMAGE_COST_USD: Final[float] = 0.039
+GEMINI_VISION_MODEL: Final[str] = model_for(Role.VISION_CAPTION)
 
 # HTTP status codes that must not retry — a bad key is a config fault.
 _AUTH_HTTP_CODES: Final[frozenset[int]] = frozenset({401, 403})
@@ -69,7 +62,6 @@ class GeminiImageClient:
     binds the shared SDK client (Vertex AI, else AI Studio).
     """
 
-    DEFAULT_IMAGE_MODEL: ClassVar[str] = DEFAULT_IMAGE_MODEL
     VISION_MODEL: ClassVar[str] = GEMINI_VISION_MODEL
 
     def __init__(
@@ -95,11 +87,15 @@ class GeminiImageClient:
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
 
-    async def generate_image(
-        self, prompt: str, *, model: str = DEFAULT_IMAGE_MODEL
-    ) -> GeneratedImage:
-        """Generate one image from ``prompt`` with retry, timeout, and cost logging."""
+    async def generate_image(self, prompt: str, *, model: str | None = None) -> GeneratedImage:
+        """Generate one image from ``prompt`` with retry, timeout, and cost logging.
 
+        ``model`` defaults to the image role (``NASHR_IMAGE_MODEL`` when set); an
+        unregistered id raises before any request.
+        """
+
+        model = gemini_request_id(model or model_for(Role.IMAGE_GENERATION))
+        cost = image_cost_usd(model)
         start = time.perf_counter()
         result = await self._run_with_retry(
             "gemini_generate_image", lambda: self._generate_image_fn(model=model, prompt=prompt)
@@ -109,7 +105,7 @@ class GeminiImageClient:
             extra={
                 "model": model,
                 "latency_ms": int((time.perf_counter() - start) * 1000),
-                "estimated_cost_usd": IMAGE_COST_USD,
+                "estimated_cost_usd": cost,
             },
         )
         return result
@@ -124,6 +120,7 @@ class GeminiImageClient:
     ) -> str:
         """Caption/understand an image (vision) with retry and timeout."""
 
+        model = gemini_request_id(model)
         start = time.perf_counter()
         text = await self._run_with_retry(
             "gemini_caption_image",
@@ -227,7 +224,6 @@ def _extract_generated_image(response: object) -> GeneratedImage:
 
 
 __all__ = [
-    "DEFAULT_IMAGE_MODEL",
     "GEMINI_VISION_MODEL",
     "GeminiImageClient",
     "GeneratedImage",

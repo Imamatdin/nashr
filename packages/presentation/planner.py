@@ -39,7 +39,8 @@ from typing import Any, Final, NamedTuple
 
 from pydantic import ValidationError
 
-from packages.core.gemini import GEMINI_PRO_3_1_MODEL, GeminiClient
+from packages.core.gemini import GeminiClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.presentation import (
     AuditCheckResult,
     DeckPlan,
@@ -177,7 +178,7 @@ class PlannerPass:
         first = await self._get_gemini().complete(
             system=system,
             user=user,
-            model=GEMINI_PRO_3_1_MODEL,
+            model=model_for(Role.DECK_PLANNER),
             max_tokens=PLANNER_MAX_TOKENS,
         )
         parsed = _parse_plan(first.content)
@@ -200,7 +201,7 @@ class PlannerPass:
         retry = await self._get_gemini().complete(
             system=system,
             user=retry_user,
-            model=GEMINI_PRO_3_1_MODEL,
+            model=model_for(Role.DECK_PLANNER),
             max_tokens=PLANNER_MAX_TOKENS,
         )
         parsed = _parse_plan(retry.content)

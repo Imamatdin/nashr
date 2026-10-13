@@ -4,7 +4,7 @@ The pass is the "creative director" of the pipeline. It maps a deck's
 specific topic onto an aesthetic specification (palette, fonts, image
 style prefix) that the rest of the pipeline treats as immutable.
 
-The palette is produced by a single Gemini 3.5 Flash call so every deck gets a
+The palette is produced by a single Gemini Flash call so every deck gets a
 *bespoke* colour scheme derived from its subject matter rather than a
 hardcoded table entry (DESIGN-LANGUAGE.md R43: "if the output looks like
 it came from a theme picker, it fails"). The deterministic six-mood table
@@ -36,7 +36,8 @@ from packages.core.enums import (
     BackgroundTreatment,
     PresentationMood,
 )
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, GeminiClient
+from packages.core.gemini import GeminiClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.presentation import (
     ColorPalette,
     DesignDirectionSpec,
@@ -62,7 +63,7 @@ logger = logging.getLogger(__name__)
 # one canonical answer per domain. The deterministic fallback handles the
 # residual jitter risk.
 DESIGN_TEMPERATURE: Final[float] = 0.4
-# Gemini 3.5 Flash spends "thoughts" tokens before visible output; the design
+# Gemini 3.x Flash spends "thoughts" tokens before visible output; the design
 # JSON itself is tiny, but the budget must clear the thinking phase or the spec
 # truncates and the pass falls back. (Sonnet ran this at 1.5k with no thinking.)
 DESIGN_MAX_TOKENS: Final[int] = 8_000
@@ -257,7 +258,7 @@ class _LLMDesignDirection(BaseModel):
 class DesignDirectionPass:
     """Generate a bespoke :class:`DesignDirectionSpec` for one deck.
 
-    The primary path is one Gemini 3.5 Flash call that derives a topic-specific
+    The primary path is one Gemini Flash call that derives a topic-specific
     palette and typography. When that call fails or yields invalid
     output, the pass falls back to the deterministic six-mood table via
     :meth:`_generate_deterministic`. Stateless apart from the injected
@@ -335,12 +336,12 @@ class DesignDirectionPass:
         user: str,
         treatment: BackgroundTreatment,
     ) -> DesignDirectionSpec | None:
-        """One Gemini 3.5 Flash call; on bad/invalid output, retry once with a stricter suffix."""
+        """One Gemini Flash call; on bad/invalid output, retry once with a stricter suffix."""
 
         first = await self._get_gemini().complete(
             system=system,
             user=user,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.DESIGN_DIRECTION),
             max_tokens=DESIGN_MAX_TOKENS,
             temperature=DESIGN_TEMPERATURE,
         )
@@ -350,7 +351,7 @@ class DesignDirectionPass:
         retry = await self._get_gemini().complete(
             system=system,
             user=user + DESIGN_DIRECTION_RETRY_SUFFIX,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.DESIGN_DIRECTION),
             max_tokens=DESIGN_MAX_TOKENS,
             temperature=DESIGN_TEMPERATURE,
         )

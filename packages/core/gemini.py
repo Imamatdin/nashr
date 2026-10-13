@@ -35,44 +35,40 @@ from packages.core.constants import (
 )
 from packages.core.gemini_tools import ToolTurnResult
 from packages.core.llm import LLMResponse
+from packages.core.model_registry import (
+    Provider,
+    Role,
+    Transport,
+    UnknownModelError,
+    model_for,
+    spec,
+    token_cost_usd,
+    transport_id,
+)
 
 logger = logging.getLogger(__name__)
 
 
-GEMINI_FLASH_MODEL: Final[str] = "gemini-2.5-flash"
+# The client defaults; call sites name their own role (packages.core.model_registry).
+GEMINI_FLASH_MODEL: Final[str] = model_for(Role.GEMINI_DEFAULT)
+GEMINI_PRO_MODEL: Final[str] = model_for(Role.DECK_BRAIN)
 
-# Current-generation Flash — the GeminiClient DEFAULT model (see ``DEFAULT_MODEL``
-# below and the default ``model=`` on ``complete()``). After the 3.x model swap it
-# backs every Flash-tier pass: thesis classifier (planner-validator), design
-# direction, claim extraction, vision (via gemini_image), and editorial's
-# interactive-content pass — all migrated off 2.5 Flash.
-GEMINI_FLASH_3_5_MODEL: Final[str] = "gemini-3.5-flash"
 
-# Current-generation Pro — the strong-reasoning tier. Opt-in (not the
-# GeminiClient default): pass explicitly as ``model=``. Used by the planner
-# (source-grounded authorship plan) and the content critic (adversarial
-# source-grounding audit). Its cost entry is in GEMINI_COSTS below.
-GEMINI_PRO_3_1_MODEL: Final[str] = "gemini-3.1-pro-preview"
+def gemini_request_id(model: str) -> str:
+    """The id to send for ``model``; unknown models and unserved Vertex locations raise.
 
-# Per million tokens (input, output)
-GEMINI_COSTS: Final[dict[str, tuple[float, float]]] = {
-    "gemini-2.5-flash": (0.50, 3.00),
-    # https://cloud.google.com/vertex-ai/generative-ai/pricing
-    "gemini-3.5-flash": (1.50, 9.00),
-    "gemini-3.1-flash-lite-preview": (0.25, 1.00),
-    "gemini-3.1-pro-preview": (2.50, 15.00),
-}
+    Checked before every request so a retired or misspelled id fails here, with
+    the registry's message, instead of as a provider 404 mid-job.
+    """
 
-GEMINI_FLASH_INPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-2.5-flash"][0]
-GEMINI_FLASH_OUTPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-2.5-flash"][1]
-GEMINI_FLASH_LITE_INPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3.1-flash-lite-preview"][
-    0
-]
-GEMINI_FLASH_LITE_OUTPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS[
-    "gemini-3.1-flash-lite-preview"
-][1]
-GEMINI_PRO_INPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3.1-pro-preview"][0]
-GEMINI_PRO_OUTPUT_COST_PER_MTOK: Final[float] = GEMINI_COSTS["gemini-3.1-pro-preview"][1]
+    entry = spec(model)
+    if entry.provider is not Provider.GOOGLE:
+        raise UnknownModelError(f"{model} is not a Gemini model")
+    if os.environ.get("VERTEX_PROJECT"):
+        return transport_id(
+            entry.key, Transport.VERTEX_GEMINI, os.environ.get("VERTEX_LOCATION", "global")
+        )
+    return transport_id(entry.key, Transport.GEMINI_API)
 
 
 _SAFETY_SETTINGS: Final[list[genai_types.SafetySetting]] = [
@@ -192,11 +188,10 @@ GenerateContentFn = Callable[..., Awaitable[_GenerateContentResponseLike]]
 
 
 def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Return USD cost of one Gemini call from its model name and token usage.
+    """Return USD cost of one Gemini call from its model's registry price row.
 
-    Falls back to current-generation Flash pricing for unknown model
-    strings — cost accounting must never fail a user-visible job, but a
-    misrouted call would still be surfaced via the per-call info log line.
+    An unregistered model raises; every request path validates the model with
+    :func:`gemini_request_id` first, so a finished call is always priceable.
 
     CACHING CAVEAT (5B-Q5b): ``prompt_token_count`` INCLUDES cached tokens, and
     this estimate bills them all at the FULL input rate. Real spend under
@@ -207,11 +202,7 @@ def gemini_cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
     against GCP billing at the live gate before adding them.
     """
 
-    rates = GEMINI_COSTS.get(model)
-    if rates is None:
-        rates = GEMINI_COSTS[GEMINI_FLASH_3_5_MODEL]
-    input_rate, output_rate = rates
-    return (input_tokens / 1_000_000.0) * input_rate + (output_tokens / 1_000_000.0) * output_rate
+    return token_cost_usd(model, input_tokens, output_tokens)
 
 
 def build_default_genai_client() -> genai.Client:
@@ -306,7 +297,7 @@ class GeminiClient:
     the live SDK initialization.
     """
 
-    DEFAULT_MODEL: ClassVar[str] = GEMINI_FLASH_3_5_MODEL
+    DEFAULT_MODEL: ClassVar[str] = GEMINI_FLASH_MODEL
 
     def __init__(
         self,
@@ -327,7 +318,7 @@ class GeminiClient:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_3_5_MODEL,
+        model: str = GEMINI_FLASH_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -413,6 +404,7 @@ class GeminiClient:
         parameterise the non-retryable code set rather than diverge this loop.
         """
 
+        model = gemini_request_id(model)
         attempt = 0
         throttle_attempt = 0
         throttle_backoff_spent = 0.0
@@ -514,7 +506,7 @@ class GeminiClient:
         tools: list[genai_types.Tool],
         *,
         system: str | None = None,
-        model: str = GEMINI_PRO_3_1_MODEL,
+        model: str = GEMINI_PRO_MODEL,
         max_tokens: int = 8192,
         temperature: float = 0.0,
         tool_mode: genai_types.FunctionCallingConfigMode = (

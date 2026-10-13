@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import date
 from typing import Any
 
 import pytest
@@ -27,22 +28,15 @@ from google.genai import types as genai_types
 from pydantic import ValidationError
 
 from packages.core.gemini import (
-    GEMINI_COSTS,
-    GEMINI_FLASH_3_5_MODEL,
-    GEMINI_FLASH_INPUT_COST_PER_MTOK,
-    GEMINI_FLASH_LITE_INPUT_COST_PER_MTOK,
-    GEMINI_FLASH_LITE_OUTPUT_COST_PER_MTOK,
     GEMINI_FLASH_MODEL,
-    GEMINI_FLASH_OUTPUT_COST_PER_MTOK,
-    GEMINI_PRO_3_1_MODEL,
-    GEMINI_PRO_INPUT_COST_PER_MTOK,
-    GEMINI_PRO_OUTPUT_COST_PER_MTOK,
+    GEMINI_PRO_MODEL,
     GeminiClient,
     GeminiToolCallError,
     _extract_usage,
     gemini_cost_for,
 )
 from packages.core.llm import LLMResponse
+from packages.core.model_registry import UnknownModelError, spec
 
 
 class _FakeUsage:
@@ -132,35 +126,80 @@ def _permission_denied() -> genai_errors.ClientError:
     )
 
 
+def _flash_rates() -> tuple[float, float]:
+    # 3.8 Flash's published price steps up on 2027-01-01; price at today's row.
+    row = spec(GEMINI_FLASH_MODEL).price.on(date.today())
+    return row.input, row.output
+
+
 def test_gemini_response_cost_calculation_flash() -> None:
     cost = gemini_cost_for(GEMINI_FLASH_MODEL, input_tokens=1_000_000, output_tokens=2_000_000)
-    expected = GEMINI_FLASH_INPUT_COST_PER_MTOK + 2 * GEMINI_FLASH_OUTPUT_COST_PER_MTOK
-    assert cost == pytest.approx(expected)
-
-
-def test_gemini_response_cost_calculation_flash_lite() -> None:
-    cost = gemini_cost_for(
-        "gemini-3.1-flash-lite-preview", input_tokens=500_000, output_tokens=100_000
-    )
-    expected = (
-        500_000 / 1_000_000 * GEMINI_FLASH_LITE_INPUT_COST_PER_MTOK
-        + 100_000 / 1_000_000 * GEMINI_FLASH_LITE_OUTPUT_COST_PER_MTOK
-    )
-    assert cost == pytest.approx(expected)
+    flash_input, flash_output = _flash_rates()
+    assert cost == pytest.approx(flash_input + 2 * flash_output)
 
 
 def test_gemini_response_cost_calculation_pro() -> None:
+    # Pro list price $2 / $12 per MTok at or under 200k prompt tokens.
     cost = gemini_cost_for("gemini-3.1-pro-preview", input_tokens=200_000, output_tokens=50_000)
-    expected = (
-        200_000 / 1_000_000 * GEMINI_PRO_INPUT_COST_PER_MTOK
-        + 50_000 / 1_000_000 * GEMINI_PRO_OUTPUT_COST_PER_MTOK
-    )
-    assert cost == pytest.approx(expected)
+    assert cost == pytest.approx(0.2 * 2.0 + 0.05 * 12.0)
 
 
-def test_gemini_response_cost_unknown_model_falls_back_to_flash() -> None:
-    cost = gemini_cost_for("gemini-unknown", input_tokens=1_000_000, output_tokens=0)
-    assert cost == pytest.approx(GEMINI_COSTS[GEMINI_FLASH_3_5_MODEL][0])
+def test_gemini_response_cost_pro_long_context_tier() -> None:
+    # Over 200k prompt tokens Pro bills $4 / $18 per MTok.
+    cost = gemini_cost_for("gemini-3.1-pro-preview", input_tokens=250_000, output_tokens=10_000)
+    assert cost == pytest.approx(0.25 * 4.0 + 0.01 * 18.0)
+
+
+@pytest.mark.parametrize(
+    "model", ["gemini-unknown", "gemini-2.5-flash", "gemini-3.5-flash", "gemini-3-flash"]
+)
+def test_gemini_cost_refuses_unregistered_models(model: str) -> None:
+    with pytest.raises(UnknownModelError):
+        gemini_cost_for(model, input_tokens=1_000_000, output_tokens=0)
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_refuses_unknown_model_before_any_request() -> None:
+    async def behaviour() -> _FakeResponse:
+        return _FakeResponse("never", prompt_tokens=1, candidate_tokens=1)
+
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(UnknownModelError):
+        await client.complete(system="sys", user="usr", model="gemini-2.5-flash")
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_refuses_a_claude_model() -> None:
+    async def behaviour() -> _FakeResponse:
+        return _FakeResponse("never", prompt_tokens=1, candidate_tokens=1)
+
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(UnknownModelError):
+        await client.complete(system="sys", user="usr", model="claude-haiku-5-5")
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_refuses_a_vertex_location_that_does_not_serve_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERTEX_PROJECT", "nashr-test")
+    monkeypatch.setenv("VERTEX_LOCATION", "us-central1")
+
+    async def behaviour() -> _FakeResponse:
+        return _FakeResponse("never", prompt_tokens=1, candidate_tokens=1)
+
+    fn, calls = _make_fn(behaviour)
+    client = GeminiClient(generate_content_fn=fn)
+
+    with pytest.raises(UnknownModelError, match="us-central1"):
+        await client.complete(system="sys", user="usr")
+    assert calls == []
 
 
 # --- _extract_usage: token accounting incl. cached_content_token_count --------
@@ -293,11 +332,11 @@ async def test_gemini_client_returns_text_and_cost() -> None:
     assert response.content == "hello world"
     assert response.input_tokens == 200
     assert response.output_tokens == 400
-    flash_input, flash_output = GEMINI_COSTS[GEMINI_FLASH_3_5_MODEL]
+    flash_input, flash_output = _flash_rates()
     expected_cost = 200 / 1_000_000 * flash_input + 400 / 1_000_000 * flash_output
     assert response.estimated_cost_usd == pytest.approx(expected_cost)
     assert len(calls) == 1
-    assert calls[0]["model"] == GEMINI_FLASH_3_5_MODEL  # the GeminiClient default is now 3.5 Flash
+    assert calls[0]["model"] == "gemini-3.8-flash"  # the GeminiClient default
     assert calls[0]["contents"] == "usr"
 
 
@@ -678,12 +717,10 @@ async def test_generate_with_tools_returns_function_call() -> None:
     assert result.text is None
     assert result.input_tokens == 100
     assert result.output_tokens == 50
-    expected_cost = 100 / 1_000_000 * GEMINI_PRO_INPUT_COST_PER_MTOK + (
-        50 / 1_000_000 * GEMINI_PRO_OUTPUT_COST_PER_MTOK
-    )
+    expected_cost = 100 / 1_000_000 * 2.0 + 50 / 1_000_000 * 12.0
     assert result.estimated_cost_usd == pytest.approx(expected_cost)
     assert len(calls) == 1
-    assert calls[0]["model"] == GEMINI_PRO_3_1_MODEL  # tool method defaults to Pro
+    assert calls[0]["model"] == GEMINI_PRO_MODEL == "gemini-3.1-pro-preview"  # tools default
 
 
 @pytest.mark.asyncio

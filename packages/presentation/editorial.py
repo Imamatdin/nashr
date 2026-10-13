@@ -66,8 +66,9 @@ from packages.core.enums import (
     NarrativePhase,
     SlideType,
 )
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, GeminiClient
+from packages.core.gemini import GeminiClient
 from packages.core.llm import LLMClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.article import ArticleOutline
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
@@ -152,7 +153,7 @@ DEFAULT_PROJECT_ID: Final[str] = "presentation"
 # stays the final authority regardless of this value.
 BRAIN_ESCALATION_MAX_ATTEMPTS: Final[int] = 3
 
-# Interactive content runs on Gemini 3.5 Flash, which spends "thoughts" tokens
+# Interactive content runs on Gemini 3.x Flash, which spends "thoughts" tokens
 # before visible output; the budget must clear the thinking phase plus the
 # quiz/matching JSON or the response truncates and no interactive slides ship.
 # (The pass ran at 3k on 2.5 Flash, which had no thinking tokens.)
@@ -1668,7 +1669,7 @@ class EditorialPass:
         first = await self._get_gemini().complete(
             system=system,
             user=user,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.INTERACTIVE_CONTENT),
             max_tokens=INTERACTIVE_MAX_TOKENS,
         )
         parsed = _parse_interactive(first.content)
@@ -1678,7 +1679,7 @@ class EditorialPass:
         retry = await self._get_gemini().complete(
             system=system,
             user=retry_user,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.INTERACTIVE_CONTENT),
             max_tokens=INTERACTIVE_MAX_TOKENS,
         )
         return _parse_interactive(retry.content).content

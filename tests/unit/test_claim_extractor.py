@@ -18,7 +18,7 @@ import json
 import pytest
 
 from packages.core.enums import ClaimStrength, ClaimType
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
+from packages.core.gemini import GEMINI_FLASH_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.source import SourceChunkCreate, SourceMetadataExtracted
 from packages.workers.source.claim_extractor import (
@@ -43,7 +43,7 @@ class _StubGemini:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_3_5_MODEL,
+        model: str = GEMINI_FLASH_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:

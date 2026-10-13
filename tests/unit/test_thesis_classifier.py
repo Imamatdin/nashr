@@ -19,8 +19,9 @@ from typing import Any
 import pytest
 
 from packages.core.enums import Language
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
+from packages.core.gemini import GEMINI_FLASH_MODEL
 from packages.core.llm import LLMResponse
+from packages.core.model_registry import Role, model_for
 from packages.core.models.presentation import ThesisVerdict
 from packages.presentation.thesis_classifier import (
     ThesisClassifier,
@@ -39,7 +40,7 @@ class _StubGemini:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_3_5_MODEL,
+        model: str = GEMINI_FLASH_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -90,7 +91,7 @@ async def test_classify_returns_verdicts_in_input_order() -> None:
     assert "three tokens" in verdicts[2].reason
     assert len(stub.calls) == 1
     _system, user_prompt, model = stub.calls[0]
-    assert model == GEMINI_FLASH_3_5_MODEL
+    assert model == model_for(Role.THESIS_CLASSIFIER)
     # Per-pair content appears in the user prompt.
     assert "Salon culture" in user_prompt
     assert "Ilim bilikti sındıradı" in user_prompt

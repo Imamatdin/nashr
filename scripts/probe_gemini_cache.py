@@ -65,7 +65,7 @@ from google.genai import types as genai_types  # noqa: E402
 from packages.core.brain_loop import build_edit_slides_tool  # noqa: E402
 from packages.core.brain_prompts import assemble_brain_system  # noqa: E402
 from packages.core.gemini import (  # noqa: E402
-    GEMINI_PRO_3_1_MODEL,
+    GEMINI_PRO_MODEL,
     build_default_genai_client,
 )
 
@@ -106,13 +106,13 @@ async def _run_probe(client: genai.Client) -> int:
 
     system = assemble_brain_system()
     tool = build_edit_slides_tool()
-    print(f"Probe model:        {GEMINI_PRO_3_1_MODEL}")
+    print(f"Probe model:        {GEMINI_PRO_MODEL}")
     print(f"System block chars: {len(system)}")
     print(f"Requested TTL:      {_CACHE_TTL}")
 
     try:
         cache = await client.aio.caches.create(
-            model=GEMINI_PRO_3_1_MODEL,
+            model=GEMINI_PRO_MODEL,
             config=genai_types.CreateCachedContentConfig(
                 system_instruction=system,
                 tools=[tool],
@@ -146,7 +146,7 @@ async def _run_probe(client: genai.Client) -> int:
 
     try:
         response = await client.aio.models.generate_content(
-            model=GEMINI_PRO_3_1_MODEL,
+            model=GEMINI_PRO_MODEL,
             contents=[genai_types.Content(role="user", parts=[genai_types.Part(text=_USER_TURN)])],
             config=genai_types.GenerateContentConfig(cached_content=cache_name),
         )
