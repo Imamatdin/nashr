@@ -57,8 +57,8 @@ disagree about which one is authoritative (full inventory in Appendix A).
 | I8 | Only the worker currently holding a render job's claim can register that job's exports, only for the revision, renderer and formats the job names, for the project's owner | `register_export` locks the job row and checks every field NULL-safely (§4.3) |
 | I9 | Only known content schema versions are stored; content size is bounded | `document_schema_versions` registry; `octet_length(content::text) <= 2 MiB` |
 | I10 | A user can read and commit only their own documents | owner-only SELECT RLS; `commit_revision` resolves the caller (`app_uid()` or the actor) to the project owner |
-| I12 | A queue worker's revision or proposal exists only if its job completed, under the claim that produced it | workers cannot use `commit_revision`; `finish_generation_job` locks the job, checks the live claim (worker, attempt token, fresh heartbeat), commits and completes in one transaction (§4.3, §4.6) |
-| I11 | A failed paid job has exactly one refund ledger row | `fail_job` and the reaper fail the job and insert its refund in one transaction under the job row lock (§6.6); partial unique index on `credit_ledger(generation_job_id) where action = 'refund'`, always installed (§8) |
+| I12 | A queue worker's revision or proposal exists only if its job left `processing` through its finish (committed, completed or delivery_failed), under the claim that produced it | workers cannot use `commit_revision`; `finish_generation_job` locks the job, checks the live claim (worker, attempt token, heartbeat fresh at decision time), commits and settles the job in one transaction (§4.3, §4.6) |
+| I11 | **A queued job that took money ends `completed` (delivered) or refunded exactly once** (`failed` or `delivery_failed`). Scope: jobs in `generation_jobs` charged through `payload.deducted_amount`; bot generation and its refunds are not queued jobs and are outside it (B8, §10) | `fail_job`, render failure and the reaper settle the job and insert its refund in one transaction under the job row lock (§6.6, §6.7); a committed job is delivered only by its render's completion; partial unique index on `credit_ledger(generation_job_id) where action = 'refund'`, always installed (§8) |
 
 ## 3. Decision summary
 
@@ -147,28 +147,54 @@ idempotency_key) → (status, document_id, revision_id, head_revision_id, propos
    other kind, `conflict` with the current head id. Nothing is written on conflict.
 
 `finish_generation_job(job_id, worker_id, claim_token, base_revision_id, content, kind,
-schema_version, idempotency_key, renderer_version, render_formats)` (B1-FIX, Codex finding 1):
-the only way a queue worker changes canonical state.
+schema_version, idempotency_key, renderer_version, render_formats, render_max_attempts)`
+(B1-FIX, Codex finding 1; delivery from B1-FIX2): the only way a queue worker changes
+canonical state.
 
+0. A committed revision must be rendered: a NULL renderer, an empty or NULL-holding
+   format list, or `render_max_attempts` outside 1–5 is refused (`render_required`,
+   `invalid_render_formats`, `invalid_render_max_attempts`) before anything is read.
+   It is never silently skipped (B1-FIX2).
 1. Lock the job row. A claim is `(worker_id, attempts)`: every claim increments
    `attempts`, so the attempt number is a monotonic claim token. The claim is live when
    the job is `processing` under that worker and token and `heartbeat_at` is younger
-   than `_claim_ttl()` (120 s, the reaper's default window). Otherwise `claim_lost` or
-   `claim_expired`, and nothing is written.
+   than `_claim_ttl()` (120 s, the reaper's default window), judged with
+   `clock_timestamp()` at the moment of the check, not `now()` (the transaction's start:
+   a finish that waited on locks would otherwise pass a check it fails in wall time).
+   Otherwise `claim_lost` or `claim_expired`, and nothing is written.
 2. The job type fixes the allowed kinds (`presentation_generation`: generation or
    regeneration; `presentation_edit`: ai_edit); the job's user must own the project.
 3. Ensure and lock the presentation document, then run the same compare-and-swap as
    `commit_revision` with actor `worker:<job>`. A first `generation` that conflicts is
    stored as a `regeneration` proposal (key `<key>:proposal`), so paid output is kept.
-4. Complete the job (`progress.outcome` = the status) and, for a committed, duplicate or
-   unchanged revision, queue a `presentation_render` job for exactly that revision.
-5. A retry with the same claim after a lost response finds the job completed and
-   returns the stored outcome (`duplicate` / `proposed`).
+4. Settle the job (`progress.outcome` = the status). For a committed, duplicate or
+   unchanged revision, `_enqueue_render` queues (or reuses, §6.5) the render of exactly
+   that revision. When something is left to render the job becomes **`committed`** and
+   `render_job_id` names the render that delivers it; when every format already exists,
+   or the result is a proposal (nothing to render until the owner accepts it), the job
+   is `completed`.
+5. A retry with the same claim after a lost response finds the job settled
+   (`committed`, `completed` or `delivery_failed`) and replays the stored outcome
+   (`duplicate` / `proposed` / `unchanged`) **only for the same content hash, schema
+   version and kind**; anything else under that key is `idempotency_key_reused`
+   (B1-FIX2). Receipts store kind and schema version for this comparison.
 
 So a revision or proposal from a job never coexists with a failed, refunded or
 re-queued job: a fault anywhere in the transaction rolls all of it back. Jobs that
 commit nothing (render, source processing) complete through `complete_job(job_id,
-worker_id, claim_token, progress)`, which refuses generation and edit jobs.
+worker_id, claim_token, progress)`, which refuses generation and edit jobs. A render
+completes only when every format it names is registered (`render_incomplete`), and in
+the same transaction every `committed` job whose `render_job_id` is that render
+becomes `completed` (§6.7).
+
+**Publication and freshness (decided, B1-FIX2).** `finish_generation_job` requires a
+fresh claim: it writes canonical state, so a worker whose heartbeat lapsed must not.
+`register_export` and `complete_job` require the caller's *current* claim token but
+not a fresh heartbeat: a slow upload that outlived its heartbeat may still publish
+until the reaper actually takes the job away. Once the reaper re-queues or fails the
+job the token no longer matches and publication is refused, so a stale worker can
+never publish against a later claim. Uploads are immutable and first-writer-wins, so
+nothing a late publisher writes can be wrong, only wasted.
 `claim_job` and `heartbeat_job(job_id, worker_id, claim_token)` carry the same token.
 
 `ensure_document(project_id, kind) → document_id`: creates the row with a null head
@@ -378,10 +404,12 @@ At job start the runner reads the head `H0`. With no head the commit is
 `finish_generation_job` with its claim (B1-FIX): the deck is committed (or stored as a
 proposal when the head moved), the job completes, and a `presentation_render` job for
 the committed revision is queued, all in one transaction. A worker whose claim lapsed
-writes nothing and the job's next claim (or the reaper) owns the outcome. On `proposed`
-the job completes without a render and without a refund (the output was delivered as a
-proposal). Rendering is therefore always a render job (§6.5), never part of the
-generation job: a generation job cannot hold a claim after its commit completed it.
+writes nothing and the job's next claim (or the reaper) owns the outcome. A committed
+deck leaves the job **`committed`** until its render publishes the files; it is then
+`completed` (delivered) or, when the render fails for good, `delivery_failed` and
+refunded (§6.7). On `proposed` the job completes without a render and without a refund
+(the output was delivered as a proposal). Rendering is always a render job (§6.5),
+never part of the generation job.
 
 The bot still commits through `commit_revision` as `bot:<telegram id>` and renders
 in-process (§6.4); it has no queue claim to fence.
@@ -398,9 +426,21 @@ already has a document.
 Base stamped at enqueue (`chat.py:243`). The worker no longer abandons on a stale base
 before running. It runs the fix and commits through `finish_generation_job`
 (`kind=ai_edit`, key `chat-edit:<job>`): committed, proposed or unchanged, the job is
-completed in the same transaction, and a committed edit's render (html, pdf, pptx) is a
-queued render job. A chat edit on a project without a document is no longer possible
+settled in the same transaction, and a committed edit's render (html, pdf, pptx) is a
+queued render job; the edit job stays `committed` until that render settles it, like a
+generation (§6.7). A chat edit on a project without a document is no longer possible
 (backfill), which removes the `save_deck` fallback.
+
+The edit allowance is consumed only by a **delivered** edit (B1-FIX2). The worker
+passes no inline `deliver`; the session records the committed edit as a pending
+delivery (`brain_sessions.pending_deliveries_json`) that holds one fix of the
+allowance, so a burst of edits cannot overdraw it. Every load of the session settles
+pending deliveries against their jobs: `completed` counts the fix and adds a chat
+notice that the edit is ready; `delivery_failed` (or a job that is gone) releases the
+hold, restoring the allowance, and adds a notice that the edit was saved but its files
+could not be produced (`delivery_notes_json`, in uz/ru/kaa/en by the deck's language).
+Settlement reads the job row the database settled with the render, so it is right
+whoever ended the render: the worker, a retry, or the reaper.
 
 ### 6.4 Bot
 
@@ -426,7 +466,18 @@ Payload carries `document_id, revision_id, renderer_version, formats` (sorted).
 Active-job dedupe moves from `(project_id, job_type)` to `(revision_id,
 renderer_version, formats)` for `presentation_render` (a new partial unique index),
 because the per-project index would hand a request for the head an already-running
-render of an older revision. A render job first reads which requested formats are
+render of an older revision. Every render is queued through `_enqueue_render`
+(`finish_generation_job`, and `request_render` behind "Update exports"), which
+serializes decisions per (revision, renderer) with a transaction-scoped advisory lock,
+skips formats already registered, and **reuses an active render whose formats cover
+the rest** (superset match, B1-FIX2), so overlapping requests share one job instead of
+rendering twice. A render job gets `render_max_attempts` attempts
+(`PlatformConfig.render_max_attempts`, env `RENDER_MAX_ATTEMPTS`, default 3 = 2
+automatic retries): `fail_job` on a render with attempts left re-queues it; render
+failures are mostly transient (a Chromium crash, an OOM on the 4 GB VM, an upload
+error), a retry is free (renders are never charged) and cheap (it renders only what is
+missing), and three attempts bound the user's wait for a refund to about three render
+times. A render job first reads which requested formats are
 already registered for its (revision, renderer) and renders only the missing ones; if
 none are missing it completes at once. Every rendered format must upload, verify and
 register (or find its first writer), or the job fails. A worker whose code is a
@@ -449,8 +500,39 @@ terminal row. Now the database settles both in one transaction:
   through the same internal `_settle_failure`, skipping rows another transaction
   holds (a worker mid-finish or mid-fail). A missing heartbeat counts as stale.
 - The job row lock serializes every settler, and the unique index backs it up.
-- The worker no longer refunds anything. The one application refund left is the
-  enqueue route's undo of a losing duplicate deduction, which belongs to no job.
+- The worker no longer refunds anything. Application refunds left: the enqueue
+  route's undo of a losing duplicate deduction (it belongs to no job), and the bot's
+  presentation and article failure refunds, which have no job row (B8, §10).
+
+### 6.7 Paid delivery (B1-FIX2, Codex B1-FIX review blocker 1)
+
+Separating render from generation (§6.1) made a paid generation `completed` before
+its files existed, so a render that failed for good left the job completed and
+charged. A job that commits now ends one of two ways, each settled exactly once:
+
+- **Delivered.** The render registers every format and completes; `complete_job`
+  moves every `committed` job whose `render_job_id` is that render to `completed` in
+  the same transaction. No refund.
+- **Undeliverable.** The render fails on its last attempt (`fail_job`, or the reaper
+  on a dead worker); `_settle_failure` fails it and moves each `committed` job it was
+  delivering to **`delivery_failed`**, refunding its charge through the same
+  `_refund_job` as `fail_job`, keyed on that job's id, in the same transaction. The
+  committed revision stays: it is canonical history, editable, and its exports can be
+  requested again.
+
+The reaper also settles a `committed` job whose render row is gone or already
+terminal: gone, failed or cancelled → `delivery_failed` and refunded; completed →
+`completed`. It reads the render row without locking it, so it cannot deadlock with a
+render completing (render lock, then parent locks): a render still active is left to
+settle its parents itself. Lock order stays job → document → proposal; a render is
+locked before the jobs it delivers.
+
+The web follows the job: the jobs API returns the job's status with its render job's
+id, status and progress, and the workspace shows "deck saved — preparing your files"
+while `committed`. Every change in that delivery fingerprint re-reads the exports,
+polling from 3 s backing off to 30 s whether or not Realtime is connected and whether
+or not a deck response exists yet. `delivery_failed` shows the refund and the kept
+deck.
 
 ## 7. Bugs this fixes (each gets a test that fails before the change)
 
@@ -563,6 +645,12 @@ Open:
    publishing images; replace with an official-publisher image (e.g. Chainguard) if one
    is adopted. It is pinned by digest and used only by the CI journey job, with
    throwaway credentials.
+5. **B8 — bot generation and refunds.** Bot presentation and article failures still
+   refund through `credits.refund` in the bot process (`presentation_flow.py`,
+   `article_flow.py`), with no job row and therefore no exactly-once settlement; the bot
+   can commit a revision, fail its render and refund. I11 is scoped to queued jobs and
+   does not cover them. Moving bot generation onto queued jobs (or giving it job-stamped
+   settlement) is B8.
 
 ## 11. Verification
 
@@ -580,6 +668,16 @@ to `ci/**` branches and on manual dispatch, never on `main`:
 3. Browser journey: API, worker and `next build && next start` (not `next dev`),
    headless Playwright with one worker. Providers are stubbed, R2 is replaced by
    local-disk storage, and no production secrets are used.
+4. Pre-change gates (B1-FIX2). Each regression module runs against the schema it
+   exists to catch and must fail there for its stated reason, gated by full test id
+   (`tests/db/expect_failures.py`): legacy 001–015, baseline 016 (blob e2863406),
+   fix1 016 (blob 1d38a9cc, `inventory_fix1.json`). The concurrent property test runs
+   once more with every document row lock removed (`NASHR_TEST_MUTATION=no_document_lock`)
+   and must fail its linearizability oracle (`inventory_mutation.json`). The journey's
+   delivery steps run once against the app as of 8cc000b and must fail
+   (`scripts/webshots/journey_inventory_fix1.json`).
+5. The presentation-worker suite, including PPTX determinism and the Chromium PDF
+   tests, and its typecheck.
 
 Each run uploads traces, videos, screenshots and logs as short-retention artifacts
 and reports the minutes it used.
