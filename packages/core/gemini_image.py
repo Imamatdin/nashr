@@ -18,6 +18,7 @@ only — never a real identifiable person (those are sourced from Commons).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -100,13 +101,16 @@ class GeminiImageClient:
         result = await self._run_with_retry(
             "gemini_generate_image", lambda: self._generate_image_fn(model=model, prompt=prompt)
         )
+        # Payload in the message string: the deployed log formatter drops ``extra``.
         logger.info(
-            "gemini_image_generated",
-            extra={
-                "model": model,
-                "latency_ms": int((time.perf_counter() - start) * 1000),
-                "estimated_cost_usd": cost,
-            },
+            "gemini_image_generated %s",
+            json.dumps(
+                {
+                    "model": model,
+                    "latency_ms": int((time.perf_counter() - start) * 1000),
+                    "estimated_cost_usd": cost,
+                }
+            ),
         )
         return result
 
