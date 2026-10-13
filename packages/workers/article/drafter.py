@@ -70,7 +70,8 @@ logger = logging.getLogger(__name__)
 
 
 SONNET_MODEL: Final[str] = model_for(Role.SECTION_DRAFTER)
-DRAFT_MAX_TOKENS: Final[int] = 6_000
+# 6k under the Claude 4.x tokenizer, x1.3 for Claude 5.x's ~30% more tokens per text.
+DRAFT_MAX_TOKENS: Final[int] = 7_800
 REVISION_THRESHOLD: Final[float] = 0.6
 USEFULNESS_THRESHOLD: Final[int] = 3
 PREVIOUS_SECTION_HEAD_CHARS: Final[int] = 200
