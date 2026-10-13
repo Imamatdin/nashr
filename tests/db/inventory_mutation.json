@@ -1,0 +1,13 @@
+{
+  "schema": "current 016 with every document row lock removed (NASHR_TEST_MUTATION=no_document_lock)",
+  "module": "tests/db/test_property.py",
+  "tests": {
+    "tests.db.test_property::test_concurrent_lifecycle_preserves_every_invariant": {
+      "expect": "fail",
+      "match": "writes committed against the same pre-round head|not on the head's parent chain|no write from the head committed"
+    },
+    "tests.db.test_property::test_n_interleaved_writers_never_lose_work": {
+      "expect": "pass"
+    }
+  }
+}
