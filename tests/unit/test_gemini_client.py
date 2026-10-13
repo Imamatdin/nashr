@@ -216,7 +216,7 @@ def test_extract_usage_reads_cached_content_token_count() -> None:
 def test_extract_usage_cached_absent_defaults_to_zero() -> None:
     # A usage object that never sets cached_content_token_count (getattr default 0).
     result = _extract_usage(_UsageResponse(_FakeUsage(prompt=50, candidates=10)))
-    assert result == (50, 10, 0)
+    assert result == (50, 10, 0, 0)
 
 
 def test_extract_usage_cached_none_defaults_to_zero() -> None:
@@ -236,7 +236,35 @@ def test_extract_usage_clamps_negative_cached_to_zero() -> None:
 
 def test_extract_usage_no_usage_metadata_is_all_zero() -> None:
     result = _extract_usage(_UsageResponse(None))
-    assert result == (0, 0, 0)
+    assert result == (0, 0, 0, 0)
+
+
+class _FakeUsageThinking:
+    def __init__(self, prompt: int, candidates: int, thoughts: int | None) -> None:
+        self.prompt_token_count = prompt
+        self.candidates_token_count = candidates
+        self.thoughts_token_count = thoughts
+
+
+def test_extract_usage_bills_thinking_tokens_as_output() -> None:
+    # Gemini bills thoughts_token_count at the output rate; it is not part of
+    # candidates_token_count, so leaving it out under-costed every 3.x call.
+    result = _extract_usage(_UsageResponse(_FakeUsageThinking(100, 40, 300)))
+    assert result.output_tokens == 340
+    assert result.thinking_tokens == 300
+
+
+def test_extract_usage_thinking_none_is_zero() -> None:
+    result = _extract_usage(_UsageResponse(_FakeUsageThinking(100, 40, None)))
+    assert result == (100, 40, 0, 0)
+
+
+def test_gemini_cost_includes_thinking_tokens() -> None:
+    usage = _extract_usage(_UsageResponse(_FakeUsageThinking(0, 0, 1_000_000)))
+    # Pro bills output (thinking included) at $12 / MTok.
+    assert gemini_cost_for(GEMINI_PRO_MODEL, usage.input_tokens, usage.output_tokens) == (
+        pytest.approx(12.0)
+    )
 
 
 def test_gemini_client_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1024,3 +1052,21 @@ async def test_generate_with_tools_bypasses_cache_for_nondefault_tool_config(
     assert any(
         r.getMessage() == "gemini_cache_bypassed_nondefault_tool_config" for r in caplog.records
     )
+
+
+@pytest.mark.asyncio
+async def test_gemini_complete_reports_truncation_and_thinking() -> None:
+    async def behaviour() -> _FakeResponse:
+        response = _FakeResponse("partial", prompt_tokens=10, candidate_tokens=5)
+        response.usage_metadata = _FakeUsageThinking(10, 5, 20)
+        response.candidates = [  # type: ignore[attr-defined]
+            genai_types.Candidate(finish_reason=genai_types.FinishReason.MAX_TOKENS)
+        ]
+        return response
+
+    fn, _calls = _make_fn(behaviour)
+    response = await GeminiClient(generate_content_fn=fn).complete(system="s", user="u")
+
+    assert response.stop_reason == "MAX_TOKENS"
+    assert response.output_tokens == 25
+    assert response.thinking_tokens == 20
