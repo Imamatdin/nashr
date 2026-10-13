@@ -64,7 +64,7 @@ class _StubRouter:
         self,
         system: str,
         user: str,
-        model: str = "gemini-3-flash",
+        model: str = "gemini-3.8-flash",
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -707,7 +707,10 @@ class TestVerifyArticle:
         report = await verifier.verify_article([section], claims, chunks, matrix)
         assert report.total_tokens > 0
         assert report.estimated_cost_usd > 0
-        assert report.model_used.startswith("gemini")
+        # CITATION_VERIFICATION role; the old routing table named "gemini-3-flash",
+        # which is not a model id and 404ed on every live call.
+        assert report.model_used == "gemini-3.8-flash"
+        assert [call[2] for call in router.calls] == ["gemini-3.8-flash"]
 
     @pytest.mark.asyncio
     async def test_empty_article(self) -> None:
@@ -764,7 +767,7 @@ class TestModels:
             verifications=[v],
             critical_issues=[v],
             warnings=[],
-            model_used="gemini-3-flash",
+            model_used="gemini-3.8-flash",
             total_tokens=100,
             estimated_cost_usd=0.001,
             verification_time_ms=50,
