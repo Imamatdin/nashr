@@ -8,10 +8,11 @@ Requires ``LLM_TRANSPORT=vertex`` (default) and ``VERTEX_PROJECT=nashr-prod``.
 Reports whether the second cached call shows ``cache_read_input_tokens > 0``.
 Cost appears in GCP billing (Vertex partner models), not the Anthropic console.
 
-Quota reference (Sonnet 4.6, global endpoint, GA 2026-02): QPM 1500;
-input TPM 1.5M (uncached + cache write); output TPM 150K. Editorial regen
-fires several sequential Sonnet calls — within burst for one job; raise a
-quota bump if parallel generation jobs saturate QPM.
+Quota reference measured for Sonnet 4.6 (global endpoint, GA 2026-02): QPM
+1500; input TPM 1.5M (uncached + cache write); output TPM 150K. Re-check the
+quota page for the current SLIDE_WRITER model before relying on these numbers.
+Editorial regen fires several sequential Sonnet calls — within burst for one
+job; raise a quota bump if parallel generation jobs saturate QPM.
 """
 
 from __future__ import annotations
@@ -21,11 +22,13 @@ import os
 import sys
 
 from packages.core.llm import (
-    DEFAULT_VERTEX_SONNET_MODEL,
     LLMClient,
     build_default_anthropic_client,
     resolve_llm_transport,
 )
+from packages.core.model_registry import Role, model_for
+
+_MODEL = model_for(Role.SLIDE_WRITER)
 
 # Editorial-shaped prefix. Anthropic prompt caching has a MINIMUM cacheable prefix
 # (1,024 tokens for Sonnet-class models); a shorter cache-marked prompt is silently
@@ -59,7 +62,7 @@ async def main() -> None:
         sys.exit(1)
     project = os.environ.get("VERTEX_PROJECT", "(unset)")
     region = os.environ.get("VERTEX_CLAUDE_REGION") or os.environ.get("VERTEX_LOCATION") or "global"
-    print(f"transport=vertex project={project} region={region} model={DEFAULT_VERTEX_SONNET_MODEL}")
+    print(f"transport=vertex project={project} region={region} model={_MODEL}")
     client = LLMClient()
     assert client.transport == "vertex"
     print(f"client_transport={client.transport}")
@@ -67,17 +70,15 @@ async def main() -> None:
     first = await client.complete(
         system=_SYSTEM,
         user=_USER,
-        model=DEFAULT_VERTEX_SONNET_MODEL,
+        model=_MODEL,
         max_tokens=512,
-        temperature=0.0,
         cache="5m",
     )
     second = await client.complete(
         system=_SYSTEM,
         user=_USER + " (repeat)",
-        model=DEFAULT_VERTEX_SONNET_MODEL,
+        model=_MODEL,
         max_tokens=512,
-        temperature=0.0,
         cache="5m",
     )
 

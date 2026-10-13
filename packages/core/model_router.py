@@ -1,8 +1,8 @@
 """Provider-agnostic LLM router.
 
 Routes :meth:`complete` calls to either :class:`packages.core.llm.LLMClient`
-or :class:`packages.core.gemini.GeminiClient` based on the leading
-identifier of the model name (``claude-*`` or ``gemini-*``). Both
+or :class:`packages.core.gemini.GeminiClient` by the model's provider in
+:mod:`packages.core.model_registry`; an unregistered model is refused. Both
 clients return the same :class:`LLMResponse`, so consumers only need to
 know which model they want — not which provider implements it.
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from packages.core.gemini import GeminiClient
 from packages.core.llm import DEFAULT_HAIKU_MODEL, LLMClient, LLMResponse
+from packages.core.model_registry import Provider, spec
 
 
 class ModelRouter:
@@ -55,27 +56,24 @@ class ModelRouter:
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
-        """Route to the correct provider based on ``model``'s prefix.
+        """Route to the provider the registry records for ``model``.
 
-        Raises :class:`ValueError` if the model is neither Claude nor
-        Gemini — workers must never call this method with a model name
-        from an unsupported provider.
+        Raises :class:`~packages.core.model_registry.UnknownModelError` (a
+        :class:`ValueError`) for an unregistered model. ``temperature`` reaches
+        Gemini only: Claude 4.7+ rejects any non-default value.
         """
 
-        if model.startswith("claude"):
+        if spec(model).provider is Provider.ANTHROPIC:
             return await self._get_anthropic().complete(
                 system=system,
                 user=user,
                 model=model,
                 max_tokens=max_tokens,
-                temperature=temperature,
             )
-        if model.startswith("gemini"):
-            return await self._get_gemini().complete(
-                system=system,
-                user=user,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-        raise ValueError(f"Unknown model provider for model: {model}")
+        return await self._get_gemini().complete(
+            system=system,
+            user=user,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )

@@ -4,7 +4,7 @@ The drafter is the LLM-facing component that turns an
 :class:`ArticleOutline` plus an :class:`EvidenceMatrix` into actual
 article prose. It is intentionally narrow:
 
-* one LLM call per section (Sonnet 4.6), with at most one revision pass
+* one LLM call per section (the SECTION_DRAFTER role, Sonnet), with at most one revision pass
   triggered by the heuristic quality validator;
 * every factual claim must reference an evidence-matrix entry whose
   ``citation_status`` is ``READY`` or ``VERIFIED``;
@@ -38,6 +38,7 @@ from packages.core.enums import (
     CitationStatus,
 )
 from packages.core.llm import LLMClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.article import (
     ArticleDraftResult,
     ArticleOutline,
@@ -68,7 +69,7 @@ from packages.workers.article.quality_validators import run_checks
 logger = logging.getLogger(__name__)
 
 
-SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
+SONNET_MODEL: Final[str] = model_for(Role.SECTION_DRAFTER)
 DRAFT_MAX_TOKENS: Final[int] = 6_000
 REVISION_THRESHOLD: Final[float] = 0.6
 USEFULNESS_THRESHOLD: Final[int] = 3

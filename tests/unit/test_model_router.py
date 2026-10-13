@@ -19,6 +19,7 @@ import pytest
 
 from packages.core.gemini import GeminiClient
 from packages.core.llm import LLMClient, LLMResponse
+from packages.core.model_registry import UnknownModelError
 from packages.core.model_router import ModelRouter
 
 
@@ -30,11 +31,10 @@ class _FakeAnthropicClient:
         self,
         system: str,
         user: str,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "claude-haiku-5-5",
         max_tokens: int = 2000,
-        temperature: float = 0.0,
     ) -> LLMResponse:
-        del max_tokens, temperature
+        del max_tokens
         self.calls.append((system, user, model))
         return LLMResponse(
             content="anthropic-output",
@@ -54,7 +54,7 @@ class _FakeGeminiClient:
         self,
         system: str,
         user: str,
-        model: str = "gemini-3-flash",
+        model: str = "gemini-3.8-flash",
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -82,12 +82,12 @@ async def test_router_routes_claude_to_anthropic() -> None:
     response = await router.complete(
         system="sys",
         user="usr",
-        model="claude-sonnet-4-6-20250514",
+        model="claude-sonnet-5-5",
     )
 
     assert response.content == "anthropic-output"
     assert len(fake_anthropic.calls) == 1
-    assert fake_anthropic.calls[0][2] == "claude-sonnet-4-6-20250514"
+    assert fake_anthropic.calls[0][2] == "claude-sonnet-5-5"
     assert len(fake_gemini.calls) == 0
 
 
@@ -103,12 +103,12 @@ async def test_router_routes_gemini_to_google() -> None:
     response = await router.complete(
         system="sys",
         user="usr",
-        model="gemini-3-flash",
+        model="gemini-3.8-flash",
     )
 
     assert response.content == "gemini-output"
     assert len(fake_gemini.calls) == 1
-    assert fake_gemini.calls[0][2] == "gemini-3-flash"
+    assert fake_gemini.calls[0][2] == "gemini-3.8-flash"
     assert len(fake_anthropic.calls) == 0
 
 
@@ -119,8 +119,24 @@ async def test_router_rejects_unknown_provider() -> None:
         gemini=_FakeGeminiClient(),  # type: ignore[arg-type]
     )
 
-    with pytest.raises(ValueError, match="Unknown model provider"):
+    with pytest.raises(UnknownModelError, match=r"not in packages/core/model_registry.py"):
         await router.complete(system="sys", user="usr", model="gpt-4o")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["gemini-3-flash", "claude-sonnet-4-6-20250514"])
+async def test_router_refuses_unregistered_ids_of_known_providers(model: str) -> None:
+    # The prefix routing used to forward these to the provider, which 404s.
+    fake_anthropic = _FakeAnthropicClient()
+    fake_gemini = _FakeGeminiClient()
+    router = ModelRouter(
+        anthropic=fake_anthropic,  # type: ignore[arg-type]
+        gemini=fake_gemini,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(UnknownModelError):
+        await router.complete(system="sys", user="usr", model=model)
+    assert fake_anthropic.calls == fake_gemini.calls == []
 
 
 @pytest.mark.asyncio
@@ -148,7 +164,7 @@ async def test_router_lazy_initializes_clients(monkeypatch: pytest.MonkeyPatch) 
         del self
         return LLMResponse(
             content="ok",
-            model="claude-sonnet-4-6-20250514",
+            model="claude-sonnet-5-5",
             input_tokens=1,
             output_tokens=1,
             latency_ms=1,
@@ -163,7 +179,7 @@ async def test_router_lazy_initializes_clients(monkeypatch: pytest.MonkeyPatch) 
     assert router._anthropic is None  # type: ignore[reportPrivateUsage]
     assert router._gemini is None  # type: ignore[reportPrivateUsage]
 
-    await router.complete(system="sys", user="usr", model="claude-sonnet-4-6-20250514")
+    await router.complete(system="sys", user="usr", model="claude-sonnet-5-5")
 
     assert init_counts["anthropic"] == 1
     assert init_counts["gemini"] == 0
@@ -178,8 +194,8 @@ async def test_router_reuses_provider_client_across_calls() -> None:
     fake_anthropic = _FakeAnthropicClient()
     router = ModelRouter(anthropic=fake_anthropic)  # type: ignore[arg-type]
 
-    await router.complete(system="s", user="u1", model="claude-sonnet-4-6-20250514")
-    await router.complete(system="s", user="u2", model="claude-sonnet-4-6-20250514")
+    await router.complete(system="s", user="u1", model="claude-sonnet-5-5")
+    await router.complete(system="s", user="u2", model="claude-sonnet-5-5")
 
     assert len(fake_anthropic.calls) == 2
     assert router._anthropic is fake_anthropic  # type: ignore[reportPrivateUsage]

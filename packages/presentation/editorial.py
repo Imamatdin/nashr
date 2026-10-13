@@ -143,7 +143,7 @@ from packages.presentation.thesis_classifier import ThesisClassifier
 logger = logging.getLogger(__name__)
 
 
-SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
+SONNET_MODEL: Final[str] = model_for(Role.SLIDE_WRITER)
 DEFAULT_PROJECT_ID: Final[str] = "presentation"
 
 # Way 1 brain escalation: how many focused fix passes the brain gets on a
@@ -1488,7 +1488,7 @@ class EditorialPass:
         ONLY a JSON object"); valid JSON that FAILS slide-schema validation
         (after coercion) takes the EXACT field errors translated into
         instructions (see :func:`packages.presentation._schema_feedback.format_schema_feedback`).
-        At temperature 0 a blind resample re-rolls the whole deck — which is how
+        A blind resample re-rolls the whole deck — which is how
         a single stray field on one slide could drop a different section's
         planned people on the prior gate run; telling the model the one field to
         fix anchors it to its previous output.
@@ -1498,7 +1498,7 @@ class EditorialPass:
         minutes. The section-repair path (_repair_failing_sections) routes
         through here too, so it inherits both the timeout and the informed retry.
         Returns ``[]`` after two failures (the emergency-deck path); we do NOT
-        add a second blind retry — at temperature 0 more rolls do not help.
+        add a second blind retry — more rolls of the same prompt do not help.
 
         ``cost_sink`` is an opt-in spend probe: when a list is passed, each
         underlying ``complete`` call's ``estimated_cost_usd`` is appended, so the

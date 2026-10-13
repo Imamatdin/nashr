@@ -43,6 +43,7 @@ from uuid import UUID
 
 from packages.core.enums import ArticleStructure, Language
 from packages.core.llm import LLMClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.article import ArticleOutline, OutlineSection
 from packages.core.models.source import (
     SourceChunkCreate,
@@ -70,6 +71,7 @@ from packages.workers.article.claim_linker import ClaimLinker
 logger = logging.getLogger(__name__)
 
 
+_MODEL: Final[str] = model_for(Role.ARTICLE_OUTLINE)
 MIN_EMPIRICAL_MARKERS: Final[int] = 3
 MAX_TARGET_WORDS: Final[int] = 20_000
 MAX_CLAIMS_IN_PROMPT: Final[int] = 60
@@ -296,13 +298,16 @@ class OutlineGenerator:
     ) -> dict[str, Any] | None:
         """One LLM call; on bad JSON, retry once with a stricter suffix."""
 
-        first = await self._llm.complete(system=system_prompt, user=user_prompt, max_tokens=4_000)
+        first = await self._llm.complete(
+            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=4_000
+        )
         parsed = _try_parse_object(first.content)
         if parsed is not None:
             return parsed
         retry = await self._llm.complete(
             system=system_prompt,
             user=user_prompt + OUTLINE_GENERATION_RETRY_SUFFIX,
+            model=_MODEL,
             max_tokens=4_000,
         )
         return _try_parse_object(retry.content)

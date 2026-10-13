@@ -65,16 +65,17 @@ class _StubLLM:
         self.responses = list(responses or [])
         self.raise_on_call = raise_on_call
         self.calls: list[tuple[str, str]] = []
+        self.models: list[str] = []
 
     async def complete(
         self,
         system: str,
         user: str,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "claude-haiku-5-5",
         max_tokens: int = 2000,
-        temperature: float = 0.0,
     ) -> LLMResponse:
         self.calls.append((system, user))
+        self.models.append(model)
         if self.raise_on_call is not None:
             raise self.raise_on_call
         if not self.responses:
@@ -695,6 +696,7 @@ class TestOutlineGeneration:
         )
         # Two calls were made (initial + repair) because xulosa was missing
         assert len(stub.calls) == 2
+        assert stub.models == ["claude-haiku-5-5", "claude-haiku-5-5"]  # ARTICLE_OUTLINE
         flag_text = " ".join(outline.quality_flags)
         assert "missing_llm_output:xulosa" in flag_text
 

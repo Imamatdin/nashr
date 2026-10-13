@@ -44,6 +44,7 @@ from packages.core.enums import (
 )
 from packages.core.fallback_questions import fallback_questions_for
 from packages.core.llm import LLMClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.evidence import (
     AnswerScore,
     EvidenceMatrix,
@@ -77,6 +78,7 @@ from packages.workers.article.evidence_matrix import (
 logger = logging.getLogger(__name__)
 
 
+_MODEL: Final[str] = model_for(Role.RESEARCH_INTERVIEW)
 GUIDED_QUESTION_COUNT: Final[int] = 4
 RESEARCH_QUESTION_COUNT: Final[int] = 10
 MAX_CHUNKS_IN_PROMPT: Final[int] = 20
@@ -367,13 +369,17 @@ class ResearchInterviewEngine:
     ) -> list[dict[str, Any]] | None:
         """Call the LLM; retry once on bad JSON; return ``None`` on final failure."""
 
-        first = await self._llm.complete(system=system_prompt, user=user_prompt, max_tokens=4_000)
+        first = await self._llm.complete(
+            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=4_000
+        )
         parsed = _try_parse_array(first.content)
         if parsed is not None:
             return parsed
 
         retry_prompt = user_prompt + INTERVIEW_QUESTION_RETRY_SUFFIX
-        second = await self._llm.complete(system=system_prompt, user=retry_prompt, max_tokens=4_000)
+        second = await self._llm.complete(
+            system=system_prompt, user=retry_prompt, model=_MODEL, max_tokens=4_000
+        )
         parsed = _try_parse_array(second.content)
         if parsed is not None:
             return parsed
@@ -439,13 +445,17 @@ class ResearchInterviewEngine:
     ) -> dict[str, Any] | None:
         """Call the LLM; retry once on bad JSON; return ``None`` on final failure."""
 
-        first = await self._llm.complete(system=system_prompt, user=user_prompt, max_tokens=800)
+        first = await self._llm.complete(
+            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=800
+        )
         parsed = _try_parse_object(first.content)
         if parsed is not None:
             return parsed
 
         retry_prompt = user_prompt + ANSWER_SCORING_RETRY_SUFFIX
-        second = await self._llm.complete(system=system_prompt, user=retry_prompt, max_tokens=800)
+        second = await self._llm.complete(
+            system=system_prompt, user=retry_prompt, model=_MODEL, max_tokens=800
+        )
         parsed = _try_parse_object(second.content)
         if parsed is not None:
             return parsed
