@@ -31,7 +31,12 @@ const EXPECTED_ERRORS = [
   { url: /\/realtime\/v1\//, kind: /.*/ },
 ];
 const errorKind = (text) => text.match(/net::ERR_[A-Z_]+/)?.[0] ?? text.match(/status of (\d{3})/)?.[1] ?? "other";
-const expectedError = (url, kind) =>
+// The delivery steps refuse Realtime on purpose. Chromium reports a failed
+// WebSocket handshake with the calling script's location, not the socket URL,
+// so that one injected failure is recognised by its message.
+const REFUSED_REALTIME = /^WebSocket connection to 'ws:\/\/127\.0\.0\.1:54321\/realtime\/v1\/websocket\?/;
+const expectedError = (url, kind, text = "") =>
+  REFUSED_REALTIME.test(text) ||
   EXPECTED_ERRORS.some((rule) => rule.url.test(url.split("?")[0]) && rule.kind.test(kind));
 const redact = (text) =>
   text.replace(/apikey=[^&\s']+/g, "apikey=<redacted>").replace(/X-Amz-[A-Za-z]+=[^&\s]+/g, "X-Amz=<redacted>");
@@ -88,7 +93,7 @@ async function openProject(
     const kind = errorKind(text);
     consoleErrors.push({
       text: redact(`${locale}: ${text.slice(0, 300)} @ ${new URL(url || "about:blank").pathname}`),
-      expected: expectedError(url, kind),
+      expected: expectedError(url, kind, text),
     });
   });
   page.on("pageerror", (error) =>
