@@ -143,6 +143,8 @@ create table if not exists document_operation_receipts (
     idempotency_key   text not null check (char_length(idempotency_key) between 1 and 128),
     operation         text not null check (operation in ('commit', 'accept')),
     content_sha256    text not null check (content_sha256 ~ '^[0-9a-f]{64}$'),
+    kind              text not null check (char_length(kind) between 1 and 32),
+    schema_version    integer not null check (schema_version between 1 and 1000),
     result_status     text not null check (result_status = 'unchanged'),
     revision_id       uuid references document_revisions(id) on delete set null,
     proposal_id       uuid references revision_proposals(id) on delete set null,
@@ -179,6 +181,13 @@ create table if not exists revision_validations (
 );
 
 alter table brain_sessions add column if not exists revision_id uuid;
+-- AI edits committed but not yet published (their render is running): each holds
+-- one fix of the allowance until its job is delivered or its delivery fails.
+alter table brain_sessions add column if not exists pending_deliveries_json jsonb
+    not null default '[]'::jsonb check (jsonb_typeof(pending_deliveries_json) = 'array');
+-- What the chat tells the user about those deliveries, in the session language.
+alter table brain_sessions add column if not exists delivery_notes_json jsonb
+    not null default '[]'::jsonb check (jsonb_typeof(delivery_notes_json) = 'array');
 alter table brain_sessions drop constraint if exists brain_sessions_revision_fk;
 alter table brain_sessions add constraint brain_sessions_revision_fk
     foreign key (revision_id) references document_revisions(id) on delete set null;
@@ -504,10 +513,10 @@ begin
         if v_head_hash = v_hash then
             insert into document_operation_receipts (
                 document_id, idempotency_key, operation, content_sha256,
-                result_status, revision_id
+                kind, schema_version, result_status, revision_id
             ) values (
                 p_document_id, p_idempotency_key, 'commit', v_hash,
-                'unchanged', v_doc.head_revision_id
+                p_kind, p_schema_version, 'unchanged', v_doc.head_revision_id
             );
             return query select 'unchanged'::text, p_document_id, v_doc.head_revision_id,
                                 v_doc.head_revision_id, null::uuid;
@@ -593,6 +602,24 @@ $$;
 -- processing under that worker and token and its heartbeat is younger than
 -- _claim_ttl(); the reaper uses the same window by default.
 
+-- Paid delivery (B1-FIX2). A generation or AI-edit job that commits a revision
+-- is 'committed' until the render it queued publishes every requested format;
+-- then it is 'completed' (delivered). If that render fails for good, the parent
+-- is 'delivery_failed' and refunded exactly once, through the same settlement as
+-- fail_job. render_job_id links the parent to the render that delivers it.
+alter table generation_jobs drop constraint if exists generation_jobs_status_check;
+alter table generation_jobs add constraint generation_jobs_status_check
+    check (status in (
+        'queued', 'processing', 'committed', 'completed', 'failed', 'delivery_failed',
+        'cancelled'
+    ));
+alter table generation_jobs add column if not exists render_job_id uuid
+    references generation_jobs(id) on delete set null;
+create index if not exists idx_generation_jobs_render_job
+    on generation_jobs (render_job_id) where render_job_id is not null;
+create index if not exists idx_generation_jobs_committed
+    on generation_jobs (created_at) where status = 'committed';
+
 create or replace function _claim_ttl() returns interval
 language sql immutable
 set search_path = public, pg_temp
@@ -615,8 +642,11 @@ begin
        or p_claim_token is null or v_job.attempts <> p_claim_token then
         raise exception 'claim_lost' using errcode = '55000';
     end if;
+    -- clock_timestamp(), not now(): now() is the transaction's start, and a
+    -- finish that waited on locks must be judged at the moment it decides.
     if p_require_fresh
-       and (v_job.heartbeat_at is null or v_job.heartbeat_at < now() - _claim_ttl()) then
+       and (v_job.heartbeat_at is null
+            or v_job.heartbeat_at < clock_timestamp() - _claim_ttl()) then
         raise exception 'claim_expired' using errcode = '55000';
     end if;
     return v_job;
@@ -657,11 +687,172 @@ as $$
     select exists (select 1 from bumped);
 $$;
 
+-- Queue the render of one revision, or reuse one already running (B1-FIX2).
+-- Formats already registered for the revision and renderer are never rendered
+-- again (first writer wins), so only the missing ones are requested. An active
+-- render whose formats cover the missing ones is reused (superset match), so
+-- overlapping requests share one job instead of rendering twice. Decisions for one
+-- revision and renderer are serialized by a transaction-scoped advisory lock, so
+-- two requests cannot both miss each other's job. Returns 'ready' (nothing left
+-- to render), 'reused' or 'queued'. The caller has verified ownership.
+create or replace function _enqueue_render(
+    p_project_id uuid,
+    p_user_id uuid,
+    p_document_id uuid,
+    p_revision_id uuid,
+    p_renderer_version text,
+    p_formats text[],
+    p_max_attempts integer,
+    p_requested_by uuid
+)
+returns table (status text, job_id uuid, formats jsonb)
+language plpgsql
+set search_path = public, pg_temp
+as $$
+#variable_conflict use_column
+declare
+    v_missing text[];
+    v_formats jsonb;
+    v_job uuid;
+begin
+    if p_renderer_version is null or p_renderer_version !~ '^[a-z0-9][a-z0-9._-]{0,63}$' then
+        raise exception 'invalid_renderer_version' using errcode = '22023';
+    end if;
+    if coalesce(cardinality(p_formats), 0) = 0
+       or exists (select 1 from unnest(p_formats) f where f is null or f not in ('html', 'pptx', 'pdf'))
+    then
+        raise exception 'invalid_render_formats' using errcode = '22023';
+    end if;
+    if p_max_attempts is null or p_max_attempts not between 1 and 5 then
+        raise exception 'invalid_render_max_attempts' using errcode = '22023';
+    end if;
+
+    perform pg_advisory_xact_lock(
+        hashtextextended('render:' || p_revision_id::text || ':' || p_renderer_version, 0)
+    );
+
+    v_missing := array(
+        select distinct f from unnest(p_formats) f
+         where not exists (
+             select 1 from revision_exports e
+              where e.revision_id = p_revision_id
+                and e.renderer_version = p_renderer_version and e.format = f)
+         order by f
+    );
+    if cardinality(v_missing) = 0 then
+        return query select 'ready'::text, null::uuid, '[]'::jsonb;
+        return;
+    end if;
+
+    -- Locked, so a render completing right now either finishes first (and is no
+    -- longer active here) or completes after this transaction links to it.
+    select j.id into v_job from generation_jobs j
+     where j.job_type = 'presentation_render'
+       and j.status in ('queued', 'processing')
+       and j.payload ->> 'revision_id' = p_revision_id::text
+       and j.payload ->> 'renderer_version' = p_renderer_version
+       and j.payload -> 'formats' @> to_jsonb(v_missing)
+     order by j.created_at
+     limit 1
+     for update;
+    if v_job is not null then
+        return query select 'reused'::text, v_job, to_jsonb(v_missing);
+        return;
+    end if;
+
+    -- A candidate that completed while this waited may have registered formats.
+    v_missing := array(
+        select distinct f from unnest(p_formats) f
+         where not exists (
+             select 1 from revision_exports e
+              where e.revision_id = p_revision_id
+                and e.renderer_version = p_renderer_version and e.format = f)
+         order by f
+    );
+    if cardinality(v_missing) = 0 then
+        return query select 'ready'::text, null::uuid, '[]'::jsonb;
+        return;
+    end if;
+    v_formats := to_jsonb(v_missing);
+
+    insert into generation_jobs (project_id, user_id, job_type, status, payload, max_attempts)
+    values (
+        p_project_id, p_user_id, 'presentation_render', 'queued',
+        jsonb_build_object(
+            'document_id', p_document_id, 'revision_id', p_revision_id,
+            'renderer_version', p_renderer_version, 'formats', v_formats,
+            'requested_by_job', p_requested_by),
+        p_max_attempts
+    )
+    on conflict do nothing
+    returning id into v_job;
+    if v_job is null then
+        -- An inline (bot) render for exactly this set holds the active slot.
+        select j.id into v_job from generation_jobs j
+         where j.job_type = 'presentation_render'
+           and j.status in ('queued', 'processing')
+           and j.payload ->> 'revision_id' = p_revision_id::text
+           and j.payload ->> 'renderer_version' = p_renderer_version
+           and j.payload -> 'formats' = v_formats;
+        return query select 'reused'::text, v_job, v_formats;
+        return;
+    end if;
+    return query select 'queued'::text, v_job, v_formats;
+end;
+$$;
+
+-- "Update exports" (API, service role): render the missing formats of a revision
+-- the caller owns, reusing a covering active render.
+create or replace function request_render(
+    p_project_id uuid,
+    p_user_id uuid,
+    p_revision_id uuid,
+    p_renderer_version text,
+    p_formats text[],
+    p_max_attempts integer
+)
+returns table (status text, job_id uuid, formats jsonb)
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+#variable_conflict use_column
+declare
+    v_doc uuid;
+    v_owner uuid;
+begin
+    select r.document_id, p.user_id into v_doc, v_owner
+      from document_revisions r
+      join documents d on d.id = r.document_id
+      join projects p on p.id = d.project_id
+     where r.id = p_revision_id and d.project_id = p_project_id;
+    if v_doc is null then
+        raise exception 'revision_not_found' using errcode = 'P0002';
+    end if;
+    if p_user_id is null or v_owner is distinct from p_user_id then
+        raise exception 'not_document_owner' using errcode = '42501';
+    end if;
+    return query select * from _enqueue_render(
+        p_project_id, v_owner, v_doc, p_revision_id, p_renderer_version, p_formats,
+        p_max_attempts, null
+    );
+end;
+$$;
+
 -- The only way a queue worker changes canonical document state. Locks the job,
 -- proves the caller's live claim, commits through the same compare-and-swap as
--- commit_revision, completes the job and queues the render of what it committed,
--- all in one transaction: a revision or proposal from a job exists only if that
--- job completed, and a worker whose claim lapsed writes nothing.
+-- commit_revision, and settles the job, all in one transaction: a revision or
+-- proposal from a job exists only if that job left 'processing', and a worker
+-- whose claim lapsed writes nothing.
+--
+-- Delivery (B1-FIX2): a committed revision must be rendered, so a renderer and a
+-- non-empty format list are required, never silently skipped. When something is
+-- left to render the job becomes 'committed' and records its render job; that
+-- render completing or failing for good settles it (completed, or
+-- delivery_failed and refunded). When every format already exists, or the result
+-- is a proposal (nothing to render until the owner accepts it), the job completes.
+drop function if exists finish_generation_job(
+    uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]
+);
 create or replace function finish_generation_job(
     p_job_id uuid,
     p_worker_id text,
@@ -672,11 +863,12 @@ create or replace function finish_generation_job(
     p_schema_version integer,
     p_idempotency_key text,
     p_renderer_version text,
-    p_render_formats text[]
+    p_render_formats text[],
+    p_render_max_attempts integer
 )
 returns table (
     status text, document_id uuid, revision_id uuid,
-    head_revision_id uuid, proposal_id uuid
+    head_revision_id uuid, proposal_id uuid, job_status text, render_job_id uuid
 )
 language plpgsql security definer
 set search_path = public, pg_temp
@@ -687,31 +879,75 @@ declare
     v_owner uuid;
     v_type text;
     v_doc uuid;
+    v_head uuid;
     v_actor text;
     v_result record;
-    v_formats jsonb;
+    v_hash text;
+    v_status text;
+    v_rev uuid;
+    v_prop uuid;
+    v_stored_hash text;
+    v_stored_schema integer;
+    v_stored_kind text;
+    v_render_status text;
+    v_render_job uuid;
+    v_job_status text;
 begin
+    if p_renderer_version is null or coalesce(cardinality(p_render_formats), 0) = 0 then
+        raise exception 'render_required' using errcode = '22023';
+    end if;
+    if exists (
+        select 1 from unnest(p_render_formats) f where f is null or f not in ('html', 'pptx', 'pdf')
+    ) then
+        raise exception 'invalid_render_formats' using errcode = '22023';
+    end if;
+    if p_render_max_attempts is null or p_render_max_attempts not between 1 and 5 then
+        raise exception 'invalid_render_max_attempts' using errcode = '22023';
+    end if;
+
     select * into v_job from generation_jobs j where j.id = p_job_id for update;
-    -- A retry of a finish whose response was lost: same claim, job completed.
-    if found and v_job.status = 'completed' and v_job.worker_id = p_worker_id
-       and v_job.attempts = p_claim_token then
-        select d.id into v_doc from documents d
+    -- A retry of a finish whose response was lost: same claim, job already
+    -- settled. It replays the stored result only for the same content, schema and
+    -- kind; anything else under that key is idempotency_key_reused.
+    if found and v_job.status in ('committed', 'completed', 'delivery_failed')
+       and v_job.worker_id = p_worker_id and v_job.attempts = p_claim_token then
+        select d.id, d.head_revision_id into v_doc, v_head from documents d
          where d.project_id = v_job.project_id and d.kind = 'presentation';
-        return query
-            select 'duplicate'::text, v_doc, r.id, d.head_revision_id, null::uuid
-              from document_revisions r join documents d on d.id = r.document_id
-             where r.document_id = v_doc and r.idempotency_key = p_idempotency_key
-            union all
-            select 'proposed'::text, v_doc, null::uuid, d.head_revision_id, q.id
-              from revision_proposals q join documents d on d.id = q.document_id
+        v_hash := _content_sha256(p_content);
+        select 'duplicate', r.id, null::uuid, r.content_sha256, r.schema_version, r.kind
+          into v_status, v_rev, v_prop, v_stored_hash, v_stored_schema, v_stored_kind
+          from document_revisions r
+         where r.document_id = v_doc and r.idempotency_key = p_idempotency_key;
+        if v_status is null then
+            select 'proposed', null::uuid, q.id, q.content_sha256, q.schema_version, q.kind
+              into v_status, v_rev, v_prop, v_stored_hash, v_stored_schema, v_stored_kind
+              from revision_proposals q
              where q.document_id = v_doc
                and q.idempotency_key in (p_idempotency_key, p_idempotency_key || ':proposal')
-            union all
-            select 'unchanged'::text, v_doc, o.revision_id, d.head_revision_id, null::uuid
-              from document_operation_receipts o join documents d on d.id = o.document_id
-             where o.document_id = v_doc and o.idempotency_key = p_idempotency_key
-            limit 1;
-        if found then
+             order by (q.idempotency_key = p_idempotency_key) desc
+             limit 1;
+        end if;
+        if v_status is null then
+            select 'unchanged', o.revision_id, null::uuid, o.content_sha256, o.schema_version,
+                   o.kind
+              into v_status, v_rev, v_prop, v_stored_hash, v_stored_schema, v_stored_kind
+              from document_operation_receipts o
+             where o.document_id = v_doc and o.idempotency_key = p_idempotency_key;
+        end if;
+        if v_status is not null then
+            if v_stored_hash is distinct from v_hash
+               or v_stored_schema is distinct from p_schema_version
+               or not coalesce(
+                   v_stored_kind = p_kind
+                   -- a lost first generation is kept as a regeneration proposal
+                   or (p_kind = 'generation' and v_stored_kind = 'regeneration'
+                       and v_status = 'proposed'),
+                   false)
+            then
+                raise exception 'idempotency_key_reused' using errcode = '23505';
+            end if;
+            return query select v_status, v_doc, v_rev, v_head, v_prop,
+                                v_job.status, v_job.render_job_id;
             return;
         end if;
     end if;
@@ -761,43 +997,57 @@ begin
         raise exception 'finish_unexpected_status %', v_result.status using errcode = 'XX000';
     end if;
 
+    if v_result.revision_id is not null then
+        select r.status, r.job_id into v_render_status, v_render_job
+          from _enqueue_render(
+              v_job.project_id, v_owner, v_doc, v_result.revision_id, p_renderer_version,
+              p_render_formats, p_render_max_attempts, p_job_id
+          ) r;
+    end if;
+    v_job_status := case when v_render_job is null then 'completed' else 'committed' end;
+
     update generation_jobs
-       set status = 'completed',
-           completed_at = now(),
+       set status = v_job_status,
+           render_job_id = v_render_job,
+           completed_at = case when v_render_job is null then now() end,
            progress = progress || jsonb_build_object(
-               'step', 'done', 'outcome', v_result.status,
-               'revision_id', v_result.revision_id, 'proposal_id', v_result.proposal_id)
+               'step', case when v_render_job is null then 'done' else 'rendering' end,
+               'outcome', v_result.status,
+               'revision_id', v_result.revision_id, 'proposal_id', v_result.proposal_id,
+               'render_job_id', v_render_job,
+               'delivery', case
+                   when v_render_job is not null then 'rendering'
+                   when v_result.revision_id is null then 'proposal'
+                   else 'ready' end)
      where id = p_job_id;
 
-    if v_result.revision_id is not null and p_renderer_version is not null
-       and coalesce(cardinality(p_render_formats), 0) > 0 then
-        if exists (
-            select 1 from unnest(p_render_formats) f
-             where f is null or f not in ('html', 'pptx', 'pdf')
-        ) then
-            raise exception 'invalid_render_formats' using errcode = '22023';
-        end if;
-        select to_jsonb(array_agg(distinct f order by f)) into v_formats
-          from unnest(p_render_formats) f;
-        insert into generation_jobs (project_id, user_id, job_type, status, payload, max_attempts)
-        values (
-            v_job.project_id, v_owner, 'presentation_render', 'queued',
-            jsonb_build_object(
-                'document_id', v_doc, 'revision_id', v_result.revision_id,
-                'renderer_version', p_renderer_version, 'formats', v_formats,
-                'requested_by_job', p_job_id),
-            1
-        )
-        on conflict do nothing;
-    end if;
-
     return query select v_result.status, v_doc, v_result.revision_id,
-                        v_result.head_revision_id, v_result.proposal_id;
+                        v_result.head_revision_id, v_result.proposal_id,
+                        v_job_status, v_render_job;
 end;
 $$;
 
+-- The caller holds the render job's lock and the render just completed: every
+-- parent it was delivering is now delivered.
+create or replace function _deliver_parents(p_render_job uuid)
+returns void
+language sql
+set search_path = public, pg_temp
+as $$
+    update generation_jobs p
+       set status = 'completed',
+           completed_at = now(),
+           progress = p.progress || jsonb_build_object('step', 'done', 'delivery', 'delivered')
+     where p.render_job_id = p_render_job and p.status = 'committed';
+$$;
+
 -- Complete a job that commits nothing (render, source processing). Jobs that
--- produce a revision complete only through finish_generation_job.
+-- produce a revision complete only through finish_generation_job. A render
+-- completes only when every format it was asked for is registered, and in the
+-- same transaction the jobs it was delivering become completed (B1-FIX2).
+-- Publication requires the caller's current claim token but not a fresh
+-- heartbeat: a slow upload that outlived its heartbeat may still publish until
+-- the reaper actually takes the job away (ADR §6.2).
 create or replace function complete_job(
     p_job_id uuid, p_worker_id text, p_claim_token integer, p_progress jsonb
 ) returns boolean
@@ -815,10 +1065,23 @@ begin
     if v_job.job_type in ('presentation_generation', 'presentation_edit') then
         raise exception 'job_must_finish_with_revision' using errcode = '55000';
     end if;
+    if v_job.job_type = 'presentation_render' and exists (
+        select 1 from jsonb_array_elements_text(v_job.payload -> 'formats') f
+         where not exists (
+             select 1 from revision_exports e
+              where e.revision_id = (v_job.payload ->> 'revision_id')::uuid
+                and e.renderer_version = v_job.payload ->> 'renderer_version'
+                and e.format = f)
+    ) then
+        raise exception 'render_incomplete' using errcode = '22023';
+    end if;
     update generation_jobs
        set status = 'completed', completed_at = now(),
            progress = progress || coalesce(p_progress, '{}'::jsonb)
      where id = p_job_id;
+    if v_job.job_type = 'presentation_render' then
+        perform _deliver_parents(p_job_id);
+    end if;
     return true;
 end;
 $$;
@@ -826,27 +1089,22 @@ $$;
 -- ---------------------------------------------------------------------------
 -- 7c. Failure and refund: one transaction, exactly once (Codex B1 finding 4)
 -- ---------------------------------------------------------------------------
--- A job that charged credits (payload.deducted_amount > 0) and fails is refunded
--- in the same transaction that marks it failed, so a crash can never leave a
--- failed, charged job without its refund. The job row lock serializes every
--- settler (worker fail_job, the reaper), and uq_credit_ledger_refund_per_job is
--- the safety net under it.
+-- A job that charged credits (payload.deducted_amount > 0) is refunded in the
+-- same transaction that marks it failed or delivery_failed, so a crash can never
+-- leave a failed, charged job without its refund. The job row lock serializes
+-- every settler (worker fail_job, render failure, the reaper), and
+-- uq_credit_ledger_refund_per_job is the safety net under it. A job that took
+-- money therefore ends completed (delivered) or refunded exactly once.
 
--- The caller holds the job row lock.
-create or replace function _settle_failure(p_job generation_jobs, p_error text)
-returns generation_jobs
+-- Refund what the job charged, once. The caller holds the job row lock.
+create or replace function _refund_job(p_job generation_jobs)
+returns void
 language plpgsql
 set search_path = public, pg_temp
 as $$
 declare
     v_amount integer;
-    v_row generation_jobs%rowtype;
 begin
-    update generation_jobs
-       set status = 'failed', completed_at = now(), error_message = left(p_error, 4000)
-     where id = p_job.id
-    returning * into v_row;
-
     if jsonb_typeof(p_job.payload -> 'deducted_amount') = 'number' then
         v_amount := (p_job.payload ->> 'deducted_amount')::numeric::integer;
     end if;
@@ -861,12 +1119,66 @@ begin
             p_job.user_id, p_job.project_id, v_amount, 'refund', 'refund', p_job.id, 'confirmed'
         );
     end if;
+end;
+$$;
+
+-- A committed job whose delivery cannot happen: delivery_failed and refunded. Its
+-- revision stays (it is canonical history); only the charge is returned. The
+-- caller holds the job row lock.
+create or replace function _fail_delivery(p_job generation_jobs, p_error text)
+returns generation_jobs
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+    v_row generation_jobs%rowtype;
+begin
+    update generation_jobs
+       set status = 'delivery_failed', completed_at = now(),
+           error_message = left(p_error, 4000),
+           progress = progress || jsonb_build_object('step', 'done', 'delivery', 'failed')
+     where id = p_job.id
+    returning * into v_row;
+    perform _refund_job(p_job);
+    return v_row;
+end;
+$$;
+
+-- The caller holds the job row lock. A render that fails for good takes every
+-- job it was delivering with it: each becomes delivery_failed and is refunded.
+create or replace function _settle_failure(p_job generation_jobs, p_error text)
+returns generation_jobs
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+    v_row generation_jobs%rowtype;
+    v_parent generation_jobs%rowtype;
+begin
+    update generation_jobs
+       set status = 'failed', completed_at = now(), error_message = left(p_error, 4000)
+     where id = p_job.id
+    returning * into v_row;
+    perform _refund_job(p_job);
+
+    if p_job.job_type = 'presentation_render' then
+        for v_parent in
+            select * from generation_jobs p
+             where p.render_job_id = p_job.id and p.status = 'committed'
+             order by p.created_at
+             for update
+        loop
+            perform _fail_delivery(v_parent, 'render failed: ' || left(p_error, 3900));
+        end loop;
+    end if;
     return v_row;
 end;
 $$;
 
 -- A worker gives up on its job. False when the claim is no longer the caller's
 -- (reaped, re-queued or claimed again): then whoever holds the job settles it.
+-- A render with attempts left goes back to the queue instead (its retries are
+-- the render_max_attempts the job was queued with); its last error is kept.
 create or replace function fail_job(
     p_job_id uuid, p_worker_id text, p_claim_token integer, p_step text, p_message text
 ) returns boolean
@@ -875,15 +1187,24 @@ set search_path = public, pg_temp
 as $$
 declare
     v_job generation_jobs%rowtype;
+    v_error text;
 begin
     begin
         v_job := _lock_claimed_job(p_job_id, p_worker_id, p_claim_token, false);
     exception when sqlstate '55000' then
         return false;
     end;
-    perform _settle_failure(
-        v_job, coalesce(p_step, 'unknown') || ': ' || coalesce(p_message, '')
-    );
+    v_error := coalesce(p_step, 'unknown') || ': ' || coalesce(p_message, '');
+    if v_job.job_type = 'presentation_render' and v_job.attempts < v_job.max_attempts then
+        update generation_jobs
+           set status = 'queued', worker_id = null, claimed_at = null, heartbeat_at = null,
+               error_message = left(v_error, 4000),
+               progress = progress || jsonb_build_object(
+                   'step', 'retry_queued', 'failed_attempt', v_job.attempts)
+         where id = p_job_id;
+        return true;
+    end if;
+    perform _settle_failure(v_job, v_error);
     return true;
 end;
 $$;
@@ -893,6 +1214,13 @@ $$;
 -- settlement. A job whose heartbeat is missing is as stale as an old one. Rows
 -- another transaction holds (a worker mid-finish or mid-fail) are skipped this
 -- round: that transaction decides them.
+--
+-- It also settles committed jobs whose render is gone or already terminal (B1-FIX2):
+-- a render row that was deleted, failed or cancelled without settling its parent
+-- makes the parent delivery_failed and refunded; one that completed makes it
+-- completed. The render row is only read, never locked, so the reaper cannot
+-- deadlock with a render completing (render lock, then parent locks): if that
+-- render is still active here, the parent is left for its completion.
 create or replace function reap_stale_jobs(p_stale_seconds integer default 120)
 returns setof generation_jobs
 language plpgsql security definer
@@ -900,6 +1228,7 @@ set search_path = public, pg_temp
 as $$
 declare
     v_job generation_jobs%rowtype;
+    v_child_status text;
 begin
     for v_job in
         select * from generation_jobs j
@@ -919,6 +1248,29 @@ begin
                 'reaped: worker heartbeat lost at step '
                     || coalesce(v_job.progress ->> 'step', 'unknown')
             );
+        end if;
+    end loop;
+
+    for v_job in
+        select * from generation_jobs j
+         where j.status = 'committed'
+         order by j.created_at
+         for update skip locked
+    loop
+        v_child_status := null;
+        if v_job.render_job_id is not null then
+            select c.status into v_child_status from generation_jobs c
+             where c.id = v_job.render_job_id;
+        end if;
+        if v_child_status is null then
+            return next _fail_delivery(v_job, 'reaped: the render job for this delivery is gone');
+        elsif v_child_status = 'completed' then
+            update generation_jobs
+               set status = 'completed', completed_at = now(),
+                   progress = progress || jsonb_build_object('step', 'done', 'delivery', 'delivered')
+             where id = v_job.id;
+        elsif v_child_status in ('failed', 'cancelled', 'delivery_failed') then
+            return next _fail_delivery(v_job, 'reaped: its render job ' || v_child_status);
         end if;
     end loop;
 end;
@@ -1036,10 +1388,10 @@ begin
          where id = p_proposal_id;
         insert into document_operation_receipts (
             document_id, idempotency_key, operation, content_sha256,
-            result_status, revision_id, proposal_id
+            kind, schema_version, result_status, revision_id, proposal_id
         ) values (
             v_document_id, p_idempotency_key, 'accept', v_prop.content_sha256,
-            'unchanged', v_doc.head_revision_id, p_proposal_id
+            v_prop.kind, v_prop.schema_version, 'unchanged', v_doc.head_revision_id, p_proposal_id
         );
         return query select 'unchanged'::text, v_document_id, v_doc.head_revision_id,
                             v_doc.head_revision_id, p_proposal_id;
@@ -1248,13 +1600,22 @@ revoke all on function _lock_claimed_job(uuid, text, integer, boolean)
 revoke all on function claim_job(uuid, text) from public, anon, authenticated;
 revoke all on function heartbeat_job(uuid, text, integer) from public, anon, authenticated;
 revoke all on function finish_generation_job(
-    uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]
+    uuid, text, integer, uuid, jsonb, text, integer, text, text, text[], integer
 ) from public, anon, authenticated;
+revoke all on function _enqueue_render(uuid, uuid, uuid, uuid, text, text[], integer, uuid)
+    from public, anon, authenticated, service_role;
+revoke all on function _refund_job(generation_jobs) from public, anon, authenticated, service_role;
+revoke all on function _fail_delivery(generation_jobs, text)
+    from public, anon, authenticated, service_role;
+revoke all on function _deliver_parents(uuid) from public, anon, authenticated, service_role;
+revoke all on function request_render(uuid, uuid, uuid, text, text[], integer)
+    from public, anon, authenticated;
+grant execute on function request_render(uuid, uuid, uuid, text, text[], integer) to service_role;
 revoke all on function complete_job(uuid, text, integer, jsonb) from public, anon, authenticated;
 grant execute on function claim_job(uuid, text) to service_role;
 grant execute on function heartbeat_job(uuid, text, integer) to service_role;
 grant execute on function finish_generation_job(
-    uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]
+    uuid, text, integer, uuid, jsonb, text, integer, text, text, text[], integer
 ) to service_role;
 grant execute on function complete_job(uuid, text, integer, jsonb) to service_role;
 revoke all on function _settle_failure(generation_jobs, text)

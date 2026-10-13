@@ -4,7 +4,8 @@ Set ``NASHR_TEST_DATABASE_URL`` to a superuser URL on a cluster bootstrapped
 with ``bootstrap_roles.sql``. ``NASHR_TEST_SCHEMA`` picks the chain:
 ``legacy`` (001–015, the pre-B1 schema test_bug_regressions must fail against),
 ``baseline`` (001–015 plus the reviewed 016, the schema test_b1_fix_regressions
-must fail against) or ``current`` (default, every migration).
+must fail against), ``fix1`` (001–015 plus 016 as of 8cc000b, the schema
+test_b1_fix2_regressions must fail against) or ``current`` (default, every migration).
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from tests.db.support import ADMIN_URL, SCHEMA, Db, create_database, drop_databa
 
 LEGACY = SCHEMA == "legacy"
 BASELINE = SCHEMA == "baseline"
+FIX1 = SCHEMA == "fix1"
 CURRENT = SCHEMA == "current"
 
 

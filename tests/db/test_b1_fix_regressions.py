@@ -213,7 +213,9 @@ async def test_a_fault_inside_finish_rolls_back_the_revision(deck: Deck) -> None
         """
         create function public.test_inject_fault() returns trigger language plpgsql as $$
         begin
-            if new.status = 'completed' then
+            -- Whatever finish settles the job to (completed, or committed while
+            -- its render runs), the revision must go with a failed settlement.
+            if new.status in ('completed', 'committed') then
                 raise exception 'injected_fault';
             end if;
             return new;

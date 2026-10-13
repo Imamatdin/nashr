@@ -733,7 +733,7 @@ async def test_a_finish_with_a_null_kind_or_format_writes_nothing(world: World) 
         "kind_not_allowed",
         world.service.fetchrow(
             "select * from finish_generation_job($1, 'w1', 1, $2, '{\"t\": 1}'::jsonb,"
-            " null, 1, 'k', null, '{}')",
+            " null, 1, 'k', 'pw-test', '{html}', 3)",
             uuid.UUID(job),
             uuid.UUID(world.r0),
         ),
@@ -792,3 +792,65 @@ async def test_commit_latency_at_200_kb(world: World) -> None:
     if out:
         Path(out).mkdir(parents=True, exist_ok=True)
         (Path(out) / "commit_latency.json").write_text(json.dumps(report))
+
+
+# ------------------------------------------------- privilege matrix (B1-FIX2 item 7)
+
+# Every canonical table and view, including B1-FIX's receipts, validations,
+# migration reports and duplicate-refund registry. No role may write any of
+# them directly: every write goes through the SECURITY DEFINER functions.
+# authenticated reads its own rows (RLS); service_role reads; anon, the
+# PostgREST login role (authenticator) and PUBLIC hold nothing.
+_MATRIX_TABLES = (
+    "decks",
+    "documents",
+    "document_revisions",
+    "revision_proposals",
+    "revision_exports",
+    "revision_validations",
+    "document_schema_versions",
+    "document_operation_receipts",
+    "proposal_validations",
+    "migration_reports",
+    "credit_ledger_legacy_duplicate_refunds",
+)
+_MATRIX_ROLES = ("anon", "authenticated", "authenticator", "service_role", "public")
+_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
+_NO_AUTHENTICATED_READ = {"migration_reports", "credit_ledger_legacy_duplicate_refunds"}
+
+
+def _expected_privileges(table: str, role: str) -> set[str]:
+    if role == "service_role":
+        return {"SELECT"}
+    if role == "authenticated" and table not in _NO_AUTHENTICATED_READ:
+        return {"SELECT"}
+    return set()
+
+
+async def test_the_privilege_matrix_is_exactly_read_only(world: World) -> None:
+    admin = await world.db.admin()
+    if not await admin.fetchval(
+        "select exists (select 1 from pg_roles where rolname = 'authenticator')"
+    ):
+        pytest.fail("the authenticator role must exist (tests/db/bootstrap_roles.sql)")
+    wrong: list[str] = []
+    for table in _MATRIX_TABLES:
+        for role in _MATRIX_ROLES:
+            held = {
+                privilege
+                for privilege in _TABLE_PRIVILEGES
+                if await admin.fetchval(
+                    "select has_table_privilege($1, $2, $3)", role, f"public.{table}", privilege
+                )
+            }
+            if held != _expected_privileges(table, role):
+                wrong.append(f"{role} on {table}: {sorted(held)}")
+            for privilege in ("INSERT", "UPDATE", "REFERENCES"):
+                if await admin.fetchval(
+                    "select has_any_column_privilege($1, $2, $3)",
+                    role,
+                    f"public.{table}",
+                    privilege,
+                ):
+                    wrong.append(f"{role} column {privilege} on {table}")
+    assert wrong == []

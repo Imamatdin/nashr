@@ -1,0 +1,65 @@
+{
+  "schema": "fix1 (migrations 001-015 + 016 as the B1-FIX review saw it, blob 1d38a9cc at 8cc000b)",
+  "module": "tests/db/test_b1_fix2_regressions.py",
+  "tests": {
+    "tests.db.test_b1_fix2_regressions::test_a_paid_job_waits_for_its_render_before_it_counts_as_delivered": {
+      "expect": "fail",
+      "match": "AssertionError: the paid job was completed before its render ran"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_render_that_fails_for_good_leaves_the_paid_job_delivery_failed_and_refunded_once": {
+      "expect": "fail",
+      "match": "AssertionError: the paid job stayed completed after its render failed"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_render_that_succeeds_completes_the_paid_job_without_a_refund": {
+      "expect": "fail",
+      "match": "AssertionError: the paid job did not wait for its render"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_failed_render_is_retried_before_the_delivery_fails": {
+      "expect": "fail",
+      "match": "AssertionError: a first render failure was terminal"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_render_cannot_complete_without_every_requested_format": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix2_regressions::test_an_ai_edit_job_also_waits_for_its_render": {
+      "expect": "fail",
+      "match": "AssertionError: the edit job was completed before its render ran"
+    },
+    "tests.db.test_b1_fix2_regressions::test_the_reaper_fails_the_delivery_of_a_committed_job_whose_render_is_gone": {
+      "expect": "fail",
+      "match": "AssertionError: the reaper left the orphaned paid job completed"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_render_completing_while_the_reaper_runs_delivers_once": {
+      "expect": "fail",
+      "match": "AssertionError: the paid job did not wait for its render"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_render_failing_while_the_reaper_runs_refunds_exactly_once": {
+      "expect": "fail",
+      "match": "AssertionError: the paid job did not wait for its render"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_finish_replay_with_other_content_is_idempotency_key_reused": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*\\bUniqueViolationError\\b"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_finish_without_a_renderer_is_refused": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_finish_without_formats_is_refused": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix2_regressions::test_claim_freshness_is_judged_when_the_finish_decides": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*\\bObjectNotInPrerequisiteStateError\\b"
+    },
+    "tests.db.test_b1_fix2_regressions::test_update_exports_reuses_an_active_render_whose_formats_cover_it": {
+      "expect": "fail",
+      "match": "UndefinedFunctionError: function request_render\\(.*\\) does not exist"
+    },
+    "tests.db.test_b1_fix2_regressions::test_a_finish_replay_with_the_same_input_replays": {
+      "expect": "pass"
+    }
+  }
+}

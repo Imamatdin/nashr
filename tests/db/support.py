@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,11 +23,17 @@ BOOTSTRAP = Path(__file__).with_name("bootstrap_database.sql")
 # Migration 016 exactly as the first B1 review saw it (blob e2863406 at 848a3c9).
 # The B1-FIX regression tests must fail against it and pass against the fixed 016.
 BASELINE_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_848a3c9.sql"
+# Migration 016 exactly as the B1-FIX review saw it (blob 1d38a9cc at 8cc000b).
+# The B1-FIX2 regression tests must fail against it and pass against the fixed 016.
+FIX1_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_8cc000b.sql"
 ADMIN_URL = os.environ.get("NASHR_TEST_DATABASE_URL", "")
-# legacy = 001–015 (pre-B1); baseline = 001–015 + the reviewed 016; current = all.
+# legacy = 001–015 (pre-B1); baseline = 001–015 + the 016 the B1 review saw;
+# fix1 = 001–015 + the 016 the B1-FIX review saw; current = all.
 SCHEMA = os.environ.get("NASHR_TEST_SCHEMA", "current")
-if SCHEMA not in ("legacy", "baseline", "current"):
-    raise RuntimeError(f"NASHR_TEST_SCHEMA must be legacy, baseline or current, not {SCHEMA!r}")
+if SCHEMA not in ("legacy", "baseline", "fix1", "current"):
+    raise RuntimeError(
+        f"NASHR_TEST_SCHEMA must be legacy, baseline, fix1 or current, not {SCHEMA!r}"
+    )
 
 
 def migrations_through(last_prefix: str | None) -> list[Path]:
@@ -44,6 +51,8 @@ def migrations_for(schema: str = SCHEMA) -> list[Path]:
         return migrations_through("015")
     if schema == "baseline":
         return [*migrations_through("015"), BASELINE_016]
+    if schema == "fix1":
+        return [*migrations_through("015"), FIX1_016]
     return migrations_through(None)
 
 
@@ -52,7 +61,11 @@ def migration_016(schema: str = SCHEMA) -> Path:
 
     if schema == "legacy":
         raise RuntimeError("the legacy schema has no migration 016")
-    return BASELINE_016 if schema == "baseline" else migrations_through(None)[-1]
+    if schema == "baseline":
+        return BASELINE_016
+    if schema == "fix1":
+        return FIX1_016
+    return migrations_through(None)[-1]
 
 
 def database_url(name: str) -> str:
@@ -84,12 +97,29 @@ async def create_database(migrations: Sequence[Path], name: str | None = None) -
     return name
 
 
+# A deliberate defect for the mutation run (B1-FIX2 item 6): with
+# NASHR_TEST_MUTATION=no_document_lock, every "select ... from documents d ...
+# for update" in 016 loses its row lock, so two same-base writers no longer
+# serialize. The property test must fail on that schema.
+MUTATION = os.environ.get("NASHR_TEST_MUTATION", "")
+_DOCUMENT_LOCK = re.compile(r"(from documents d\s+where[^;]*?)\s+for update;", re.DOTALL)
+
+
+def _mutated(path: Path, text: str) -> str:
+    if MUTATION != "no_document_lock" or not path.name.startswith("016_"):
+        return text
+    mutated, count = _DOCUMENT_LOCK.subn(r"\1;", text)
+    if count != 4:
+        raise RuntimeError(f"expected 4 document row locks in {path.name}, found {count}")
+    return mutated
+
+
 async def apply(conn: Any, path: Path) -> None:
     """Run one migration file as a single transaction."""
 
     await conn.execute("begin")
     try:
-        await conn.execute(path.read_text(encoding="utf-8"))
+        await conn.execute(_mutated(path, path.read_text(encoding="utf-8")))
     except Exception:
         await conn.execute("rollback")
         raise
@@ -174,6 +204,7 @@ class Db:
         payload: dict[str, Any] | None = None,
         attempts: int = 1,
         conn: Any = None,
+        max_attempts: int | None = None,
     ) -> str:
         """A job row; a processing one holds a live claim (``worker``, attempt ``attempts``).
 
@@ -189,7 +220,7 @@ class Db:
         await conn.execute(
             "insert into generation_jobs (id, project_id, user_id, job_type, status, worker_id,"
             " payload, attempts, max_attempts, claimed_at, heartbeat_at)"
-            " values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, greatest($8, 1),"
+            " values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, coalesce($9, greatest($8, 1)),"
             " case when $5 = 'processing' then now() end,"
             " case when $5 = 'processing' then now() end)",
             uuid.UUID(job_id),
@@ -200,6 +231,7 @@ class Db:
             worker,
             body,
             attempts,
+            max_attempts,
         )
         return job_id
 
@@ -263,11 +295,17 @@ async def finish(
     key: str,
     render_formats: list[str] | None = None,
     renderer_version: str | None = "pw-test",
+    render_max_attempts: int = 3,
 ) -> dict[str, Any]:
-    """finish_generation_job: the fenced commit + completion a queue worker makes."""
+    """finish_generation_job: the fenced commit + settlement a queue worker makes.
 
-    row = await conn.fetchrow(
-        "select * from finish_generation_job($1, $2, $3, $4, $5::jsonb, $6, 1, $7, $8, $9)",
+    A committed revision is always rendered (B1-FIX2), so the formats default to
+    html. The reviewed 016s (baseline, fix1) take no ``render_max_attempts``; the
+    call adapts so a test fails there on behaviour, not on a missing signature.
+    """
+
+    formats = render_formats if render_formats is not None else ["html"]
+    args: list[Any] = [
         uuid.UUID(job_id),
         worker,
         token,
@@ -276,8 +314,16 @@ async def finish(
         kind,
         key,
         renderer_version,
-        render_formats if render_formats is not None else [],
-    )
+        formats,
+    ]
+    if SCHEMA in ("baseline", "fix1"):
+        sql = "select * from finish_generation_job($1, $2, $3, $4, $5::jsonb, $6, 1, $7, $8, $9)"
+    else:
+        sql = (
+            "select * from finish_generation_job($1, $2, $3, $4, $5::jsonb, $6, 1, $7, $8, $9, $10)"
+        )
+        args.append(render_max_attempts)
+    row = await conn.fetchrow(sql, *args)
     return {k: (str(v) if isinstance(v, uuid.UUID) else v) for k, v in dict(row).items()}
 
 
