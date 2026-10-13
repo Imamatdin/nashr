@@ -70,16 +70,17 @@ class _StubLLM:
         self.responses = list(responses or [])
         self.raise_on_call = raise_on_call
         self.calls: list[tuple[str, str]] = []
+        self.models: list[str] = []
 
     async def complete(
         self,
         system: str,
         user: str,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "claude-haiku-5-5",
         max_tokens: int = 2000,
-        temperature: float = 0.0,
     ) -> LLMResponse:
         self.calls.append((system, user))
+        self.models.append(model)
         if self.raise_on_call is not None:
             raise self.raise_on_call
         if not self.responses:
@@ -569,6 +570,7 @@ async def test_generate_questions_invalid_json_retries() -> None:
 
     assert len(questions) == 4
     assert len(stub.calls) == 2
+    assert stub.models == ["claude-haiku-5-5", "claude-haiku-5-5"]  # RESEARCH_INTERVIEW
 
 
 @pytest.mark.asyncio
@@ -772,6 +774,7 @@ async def test_score_answer_invalid_json_retries_then_succeeds() -> None:
     )
 
     assert len(stub.calls) == 2
+    assert stub.models == ["claude-haiku-5-5", "claude-haiku-5-5"]  # RESEARCH_INTERVIEW
     assert scored.score.specificity == 4
 
 

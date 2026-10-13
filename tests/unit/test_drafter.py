@@ -82,18 +82,19 @@ class _StubLLM:
         self.responses = list(responses or [])
         self.raise_on_call = raise_on_call
         self.calls: list[tuple[str, str]] = []
+        self.models: list[str] = []
         self.cache_args: list[bool | str] = []
 
     async def complete(
         self,
         system: str,
         user: str,
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "claude-haiku-5-5",
         max_tokens: int = 2000,
-        temperature: float = 0.0,
         cache: bool | str = False,
     ) -> LLMResponse:
         self.calls.append((system, user))
+        self.models.append(model)
         self.cache_args.append(cache)
         if self.raise_on_call is not None:
             raise self.raise_on_call
@@ -730,6 +731,7 @@ class TestDraftSection:
         assert result.revision_attempted is True
         assert result.revision_improved is True
         assert result.llm_calls_made == 2
+        assert llm.models == ["claude-sonnet-5-5", "claude-sonnet-5-5"]  # SECTION_DRAFTER
 
     @pytest.mark.asyncio
     async def test_no_revision_on_good_quality(self) -> None:

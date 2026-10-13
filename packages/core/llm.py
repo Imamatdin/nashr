@@ -10,10 +10,12 @@ instead of scattered across the article, presentation, and source workers.
   retried with exponential backoff; ``AuthenticationError`` is intentionally
   *not* caught because it indicates a misconfigured key, not a transient
   fault, and silently retrying would only delay the operator's diagnosis.
-* **Cost** — token usage is multiplied by the per-million-token price for
-  Haiku 4.5 / Sonnet 4.6 to record an estimated cost on every response. The
-  numbers come from the SPEC's cost-control table and are intentionally a
-  small, immutable surface so cost changes are a one-line edit.
+* **Models** — every model id is checked against
+  :mod:`packages.core.model_registry` before a request is sent, translated to
+  the transport's spelling there, and sent with the registry's pinned thinking
+  mode. Claude 4.7+ rejects a non-default ``temperature``, so none is sent.
+* **Cost** — token usage is priced from the model's registry row, including its
+  own cache-read / cache-write rates and long-context tier.
 * **Prompt caching** — callers may opt in (``cache=...``) to mark the system
   prompt as a cache breakpoint; the cache-read / cache-write token buckets the
   API returns are then surfaced on the response and priced at their own
@@ -27,7 +29,7 @@ import json
 import logging
 import os
 import time
-from typing import ClassVar, Final, Literal, NamedTuple
+from typing import Literal
 
 from anthropic import APIError, AsyncAnthropic, AuthenticationError, RateLimitError
 from anthropic.lib.vertex import AsyncAnthropicVertex
@@ -40,95 +42,58 @@ from anthropic.types import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.core.constants import DEFAULT_LLM_MAX_RETRIES, DEFAULT_LLM_TIMEOUT_SECONDS
+from packages.core.model_registry import (
+    Provider,
+    Role,
+    Transport,
+    UnknownModelError,
+    model_for,
+    spec,
+    token_cost_usd,
+    transport_id,
+)
 
 logger = logging.getLogger(__name__)
 
 
-HAIKU_INPUT_COST_PER_MTOK: float = 1.0
-HAIKU_OUTPUT_COST_PER_MTOK: float = 5.0
-SONNET_INPUT_COST_PER_MTOK: float = 3.0
-SONNET_OUTPUT_COST_PER_MTOK: float = 15.0
-
-# Opus is NOT used at runtime — .claude/rules/llm-integration.md forbids it ("Never use Opus
-# for runtime user jobs"). These rates exist ONLY so cost_for cannot silently mis-cost an Opus
-# model string as Haiku (the prior substring-routing defect). They are the historical Opus 4.x
-# list prices and are UNCONFIRMED for Opus 4.8 — the prompt-caching docs' worked example implies
-# a lower input rate. CONFIRM against the official pricing page before any Opus call is added to a
-# runtime path.
-OPUS_INPUT_COST_PER_MTOK: float = 15.0  # UNCONFIRMED — see note above
-OPUS_OUTPUT_COST_PER_MTOK: float = 75.0  # UNCONFIRMED — see note above
-
-DEFAULT_HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
-
-# Vertex partner-model ID for Sonnet 4.6 (alias form — no @date suffix). Confirmed
-# against Google Cloud partner-model docs and Anthropic Vertex integration guide.
-DEFAULT_VERTEX_SONNET_MODEL: str = "claude-sonnet-4-6"
+# The Claude model a caller gets when it names none (Haiku 5.5, via the registry).
+DEFAULT_HAIKU_MODEL: str = model_for(Role.CLAUDE_DEFAULT)
 
 LLMTransport = Literal["vertex", "anthropic"]
 ResolvedLLMTransport = Literal["vertex", "anthropic", "injected"]
 
-
-# Explicit direct-API → Vertex partner-model id pairs, from the Anthropic
-# Claude-on-Vertex model table. Alias ids ("claude-sonnet-4-6") are identical on both
-# transports and need no entry. Deliberately an ALLOWLIST, not a generic date-suffix
-# rewrite: rewriting unknown ids can mint strings the Vertex endpoint never listed,
-# turning one 404 into a subtler one. Unknown ids pass through and fail loudly at the
-# API with the id the caller actually asked for.
-_VERTEX_MODEL_IDS: Final[dict[str, str]] = {
-    DEFAULT_HAIKU_MODEL: "claude-haiku-4-5@20251001",
-}
-
-
-def vertex_model_id(model: str) -> str:
-    """Translate a known direct-API Claude model id to its Vertex partner-model form.
-
-    Applied once at the :meth:`LLMClient.complete` chokepoint so callers keep passing
-    the direct-API ids they always have; ids outside the allowlist are returned
-    unchanged.
-    """
-
-    return _VERTEX_MODEL_IDS.get(model, model)
-
-
 type AnthropicAsyncClient = AsyncAnthropic | AsyncAnthropicVertex
-
-# Cache pricing multipliers vs. the base input price, per the Anthropic prompt-caching docs
-# (verified 2026-06-21): a 5-minute cache write costs 1.25x, a 1-hour cache write 2.0x, and a
-# cache read 0.1x the base input token price.
-_CACHE_READ_MULTIPLIER: Final[float] = 0.10
-_CACHE_WRITE_5M_MULTIPLIER: Final[float] = 1.25
-_CACHE_WRITE_1H_MULTIPLIER: Final[float] = 2.00
 
 CacheTTL = Literal["5m", "1h"]
 
 
-class _Rates(NamedTuple):
-    """Per-million-token USD prices (input, output) for one model family."""
-
-    input: float
-    output: float
+def _registry_transport(transport: ResolvedLLMTransport) -> Transport:
+    return Transport.VERTEX_ANTHROPIC if transport == "vertex" else Transport.ANTHROPIC_API
 
 
-_MODEL_RATES: Final[dict[str, _Rates]] = {
-    "haiku": _Rates(HAIKU_INPUT_COST_PER_MTOK, HAIKU_OUTPUT_COST_PER_MTOK),
-    "sonnet": _Rates(SONNET_INPUT_COST_PER_MTOK, SONNET_OUTPUT_COST_PER_MTOK),
-    "opus": _Rates(OPUS_INPUT_COST_PER_MTOK, OPUS_OUTPUT_COST_PER_MTOK),
-}
+def claude_request_id(model: str, transport: ResolvedLLMTransport, location: str | None) -> str:
+    """The id to send for ``model``; unknown models and unserved Vertex locations raise.
 
-
-def _rates_for(model: str) -> _Rates:
-    """Map a model string to its rate family.
-
-    Checks opus and sonnet BEFORE the Haiku fallback, so an Opus or Sonnet model is never
-    mis-costed at the cheaper Haiku rate (the prior substring-routing defect). An unknown
-    string falls back to Haiku rather than raising — cost accounting must never fail a job.
+    An injected client is addressed with the direct-API spelling (the tests' fakes).
     """
 
-    lower = model.lower()
-    for family in ("opus", "sonnet", "haiku"):
-        if family in lower:
-            return _MODEL_RATES[family]
-    return _MODEL_RATES["haiku"]
+    entry = spec(model)
+    if entry.provider is not Provider.ANTHROPIC:
+        raise UnknownModelError(f"{model} is not a Claude model")
+    return transport_id(entry.key, _registry_transport(transport), location)
+
+
+def thinking_config(model: str) -> dict[str, str]:
+    """The ``thinking`` block pinned for ``model`` (see ``ClaudeThinking``).
+
+    Claude 5.5 models think by default and thinking tokens count against
+    ``max_tokens``; pinning it keeps every call single-pass, as the budgets assume.
+    """
+
+    mode = spec(model).claude_thinking
+    if mode is None:
+        raise UnknownModelError(f"{model} records no thinking mode")
+    return {"type": mode.value}
 
 
 def resolve_llm_transport() -> LLMTransport:
@@ -173,9 +138,10 @@ def build_default_anthropic_client(
         or "global"
     )
     if region != "global":
-        # Regional/multi-region Vertex endpoints carry a ~10% pricing premium over
-        # global; the cost constants above model global rates only, so estimated
-        # per-call cost will undercount on this endpoint.
+        # Multi-region Vertex endpoints carry a ~10% pricing premium over global;
+        # the registry prices global rates only, so estimated per-call cost will
+        # undercount on this endpoint. Single regions do not serve Claude 5.x at
+        # all; LLMClient refuses them before the first request.
         logger.warning(
             "vertex region %s is non-global; estimated_cost_usd uses global rates "
             "and undercounts the ~10%% regional premium",
@@ -224,13 +190,6 @@ class LLMResponse(BaseModel):
     latency_ms: int = Field(ge=0)
     estimated_cost_usd: float = Field(ge=0.0)
 
-    HAIKU_INPUT_COST: ClassVar[float] = HAIKU_INPUT_COST_PER_MTOK
-    HAIKU_OUTPUT_COST: ClassVar[float] = HAIKU_OUTPUT_COST_PER_MTOK
-    SONNET_INPUT_COST: ClassVar[float] = SONNET_INPUT_COST_PER_MTOK
-    SONNET_OUTPUT_COST: ClassVar[float] = SONNET_OUTPUT_COST_PER_MTOK
-    OPUS_INPUT_COST: ClassVar[float] = OPUS_INPUT_COST_PER_MTOK
-    OPUS_OUTPUT_COST: ClassVar[float] = OPUS_OUTPUT_COST_PER_MTOK
-
     @property
     def total_prompt_tokens(self) -> int:
         """Total prompt tokens billed across all buckets.
@@ -256,22 +215,20 @@ class LLMResponse(BaseModel):
     ) -> float:
         """Return the USD cost of one call given its model and token usage.
 
-        The model routes to its rate family (Opus / Sonnet / Haiku) and each input bucket is
-        priced at its own multiplier: uncached input at base, cache reads at 0.1x, 5-minute
-        cache writes at 1.25x, and 1-hour cache writes at 2.0x. The cache buckets default to
-        zero so non-caching call sites and the pure-pricing tests are unaffected. Falls back
-        to Haiku pricing for unknown model strings rather than raising, because cost
-        accounting must never fail a user-visible job.
+        Every bucket is priced from the model's registry row: uncached input, cache
+        reads, 5-minute and 1-hour cache writes, and output, at the long-context
+        tier when the prompt crosses it. An unregistered model raises, but
+        :meth:`LLMClient.complete` refuses one before any request is sent, so a
+        finished call is always priceable.
         """
 
-        rates = _rates_for(model)
-        base_input = rates.input / 1_000_000.0
-        return (
-            input_tokens * base_input
-            + cache_read_input_tokens * base_input * _CACHE_READ_MULTIPLIER
-            + cache_write_5m_input_tokens * base_input * _CACHE_WRITE_5M_MULTIPLIER
-            + cache_write_1h_input_tokens * base_input * _CACHE_WRITE_1H_MULTIPLIER
-            + output_tokens * (rates.output / 1_000_000.0)
+        return token_cost_usd(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens=cache_read_input_tokens,
+            cache_write_5m_tokens=cache_write_5m_input_tokens,
+            cache_write_1h_tokens=cache_write_1h_input_tokens,
         )
 
 
@@ -326,7 +283,6 @@ class LLMClient:
         user: str,
         model: str = DEFAULT_HAIKU_MODEL,
         max_tokens: int = 2000,
-        temperature: float = 0.0,
         timeout: int | None = None,
         cache: bool | CacheTTL = False,
     ) -> LLMResponse:
@@ -346,10 +302,11 @@ class LLMClient:
         since a single-shot call pays the cache-write premium for no later read.
         """
 
-        if self._transport == "vertex":
-            # Vertex addresses partner models by "@"-versioned ids; translate here so
-            # every downstream use of ``model`` (API call, cost, logs, response) agrees.
-            model = vertex_model_id(model)
+        llm_client = self._ensure_client()
+        # Translated once here so the API call, cost, logs and response all agree.
+        location = getattr(llm_client, "region", None) if self._transport == "vertex" else None
+        model = claude_request_id(model, self._transport, location)
+        thinking = thinking_config(model)
         effective_timeout = timeout if timeout is not None else self._timeout_seconds
         system_param: str | list[TextBlockParam]
         if cache is False:
@@ -357,7 +314,6 @@ class LLMClient:
         else:
             ttl: CacheTTL = "5m" if cache is True else cache
             system_param = [cached_system_block(system, ttl=ttl)]
-        llm_client = self._ensure_client()
         attempt = 0
         last_error: Exception | None = None
         while attempt <= self._max_retries:
@@ -368,9 +324,11 @@ class LLMClient:
                     llm_client.messages.create(
                         model=model,
                         max_tokens=max_tokens,
-                        temperature=temperature,
                         system=system_param,
                         messages=messages,
+                        # SDK 0.84 has no type for "between_tools"; the body field is
+                        # the API's, so it goes through extra_body for every model.
+                        extra_body={"thinking": thinking},
                     ),
                     timeout=effective_timeout,
                 )
@@ -455,7 +413,7 @@ class LLMClient:
 def _extract_text(message: object) -> str:
     """Concatenate every ``TextBlock`` in an Anthropic ``Message`` response.
 
-    Non-text blocks (tool-use, etc.) are ignored — workers that need them
+    Non-text blocks (thinking, tool-use, etc.) are ignored — workers that need them
     should call the SDK directly rather than through :class:`LLMClient`.
     """
 

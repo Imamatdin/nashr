@@ -32,18 +32,17 @@ from pydantic import ValidationError
 
 from packages.core.llm import (
     DEFAULT_HAIKU_MODEL,
-    HAIKU_INPUT_COST_PER_MTOK,
-    HAIKU_OUTPUT_COST_PER_MTOK,
-    OPUS_INPUT_COST_PER_MTOK,
-    OPUS_OUTPUT_COST_PER_MTOK,
-    SONNET_INPUT_COST_PER_MTOK,
-    SONNET_OUTPUT_COST_PER_MTOK,
     LLMClient,
     LLMResponse,
     build_default_anthropic_client,
     resolve_llm_transport,
-    vertex_model_id,
 )
+from packages.core.model_registry import UnknownModelError
+
+# Published list prices (USD per MTok), platform.claude.com pricing, 2026-10-13.
+HAIKU_IN, HAIKU_OUT = 0.10, 0.50
+SONNET_IN, SONNET_OUT = 2.0, 10.0
+SONNET = "claude-sonnet-5-5"
 
 
 def _make_message(
@@ -114,51 +113,59 @@ def _make_auth_error() -> AuthenticationError:
     return AuthenticationError(message="bad key", response=response, body=None)
 
 
+def test_default_claude_model_is_haiku_5_5() -> None:
+    assert DEFAULT_HAIKU_MODEL == "claude-haiku-5-5"
+
+
 def test_llm_response_cost_calculation_haiku() -> None:
+    # Under the 100k-token prompt threshold: the base $0.10 / $0.50 tier.
+    cost = LLMResponse.cost_for(DEFAULT_HAIKU_MODEL, input_tokens=100_000, output_tokens=200_000)
+    assert cost == pytest.approx(0.1 * HAIKU_IN + 0.2 * HAIKU_OUT)
+
+
+def test_haiku_prompt_over_100k_tokens_bills_the_long_context_tier() -> None:
+    # Haiku 5.5: prompts over 100k tokens bill $0.50 / $2.50, cache reads $0.05.
     cost = LLMResponse.cost_for(
-        DEFAULT_HAIKU_MODEL, input_tokens=1_000_000, output_tokens=2_000_000
+        DEFAULT_HAIKU_MODEL,
+        input_tokens=100_000,
+        output_tokens=1_000_000,
+        cache_read_input_tokens=1_000_000,
     )
-    expected = HAIKU_INPUT_COST_PER_MTOK + 2 * HAIKU_OUTPUT_COST_PER_MTOK
-    assert cost == pytest.approx(expected)
+    assert cost == pytest.approx(0.1 * 0.50 + 2.50 + 0.05)
 
 
 def test_llm_response_cost_calculation_sonnet() -> None:
-    cost = LLMResponse.cost_for("claude-sonnet-4-6", input_tokens=500_000, output_tokens=100_000)
-    expected = (
-        500_000 / 1_000_000 * SONNET_INPUT_COST_PER_MTOK
-        + 100_000 / 1_000_000 * SONNET_OUTPUT_COST_PER_MTOK
-    )
-    assert cost == pytest.approx(expected)
+    cost = LLMResponse.cost_for(SONNET, input_tokens=500_000, output_tokens=100_000)
+    assert cost == pytest.approx(0.5 * SONNET_IN + 0.1 * SONNET_OUT)
 
 
-def test_cost_for_routes_opus_to_opus_rates_not_haiku() -> None:
-    # Regression guard: substring routing used to send every non-sonnet model through to
-    # Haiku, silently under-costing Opus. Opus must price at Opus rates and exceed the Haiku
-    # fallback for identical token counts.
-    cost = LLMResponse.cost_for("claude-opus-4-8", input_tokens=1_000_000, output_tokens=1_000_000)
-    expected = OPUS_INPUT_COST_PER_MTOK + OPUS_OUTPUT_COST_PER_MTOK
-    assert cost == pytest.approx(expected)
-    haiku = LLMResponse.cost_for(DEFAULT_HAIKU_MODEL, 1_000_000, 1_000_000)
-    assert cost > haiku
-
-
-def test_cost_for_prices_each_cache_bucket() -> None:
-    cost = LLMResponse.cost_for(
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-opus-4-8",
+        "claude-haiku-4-5-20251001",
         "claude-sonnet-4-6",
+        "claude-sonnet-4-6-20250514",
+    ],
+)
+def test_cost_for_refuses_unregistered_claude_models(model: str) -> None:
+    # The old substring routing priced any unknown string as Haiku; an unregistered id
+    # now raises (LLMClient refuses it before sending, so no finished call hits this).
+    with pytest.raises(UnknownModelError):
+        LLMResponse.cost_for(model, input_tokens=1, output_tokens=1)
+
+
+def test_cost_for_prices_each_cache_bucket_at_its_published_rate() -> None:
+    # Sonnet 5.5: cache read $0.10, 5-minute write $2.50, 1-hour write $4.00.
+    cost = LLMResponse.cost_for(
+        SONNET,
         input_tokens=1_000_000,
         output_tokens=1_000_000,
         cache_read_input_tokens=1_000_000,
         cache_write_5m_input_tokens=1_000_000,
         cache_write_1h_input_tokens=1_000_000,
     )
-    expected = (
-        SONNET_INPUT_COST_PER_MTOK  # uncached input
-        + SONNET_INPUT_COST_PER_MTOK * 0.10  # cache read
-        + SONNET_INPUT_COST_PER_MTOK * 1.25  # 5-minute cache write
-        + SONNET_INPUT_COST_PER_MTOK * 2.00  # 1-hour cache write
-        + SONNET_OUTPUT_COST_PER_MTOK  # output
-    )
-    assert cost == pytest.approx(expected)
+    assert cost == pytest.approx(SONNET_IN + 0.10 + 2.50 + 4.00 + SONNET_OUT)
 
 
 def test_llm_response_model_validation_accepts_zero_latency() -> None:
@@ -198,11 +205,56 @@ async def test_llm_client_returns_text_and_cost() -> None:
     assert response.content == "hello world"
     assert response.input_tokens == 200
     assert response.output_tokens == 400
-    expected_cost = (
-        200 / 1_000_000 * HAIKU_INPUT_COST_PER_MTOK + 400 / 1_000_000 * HAIKU_OUTPUT_COST_PER_MTOK
-    )
+    expected_cost = 200 / 1_000_000 * HAIKU_IN + 400 / 1_000_000 * HAIKU_OUT
     assert response.estimated_cost_usd == pytest.approx(expected_cost)
     assert fake.messages.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_sends_no_temperature_and_pins_thinking_per_model() -> None:
+    # Claude 4.7+ answers a non-default temperature with a 400, and the 5.5 models
+    # think by default (thinking tokens spend max_tokens), so each request carries
+    # the registry's thinking mode and never a sampling parameter.
+    async def behaviour() -> Message:
+        return _make_message("ok")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    client = LLMClient(client=fake)  # type: ignore[arg-type]
+
+    await client.complete(system="sys", user="usr")
+    haiku_kwargs = fake.messages.last_kwargs
+    await client.complete(system="sys", user="usr", model=SONNET)
+    sonnet_kwargs = fake.messages.last_kwargs
+
+    for kwargs in (haiku_kwargs, sonnet_kwargs):
+        assert not {"temperature", "top_p", "top_k"} & set(kwargs)
+        assert "thinking" not in kwargs  # sent as a body field, see below
+    assert haiku_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert sonnet_kwargs["extra_body"] == {"thinking": {"type": "between_tools"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-6-20250514",
+        "claude-opus-4-8",
+        "gemini-3.8-flash",
+    ],
+)
+async def test_complete_refuses_unregistered_or_non_claude_model_before_sending(
+    model: str,
+) -> None:
+    async def behaviour() -> Message:
+        return _make_message("never")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    client = LLMClient(client=fake)  # type: ignore[arg-type]
+
+    with pytest.raises(UnknownModelError):
+        await client.complete(system="sys", user="usr", model=model)
+    assert fake.messages.calls == 0
 
 
 @pytest.mark.asyncio
@@ -251,21 +303,13 @@ async def test_complete_surfaces_cache_tokens_and_prices_them() -> None:
     fake = _FakeAsyncAnthropic(behaviour)
     client = LLMClient(client=fake)  # type: ignore[arg-type]
 
-    response = await client.complete(
-        system="rules", user="task", model="claude-sonnet-4-6", cache="5m"
-    )
+    response = await client.complete(system="rules", user="task", model=SONNET, cache="5m")
 
     assert response.cache_read_input_tokens == 900
     assert response.cache_creation_input_tokens == 100
     assert response.total_prompt_tokens == 10 + 900 + 100
 
-    base_in = SONNET_INPUT_COST_PER_MTOK / 1_000_000.0
-    expected = (
-        10 * base_in
-        + 900 * base_in * 0.10
-        + 100 * base_in * 1.25
-        + 20 * (SONNET_OUTPUT_COST_PER_MTOK / 1_000_000.0)
-    )
+    expected = (10 * SONNET_IN + 900 * 0.10 + 100 * 2.50 + 20 * SONNET_OUT) / 1_000_000.0
     assert response.estimated_cost_usd == pytest.approx(expected)
     # total_prompt_tokens is a derived property, not a serialised field — round-trip is lossless.
     assert LLMResponse(**response.model_dump()) == response
@@ -450,33 +494,45 @@ async def test_bare_construction_is_safe_without_vertex_env_but_first_call_fails
         await client.complete(system="sys", user="usr")
 
 
-def test_vertex_model_id_translates_known_dated_direct_api_ids() -> None:
-    assert vertex_model_id("claude-haiku-4-5-20251001") == "claude-haiku-4-5@20251001"
-
-
-def test_vertex_model_id_passes_everything_else_through_unchanged() -> None:
-    # Allowlist semantics (Codex round-2 RISK): unknown dated strings must NOT be
-    # date-flipped into ids the Vertex endpoint never listed — they pass through and
-    # fail loudly at the API as the id the caller actually asked for.
-    assert vertex_model_id("claude-sonnet-4-6") == "claude-sonnet-4-6"
-    assert vertex_model_id("claude-sonnet-4-6-20250514") == "claude-sonnet-4-6-20250514"
-    assert vertex_model_id("claude-haiku-4-5@20251001") == "claude-haiku-4-5@20251001"
-    assert vertex_model_id("gemini-3-flash") == "gemini-3-flash"
-
-
 @pytest.mark.asyncio
-async def test_complete_translates_default_haiku_model_on_vertex_transport() -> None:
-    # Regression (Codex HIGH): callers that omit model= get DEFAULT_HAIKU_MODEL in
-    # direct-API dated form; Vertex addresses Haiku 4.5 as claude-haiku-4-5@20251001.
-    # Without translation every default-model call 404s under LLM_TRANSPORT=vertex.
+async def test_complete_sends_the_same_id_on_vertex_transport() -> None:
+    # Claude 4.6+ ids are identical on the Claude API and Vertex; the old
+    # "@date" translation existed only for Haiku 4.5.
     async def behaviour() -> Message:
         return _make_message("ok")
 
     fake = _FakeAsyncAnthropic(behaviour)
     client = LLMClient(client=fake, transport="vertex")  # type: ignore[arg-type]
     response = await client.complete(system="sys", user="usr")
-    assert fake.messages.last_kwargs["model"] == "claude-haiku-4-5@20251001"
-    assert response.model == "claude-haiku-4-5@20251001"
+    assert fake.messages.last_kwargs["model"] == "claude-haiku-5-5"
+    assert response.model == "claude-haiku-5-5"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("region", ["global", "us", "eu"])
+async def test_complete_accepts_vertex_locations_that_serve_claude_5(region: str) -> None:
+    async def behaviour() -> Message:
+        return _make_message("ok")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    fake.region = region  # type: ignore[attr-defined]
+    client = LLMClient(client=fake, transport="vertex")  # type: ignore[arg-type]
+    await client.complete(system="sys", user="usr", model=SONNET)
+    assert fake.messages.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_refuses_a_single_vertex_region_before_sending() -> None:
+    # Single-region Vertex endpoints serve only Sonnet 4.6 and earlier.
+    async def behaviour() -> Message:
+        return _make_message("never")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    fake.region = "us-east5"  # type: ignore[attr-defined]
+    client = LLMClient(client=fake, transport="vertex")  # type: ignore[arg-type]
+    with pytest.raises(UnknownModelError, match="us-east5"):
+        await client.complete(system="sys", user="usr")
+    assert fake.messages.calls == 0
 
 
 @pytest.mark.asyncio
