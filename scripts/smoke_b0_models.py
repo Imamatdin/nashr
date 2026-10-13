@@ -4,6 +4,12 @@ Usage (from the repo root, with .env holding VERTEX_PROJECT / LLM_TRANSPORT):
 
     python scripts/smoke_b0_models.py --dry-run      # no network, fake clients
     python scripts/smoke_b0_models.py --spend        # REAL calls; hard cap $5
+    python scripts/smoke_b0_models.py --haiku-only   # REAL Haiku 5.5 calls, Claude API
+
+``--haiku-only`` runs only claude-haiku-5-5 over the direct Claude API
+(LLM_TRANSPORT=anthropic): the Haiku roles, plus the real editorial prompt in
+the four languages with Haiku standing in for Sonnet 5.5. Those editorial rows
+prove the request shape, language handling and JSON contract, not Sonnet.
 
 Per call it records model, transport, latency, input / output / thinking tokens,
 cost from the registry, JSON validity and truncation, and prints one table.
@@ -24,6 +30,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -132,11 +139,14 @@ def _json_valid(text: str) -> str:
 class RecordingLLM(LLMClient):
     """LLMClient that passes the budget gate before, and records after, every call."""
 
-    def __init__(self, ledger: Ledger, **kwargs: Any) -> None:
+    def __init__(self, ledger: Ledger, *, stand_in: str | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.ledger = ledger
+        self.stand_in = stand_in
 
     async def complete(self, system: str, user: str, **kwargs: Any) -> LLMResponse:  # type: ignore[override]
+        if self.stand_in is not None:
+            kwargs["model"] = self.stand_in
         model = kwargs.get("model") or model_for(Role.CLAUDE_DEFAULT)
         self.ledger.admit(model, len(system) + len(user), kwargs.get("max_tokens", 2000))
         response = await super().complete(system, user, **kwargs)
@@ -178,12 +188,12 @@ _SAMPLE = (
 )
 
 
-async def probe_editorial(ledger: Ledger, llm: LLMClient) -> None:
+async def probe_editorial(ledger: Ledger, llm: LLMClient, label: str = "") -> None:
     deck = DeckSpec.model_validate_json(DECK_PATH.read_text(encoding="utf-8"))
     target = next(s for s in deck.slides if s.slide_type.value not in {"title_hero"})
     editorial = EditorialPass(llm=llm)
     for language in (Language.UZ, Language.RU, Language.KAA, Language.EN):
-        ledger.current_probe = f"editorial regen ({language.value})"
+        ledger.current_probe = f"editorial regen ({language.value}){label}"
         ledger.current_role = Role.SLIDE_WRITER.value
         localized = deck.model_copy(
             update={
@@ -226,6 +236,23 @@ async def probe_claude_roles(ledger: Ledger, llm: LLMClient) -> None:
         model=spec(model_for(Role.SLIDE_WRITER)).fallback or "",
         max_tokens=2_000,
     )
+
+
+async def probe_haiku_roles(ledger: Ledger, llm: LLMClient) -> None:
+    for role, max_tokens in (
+        (Role.RESEARCH_INTERVIEW, 5_200),
+        (Role.RESEARCH_INTERVIEW, 1_040),
+        (Role.ARTICLE_OUTLINE, 5_200),
+        (Role.CLAUDE_DEFAULT, 2_000),
+    ):
+        ledger.current_probe = f"{role.value} json ({max_tokens})"
+        ledger.current_role = role.value
+        await llm.complete(
+            system="You are a precise academic assistant. " + _JSON_TASK,
+            user=_SAMPLE,
+            model=model_for(role),
+            max_tokens=max_tokens,
+        )
 
 
 async def probe_gemini_roles(ledger: Ledger, gemini: GeminiClient) -> None:
@@ -385,28 +412,39 @@ def _print_table(ledger: Ledger) -> None:
     print(f"\nTotal spend (registry prices): ${ledger.spent:.4f} of ${ledger.cap:.2f} cap")
 
 
-async def run(dry_run: bool) -> int:
+async def run(mode: str) -> int:
     ledger = Ledger(HARD_CAP_USD)
-    if dry_run:
-        from scripts._smoke_b0_fakes import fake_clients
-
-        llm, gemini, images = fake_clients(ledger)
-    else:
+    probes: list[tuple[str, Callable[[], Awaitable[None]]]]
+    if mode == "haiku-only":
+        haiku = model_for(Role.CLAUDE_DEFAULT)
         llm = RecordingLLM(ledger)
-        gemini = RecordingGemini(ledger)
-        images = GeminiImageClient()
-        for role in (Role.DECK_PLANNER, Role.GEMINI_DEFAULT, Role.IMAGE_GENERATION):
-            gemini_request_id(model_for(role))  # fail fast on a bad location
+        stand_in = RecordingLLM(ledger, stand_in=haiku)
+        probes = [
+            ("editorial", lambda: probe_editorial(ledger, stand_in, " [Haiku stand-in]")),
+            ("haiku roles", lambda: probe_haiku_roles(ledger, llm)),
+        ]
+    else:
+        if mode == "dry-run":
+            from scripts._smoke_b0_fakes import fake_clients
+
+            llm, gemini, images = fake_clients(ledger)
+        else:
+            llm = RecordingLLM(ledger)
+            gemini = RecordingGemini(ledger)
+            images = GeminiImageClient()
+            for role in (Role.DECK_PLANNER, Role.GEMINI_DEFAULT, Role.IMAGE_GENERATION):
+                gemini_request_id(model_for(role))  # fail fast on a bad location
+        probes = [
+            ("editorial", lambda: probe_editorial(ledger, llm)),
+            ("claude roles", lambda: probe_claude_roles(ledger, llm)),
+            ("gemini roles", lambda: probe_gemini_roles(ledger, gemini)),
+            ("brain tools", lambda: probe_brain_tools(ledger, gemini)),
+            ("images", lambda: probe_images(ledger, images)),
+        ]
     failures = 0
-    for name, probe in (
-        ("editorial", probe_editorial(ledger, llm)),
-        ("claude roles", probe_claude_roles(ledger, llm)),
-        ("gemini roles", probe_gemini_roles(ledger, gemini)),
-        ("brain tools", probe_brain_tools(ledger, gemini)),
-        ("images", probe_images(ledger, images)),
-    ):
+    for name, probe in probes:
         try:
-            await probe
+            await probe()
         except BudgetExceededError as exc:
             print(f"STOP ({name}): {exc}")
             failures += 1
@@ -423,13 +461,20 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--spend", action="store_true", help="make REAL paid calls (cap $5)")
+    mode.add_argument(
+        "--haiku-only", action="store_true", help="REAL Haiku 5.5 calls over the Claude API"
+    )
     args = parser.parse_args()
-    if args.spend:
+    if not args.dry_run:
         from dotenv import load_dotenv
 
         load_dotenv(ROOT / ".env")
+    if args.haiku_only:
+        # Transport is frozen when each LLMClient is built, so set it first.
+        os.environ["LLM_TRANSPORT"] = "anthropic"
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-    raise SystemExit(asyncio.run(run(dry_run=args.dry_run)))
+    mode = "dry-run" if args.dry_run else "haiku-only" if args.haiku_only else "spend"
+    raise SystemExit(asyncio.run(run(mode)))
 
 
 if __name__ == "__main__":
