@@ -96,7 +96,7 @@ def _finish_and_claim(
         begin;
         select row_to_json(f) from finish_generation_job(
             '{job}', '{WORKER}', 1, {base_sql}, {_literal(content)}::jsonb, '{kind}', 1, '{key}',
-            '{RENDERER}', '{{html,pdf}}'{attempts}) f;
+            '{RENDERER}', '{{html,pdf,pptx}}'{attempts}) f;
         select row_to_json(c) from (
             select id, attempts from claim_job(
                 (select id from generation_jobs where job_type = 'presentation_render'
@@ -185,7 +185,7 @@ def edit(project: str, user: str) -> dict[str, Any]:
                                     formats_json, approval_state, fixes_used,
                                     accumulated_cost_usd, accumulated_image_count, revision_id)
         values ('{project}', '[]', {_literal(light)}::jsonb, '[]', 'presentation_standard',
-                '["html","pdf","pptx"]', 'idle', 0, 0, 0, '{head["revision"]}')
+                '["html","pdf","pptx_editable"]', 'idle', 0, 0, 0, '{head["revision"]}')
         on conflict (project_id) do update set revision_id = excluded.revision_id;
         """
     )

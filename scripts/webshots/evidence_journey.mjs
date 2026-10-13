@@ -144,7 +144,10 @@ async function deliverySteps(browser) {
     });
     const published = fixture("publish", generation.render, String(generation.token));
     assert.equal(published.completed, true, "the render did not complete");
+    // The web delivers html (the preview), pdf and pptx (the two download links).
     await eventually(async () => (await downloads()) === 2, "downloads did not appear within 60 s without a reload");
+    const partial = await page.locator(".designer-render-needed").count();
+    assert.equal(partial, 0, "the downloads are still reported as incomplete");
     assert.equal(await marked(), true, "the page reloaded to show the downloads");
     assert.equal(sawDelivering, true, "the page never showed the delivery in progress");
     const job = await api(`/jobs?project_id=${generation.project}`);
