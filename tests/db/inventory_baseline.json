@@ -2,127 +2,127 @@
   "schema": "baseline (migrations 001-015 + 016 as reviewed, blob e2863406)",
   "module": "tests/db/test_b1_fix_regressions.py",
   "tests": {
-    "test_a_worker_whose_job_was_reclaimed_writes_nothing": {
+    "tests.db.test_b1_fix_regressions::test_a_worker_whose_job_was_reclaimed_writes_nothing": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bObjectNotInPrerequisiteStateError\\b"
     },
-    "test_a_worker_whose_claim_expired_writes_nothing": {
+    "tests.db.test_b1_fix_regressions::test_a_worker_whose_claim_expired_writes_nothing": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bObjectNotInPrerequisiteStateError\\b"
     },
-    "test_a_reclaim_racing_a_finish_leaves_nothing_from_the_old_claim": {
+    "tests.db.test_b1_fix_regressions::test_a_reclaim_racing_a_finish_leaves_nothing_from_the_old_claim": {
       "expect": "fail",
       "match": "AssertionError: a revision was written by a reclaimed worker"
     },
-    "test_a_status_change_during_finish_never_leaves_a_revision_beside_a_failed_job": {
+    "tests.db.test_b1_fix_regressions::test_a_status_change_during_finish_never_leaves_a_revision_beside_a_failed_job": {
       "expect": "fail",
       "match": "AssertionError: a revision was written beside a failed job"
     },
-    "test_a_fault_inside_finish_rolls_back_the_revision": {
+    "tests.db.test_b1_fix_regressions::test_a_fault_inside_finish_rolls_back_the_revision": {
       "expect": "fail",
       "match": "AssertionError: a revision survived a failed completion"
     },
-    "test_a_render_job_cannot_be_created_with_a_null_target": {
+    "tests.db.test_b1_fix_regressions::test_a_render_job_cannot_be_created_with_a_null_target": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bCheckViolationError\\b"
     },
-    "test_a_job_whose_payload_has_no_target_cannot_register": {
+    "tests.db.test_b1_fix_regressions::test_a_job_whose_payload_has_no_target_cannot_register": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_a_legacy_render_job_with_a_json_null_target_cannot_register": {
+    "tests.db.test_b1_fix_regressions::test_a_legacy_render_job_with_a_json_null_target_cannot_register": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_a_render_job_of_another_user_cannot_register": {
+    "tests.db.test_b1_fix_regressions::test_a_render_job_of_another_user_cannot_register": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_a_job_without_a_claim_cannot_register": {
+    "tests.db.test_b1_fix_regressions::test_a_job_without_a_claim_cannot_register": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bObjectNotInPrerequisiteStateError\\b"
     },
-    "test_a_job_of_another_type_cannot_register": {
+    "tests.db.test_b1_fix_regressions::test_a_job_of_another_type_cannot_register": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_a_format_the_job_did_not_request_cannot_be_registered": {
+    "tests.db.test_b1_fix_regressions::test_a_format_the_job_did_not_request_cannot_be_registered": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_a_renderer_version_the_job_did_not_request_cannot_be_registered": {
+    "tests.db.test_b1_fix_regressions::test_a_renderer_version_the_job_did_not_request_cannot_be_registered": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_a_stale_claim_token_cannot_register": {
+    "tests.db.test_b1_fix_regressions::test_a_stale_claim_token_cannot_register": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bObjectNotInPrerequisiteStateError\\b"
     },
-    "test_rendering_a_revision_twice_keeps_the_first_export": {
+    "tests.db.test_b1_fix_regressions::test_rendering_a_revision_twice_keeps_the_first_export": {
       "expect": "fail",
       "match": "UniqueViolationError: export_conflict"
     },
-    "test_a_recovery_render_after_a_crash_mid_publish_completes_the_set": {
+    "tests.db.test_b1_fix_regressions::test_a_recovery_render_after_a_crash_mid_publish_completes_the_set": {
       "expect": "fail",
       "match": "UniqueViolationError: export_conflict"
     },
-    "test_a_crash_after_the_failure_is_decided_still_ends_with_one_refund": {
+    "tests.db.test_b1_fix_regressions::test_a_crash_after_the_failure_is_decided_still_ends_with_one_refund": {
       "expect": "fail",
       "match": "AssertionError: a failed paid job has no refund"
     },
-    "test_a_worker_failing_while_the_reaper_reaps_refunds_exactly_once": {
+    "tests.db.test_b1_fix_regressions::test_a_worker_failing_while_the_reaper_reaps_refunds_exactly_once": {
       "expect": "pass",
       "why": "coverage: the reviewed guarded updates already prevented a double refund; the fix must keep it"
     },
-    "test_016_installs_the_refund_index_even_over_legacy_duplicate_refunds": {
+    "tests.db.test_b1_fix_regressions::test_016_installs_the_refund_index_even_over_legacy_duplicate_refunds": {
       "expect": "fail",
       "match": "AssertionError: 016 finished without the refund index"
     },
-    "test_a_retried_unchanged_commit_replays_after_the_head_moved": {
+    "tests.db.test_b1_fix_regressions::test_a_retried_unchanged_commit_replays_after_the_head_moved": {
       "expect": "fail",
       "match": "AssertionError: assert \\('conflict', None\\) == \\('unchanged'"
     },
-    "test_an_unchanged_commits_key_cannot_be_reused_for_other_content": {
+    "tests.db.test_b1_fix_regressions::test_an_unchanged_commits_key_cannot_be_reused_for_other_content": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bUniqueViolationError\\b"
     },
-    "test_a_replayed_no_op_accept_returns_its_result": {
+    "tests.db.test_b1_fix_regressions::test_a_replayed_no_op_accept_returns_its_result": {
       "expect": "fail",
       "match": "ObjectNotInPrerequisiteStateError: proposal_not_pending"
     },
-    "test_no_api_role_holds_any_write_privilege_on_canonical_state": {
+    "tests.db.test_b1_fix_regressions::test_no_api_role_holds_any_write_privilege_on_canonical_state": {
       "expect": "pass",
       "why": "coverage: the reviewed 016 already revoked these; this pins every table, role and column privilege"
     },
-    "test_an_api_user_writing_the_decks_view_is_refused_with_42501": {
+    "tests.db.test_b1_fix_regressions::test_an_api_user_writing_the_decks_view_is_refused_with_42501": {
       "expect": "fail",
       "match": "\\bObjectNotInPrerequisiteStateError\\b: cannot insert into view \\\"decks\\\""
     },
-    "test_even_the_view_owner_cannot_write_the_decks_view": {
+    "tests.db.test_b1_fix_regressions::test_even_the_view_owner_cannot_write_the_decks_view": {
       "expect": "fail",
       "match": "\\bObjectNotInPrerequisiteStateError\\b: cannot update view \\\"decks\\\""
     },
-    "test_every_security_definer_function_resolves_names_through_public_then_pg_temp": {
+    "tests.db.test_b1_fix_regressions::test_every_security_definer_function_resolves_names_through_public_then_pg_temp": {
       "expect": "fail",
       "match": "definer functions without pg_temp last: \\['claim_next_job', 'consume_rate_limit', 'heartbeat_job', 'reap_stale_jobs'\\]"
     },
-    "test_016_takes_create_on_public_away_from_api_roles": {
+    "tests.db.test_b1_fix_regressions::test_016_takes_create_on_public_away_from_api_roles": {
       "expect": "fail",
       "match": "roles that can still create in public: \\['public', 'anon', 'authenticated', 'authenticator'\\]"
     },
-    "test_a_system_actor_is_only_a_migration_identity": {
+    "tests.db.test_b1_fix_regressions::test_a_system_actor_is_only_a_migration_identity": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bDataError\\b"
     },
-    "test_016_keeps_each_revisions_schema_version_and_inventories_it": {
+    "tests.db.test_b1_fix_regressions::test_016_keeps_each_revisions_schema_version_and_inventories_it": {
       "expect": "fail",
       "match": "AssertionError: a version-2 document's revision was relabelled"
     },
-    "test_016_persists_its_backfill_counts_including_skipped_rows": {
+    "tests.db.test_b1_fix_regressions::test_016_persists_its_backfill_counts_including_skipped_rows": {
       "expect": "fail",
       "match": "UndefinedTableError: relation \\\"migration_reports\\\" does not exist"
     },
-    "test_a_pending_import_proposal_can_carry_a_validation_verdict": {
+    "tests.db.test_b1_fix_regressions::test_a_pending_import_proposal_can_carry_a_validation_verdict": {
       "expect": "fail",
       "match": "UndefinedFunctionError: function record_proposal_validation"
     }

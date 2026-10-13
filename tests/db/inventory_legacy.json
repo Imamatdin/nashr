@@ -2,39 +2,39 @@
   "schema": "legacy (migrations 001-015)",
   "module": "tests/db/test_bug_regressions.py",
   "tests": {
-    "test_a_rendering_an_older_revision_does_not_change_the_heads_downloads": {
+    "tests.db.test_bug_regressions::test_a_rendering_an_older_revision_does_not_change_the_heads_downloads": {
       "expect": "fail",
       "match": "AssertionError: assert \\['generated/[^]]*\\] == \\['generated/"
     },
-    "test_b_a_bot_edit_reaches_the_head_the_web_reads": {
+    "tests.db.test_bug_regressions::test_b_a_bot_edit_reaches_the_head_the_web_reads": {
       "expect": "fail",
       "match": "assert \\{'title': 'imported'\\} == \\{'title': 'bot edit'\\}"
     },
-    "test_c_an_ai_edit_that_loses_the_race_is_kept": {
+    "tests.db.test_bug_regressions::test_c_an_ai_edit_that_loses_the_race_is_kept": {
       "expect": "fail",
       "match": "assert 0 == 1"
     },
-    "test_e_reusing_an_idempotency_key_for_other_content_is_refused": {
+    "tests.db.test_bug_regressions::test_e_reusing_an_idempotency_key_for_other_content_is_refused": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bUniqueViolationError\\b"
     },
-    "test_f_a_worker_without_the_claim_cannot_publish": {
+    "tests.db.test_bug_regressions::test_f_a_worker_without_the_claim_cannot_publish": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bObjectNotInPrerequisiteStateError\\b"
     },
-    "test_g_a_job_cannot_publish_a_revision_it_does_not_target": {
+    "tests.db.test_bug_regressions::test_g_a_job_cannot_publish_a_revision_it_does_not_target": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_h_a_job_cannot_be_refunded_twice": {
+    "tests.db.test_bug_regressions::test_h_a_job_cannot_be_refunded_twice": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bUniqueViolationError\\b"
     },
-    "test_k_an_api_user_cannot_write_revisions_or_decks_directly": {
+    "tests.db.test_bug_regressions::test_k_an_api_user_cannot_write_revisions_or_decks_directly": {
       "expect": "fail",
       "match": "DID NOT RAISE .*\\bInsufficientPrivilegeError\\b"
     },
-    "test_export_key_shape": {
+    "tests.db.test_bug_regressions::test_export_key_shape": {
       "expect": "pass"
     }
   }

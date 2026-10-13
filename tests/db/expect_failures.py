@@ -2,7 +2,9 @@
 
     python -m tests.db.expect_failures artifacts/prechange.xml tests/db/inventory_legacy.json
 
-Reads a pytest JUnit report and an exact inventory. The verdict is green only when
+Reads a pytest JUnit report and an exact inventory, keyed by full test id
+(``<classname>::<name>``, so two tests with one short name cannot overwrite each
+other; a duplicated id is refused). The verdict is green only when
 the report contains exactly the inventory's tests, nothing errored or was skipped
 (a setup or collection error is not evidence that a bug was detected), every
 ``fail`` entry failed with a message matching its ``match`` pattern (the SQLSTATE,
@@ -20,12 +22,25 @@ from pathlib import Path
 from typing import Any, cast
 
 
-def _outcomes(report: Path) -> dict[str, tuple[str, str]]:
-    """Each test's outcome (passed/failed/error/skipped) and failure text."""
+def test_id(case: ElementTree.Element) -> str:
+    """The full test id, ``<module or class path>::<test name>`` (pytest's classname)."""
+
+    return f"{case.get('classname', '')}::{case.get('name', '')}"
+
+
+def _outcomes(report: Path) -> tuple[dict[str, tuple[str, str]], list[str]]:
+    """Each test's outcome (passed/failed/error/skipped) and failure text, by full id.
+
+    A report with the same full id twice cannot be gated: one result would hide
+    the other, so duplicates are returned for the verdict to refuse.
+    """
 
     found: dict[str, tuple[str, str]] = {}
+    duplicates: list[str] = []
     for case in ElementTree.parse(report).iter("testcase"):
-        name = case.get("name", "")
+        name = test_id(case)
+        if name in found:
+            duplicates.append(name)
         failure = case.find("failure")
         error = case.find("error")
         if error is not None:
@@ -36,15 +51,15 @@ def _outcomes(report: Path) -> dict[str, tuple[str, str]]:
             found[name] = ("skipped", "")
         else:
             found[name] = ("passed", "")
-    return found
+    return found, duplicates
 
 
 def verdict(report: Path, inventory: dict[str, Any]) -> list[str]:
     """Every reason the report does not satisfy the inventory (empty = green)."""
 
     expected = cast(dict[str, dict[str, str]], inventory["tests"])
-    outcomes = _outcomes(report)
-    problems: list[str] = []
+    outcomes, duplicates = _outcomes(report)
+    problems: list[str] = [f"{name}: appears more than once in the report" for name in duplicates]
     for name in sorted(set(outcomes) - set(expected)):
         problems.append(f"{name}: ran but is not in the inventory")
     for name in sorted(set(expected) - set(outcomes)):
@@ -66,7 +81,7 @@ def verdict(report: Path, inventory: dict[str, Any]) -> list[str]:
 def main() -> int:
     report, inventory_path = Path(sys.argv[1]), Path(sys.argv[2])
     inventory = cast(dict[str, Any], json.loads(inventory_path.read_text(encoding="utf-8")))
-    outcomes = _outcomes(report)
+    outcomes, _duplicates = _outcomes(report)
     for name, (outcome, _text) in sorted(outcomes.items()):
         print(f"{outcome:>7}  {name}")
     problems = verdict(report, inventory)
