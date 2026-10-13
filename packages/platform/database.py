@@ -432,7 +432,8 @@ class DatabaseClient:
     _SESSION_LIGHT_COLUMNS: str = (
         "id,project_id,history_json,sources_json,package,formats_json,"
         "approval_state,pending_action_json,fixes_used,accumulated_cost_usd,"
-        "accumulated_image_count,findings_json,revision_id,created_at,updated_at"
+        "accumulated_image_count,findings_json,revision_id,pending_deliveries_json,"
+        "delivery_notes_json,created_at,updated_at"
     )
 
     async def save_brain_session(
@@ -450,6 +451,8 @@ class DatabaseClient:
         accumulated_image_count: int,
         figures_json: list[dict[str, Any]] | None = None,
         revision_id: str | None = None,
+        pending_deliveries_json: list[dict[str, Any]] | None = None,
+        delivery_notes_json: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Upsert the project's single brain session and return the saved row.
 
@@ -464,6 +467,9 @@ class DatabaseClient:
         never change during editing, only the deck and the conversation do.
 
         ``revision_id`` is the document revision the session is editing (ADR 0001).
+        ``pending_deliveries_json`` / ``delivery_notes_json`` are the edits still
+        rendering and the chat notices about settled ones (B1-FIX2); omitted, the
+        stored values are kept.
         """
 
         payload: dict[str, Any] = {
@@ -481,6 +487,10 @@ class DatabaseClient:
         }
         if figures_json is not None:
             payload["figures_json"] = figures_json
+        if pending_deliveries_json is not None:
+            payload["pending_deliveries_json"] = pending_deliveries_json
+        if delivery_notes_json is not None:
+            payload["delivery_notes_json"] = delivery_notes_json
         result = await asyncio.to_thread(
             lambda: (
                 self._client.table("brain_sessions")

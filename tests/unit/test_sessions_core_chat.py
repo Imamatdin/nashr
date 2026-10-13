@@ -211,8 +211,11 @@ async def _dispatch(*, fake: Any, **kwargs: Any) -> Any:
             content=deck.model_dump(mode="json"),
             kind=RevisionKind.AI_EDIT,
             idempotency_key=f"chat-edit:{job_id}",
-            renderer_version=None,
-            render_formats=[],
+            # finish always queues the render of what it commits (B1-FIX2); this
+            # helper still delivers inline, as the bot path does.
+            renderer_version="pw-test",
+            render_formats=["html"],
+            render_max_attempts=1,
         )
 
     async def deliver(deck: Any, revision_id: str, formats: list[Any]) -> list[str]:

@@ -94,6 +94,42 @@ class TurnOutcome:
     fix_call_count: int = 0
 
 
+class PendingDelivery(BaseModel):
+    """An AI edit committed by a queued job whose exports are still rendering.
+
+    It holds one fix of the allowance until the job is delivered (counted) or its
+    delivery fails (released). See :mod:`packages.bot.sessions.delivery`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(min_length=1, max_length=64)
+    revision_id: str = Field(min_length=1, max_length=64)
+    slides_changed: int = Field(ge=0, le=1000)
+
+
+class DeliveryNoteKind(StrEnum):
+    """How a pending delivery settled."""
+
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
+class DeliveryNote(BaseModel):
+    """A chat line the system owes the user about a settled delivery.
+
+    ``history_index`` is ``len(history)`` when it settled, so the chat view shows
+    it after the conversation turns that preceded it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: DeliveryNoteKind
+    job_id: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=500)
+    history_index: int = Field(ge=0)
+
+
 class BrainSession(BaseModel):
     """The live, typed session a chat-loop turn loads, mutates, and persists.
 
@@ -124,6 +160,11 @@ class BrainSession(BaseModel):
     # The edit allowance is a COUNTER (see budget.has_fixes_remaining): bumped only
     # after a fix succeeds, so a refused/failed fix never consumes one.
     fixes_used: int = Field(default=0, ge=0)
+    # Edits committed but still rendering: each holds one fix until it settles.
+    pending_deliveries: list[PendingDelivery] = Field(
+        default_factory=list[PendingDelivery], max_length=20
+    )
+    delivery_notes: list[DeliveryNote] = Field(default_factory=list[DeliveryNote], max_length=50)
     # ACTUAL spend, for billing/analytics ONLY — does not gate the session.
     accumulated_cost_usd: float = Field(default=0.0, ge=0.0)
     accumulated_image_count: int = Field(default=0, ge=0)

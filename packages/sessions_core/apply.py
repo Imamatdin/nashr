@@ -6,9 +6,12 @@ against the revision the session is editing; only a committed revision is
 rendered and published. Every exit answers each pending ``edit_slides`` call part
 so the next turn's history stays coherent.
 
-Allowance rule (unchanged from Build 2): one edit is consumed only when the edit
-was delivered — committed, rendered and published. A refused, failed, unchanged,
-conflicting or proposed edit consumes nothing.
+Allowance rule: one edit is consumed only when the edit was delivered —
+committed, rendered and published. A refused, failed, unchanged, conflicting or
+proposed edit consumes nothing. When the queued job's own render publishes the
+exports (``deliver=None``), the committed edit holds one fix as a pending delivery
+until that render settles (:mod:`packages.bot.sessions.delivery`): delivered, it
+is counted; failed, the hold is released and the allowance restored.
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from packages.bot.sessions.budget import has_fixes_remaining, session_fix_limit
-from packages.bot.sessions.models import ApprovalState, BrainSession
+from packages.bot.sessions.delivery import fixes_reserved
+from packages.bot.sessions.models import ApprovalState, BrainSession, PendingDelivery
 from packages.bot.sessions.roster_format import render_roster_payload
 from packages.bot.sessions.store import hydrate_figures, persist_session
 from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
@@ -29,6 +33,7 @@ from packages.core.gemini_tools import FunctionResult, build_function_responses_
 from packages.core.models.presentation import DeckSpec, SlideFix
 from packages.platform.database import DatabaseClient
 from packages.platform.document_models import CommitOutcome, CommitStatus
+from packages.platform.jobs import JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,8 @@ class FixStatus(StrEnum):
     """How a fix batch resolved."""
 
     DELIVERED = "delivered"
+    # Committed; the job's render is publishing the exports (not yet delivered).
+    COMMITTED = "committed"
     PROPOSED = "proposed"
     CONFLICT = "conflict"
     UNCHANGED = "unchanged"
@@ -120,16 +127,23 @@ async def apply_fix_batch(
     call_count: int,
     progress: ProgressFn,
     commit: CommitDeck,
-    deliver: DeliverRevision,
+    deliver: DeliverRevision | None,
+    delivery_job_id: str | None = None,
 ) -> FixDispatchResult:
     """Apply ``fixes`` to ``session.deck``, commit against ``session.revision_id``, resolve.
 
-    ``commit(deck, base_revision_id)`` returns the commit outcome; ``deliver(deck,
+    ``commit(deck, base_revision_id)`` returns the commit outcome. ``deliver(deck,
     revision_id, formats)`` renders and publishes a committed revision in the
-    session's formats and returns render warnings, raising on any failure.
+    session's formats and returns render warnings, raising on any failure (the
+    bot's inline path). ``deliver=None`` means the queued job ``delivery_job_id``
+    is delivering it through its own render: the edit is then COMMITTED and holds
+    one fix until that render settles, unless every format already existed.
     """
 
-    if not has_fixes_remaining(session.fixes_used, session.package):
+    if deliver is None and delivery_job_id is None:
+        raise ValueError("an edit without an inline deliver needs the job delivering it")
+    # Edits still rendering hold their fix, so a burst of edits cannot overdraw.
+    if not has_fixes_remaining(fixes_reserved(session), session.package):
         limit = session_fix_limit(session.package)
         return await _finish(
             db,
@@ -225,6 +239,46 @@ async def apply_fix_batch(
     revision_id = str(outcome.revision_id)
     session.deck = edited
     session.revision_id = revision_id
+    if deliver is None:
+        assert delivery_job_id is not None
+        # Images were generated (and paid for) whether or not the render succeeds.
+        session.accumulated_image_count += int(batch.image_count)
+        if outcome.job_status == JobStatus.COMMITTED.value:
+            session.pending_deliveries = [
+                *session.pending_deliveries,
+                PendingDelivery(
+                    job_id=delivery_job_id, revision_id=revision_id, slides_changed=len(fixes)
+                ),
+            ]
+            return await _finish(
+                db,
+                session,
+                {
+                    "committed": True,
+                    "delivery": "rendering",
+                    "slides_changed": len(fixes),
+                    "roster": render_roster_payload(edited),
+                },
+                call_count,
+                FixDispatchResult(
+                    FixStatus.COMMITTED, slides_changed=len(fixes), revision_id=revision_id
+                ),
+            )
+        # Every format already existed for this revision: delivered in the commit.
+        session.fixes_used += 1
+        return await _finish(
+            db,
+            session,
+            {
+                "delivered": True,
+                "slides_changed": len(fixes),
+                "roster": render_roster_payload(edited),
+            },
+            call_count,
+            FixDispatchResult(
+                FixStatus.DELIVERED, slides_changed=len(fixes), revision_id=revision_id
+            ),
+        )
     try:
         warnings = tuple(await deliver(edited, revision_id, list(session.formats)))
     except Exception as exc:

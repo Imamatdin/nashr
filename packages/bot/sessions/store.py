@@ -16,12 +16,19 @@ its caller by design.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ValidationError
 
 from packages.bot.orchestrators.article_orchestrator import SourceProcessingResult
-from packages.bot.sessions.models import ApprovalState, BrainSession, PendingAction
+from packages.bot.sessions.delivery import settle_deliveries
+from packages.bot.sessions.models import (
+    ApprovalState,
+    BrainSession,
+    DeliveryNote,
+    PendingAction,
+    PendingDelivery,
+)
 from packages.bot.sessions.serialization import deserialize_sources, serialize_sources
 from packages.core.enums import ExportFormat, GenerationPackage
 from packages.core.gemini_tools import deserialize_history, serialize_history
@@ -29,6 +36,7 @@ from packages.core.models.presentation import DeckSpec
 from packages.platform.database import DatabaseClient
 from packages.platform.document_models import DocumentKind
 from packages.platform.document_store import DocumentStore
+from packages.platform.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +72,8 @@ async def create_session(
         accumulated_cost_usd=0.0,
         accumulated_image_count=0,
         revision_id=revision_id,
+        pending_deliveries_json=[],
+        delivery_notes_json=[],
     )
     return BrainSession(
         project_id=project_id,
@@ -89,6 +99,10 @@ async def load_session(db: DatabaseClient, project_id: str) -> BrainSession | No
     loaded (``sources.figures`` is empty, ``figures_loaded`` is False) so a
     text-only turn never deserializes the raster bytes. The fix path calls
     :func:`hydrate_figures` first.
+
+    Edits still rendering are settled against their jobs here (and the result
+    persisted), so every reader - bot, web, worker - sees the allowance and the
+    chat notices as the database last decided them.
     """
 
     row = await db.get_brain_session(project_id)
@@ -99,7 +113,7 @@ async def load_session(db: DatabaseClient, project_id: str) -> BrainSession | No
     revision_id, deck = await load_revision_deck(
         db, project_id, str(stored_revision) if stored_revision else None
     )
-    return BrainSession(
+    session = BrainSession(
         project_id=project_id,
         history=deserialize_history(row["history_json"]),
         sources=deserialize_sources(row["sources_json"], None),
@@ -112,8 +126,19 @@ async def load_session(db: DatabaseClient, project_id: str) -> BrainSession | No
         fixes_used=int(row["fixes_used"]),
         accumulated_cost_usd=float(row["accumulated_cost_usd"]),
         accumulated_image_count=int(row["accumulated_image_count"]),
+        pending_deliveries=[
+            PendingDelivery.model_validate(item)
+            for item in cast(list[Any], row.get("pending_deliveries_json") or [])
+        ],
+        delivery_notes=[
+            DeliveryNote.model_validate(item)
+            for item in cast(list[Any], row.get("delivery_notes_json") or [])
+        ],
         figures_loaded=False,
     )
+    if await settle_deliveries(JobQueue(db), session):
+        await persist_session(db, session)
+    return session
 
 
 async def hydrate_figures(db: DatabaseClient, session: BrainSession) -> BrainSession:
@@ -156,6 +181,8 @@ async def persist_session(db: DatabaseClient, session: BrainSession) -> None:
         accumulated_cost_usd=session.accumulated_cost_usd,
         accumulated_image_count=session.accumulated_image_count,
         revision_id=session.revision_id,
+        pending_deliveries_json=[p.model_dump(mode="json") for p in session.pending_deliveries],
+        delivery_notes_json=[n.model_dump(mode="json") for n in session.delivery_notes],
     )
 
 

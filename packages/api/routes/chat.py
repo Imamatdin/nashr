@@ -89,6 +89,11 @@ class ChatHistoryView(BaseModel):
     # An edit job is running: the deck is being re-rendered right now, so the
     # composer is disabled and the client watches this job.
     applying_job_id: str | None
+    # Edits committed whose exports are still rendering (B1-FIX2). Each holds one
+    # fix (``fixes_pending``); the client polls these jobs and re-reads the chat
+    # when they settle, which is when the delivery notice appears.
+    fixes_pending: int = 0
+    delivering_job_ids: list[str] = []
 
 
 class ChatTurnView(BaseModel):
@@ -107,6 +112,7 @@ class ChatTurnView(BaseModel):
     fixes_used: int = 0
     fix_limit: int = 0
     fixes_remaining: int = 0
+    fixes_pending: int = 0
 
 
 def _fix_views(fixes: tuple[SlideFix, ...]) -> list[FixView]:
@@ -214,7 +220,9 @@ async def get_chat(request: Request, project_id: str, auth: Authenticated) -> Ch
         pending_action=_pending_view(view.pending),
         fixes_used=view.fixes_used,
         fix_limit=view.fix_limit,
-        fixes_remaining=max(0, view.fix_limit - view.fixes_used),
+        fixes_remaining=max(0, view.fix_limit - view.fixes_used - view.fixes_pending),
+        fixes_pending=view.fixes_pending,
+        delivering_job_ids=list(view.delivering_job_ids),
         package=view.package,
         slide_count=view.slide_count,
         applying_job_id=await _active_edit_job_id(queue, project_id),
@@ -284,7 +292,7 @@ async def post_chat(
         edit_job_active=lambda: _has_active_edit_job(queue, project_id),
     )
 
-    remaining = max(0, result.fix_limit - result.fixes_used)
+    remaining = max(0, result.fix_limit - result.fixes_used - result.fixes_pending)
 
     if result.kind is TurnKind.NO_SESSION:
         raise HTTPException(
@@ -308,6 +316,7 @@ async def post_chat(
             fixes_used=result.fixes_used,
             fix_limit=result.fix_limit,
             fixes_remaining=remaining,
+            fixes_pending=result.fixes_pending,
         )
     if result.kind is TurnKind.REPLY:
         return ChatTurnView(
@@ -316,6 +325,7 @@ async def post_chat(
             fixes_used=result.fixes_used,
             fix_limit=result.fix_limit,
             fixes_remaining=remaining,
+            fixes_pending=result.fixes_pending,
         )
 
     # FIX_READY: the session is parked with the call unanswered; the job carries
@@ -362,6 +372,7 @@ async def post_chat(
         fixes_used=result.fixes_used,
         fix_limit=result.fix_limit,
         fixes_remaining=remaining,
+        fixes_pending=result.fixes_pending,
     )
 
 
@@ -422,7 +433,8 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
         job_id=job_id,
         fixes_used=view.fixes_used,
         fix_limit=view.fix_limit,
-        fixes_remaining=max(0, view.fix_limit - view.fixes_used),
+        fixes_remaining=max(0, view.fix_limit - view.fixes_used - view.fixes_pending),
+        fixes_pending=view.fixes_pending,
     )
 
 
@@ -452,7 +464,8 @@ async def reject_pending_action(
         kind=TurnKind.REPLY.value,
         fixes_used=view.fixes_used,
         fix_limit=view.fix_limit,
-        fixes_remaining=max(0, view.fix_limit - view.fixes_used),
+        fixes_remaining=max(0, view.fix_limit - view.fixes_used - view.fixes_pending),
+        fixes_pending=view.fixes_pending,
     )
 
 

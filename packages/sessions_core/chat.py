@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 from google.genai import types as genai_types
 
 from packages.bot.sessions.budget import has_fixes_remaining, session_fix_limit
+from packages.bot.sessions.delivery import fixes_reserved
 from packages.bot.sessions.models import (
     ApprovalState,
     BrainSession,
@@ -108,6 +109,8 @@ class TurnResult:
     fix_call_count: int = 0
     fix_limit: int = 0
     fixes_used: int = 0
+    # Edits committed but still rendering: they hold allowance until settled.
+    fixes_pending: int = 0
     # The revision the brain saw this turn: a parked edit commits against it.
     revision_id: str | None = None
 
@@ -120,6 +123,8 @@ class ChatSessionView:
     messages: list[dict[str, str]] = field(default_factory=list[dict[str, str]])
     pending: PendingActionView | None = None
     fixes_used: int = 0
+    fixes_pending: int = 0
+    delivering_job_ids: list[str] = field(default_factory=list[str])
     fix_limit: int = 0
     package: str | None = None
     slide_count: int = 0
@@ -152,10 +157,20 @@ def _strip_context_prefix(text: str) -> str:
 
 
 def history_for_wire(session: BrainSession) -> list[dict[str, str]]:
-    """The conversation as user/assistant text, tool plumbing removed."""
+    """The conversation as user/assistant text, tool plumbing removed.
+
+    Delivery notices (an edit published, or saved but not rendered) are system
+    lines placed after the turns that preceded them; they are never sent to the
+    model.
+    """
 
     messages: list[dict[str, str]] = []
+    notes = sorted(session.delivery_notes, key=lambda note: note.history_index)
+    next_note = 0
     for index, content in enumerate(session.history):
+        while next_note < len(notes) and notes[next_note].history_index <= index:
+            messages.append({"role": "system", "text": notes[next_note].text})
+            next_note += 1
         role = content.role or "model"
         if role not in ("user", "model"):
             continue
@@ -171,6 +186,8 @@ def history_for_wire(session: BrainSession) -> list[dict[str, str]]:
             if not text:
                 continue
         messages.append({"role": "user" if role == "user" else "assistant", "text": text})
+    for note in notes[next_note:]:
+        messages.append({"role": "system", "text": note.text})
     return messages[-_MAX_WIRE_MESSAGES:]
 
 
@@ -259,6 +276,8 @@ async def read_session(db: DatabaseClient, project_id: str) -> ChatSessionView:
         messages=history_for_wire(session),
         pending=_pending_view(session.pending_action),
         fixes_used=session.fixes_used,
+        fixes_pending=len(session.pending_deliveries),
+        delivering_job_ids=[pending.job_id for pending in session.pending_deliveries],
         fix_limit=session_fix_limit(session.package),
         package=session.package.value,
         slide_count=len(session.deck.slides) if session.deck is not None else 0,
@@ -303,6 +322,7 @@ async def run_web_turn(
             pending=_pending_view(session.pending_action),
             fix_limit=session_fix_limit(session.package),
             fixes_used=session.fixes_used,
+            fixes_pending=len(session.pending_deliveries),
         )
 
     if has_dangling_call(session):
@@ -314,6 +334,7 @@ async def run_web_turn(
                 pending=None,
                 fix_limit=session_fix_limit(session.package),
                 fixes_used=session.fixes_used,
+                fixes_pending=len(session.pending_deliveries),
             )
         await repair_dangling_call(db, session)
 
@@ -335,6 +356,7 @@ async def run_web_turn(
             reply_text=outcome.reply_text,
             fix_limit=fix_limit,
             fixes_used=session.fixes_used,
+            fixes_pending=len(session.pending_deliveries),
         )
 
     if requires_approval(outcome, user_initiated=True):
@@ -355,9 +377,10 @@ async def run_web_turn(
             pending=_pending_view(session.pending_action),
             fix_limit=fix_limit,
             fixes_used=session.fixes_used,
+            fixes_pending=len(session.pending_deliveries),
         )
 
-    if not has_fixes_remaining(session.fixes_used, session.package):
+    if not has_fixes_remaining(fixes_reserved(session), session.package):
         # Refuse BEFORE the expensive apply, and answer the model's call so the
         # next turn sees a coherent call → result history. The worker's
         # dispatch_fix re-checks: this gate is for the user's benefit, that one
@@ -373,6 +396,7 @@ async def run_web_turn(
             reply_text=outcome.reply_text,
             fix_limit=fix_limit,
             fixes_used=session.fixes_used,
+            fixes_pending=len(session.pending_deliveries),
         )
 
     # Park: history holds the unanswered call, so no other turn can run until a
@@ -386,6 +410,7 @@ async def run_web_turn(
         fix_call_count=max(1, outcome.fix_call_count),
         fix_limit=fix_limit,
         fixes_used=session.fixes_used,
+        fixes_pending=len(session.pending_deliveries),
         revision_id=session.revision_id,
     )
 
@@ -453,7 +478,8 @@ async def dispatch_fix(
     progress: Callable[[str, int, int], Awaitable[None]],
     base_revision_id: str,
     commit: CommitDeck,
-    deliver: DeliverRevision,
+    deliver: DeliverRevision | None,
+    delivery_job_id: str | None = None,
 ) -> FixDispatchResult:
     """Apply a parked fix batch against the revision the brain saw. Worker-side.
 
@@ -488,6 +514,7 @@ async def dispatch_fix(
         progress=progress,
         commit=commit,
         deliver=deliver,
+        delivery_job_id=delivery_job_id,
     )
 
 
