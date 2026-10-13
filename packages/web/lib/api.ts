@@ -589,6 +589,13 @@ export interface JobView {
   deducted_amount: number | null;
   /** A FACT from the job-stamped ledger row, never inferred from timestamps. */
   refunded: boolean;
+  /**
+   * Delivery (B1-FIX2): a generation/edit is 'committed' while this render job
+   * publishes its files, then 'completed' or 'delivery_failed' (refunded).
+   */
+  render_job_id?: string | null;
+  render_status?: string | null;
+  render_progress?: { step?: string; current?: number; total?: number } | null;
 }
 
 export function enqueueJob(
@@ -930,7 +937,8 @@ export interface ChatPendingView {
 }
 
 export interface ChatMessageView {
-  role: "user" | "assistant";
+  /** "system": a delivery notice (edit published, or saved but not rendered). */
+  role: "user" | "assistant" | "system";
   text: string;
 }
 
@@ -945,6 +953,9 @@ export interface ChatHistoryView {
   slide_count: number;
   /** An edit job is re-rendering the deck right now. */
   applying_job_id: string | null;
+  /** Edits committed whose files are still rendering; each holds one fix. */
+  fixes_pending?: number;
+  delivering_job_ids?: string[];
 }
 
 export interface ChatTurnView {

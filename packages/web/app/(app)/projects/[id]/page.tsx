@@ -92,6 +92,7 @@ import {
 } from "@/lib/decisions";
 import { useAppSession } from "@/lib/use-session";
 import { useLiveJob } from "@/lib/use-live-job";
+import { nextPollDelay, settledDeliveries } from "@/lib/delivery";
 import {
   badgeStatusFor,
   deriveWorkspaceState,
@@ -365,6 +366,46 @@ export default function ProjectPage() {
       .then((view) => view && setChat(view))
       .catch(() => undefined);
   }, [session, deckProject, projectId, loadDeck, loadDecisions, withAuth]);
+
+  // B1-FIX2: a queued AI edit is applied by a worker, then committed while its
+  // render publishes the files. The chat owns that watch: while an edit is
+  // applying or delivering, re-read the chat (3 s backing off to 30 s, with or
+  // without Realtime). Each read settles finished deliveries server-side, so
+  // the "ready" or "saved but not rendered" notice and the restored allowance
+  // appear without a reload; a settled delivery also refreshes the downloads.
+  const deliveringKey = (chat?.delivering_job_ids ?? []).join(",");
+  const applyingId = chat?.applying_job_id ?? null;
+  useEffect(() => {
+    if (!session || !deckProject) return;
+    if (!applyingId && deliveringKey === "") return;
+    let delay: number | null = null;
+    let stopped = false;
+    let timer: number | null = null;
+    const previous = deliveringKey === "" ? [] : deliveringKey.split(",");
+    const tick = async () => {
+      try {
+        const view = await withAuth((token) => getChat(projectId, token));
+        if (stopped || !view) return;
+        const next = view.delivering_job_ids ?? [];
+        const settled = settledDeliveries(previous, next);
+        if (settled.length > 0 || (applyingId && !view.applying_job_id)) {
+          onDeckChanged();
+        }
+        setChat(view);
+      } catch {
+        // A blip must not end the watch; the next tick tries again.
+      }
+      if (stopped) return;
+      delay = nextPollDelay(delay);
+      timer = window.setTimeout(() => void tick(), delay);
+    };
+    delay = nextPollDelay(null);
+    timer = window.setTimeout(() => void tick(), delay);
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [session, deckProject, applyingId, deliveringKey, projectId, withAuth, onDeckChanged]);
 
   // Re-mint the signed deck URL before it expires (G20).
   useEffect(() => {
@@ -670,6 +711,9 @@ export default function ProjectPage() {
         <InlineError error={chatError} onRetry={() => setChatError(null)} />
       )}
       {chat?.applying_job_id && <p className="ws-fine">{t.fixApplying}</p>}
+      {!chat?.applying_job_id && (chat?.delivering_job_ids?.length ?? 0) > 0 && (
+        <p className="ws-fine">{t.fixDelivering}</p>
+      )}
       {!chatDisabledReason && fixesLeft !== null && (
         <p className="ws-fine">
           {t.fixesRemaining}: <DataText>{fixesLeft}</DataText>
@@ -785,6 +829,49 @@ export default function ProjectPage() {
         </div>
       )}
 
+      {workspace.kind === "delivering" && job && (
+        <div className="ws-wait" data-testid="ws-delivering">
+          <LoadingState label={t.delivering} startedAt={startedAtMs(job)} />
+          <p className="ws-fine">
+            {t.deliveringHint}
+            {live ? ` · ${t.live}` : ` · ${t.refreshing}`}
+          </p>
+        </div>
+      )}
+
+      {workspace.kind === "delivery_failed" && job && (
+        <div className="ws-failed" data-testid="ws-delivery-failed">
+          <p className="ws-failed-note">{t.deliveryFailed}</p>
+          <p className="ws-fine">{t.deliveryFailedHint}</p>
+          {/* The refund is a FACT off the job-stamped ledger row. */}
+          {job.refunded && (
+            <p className="ws-fine">
+              {t.refunded}
+              {job.deducted_amount ? (
+                <>
+                  : <DataText>{soum(job.deducted_amount)}</DataText>
+                </>
+              ) : null}
+              .
+            </p>
+          )}
+          {job.error_message && (
+            <details className="ws-detail">
+              <summary>{t.technical}</summary>
+              <code>{job.error_message}</code>
+            </details>
+          )}
+          <Button
+            variant="ghost"
+            onClick={() => void onEnqueue()}
+            loading={enqueueing}
+          >
+            {t.restart} — <DataText>{soum(priced.price)}</DataText>
+          </Button>
+          <p className="ws-fine">{t.restartHint}</p>
+        </div>
+      )}
+
       {workspace.kind === "completed_no_deck" && (
         <div className="ws-wait">
           <LoadingState label={t.preparingFiles} startedAt={startedAtMs(job)} />
@@ -836,7 +923,9 @@ export default function ProjectPage() {
         />
       ) : (
         <div className="ws-deck-blank">
-          {workspace.kind === "processing" || workspace.kind === "queued" ? (
+          {workspace.kind === "processing" ||
+          workspace.kind === "queued" ||
+          workspace.kind === "delivering" ? (
             <p>{t.deckAppears}</p>
           ) : (
             <p>{t.noDeck}</p>

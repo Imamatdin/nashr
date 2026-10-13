@@ -33,6 +33,7 @@ export const WORKSPACE_COPY = {
     chatDisabledEmpty:
       "Chat opens after the presentation is ready and works directly on its slides.",
     fixApplying: "Applying your edit. This usually takes a few minutes.",
+    fixDelivering: "Your edit is saved; its files are being prepared.",
     fixesRemaining: "Edits remaining",
     reconnecting: "Status is not updating. Reconnecting…",
     archivedTitle: "Archived project",
@@ -60,6 +61,12 @@ export const WORKSPACE_COPY = {
     preparingFiles: "Preparing files",
     preparingFilesHint:
       "The presentation is assembled and its files are being published.",
+    delivering: "Deck saved — preparing your files",
+    deliveringHint:
+      "Your deck is saved. Each download appears here as soon as it is published; there is no need to reload.",
+    deliveryFailed: "Your deck was saved, but its files could not be produced.",
+    deliveryFailedHint:
+      "You were not charged for this run. The deck stays editable; update the exports to try the files again, or start a new generation.",
     processDetails: "Process details",
     deckAppears: "Your presentation will appear here.",
     noDeck: "No presentation yet.",
@@ -142,6 +149,7 @@ export const WORKSPACE_COPY = {
     chatDisabledEmpty:
       "Чат откроется после подготовки презентации и будет работать прямо с её слайдами.",
     fixApplying: "Применяем правку. Обычно это занимает несколько минут.",
+    fixDelivering: "Правка сохранена, файлы для неё готовятся.",
     fixesRemaining: "Осталось правок",
     reconnecting: "Статус не обновляется. Переподключаемся…",
     archivedTitle: "Проект в архиве",
@@ -168,6 +176,12 @@ export const WORKSPACE_COPY = {
       "Это новая генерация с первого этапа и новым списанием средств.",
     preparingFiles: "Подготавливаем файлы",
     preparingFilesHint: "Презентация собрана, файлы сейчас публикуются.",
+    delivering: "Презентация сохранена — готовим файлы",
+    deliveringHint:
+      "Презентация сохранена. Каждый файл появится здесь, как только будет опубликован, — перезагружать страницу не нужно.",
+    deliveryFailed: "Презентация сохранена, но подготовить её файлы не удалось.",
+    deliveryFailedHint:
+      "Средства за этот запуск возвращены. Презентацию можно редактировать: обновите экспорт, чтобы попробовать ещё раз, или запустите новую генерацию.",
     processDetails: "Ход работы",
     deckAppears: "Презентация появится здесь.",
     noDeck: "Презентации пока нет.",
@@ -249,6 +263,7 @@ export const WORKSPACE_COPY = {
     chatDisabledEmpty:
       "Suhbat taqdimot tayyor bo‘lgandan keyin ochiladi — u tayyor slaydlar ustida ishlaydi.",
     fixApplying: "Tahrir qo‘llanmoqda — bir necha daqiqa.",
+    fixDelivering: "Tahrir saqlandi, uning fayllari tayyorlanmoqda.",
     fixesRemaining: "Qolgan tahrirlar",
     reconnecting: "Holat yangilanmayapti — qayta ulanmoqda.",
     archivedTitle: "Arxivlangan loyiha",
@@ -275,6 +290,12 @@ export const WORKSPACE_COPY = {
       "Bu yangi generatsiya: jarayon birinchi bosqichdan boshlanadi va hisobdan qayta yechiladi.",
     preparingFiles: "Fayllar tayyorlanmoqda",
     preparingFilesHint: "Taqdimot yig‘ildi — fayllar hozir joylanmoqda.",
+    delivering: "Taqdimot saqlandi — fayllar tayyorlanmoqda",
+    deliveringHint:
+      "Taqdimot saqlandi. Har bir fayl joylanishi bilan shu yerda paydo bo‘ladi — sahifani yangilash shart emas.",
+    deliveryFailed: "Taqdimot saqlandi, lekin uning fayllarini tayyorlab bo‘lmadi.",
+    deliveryFailedHint:
+      "Bu ishga yechilgan mablag‘ qaytarildi. Taqdimotni tahrirlash mumkin: fayllarni qayta urinish uchun eksportni yangilang yoki yangi generatsiya boshlang.",
     processDetails: "Jarayon tafsiloti",
     deckAppears: "Taqdimot shu yerda paydo bo‘ladi.",
     noDeck: "Hali taqdimot yo‘q.",

@@ -15,18 +15,26 @@
 //
 // So: Realtime is the fast path, polling is a fallback that BACKS OFF but never
 // gives up, and a completed-but-deckless job keeps listening for the deck row.
+//
+// B1-FIX2 — a paid job is 'committed' while a separate render job publishes its
+// files. The job view carries that render's status and progress, so this hook
+// follows the parent to 'committed' and then the render: every change in the
+// delivery fingerprint re-reads the exports (onDeckChanged). While anything is
+// in flight it polls from 3 s backing off to 30 s, whether or not Realtime is
+// connected and whether or not a deck exists yet.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { ApiError, type JobView, getLatestJob } from "./api";
+import { deliveryFingerprint, isInFlight, nextPollDelay, POLL_FIRST_MS } from "./delivery";
 import type { AppSession } from "./session";
 import { createRlsClient } from "./supabase";
 
-/** Fast cadence while a job is live and Realtime has not confirmed itself. */
-const POLL_ACTIVE_MS = 3_000;
-/** Once Realtime is connected, polling is only a safety net. */
+/** Fast cadence right after something changed. */
+const POLL_ACTIVE_MS = POLL_FIRST_MS;
+/** Settled and Realtime connected: polling is only a safety net. */
 const POLL_BACKGROUND_MS = 20_000;
-/** Backoff ceiling for a poll that keeps failing. Never becomes "stop". */
+/** Backoff ceiling for a poll that keeps failing or waiting. Never becomes "stop". */
 const POLL_MAX_MS = 30_000;
 
 export type JobLoadState = "loading" | "loaded" | "absent" | "error";
@@ -75,6 +83,8 @@ export function useLiveJob({
   // being torn down and rebuilt every time the parent re-renders.
   const deckCallback = useRef(onDeckChanged);
   deckCallback.current = onDeckChanged;
+  // The last delivery fingerprint seen; a change re-reads the exports.
+  const lastPrint = useRef<string | null>(null);
 
   const readJob = useCallback(async (): Promise<void> => {
     try {
@@ -84,7 +94,18 @@ export function useLiveJob({
       setJob(view);
       setState("loaded");
       setError(null);
-      backoff.current = liveRef.current ? POLL_BACKGROUND_MS : POLL_ACTIVE_MS;
+      const print = deliveryFingerprint(view);
+      const changed = print !== lastPrint.current;
+      if (changed && lastPrint.current !== null) {
+        // The render started, published, finished or failed: refresh downloads.
+        deckCallback.current();
+      }
+      lastPrint.current = print;
+      if (isInFlight(view)) {
+        backoff.current = changed ? POLL_ACTIVE_MS : nextPollDelay(backoff.current);
+      } else {
+        backoff.current = liveRef.current ? POLL_BACKGROUND_MS : POLL_MAX_MS;
+      }
     } catch (readError) {
       if (stopped.current) return;
       if (readError instanceof ApiError && readError.status === 404) {
@@ -92,7 +113,8 @@ export function useLiveJob({
         setJob(null);
         setState("absent");
         setError(null);
-        backoff.current = liveRef.current ? POLL_BACKGROUND_MS : POLL_ACTIVE_MS;
+        // Keep asking (3 s backing off to 30 s): a job may be enqueued elsewhere.
+        backoff.current = nextPollDelay(backoff.current);
         return;
       }
       // Surface it, keep the last known job on screen, and keep watching. The
@@ -167,9 +189,10 @@ export function useLiveJob({
           const connected = status === "SUBSCRIBED";
           liveRef.current = connected;
           setLive(connected);
-          // Connected: drop to the background cadence. Dropped: return to the
-          // fast one rather than trusting a channel that just failed.
-          backoff.current = connected ? POLL_BACKGROUND_MS : POLL_ACTIVE_MS;
+          // Dropped: return to the fast cadence rather than trusting a channel
+          // that just failed. Connected: the next read picks the cadence, which
+          // stays the in-flight backoff while a delivery is pending.
+          if (!connected) backoff.current = POLL_ACTIVE_MS;
         });
     } catch {
       // Realtime is an optimisation. If the client cannot even be constructed

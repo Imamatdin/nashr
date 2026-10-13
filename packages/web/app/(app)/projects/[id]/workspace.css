@@ -538,6 +538,17 @@
 }
 
 .chat-msg[data-role="assistant"] .chat-bubble { color: var(--ink); }
+/* A delivery notice from Nashr (an edit published, or saved but not rendered):
+   centred and quieter than either speaker, so it never reads as the model. */
+.chat-msg[data-role="system"] { justify-content: center; padding: 0 24px; }
+.chat-msg[data-role="system"] .chat-bubble {
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 10px;
+  text-align: center;
+}
 .chat-msg[data-pending="true"] { opacity: 0.6; }
 
 /* The approval card renders INLINE in the thread: a change the model proposed

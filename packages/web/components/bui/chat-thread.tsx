@@ -21,7 +21,8 @@ import { ArrowUp, Check, X } from "lucide-react";
 
 export interface ChatThreadMessage {
   key: string;
-  role: "user" | "assistant";
+  /** "system": a delivery notice from Nashr, not the model's words. */
+  role: "user" | "assistant" | "system";
   text: string;
   /** Renders quieter, for a turn that is still settling. */
   pending?: boolean;

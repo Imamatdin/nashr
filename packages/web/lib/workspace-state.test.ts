@@ -192,3 +192,35 @@ describe("badgeStatusFor — the header cannot contradict the body", () => {
     expect(badgeStatusFor("loading", "draft")).toBe("draft");
   });
 });
+
+describe("deriveWorkspaceState — asynchronous delivery (B1-FIX2)", () => {
+  it("a committed job is delivering: no purchase offered, files on their way", () => {
+    const state = deriveWorkspaceState(presentation, job({ status: "committed" }), false, true);
+    expect(state.kind).toBe("delivering");
+    expect(state.canEnqueue).toBe(false);
+    expect(isRunning(job({ status: "committed" }))).toBe(true);
+    expect(badgeStatusFor("delivering", "ready")).toBe("processing");
+  });
+
+  it("stays delivering even when a deck response already exists", () => {
+    // The head is committed before its files exist: the deck route answers,
+    // but the run is not delivered until the render publishes.
+    expect(deriveWorkspaceState(presentation, job({ status: "committed" }), true, true).kind).toBe(
+      "delivering",
+    );
+  });
+
+  it("a delivery_failed job is its own state: refunded, regenerating is a new paid run", () => {
+    const state = deriveWorkspaceState(
+      presentation,
+      job({ status: "delivery_failed", refunded: true }),
+      true,
+      true,
+    );
+    expect(state.kind).toBe("delivery_failed");
+    expect(state.canEnqueue).toBe(true);
+    expect(state.enqueueIsRepeat).toBe(true);
+    expect(isRunning(job({ status: "delivery_failed" }))).toBe(false);
+    expect(badgeStatusFor("delivery_failed", "ready")).toBe("failed");
+  });
+});

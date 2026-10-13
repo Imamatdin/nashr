@@ -30,8 +30,11 @@ export interface JobSnapshot {
   startedAt: string | null;
 }
 
-/** Statuses that mean "the worker still owes this project something". */
-const ACTIVE = new Set(["queued", "processing"]);
+/**
+ * Statuses that mean "the worker still owes this project something". A
+ * committed job's files are still rendering (B1-FIX2).
+ */
+const ACTIVE = new Set(["queued", "processing", "committed"]);
 
 export function isTerminalJob(status: string): boolean {
   return !ACTIVE.has(status);
@@ -115,9 +118,9 @@ export function applyJob(
 
 const CHIP_STATUSES: Record<string, readonly string[]> = {
   draft: ["draft", "sourcing", "interview"],
-  generating: ["generating", "queued", "processing"],
+  generating: ["generating", "queued", "processing", "committed"],
   ready: ["ready", "completed"],
-  failed: ["failed", "cancelled"],
+  failed: ["failed", "cancelled", "delivery_failed"],
   archived: ["archived"],
 };
 

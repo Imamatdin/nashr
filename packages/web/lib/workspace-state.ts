@@ -24,6 +24,10 @@ export type WorkspaceStateKind =
   | "processing"
   | "failed"
   | "completed_no_deck"
+  // B1-FIX2: the deck is committed and its render is publishing the files.
+  | "delivering"
+  // The render failed for good: the charge was refunded, the deck was kept.
+  | "delivery_failed"
   | "ready";
 
 export interface WorkspaceState {
@@ -45,9 +49,12 @@ export interface ProjectShape {
   project_type?: string | null;
 }
 
-/** Statuses the queue considers live. */
+/** Statuses the queue considers live: running, or committed and delivering. */
 export function isRunning(job: JobView | null): boolean {
-  return job !== null && (job.status === "queued" || job.status === "processing");
+  return (
+    job !== null &&
+    (job.status === "queued" || job.status === "processing" || job.status === "committed")
+  );
 }
 
 /**
@@ -90,6 +97,14 @@ export function deriveWorkspaceState(
   }
   if (job.status === "processing") {
     return { kind: "processing", job, canEnqueue: false, enqueueIsRepeat: false };
+  }
+  if (job.status === "committed") {
+    // Paid for and committed: nothing to buy here, the files are on their way.
+    return { kind: "delivering", job, canEnqueue: false, enqueueIsRepeat: false };
+  }
+  if (job.status === "delivery_failed") {
+    // Refunded. Regenerating is a new paid run; the kept deck stays editable.
+    return { kind: "delivery_failed", job, canEnqueue: true, enqueueIsRepeat: true };
   }
   if (job.status === "failed" || job.status === "cancelled") {
     // Retry is a NEW paid job from step 1, not a resume of the four steps that
@@ -165,7 +180,10 @@ export function badgeStatusFor(kind: WorkspaceStateKind, projectStatus: string):
       // Files are still being written; the run is not over.
       return "processing";
     case "completed_no_deck":
+    case "delivering":
       return "processing";
+    case "delivery_failed":
+      return "failed";
     case "failed":
       return "failed";
     case "ready":
