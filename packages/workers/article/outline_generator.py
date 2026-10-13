@@ -72,6 +72,8 @@ logger = logging.getLogger(__name__)
 
 
 _MODEL: Final[str] = model_for(Role.ARTICLE_OUTLINE)
+# 4k under the Claude 4.x tokenizer, x1.3 for Claude 5.x's ~30% more tokens per text.
+_OUTLINE_MAX_TOKENS: Final[int] = 5_200
 MIN_EMPIRICAL_MARKERS: Final[int] = 3
 MAX_TARGET_WORDS: Final[int] = 20_000
 MAX_CLAIMS_IN_PROMPT: Final[int] = 60
@@ -299,7 +301,7 @@ class OutlineGenerator:
         """One LLM call; on bad JSON, retry once with a stricter suffix."""
 
         first = await self._llm.complete(
-            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=4_000
+            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=_OUTLINE_MAX_TOKENS
         )
         parsed = _try_parse_object(first.content)
         if parsed is not None:
@@ -308,7 +310,7 @@ class OutlineGenerator:
             system=system_prompt,
             user=user_prompt + OUTLINE_GENERATION_RETRY_SUFFIX,
             model=_MODEL,
-            max_tokens=4_000,
+            max_tokens=_OUTLINE_MAX_TOKENS,
         )
         return _try_parse_object(retry.content)
 

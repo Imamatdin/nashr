@@ -159,15 +159,20 @@ BRAIN_ESCALATION_MAX_ATTEMPTS: Final[int] = 3
 # (The pass ran at 3k on 2.5 Flash, which had no thinking tokens.)
 INTERACTIVE_MAX_TOKENS: Final[int] = 8_000
 
+# The executor's output budget: the 16k it was sized at under the Claude 4.x
+# tokenizer, x1.3 because Claude 5.x counts ~30% more tokens for the same text.
+EDITORIAL_MAX_TOKENS: Final[int] = 20_800
+
 # Per-call timeout for the editorial executor's Sonnet call (and the section
-# repair, which reuses the same helper). The executor runs at 16k max_tokens
+# repair, which reuses the same helper). The executor runs at EDITORIAL_MAX_TOKENS
 # and now carries the full plan spine, so a complete plan-bound deck
 # legitimately takes minutes — longer than the shared DEFAULT_LLM_TIMEOUT_SECONDS
 # (180s) that suits the small planner/classifier calls. 300s is a CEILING that
 # comfortably covers a ~16k-token generation (~200-270s at Sonnet rates); a
 # typical deck returns well under it, so this never slows a normal call. If real
 # generations routinely approach 300s, the proper fix is streaming the
-# completion (or a lower max_tokens), not a higher ceiling.
+# completion (or a lower max_tokens), not a higher ceiling. The timings above
+# were measured on Sonnet 4.6; Sonnet 5.5's have not been measured yet.
 EDITORIAL_LLM_TIMEOUT_SECONDS: Final[int] = 300
 
 # Deck sizing is driven by content volume, not talk duration. Floor 6:
@@ -1511,7 +1516,7 @@ class EditorialPass:
             system=system,
             user=user,
             model=SONNET_MODEL,
-            max_tokens=16_000,
+            max_tokens=EDITORIAL_MAX_TOKENS,
             timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
         if cost_sink is not None:
@@ -1524,7 +1529,7 @@ class EditorialPass:
             system=system,
             user=retry_user,
             model=SONNET_MODEL,
-            max_tokens=16_000,
+            max_tokens=EDITORIAL_MAX_TOKENS,
             timeout=EDITORIAL_LLM_TIMEOUT_SECONDS,
         )
         if cost_sink is not None:

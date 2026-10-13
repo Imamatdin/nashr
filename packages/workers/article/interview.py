@@ -79,6 +79,10 @@ logger = logging.getLogger(__name__)
 
 
 _MODEL: Final[str] = model_for(Role.RESEARCH_INTERVIEW)
+# Sized at 4k / 800 under the Claude 4.x tokenizer, x1.3 for Claude 5.x's ~30%
+# more tokens per text.
+_QUESTIONS_MAX_TOKENS: Final[int] = 5_200
+_SCORE_MAX_TOKENS: Final[int] = 1_040
 GUIDED_QUESTION_COUNT: Final[int] = 4
 RESEARCH_QUESTION_COUNT: Final[int] = 10
 MAX_CHUNKS_IN_PROMPT: Final[int] = 20
@@ -370,7 +374,7 @@ class ResearchInterviewEngine:
         """Call the LLM; retry once on bad JSON; return ``None`` on final failure."""
 
         first = await self._llm.complete(
-            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=4_000
+            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=_QUESTIONS_MAX_TOKENS
         )
         parsed = _try_parse_array(first.content)
         if parsed is not None:
@@ -378,7 +382,7 @@ class ResearchInterviewEngine:
 
         retry_prompt = user_prompt + INTERVIEW_QUESTION_RETRY_SUFFIX
         second = await self._llm.complete(
-            system=system_prompt, user=retry_prompt, model=_MODEL, max_tokens=4_000
+            system=system_prompt, user=retry_prompt, model=_MODEL, max_tokens=_QUESTIONS_MAX_TOKENS
         )
         parsed = _try_parse_array(second.content)
         if parsed is not None:
@@ -446,7 +450,7 @@ class ResearchInterviewEngine:
         """Call the LLM; retry once on bad JSON; return ``None`` on final failure."""
 
         first = await self._llm.complete(
-            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=800
+            system=system_prompt, user=user_prompt, model=_MODEL, max_tokens=_SCORE_MAX_TOKENS
         )
         parsed = _try_parse_object(first.content)
         if parsed is not None:
@@ -454,7 +458,7 @@ class ResearchInterviewEngine:
 
         retry_prompt = user_prompt + ANSWER_SCORING_RETRY_SUFFIX
         second = await self._llm.complete(
-            system=system_prompt, user=retry_prompt, model=_MODEL, max_tokens=800
+            system=system_prompt, user=retry_prompt, model=_MODEL, max_tokens=_SCORE_MAX_TOKENS
         )
         parsed = _try_parse_object(second.content)
         if parsed is not None:
