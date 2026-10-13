@@ -1,0 +1,11 @@
+{
+  "app": "packages/, supabase/ and the worker as of 8cc000b (the B1-FIX review's SHA)",
+  "steps": {
+    "delivery: a paid deck follows its render to the downloads without reload or Realtime": {
+      "match": "downloads did not appear within 60 s without a reload"
+    },
+    "delivery: an edit whose render fails restores the allowance and says so": {
+      "match": "the chat never said the edit's files could not be produced"
+    }
+  }
+}

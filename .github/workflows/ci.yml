@@ -35,7 +35,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: packages/web/package-lock.json
+          cache-dependency-path: |
+            packages/web/package-lock.json
+            packages/presentation-worker/package-lock.json
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
@@ -59,6 +61,18 @@ jobs:
           npm test
           npm run typecheck
           npm run build
+      # B1-FIX2 item 8: the renderer suite, including PPTX determinism and the
+      # Chromium-backed PDF renderer tests (RUN_PDF_TESTS=1).
+      - name: Presentation worker tests and typecheck
+        working-directory: packages/presentation-worker
+        env:
+          RUN_PDF_TESTS: "1"
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run typecheck
+          set -o pipefail
+          npm test 2>&1 | tee ../../artifacts/presentation-worker.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -115,6 +129,24 @@ jobs:
           set -e
           python -m tests.db.expect_failures artifacts/prefix.xml tests/db/inventory_baseline.json \
             | tee artifacts/prefix-verdict.log
+          exit ${PIPESTATUS[0]}
+      - name: Pre-fix run — B1-FIX2 regressions must FAIL on 016 as of 8cc000b
+        run: |
+          set +e
+          NASHR_TEST_SCHEMA=fix1 python -m pytest tests/db/test_b1_fix2_regressions.py -v -ra \
+            --junitxml=artifacts/prefix2.xml 2>&1 | tee artifacts/prefix2.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prefix2.xml tests/db/inventory_fix1.json \
+            | tee artifacts/prefix2-verdict.log
+          exit ${PIPESTATUS[0]}
+      - name: Mutation run — property test must FAIL with the document row lock removed
+        run: |
+          set +e
+          NASHR_TEST_MUTATION=no_document_lock python -m pytest tests/db/test_property.py -v -ra \
+            --junitxml=artifacts/mutation.xml 2>&1 | tee artifacts/mutation.log
+          set -e
+          python -m tests.db.expect_failures artifacts/mutation.xml tests/db/inventory_mutation.json \
+            | tee artifacts/mutation-verdict.log
           exit ${PIPESTATUS[0]}
       - name: Post-change run — full suite on migrations 001–016
         run: |
@@ -233,10 +265,102 @@ jobs:
             !artifacts/seed.json
           retention-days: 5
 
+  journey-prefix:
+    name: browser journey pre-fix (delivery steps must FAIL on 8cc000b)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The app under test is the B1-FIX review's SHA; the journey, its fixture
+      # and the local stack stay current. The fixture adapts to 8cc000b's 016.
+      - name: The app as of 8cc000b
+        run: git checkout 8cc000b -- packages supabase scripts/worker_run_job.py
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # fixtures.py builds its PDF fixtures with reportlab (test-only, not in the image)
+          pip install -r requirements-dev.txt
+      - name: Local stack (Postgres + migrations + PostgREST + Caddy)
+        run: |
+          mkdir -p artifacts
+          bash scripts/local_stack/up.sh 2>&1 | tee artifacts/stack.log
+      # S3 stand-in is a community MinIO rebuild because upstream stopped publishing
+      # images; replace with an official-publisher image (e.g. Chainguard) if one is
+      # adopted. Pinned by digest, CI only: never used by the local stack or anything
+      # in the handover, and this job gets only throwaway loopback credentials (no R2,
+      # model, payment or deploy secrets).
+      - name: MinIO as the R2 stand-in
+        run: |
+          docker run -d --name s3 -p 127.0.0.1:54322:9000 \
+            -e MINIO_ROOT_USER=local-access -e MINIO_ROOT_PASSWORD=local-secret \
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372 \
+            server /data
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:54322/minio/health/live && break; sleep 1; done
+          python - <<'PY'
+          import boto3
+          s3 = boto3.client("s3", endpoint_url="http://127.0.0.1:54322",
+                            aws_access_key_id="local-access", aws_secret_access_key="local-secret",
+                            region_name="us-east-1")
+          s3.create_bucket(Bucket="nashr-local")
+          PY
+      - name: Test environment
+        run: |
+          python scripts/local_stack/local_env.py | sed -e "s/^export //" -e "s/'//g" >> "$GITHUB_ENV"
+          echo "TELEGRAM_BOT_TOKEN=0:ci-placeholder" >> "$GITHUB_ENV"
+      - name: Start API and worker
+        run: |
+          API_HOST=127.0.0.1 nohup python -m packages.api.run > artifacts/api.log 2>&1 &
+          nohup python scripts/worker_run_job.py --loop > artifacts/worker.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8090/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:8090/health
+      - name: Build and start the web app (next build + next start)
+        working-directory: packages/web
+        run: |
+          npm ci
+          npm run build 2>&1 | tee ../../artifacts/next-build.log
+          nohup npx next start -H 127.0.0.1 -p 3100 > ../../artifacts/next.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:3100/ >/dev/null && break; sleep 1; done
+      - name: Seed and fixtures
+        run: |
+          python scripts/local_stack/seed.py > artifacts/seed.json
+          python scripts/local_stack/fixtures.py artifacts/fixtures
+      - name: Playwright delivery steps — must FAIL on 8cc000b
+        working-directory: scripts/webshots
+        env:
+          JOURNEY_RECORD: "1"
+          JOURNEY_ONLY: delivery
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          set +e
+          node evidence_journey.mjs ../../artifacts/seed.json ../../artifacts/fixtures ../../artifacts/journey
+          set -e
+          python expect_journey.py ../../artifacts/journey/results.json journey_inventory_fix1.json \
+            | tee ../../artifacts/journey-prefix-verdict.log
+          exit ${PIPESTATUS[0]}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: journey-prefix-artifacts
+          path: |
+            artifacts/
+            !artifacts/seed.json
+          retention-days: 5
+
   minutes:
     name: minutes used
     if: always()
-    needs: [unit, postgres, journey]
+    needs: [unit, postgres, journey, journey-prefix]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

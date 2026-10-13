@@ -1,11 +1,16 @@
 // Stage A browser journey against the local stack (scripts/local_stack).
 // node scripts/webshots/evidence_journey.mjs <seed.json> <fixtures dir> <out dir>
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const [seedPath, fixturesDir, outDir] = process.argv.slice(2);
+// JOURNEY_ONLY=delivery runs only the B1-FIX2 delivery steps (the pre-fix job).
+const ONLY = process.env.JOURNEY_ONLY ?? "";
+const HERE = dirname(fileURLToPath(import.meta.url));
 const WEB = "http://127.0.0.1:3100";
 const API = "http://127.0.0.1:8090";
 const seed = JSON.parse(await readFile(seedPath, "utf8"));
@@ -48,7 +53,11 @@ async function step(name, run) {
 const record = process.env.JOURNEY_RECORD === "1";
 let traceCount = 0;
 
-async function openProject(browser, locale, { viewport = { width: 1440, height: 1000 }, session = seed.session } = {}) {
+async function openProject(
+  browser,
+  locale,
+  { viewport = { width: 1440, height: 1000 }, session = seed.session, projectId = null, realtime = true } = {},
+) {
   const context = await browser.newContext({
     viewport,
     acceptDownloads: true,
@@ -89,8 +98,89 @@ async function openProject(browser, locale, { viewport = { width: 1440, height: 
     if (response.status() >= 400) failedRequests.push(redact(`${locale} ${response.status()} ${response.request().method()} ${new URL(response.url()).pathname}`));
   });
   currentPage = page;
-  await page.goto(`${WEB}/projects/${seed.projects[locale]}`);
+  if (!realtime) {
+    // Delivery must not depend on Realtime: refuse the websocket outright.
+    await context.route(/\/realtime\/v1\//, (route) => route.abort());
+  }
+  await page.goto(`${WEB}/projects/${projectId ?? seed.projects[locale]}`);
   return { context, page };
+}
+
+// The stand-in render worker (scripts/local_stack/delivery_fixture.py).
+function fixture(...args) {
+  const out = execFileSync("python", [join(HERE, "..", "local_stack", "delivery_fixture.py"), ...args], {
+    encoding: "utf8",
+  });
+  return JSON.parse(out.trim().split("\n").pop());
+}
+
+async function eventually(check, message, timeout = 60_000) {
+  const until = Date.now() + timeout;
+  for (;;) {
+    if (await check()) return;
+    if (Date.now() > until) throw new Error(message);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+}
+
+async function deliverySteps(browser) {
+  let generation = null;
+  let page = null;
+  let context = null;
+  const marked = () => page.evaluate(() => window.__journeyNoReload === true).catch(() => false);
+  const downloads = () => page.locator(".designer-downloads a[download]").count();
+
+  await step("delivery: a paid deck follows its render to the downloads without reload or Realtime", async () => {
+    generation = fixture("paid", seed.session.userId);
+    ({ context, page } = await openProject(browser, "uz", { projectId: generation.project, realtime: false }));
+    await page.locator(".designer-downloads").waitFor({ timeout: 90_000 });
+    const sawDelivering = await page
+      .locator('[data-testid="ws-delivering"]')
+      .waitFor({ timeout: 20_000 })
+      .then(() => true, () => false);
+    assert.equal(await downloads(), 0, "downloads were offered before the render published");
+    await page.evaluate(() => {
+      window.__journeyNoReload = true;
+    });
+    const published = fixture("publish", generation.render, String(generation.token));
+    assert.equal(published.completed, true, "the render did not complete");
+    await eventually(async () => (await downloads()) === 2, "downloads did not appear within 60 s without a reload");
+    assert.equal(await marked(), true, "the page reloaded to show the downloads");
+    assert.equal(sawDelivering, true, "the page never showed the delivery in progress");
+    const job = await api(`/jobs?project_id=${generation.project}`);
+    assert.equal(job.body.status, "completed", `the paid job is ${job.body.status} after delivery`);
+    assert.equal(job.body.render_status, "completed");
+    await shot(page, "10-delivery-done");
+  });
+
+  await step("delivery: an edit whose render fails restores the allowance and says so", async () => {
+    assert.ok(generation && page, "needs the delivered deck from the previous step");
+    const edit = fixture("edit", generation.project, seed.session.userId);
+    await page.reload();
+    const remaining = page.locator(".ws-fine", { hasText: "Qolgan tahrirlar" });
+    await remaining.first().waitFor({ timeout: 60_000 });
+    const before = await remaining.first().innerText();
+    await page.evaluate(() => {
+      window.__journeyNoReload = true;
+    });
+    const failed = fixture("fail", edit.render, String(edit.token));
+    assert.equal(failed.render_status, "failed", "the render did not fail for good");
+    await eventually(
+      async () => (await page.locator('.chat-msg[data-role="system"]').count()) > 0,
+      "the chat never said the edit's files could not be produced",
+    );
+    const notice = await page.locator('.chat-msg[data-role="system"]').last().innerText();
+    assert.match(notice, /saqlandi/, `unexpected notice: ${notice}`);
+    await eventually(
+      async () => /2\s*\/\s*2/.test(await remaining.first().innerText()),
+      `the allowance was not restored (was "${before}", now "${await remaining.first().innerText()}")`,
+    );
+    assert.equal(await marked(), true, "the page reloaded to show the failure");
+    const job = await api(`/jobs/${edit.job}`);
+    assert.equal(job.body.status, "delivery_failed", `the edit job is ${job.body.status}`);
+    await shot(page, "11-edit-delivery-failed");
+    await context.close();
+  });
 }
 
 const ready = (page) => page.locator(".article-page textarea").first().waitFor({ timeout: 90_000 });
@@ -141,6 +231,8 @@ const saveRoute = (url) => url.pathname.endsWith("/documents/article");
 
 const browser = await chromium.launch();
 try {
+  await deliverySteps(browser);
+  if (ONLY !== "delivery") {
   // ------------------------------------------------------------------ UZ core
   const uz = seed.projects.uz;
   const { context, page } = await openProject(browser, "uz");
@@ -378,6 +470,7 @@ try {
     await shot(enPage, "09-en");
     await en.close();
   });
+  }
 } finally {
   await browser.close();
   const unique = [...new Set(failedRequests)];
