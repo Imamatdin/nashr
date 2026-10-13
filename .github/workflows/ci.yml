@@ -276,7 +276,12 @@ jobs:
       # The app under test is the B1-FIX review's SHA; the journey, its fixture
       # and the local stack stay current. The fixture adapts to 8cc000b's 016.
       - name: The app as of 8cc000b
-        run: git checkout 8cc000b -- packages supabase scripts/worker_run_job.py
+        run: |
+          # checkout restores 8cc000b's files but keeps files added since; remove
+          # those too, or the "old" app still builds against new modules.
+          git diff --name-only --diff-filter=A 8cc000b HEAD -- packages supabase | xargs -r rm -f
+          git checkout 8cc000b -- packages supabase scripts/worker_run_job.py
+          git diff --stat 8cc000b -- packages supabase scripts/worker_run_job.py | tail -1
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
