@@ -124,6 +124,9 @@ class DocumentRpcEmulator:
         digest: str,
         revision_id: str | None,
         proposal_id: str | None,
+        *,
+        kind: str,
+        schema_version: int,
     ) -> None:
         self._rows("document_operation_receipts").append(
             {
@@ -132,6 +135,8 @@ class DocumentRpcEmulator:
                 "idempotency_key": key,
                 "operation": operation,
                 "content_sha256": digest,
+                "kind": kind,
+                "schema_version": schema_version,
                 "result_status": "unchanged",
                 "revision_id": revision_id,
                 "proposal_id": proposal_id,
@@ -239,7 +244,16 @@ class DocumentRpcEmulator:
 
         head_row = self._one("document_revisions", id=head) if head else None
         if head_row is not None and head_row["content_sha256"] == digest:
-            self._receipt(document["id"], key, "commit", digest, head, None)
+            self._receipt(
+                document["id"],
+                key,
+                "commit",
+                digest,
+                head,
+                None,
+                kind=kind,
+                schema_version=int(params["p_schema_version"]),
+            )
             return self._result("unchanged", document["id"], head, head, None)
 
         if params["p_base_revision_id"] == head:
@@ -339,17 +353,44 @@ class DocumentRpcEmulator:
             return False
         if job["job_type"] in ("presentation_generation", "presentation_edit"):
             raise refuse("job_must_finish_with_revision")
+        payload = cast(dict[str, Any], job.get("payload") or {})
+        if job["job_type"] == "presentation_render" and any(
+            self._one(
+                "revision_exports",
+                revision_id=payload.get("revision_id"),
+                renderer_version=payload.get("renderer_version"),
+                format=fmt,
+            )
+            is None
+            for fmt in cast(list[str], payload.get("formats") or [])
+        ):
+            raise refuse("render_incomplete")
         job.update(
             status="completed",
             completed_at=self._now(),
             progress={**(job.get("progress") or {}), **(params.get("p_progress") or {})},
         )
+        if job["job_type"] == "presentation_render":
+            for parent in self._parents_of(str(job["id"])):
+                parent.update(
+                    status="completed",
+                    completed_at=self._now(),
+                    progress={
+                        **(parent.get("progress") or {}),
+                        "step": "done",
+                        "delivery": "delivered",
+                    },
+                )
         return True
 
-    def _settle_failure(self, job: dict[str, Any], error: str) -> None:
-        """Fail the job and refund its stamped charge once (one SQL transaction)."""
+    def _parents_of(self, render_job_id: str) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self._rows("generation_jobs")
+            if row.get("render_job_id") == render_job_id and row.get("status") == "committed"
+        ]
 
-        job.update(status="failed", completed_at=self._now(), error_message=error[:4000])
+    def _refund_job(self, job: dict[str, Any]) -> None:
         amount = (job.get("payload") or {}).get("deducted_amount")
         refunded = any(
             row.get("generation_job_id") == job["id"] and row.get("action") == "refund"
@@ -370,6 +411,24 @@ class DocumentRpcEmulator:
                 }
             )
 
+    def _fail_delivery(self, job: dict[str, Any], error: str) -> None:
+        job.update(
+            status="delivery_failed",
+            completed_at=self._now(),
+            error_message=error[:4000],
+            progress={**(job.get("progress") or {}), "step": "done", "delivery": "failed"},
+        )
+        self._refund_job(job)
+
+    def _settle_failure(self, job: dict[str, Any], error: str) -> None:
+        """Fail the job and refund its stamped charge once (one SQL transaction)."""
+
+        job.update(status="failed", completed_at=self._now(), error_message=error[:4000])
+        self._refund_job(job)
+        if job.get("job_type") == "presentation_render":
+            for parent in self._parents_of(str(job["id"])):
+                self._fail_delivery(parent, f"render failed: {error}"[:4000])
+
     def fail_job(self, params: dict[str, Any]) -> bool:
         """Fail and refund under the caller's claim; False when the claim is gone."""
 
@@ -377,35 +436,201 @@ class DocumentRpcEmulator:
             job = self._claimed_job(params, fresh=False)
         except APIError:
             return False
-        self._settle_failure(job, f"{params.get('p_step')}: {params.get('p_message')}")
+        error = f"{params.get('p_step') or 'unknown'}: {params.get('p_message') or ''}"
+        if job.get("job_type") == "presentation_render" and int(job.get("attempts") or 0) < int(
+            job.get("max_attempts") or 1
+        ):
+            job.update(
+                status="queued",
+                worker_id=None,
+                claimed_at=None,
+                heartbeat_at=None,
+                error_message=error[:4000],
+                progress={
+                    **(job.get("progress") or {}),
+                    "step": "retry_queued",
+                    "failed_attempt": job.get("attempts"),
+                },
+            )
+            return True
+        self._settle_failure(job, error)
         return True
 
-    def finish_generation_job(self, params: dict[str, Any]) -> list[dict[str, Any]]:
-        """Fenced commit + completion + render enqueue, as one step."""
+    def _missing_formats(self, revision_id: str, version: str, formats: list[str]) -> list[str]:
+        return sorted(
+            {
+                fmt
+                for fmt in formats
+                if self._one(
+                    "revision_exports",
+                    revision_id=revision_id,
+                    renderer_version=version,
+                    format=fmt,
+                )
+                is None
+            }
+        )
 
-        job = self._one("generation_jobs", id=params["p_job_id"])
+    def _enqueue_render(
+        self,
+        *,
+        project_id: str,
+        user_id: str,
+        document_id: str,
+        revision_id: str,
+        version: str | None,
+        formats: list[str] | None,
+        max_attempts: int | None,
+        requested_by: str | None,
+    ) -> dict[str, Any]:
+        """Missing formats only; reuse a covering active render; else queue one."""
+
+        if version is None or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", version):
+            raise refuse("invalid_renderer_version")
+        if not formats or any(f not in ("html", "pptx", "pdf") for f in formats):
+            raise refuse("invalid_render_formats")
+        if max_attempts is None or not 1 <= max_attempts <= 5:
+            raise refuse("invalid_render_max_attempts")
+        missing = self._missing_formats(revision_id, version, formats)
+        if not missing:
+            return {"status": "ready", "job_id": None, "formats": []}
+        for row in self._rows("generation_jobs"):
+            payload = cast(dict[str, Any], row.get("payload") or {})
+            if (
+                row.get("job_type") == "presentation_render"
+                and row.get("status") in ("queued", "processing")
+                and payload.get("revision_id") == revision_id
+                and payload.get("renderer_version") == version
+                and set(missing) <= set(cast(list[str], payload.get("formats") or []))
+            ):
+                return {"status": "reused", "job_id": row["id"], "formats": missing}
+        job_id = str(uuid.uuid4())
+        self._rows("generation_jobs").append(
+            {
+                "id": job_id,
+                "project_id": project_id,
+                "user_id": user_id,
+                "job_type": "presentation_render",
+                "status": "queued",
+                "payload": {
+                    "document_id": document_id,
+                    "revision_id": revision_id,
+                    "renderer_version": version,
+                    "formats": missing,
+                    "requested_by_job": requested_by,
+                },
+                "attempts": 0,
+                "max_attempts": max_attempts,
+                "progress": {},
+                "created_at": self._now(),
+            }
+        )
+        return {"status": "queued", "job_id": job_id, "formats": missing}
+
+    def request_render(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Owner-checked render request (the API's "Update exports")."""
+
+        revision = self._one("document_revisions", id=params["p_revision_id"])
+        document = (
+            self._one("documents", id=revision["document_id"]) if revision is not None else None
+        )
+        if document is None or document["project_id"] != params["p_project_id"]:
+            raise refuse("revision_not_found")
+        project = self._one("projects", id=document["project_id"])
+        owner = str(project["user_id"]) if project is not None else None
+        if params.get("p_user_id") is None or owner != str(params["p_user_id"]):
+            raise refuse("not_document_owner")
+        return [
+            self._enqueue_render(
+                project_id=str(document["project_id"]),
+                user_id=owner,
+                document_id=str(document["id"]),
+                revision_id=str(params["p_revision_id"]),
+                version=params.get("p_renderer_version"),
+                formats=params.get("p_formats"),
+                max_attempts=params.get("p_max_attempts"),
+                requested_by=None,
+            )
+        ]
+
+    def _finish_replay(
+        self, job: dict[str, Any], params: dict[str, Any]
+    ) -> list[dict[str, Any]] | None:
+        """The stored result of a settled job's finish, if the same request is replayed."""
+
+        document = self._one("documents", project_id=job["project_id"], kind="presentation")
+        if document is None:
+            return None
         key = str(params["p_idempotency_key"])
+        digest = content_hash(cast(dict[str, Any], params["p_content"]))
+        head = document.get("head_revision_id")
+        found: tuple[str, str | None, str | None, dict[str, Any]] | None = None
+        prior = self._one("document_revisions", document_id=document["id"], idempotency_key=key)
+        if prior is not None:
+            found = ("duplicate", prior["id"], None, prior)
+        else:
+            for candidate in (key, f"{key}:proposal"):
+                proposal = self._one(
+                    "revision_proposals", document_id=document["id"], idempotency_key=candidate
+                )
+                if proposal is not None:
+                    found = ("proposed", None, proposal["id"], proposal)
+                    break
+            else:
+                receipt = self._one(
+                    "document_operation_receipts", document_id=document["id"], idempotency_key=key
+                )
+                if receipt is not None:
+                    found = ("unchanged", receipt["revision_id"], None, receipt)
+        if found is None:
+            return None
+        status, revision_id, proposal_id, stored = found
+        kind = str(params["p_kind"])
+        same_kind = stored.get("kind") == kind or (
+            kind == "generation" and stored.get("kind") == "regeneration" and status == "proposed"
+        )
+        if (
+            stored.get("content_sha256") != digest
+            or stored.get("schema_version") != params["p_schema_version"]
+            or not same_kind
+        ):
+            raise refuse("idempotency_key_reused")
+        return self._finish_result(status, str(document["id"]), revision_id, head, proposal_id, job)
+
+    def _finish_result(
+        self,
+        status: str,
+        document_id: str,
+        revision_id: str | None,
+        head: str | None,
+        proposal_id: str | None,
+        job: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        row = self._result(status, document_id, revision_id, head, proposal_id)[0]
+        return [{**row, "job_status": job["status"], "render_job_id": job.get("render_job_id")}]
+
+    def finish_generation_job(self, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Fenced commit + job settlement + render enqueue, as one step (B1-FIX2)."""
+
+        formats = params.get("p_render_formats")
+        if params.get("p_renderer_version") is None or not formats:
+            raise refuse("render_required")
+        if any(f not in ("html", "pptx", "pdf") for f in formats):
+            raise refuse("invalid_render_formats")
+        attempts = params.get("p_render_max_attempts")
+        if attempts is None or not 1 <= attempts <= 5:
+            raise refuse("invalid_render_max_attempts")
+        job = self._one("generation_jobs", id=params["p_job_id"])
         if (
             job is not None
-            and job.get("status") == "completed"
+            and job.get("status") in ("committed", "completed", "delivery_failed")
             and job.get("worker_id") == params.get("p_worker_id")
             and int(job.get("attempts") or 0) == params.get("p_claim_token")
         ):
-            document = self._one("documents", project_id=job["project_id"], kind="presentation")
-            if document is not None:
-                prior = self._one(
-                    "document_revisions", document_id=document["id"], idempotency_key=key
-                )
-                if prior is not None:
-                    head = document.get("head_revision_id")
-                    return self._result("duplicate", document["id"], prior["id"], head, None)
-                for candidate in (key, f"{key}:proposal"):
-                    proposal = self._one(
-                        "revision_proposals", document_id=document["id"], idempotency_key=candidate
-                    )
-                    if proposal is not None:
-                        head = document.get("head_revision_id")
-                        return self._result("proposed", document["id"], None, head, proposal["id"])
+            replay = self._finish_replay(job, params)
+            if replay is not None:
+                return replay
+        key = str(params["p_idempotency_key"])
         job = self._claimed_job(params, fresh=True)
         kind = str(params["p_kind"])
         allowed = {
@@ -442,53 +667,40 @@ class DocumentRpcEmulator:
                 document, retry, "regeneration", actor, owner, str(job["id"])
             )
         outcome = result[0]
+        render_job: str | None = None
+        if outcome["revision_id"] is not None:
+            render_job = self._enqueue_render(
+                project_id=str(job["project_id"]),
+                user_id=owner,
+                document_id=document_id,
+                revision_id=str(outcome["revision_id"]),
+                version=params["p_renderer_version"],
+                formats=list(formats),
+                max_attempts=attempts,
+                requested_by=str(job["id"]),
+            )["job_id"]
+        delivery = (
+            "rendering"
+            if render_job is not None
+            else "proposal"
+            if outcome["revision_id"] is None
+            else "ready"
+        )
         job.update(
-            status="completed",
-            completed_at=self._now(),
+            status="committed" if render_job is not None else "completed",
+            render_job_id=render_job,
+            completed_at=None if render_job is not None else self._now(),
             progress={
                 **(job.get("progress") or {}),
-                "step": "done",
+                "step": "rendering" if render_job is not None else "done",
                 "outcome": outcome["status"],
                 "revision_id": outcome["revision_id"],
                 "proposal_id": outcome["proposal_id"],
+                "render_job_id": render_job,
+                "delivery": delivery,
             },
         )
-        formats = sorted(set(params.get("p_render_formats") or []))
-        if outcome["revision_id"] is not None and params.get("p_renderer_version") and formats:
-            if not set(formats) <= {"html", "pptx", "pdf"}:
-                raise refuse("invalid_render_formats")
-            payload = {
-                "document_id": document_id,
-                "revision_id": outcome["revision_id"],
-                "renderer_version": params["p_renderer_version"],
-                "formats": formats,
-                "requested_by_job": job["id"],
-            }
-            active = any(
-                row.get("job_type") == "presentation_render"
-                and row.get("status") in ("queued", "processing")
-                and all(
-                    (row.get("payload") or {}).get(k) == payload[k]
-                    for k in ("revision_id", "renderer_version", "formats")
-                )
-                for row in self._rows("generation_jobs")
-            )
-            if not active:
-                self._rows("generation_jobs").append(
-                    {
-                        "id": str(uuid.uuid4()),
-                        "project_id": job["project_id"],
-                        "user_id": owner,
-                        "job_type": "presentation_render",
-                        "status": "queued",
-                        "payload": payload,
-                        "attempts": 0,
-                        "max_attempts": 1,
-                        "progress": {},
-                        "created_at": self._now(),
-                    }
-                )
-        return result
+        return [{**outcome, "job_status": job["status"], "render_job_id": render_job}]
 
     def accept_proposal(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Replace the head the caller saw with the proposal's content."""
@@ -535,7 +747,14 @@ class DocumentRpcEmulator:
                 accepted_revision_id=head,
             )
             self._receipt(
-                document["id"], key, "accept", proposal["content_sha256"], head, proposal["id"]
+                document["id"],
+                key,
+                "accept",
+                proposal["content_sha256"],
+                head,
+                proposal["id"],
+                kind=str(proposal["kind"]),
+                schema_version=int(proposal["schema_version"]),
             )
             return self._result("unchanged", document["id"], head, head, proposal["id"])
         revision_id = self._insert_revision(
@@ -693,6 +912,7 @@ class DocumentRpcEmulator:
             "complete_job": self.complete_job,
             "finish_generation_job": self.finish_generation_job,
             "fail_job": self.fail_job,
+            "request_render": self.request_render,
             "record_proposal_validation": self.record_proposal_validation,
         }.get(fn)
         if handler is None:

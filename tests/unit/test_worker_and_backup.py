@@ -11,7 +11,6 @@ import pytest
 from packages.core.enums import (
     AudienceType,
     BackgroundTreatment,
-    ExportFormat,
     PresentationMood,
     SlideType,
 )
@@ -226,9 +225,10 @@ def test_retention_days_is_fourteen() -> None:
 
 
 class _FakeConfig:
-    """Only the field the executors actually read off PlatformConfig."""
+    """Only the fields the executors actually read off PlatformConfig."""
 
     telegram_bot_token = "0:test-token"
+    render_max_attempts = 3
 
 
 class _FakeBotSession:
@@ -625,15 +625,18 @@ async def test_generation_commits_with_its_job_queues_the_render_and_opens_the_s
     assert head is not None
     revision = next(r for r in world.fake.tables["document_revisions"] if r["id"] == head)
     assert revision["kind"] == "generation" and revision["actor"] == f"worker:{job.id}"
-    # The commit completed the job in the same step; the render is a queued job.
+    # The commit settled the job in the same step: 'committed' until the queued
+    # render publishes (B1-FIX2), linked to that render.
     row = world.job_row(job.id)
-    assert row["status"] == "completed" and row["progress"]["outcome"] == "committed"
+    assert row["status"] == "committed" and row["progress"]["outcome"] == "committed"
     assert world.exports() == [] and world.built[0].rendered == []
     renders = world.queued_renders()
     assert len(renders) == 1
     assert renders[0]["payload"]["revision_id"] == head
     assert renders[0]["payload"]["formats"] == ["html"]
     assert renders[0]["payload"]["renderer_version"] == renderer_version()
+    assert renders[0]["max_attempts"] == 3  # PlatformConfig.render_max_attempts
+    assert row["render_job_id"] == renders[0]["id"]
     assert sessions[0]["revision_id"] == head
     assert world.queue.completed == [] and world.queue.failed == []
 
@@ -812,13 +815,14 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     world.patch(monkeypatch)
     edited = _render_deck("After the AI edit")
 
+    seen: dict[str, Any] = {}
+
     async def _dispatch(**kwargs: Any) -> FixDispatchResult:
         outcome = await kwargs["commit"](edited, kwargs["base_revision_id"])
-        warnings = await kwargs["deliver"](edited, outcome.revision_id, [ExportFormat.HTML])
-        assert warnings == []  # the worker renders nothing in-process
-        return FixDispatchResult(
-            FixStatus.DELIVERED, revision_id=outcome.revision_id, warnings=tuple(warnings)
+        seen.update(
+            deliver=kwargs["deliver"], delivery_job_id=kwargs["delivery_job_id"], outcome=outcome
         )
+        return FixDispatchResult(FixStatus.COMMITTED, revision_id=outcome.revision_id)
 
     monkeypatch.setattr("packages.sessions_core.dispatch_fix", _dispatch)
 
@@ -829,11 +833,16 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     assert revision["kind"] == "ai_edit" and revision["actor"] == f"worker:{job.id}"
     assert revision["parent_revision_id"] == base
     assert revision["idempotency_key"] == f"chat-edit:{job.id}"
-    assert world.job_row(job.id)["status"] == "completed"
+    # The worker renders nothing in-process: the job's own render delivers the
+    # edit, so the session holds the fix until that render settles the job.
+    assert seen["deliver"] is None and seen["delivery_job_id"] == job.id
+    row = world.job_row(job.id)
+    assert row["status"] == "committed" == seen["outcome"].job_status
     assert world.exports() == [] and world.built[0].rendered == []
     renders = world.queued_renders()
     assert [r["payload"]["revision_id"] for r in renders] == [head]
     assert renders[0]["payload"]["formats"] == ["html", "pdf", "pptx"]
+    assert row["render_job_id"] == renders[0]["id"] == seen["outcome"].render_job_id
     assert world.queue.completed == [] and world.queue.failed == []
 
 

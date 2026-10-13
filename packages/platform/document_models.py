@@ -143,6 +143,10 @@ class CommitOutcome(BaseModel):
     revision_id: str | None = None
     head_revision_id: str | None = None
     proposal_id: str | None = None
+    # finish_generation_job only: where the job landed ('committed' while its
+    # render runs, else 'completed') and the render job delivering it.
+    job_status: str | None = None
+    render_job_id: str | None = None
 
 
 class RevisionRecord(BaseModel):

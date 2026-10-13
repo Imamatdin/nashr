@@ -18,7 +18,7 @@ import logging
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -43,13 +43,24 @@ class JobType(StrEnum):
 
 
 class JobStatus(StrEnum):
-    """Wire-stable job statuses (generation_jobs.status CHECK, migration 006)."""
+    """Wire-stable job statuses (generation_jobs.status CHECK, migration 016)."""
 
     QUEUED = "queued"
     PROCESSING = "processing"
+    # A generation/edit job whose revision is committed while its render job
+    # publishes the exports; it becomes COMPLETED (delivered) or DELIVERY_FAILED.
+    COMMITTED = "committed"
     COMPLETED = "completed"
     FAILED = "failed"
+    # The render failed for good: the job was refunded, the revision kept.
+    DELIVERY_FAILED = "delivery_failed"
     CANCELLED = "cancelled"
+
+
+# Statuses a job never leaves.
+TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
+    {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.DELIVERY_FAILED, JobStatus.CANCELLED}
+)
 
 
 class GenerationJob(BaseModel):
@@ -73,6 +84,18 @@ class GenerationJob(BaseModel):
     claimed_at: datetime | None = None
     heartbeat_at: datetime | None = None
     completed_at: datetime | None = None
+    # The render job delivering this job's committed revision (B1-FIX2).
+    render_job_id: str | None = None
+
+
+class RenderRequest(BaseModel):
+    """What ``request_render`` decided: nothing left, an active render reused, or queued."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ready", "reused", "queued"]
+    job_id: str | None = None
+    formats: list[str] = Field(default_factory=list[str])
 
 
 class DuplicateActiveJobError(Exception):
@@ -241,6 +264,46 @@ class JobQueue:
                 return job
         return None
 
+    async def request_render(
+        self,
+        *,
+        project_id: str,
+        user_id: str,
+        revision_id: str,
+        renderer_version: str,
+        formats: list[str],
+        max_attempts: int,
+    ) -> RenderRequest:
+        """Render the missing formats of a revision the user owns (``request_render``).
+
+        One SQL decision under a per-revision lock: formats already registered are
+        skipped, an active render whose formats cover the rest is reused (superset
+        match), otherwise one render job is queued.
+        """
+
+        result = await asyncio.to_thread(
+            lambda: self._db.rpc(
+                "request_render",
+                {
+                    "p_project_id": project_id,
+                    "p_user_id": user_id,
+                    "p_revision_id": revision_id,
+                    "p_renderer_version": renderer_version,
+                    "p_formats": formats,
+                    "p_max_attempts": max_attempts,
+                },
+            )
+        )
+        rows = cast(list[dict[str, Any]], list(result.data or []))
+        if not rows:
+            raise RuntimeError("request_render returned no decision")
+        row = rows[0]
+        return RenderRequest(
+            status=row["status"],
+            job_id=str(row["job_id"]) if row.get("job_id") else None,
+            formats=[str(f) for f in cast(list[Any], row.get("formats") or [])],
+        )
+
     async def _insert(self, row: dict[str, Any]) -> GenerationJob:
         def run() -> Any:
             return self._db._query("generation_jobs").insert(row).execute()  # pyright: ignore[reportPrivateUsage]
@@ -379,11 +442,12 @@ class JobQueue:
         return bool(result.data)
 
     async def reap_stale(self, stale_seconds: int = DEFAULT_STALE_SECONDS) -> list[GenerationJob]:
-        """Reap zombie processing rows; returns the jobs that were FAILED.
+        """Reap zombie rows; returns the jobs that were FAILED or DELIVERY_FAILED.
 
         Retryable zombies are re-queued inside the SQL function; exhausted ones
-        are failed and, when paid, refunded in the same transaction. The rows come
-        back for logging only.
+        are failed and, when paid, refunded in the same transaction. Committed jobs
+        whose render is gone or failed are delivery_failed and refunded; those whose
+        render completed are completed. The rows come back for logging only.
         """
 
         result = await asyncio.to_thread(
@@ -432,10 +496,12 @@ async def heartbeat_while(
 __all__ = [
     "DEFAULT_STALE_SECONDS",
     "HEARTBEAT_INTERVAL_SECONDS",
+    "TERMINAL_STATUSES",
     "DuplicateActiveJobError",
     "GenerationJob",
     "JobQueue",
     "JobStatus",
     "JobType",
+    "RenderRequest",
     "heartbeat_while",
 ]

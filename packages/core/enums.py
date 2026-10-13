@@ -345,8 +345,13 @@ class JobStatus(StrEnum):
 
     QUEUED = "queued"
     PROCESSING = "processing"
+    # Revision committed; its render is publishing the exports (B1-FIX2).
+    COMMITTED = "committed"
     COMPLETED = "completed"
     FAILED = "failed"
+    # Committed, but the render failed for good: refunded, revision kept.
+    DELIVERY_FAILED = "delivery_failed"
+    CANCELLED = "cancelled"
 
 
 class CreditReason(StrEnum):

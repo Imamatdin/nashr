@@ -99,8 +99,9 @@ class _World:
                 "p_kind": "ai_edit",
                 "p_schema_version": 1,
                 "p_idempotency_key": "ai",
-                "p_renderer_version": None,
-                "p_render_formats": [],
+                "p_renderer_version": "pw-test",
+                "p_render_formats": ["html"],
+                "p_render_max_attempts": 1,
             }
         )[0]
         assert proposed["status"] == "proposed"

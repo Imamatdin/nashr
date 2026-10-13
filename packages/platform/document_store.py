@@ -115,15 +115,18 @@ class DocumentStore:
         content: dict[str, Any],
         kind: RevisionKind,
         idempotency_key: str,
-        renderer_version: str | None,
+        renderer_version: str,
         render_formats: list[str],
+        render_max_attempts: int,
         schema_version: int = CONTENT_SCHEMA_VERSION,
     ) -> CommitOutcome:
-        """Commit a job's deck and complete the job in one claim-fenced transaction.
+        """Commit a job's deck and settle the job in one claim-fenced transaction.
 
         Raises ``claim_lost``/``claim_expired`` when the caller no longer holds the
-        job; then nothing was written. A committed revision gets a queued render
-        job for ``render_formats`` in the same transaction.
+        job; then nothing was written. A committed revision is rendered by a render
+        job queued (or reused) in the same transaction; the job stays ``committed``
+        until that render publishes every format (ADR §6.3), so ``job_status`` and
+        ``render_job_id`` on the outcome say where it landed.
         """
 
         rows = await self._rpc(
@@ -139,6 +142,7 @@ class DocumentStore:
                 "p_idempotency_key": idempotency_key,
                 "p_renderer_version": renderer_version,
                 "p_render_formats": render_formats,
+                "p_render_max_attempts": render_max_attempts,
             },
         )
         return _outcome(rows)

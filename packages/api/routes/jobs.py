@@ -107,6 +107,12 @@ class JobView(BaseModel):
     package: str | None = None
     deducted_amount: int | None = None
     refunded: bool = False
+    # Delivery (B1-FIX2): a generation/edit job is 'committed' while the render job
+    # below publishes its exports, then 'completed' or 'delivery_failed'. The web
+    # follows the parent to 'committed', then this render job.
+    render_job_id: str | None = None
+    render_status: str | None = None
+    render_progress: dict[str, Any] | None = None
 
 
 def _payload_str(payload: dict[str, Any], key: str) -> str | None:
@@ -124,17 +130,25 @@ async def job_view(
     credits: CreditLedger | None = None,
     *,
     existing: bool = False,
+    queue: JobQueue | None = None,
 ) -> JobView:
-    """Render one job row for the wire, resolving the refund fact when relevant.
+    """Render one job row for the wire, resolving the refund and render facts.
 
-    The ledger probe fires ONLY for a failed job: a queued/processing/completed
-    row cannot have been refunded by the worker's failure path, and the web
-    polls this shape every few seconds.
+    The ledger probe fires ONLY for a failed or delivery_failed job: no other
+    row can have been refunded, and the web polls this shape every few seconds.
+    The render job is read only when the row links one.
     """
 
     refunded = False
-    if credits is not None and job.status is JobStatus.FAILED and job.user_id:
+    if (
+        credits is not None
+        and job.status in (JobStatus.FAILED, JobStatus.DELIVERY_FAILED)
+        and job.user_id
+    ):
         refunded = await credits.has_refund_for_job(job.user_id, job.id)
+    render = None
+    if queue is not None and job.render_job_id is not None:
+        render = await queue.get_job(job.render_job_id)
     return JobView(
         id=job.id,
         project_id=job.project_id,
@@ -150,6 +164,9 @@ async def job_view(
         package=_payload_str(job.payload, "package"),
         deducted_amount=_payload_int(job.payload, "deducted_amount"),
         refunded=refunded,
+        render_job_id=job.render_job_id,
+        render_status=render.status.value if render is not None else None,
+        render_progress=render.progress if render is not None else None,
     )
 
 
@@ -361,7 +378,7 @@ async def get_latest_project_job(
     job = await queue.get_latest_job(project_id, job_type)
     if job is None or (job.user_id is not None and job.user_id != str(auth.user_id)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-    return await job_view(job, credits)
+    return await job_view(job, credits, queue=queue)
 
 
 @router.get("/{job_id}", response_model=JobView)
@@ -373,4 +390,4 @@ async def get_job(request: Request, job_id: str, auth: Authenticated) -> JobView
     job = await queue.get_job(job_id)
     if job is None or job.user_id != str(auth.user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-    return await job_view(job, credits)
+    return await job_view(job, credits, queue=queue)

@@ -64,7 +64,18 @@ def test_no_enum_has_duplicate_values() -> None:
                 "export",
             },
         ),
-        (enums.JobStatus, {"queued", "processing", "completed", "failed"}),
+        (
+            enums.JobStatus,
+            {
+                "queued",
+                "processing",
+                "committed",
+                "completed",
+                "failed",
+                "delivery_failed",
+                "cancelled",
+            },
+        ),
         (
             enums.CreditReason,
             {

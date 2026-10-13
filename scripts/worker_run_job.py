@@ -149,6 +149,10 @@ class JobRunner:
                     "worker_fail_row_not_ours %s",
                     json.dumps({"job_id": job.id, "step": str(step)}),
                 )
+            if job.job_type is JobType.PRESENTATION_RENDER:
+                # A render that failed for good settled the edits it was delivering
+                # (delivery_failed); tell their sessions now rather than on next read.
+                await self._settle_session(job.project_id)
 
     def _executor_for(self, job_type: JobType) -> Callable[[GenerationJob], Awaitable[None]] | None:
         """The coroutine that runs this job type, or None when unsupported."""
@@ -208,6 +212,24 @@ class JobRunner:
             "worker_job_completed %s",
             json.dumps({"job_id": job.id, "project_id": job.project_id, **outcome}),
         )
+
+    async def _settle_session(self, project_id: str) -> None:
+        """Settle the project's pending edit deliveries now; best-effort.
+
+        Loading the session settles them against their jobs and persists the
+        result. Any reader would do the same later, so a failure here only delays
+        the chat notice.
+        """
+
+        try:
+            from packages.bot.sessions.store import load_session
+
+            await load_session(self._db, project_id)
+        except Exception as exc:
+            logger.warning(
+                "worker_session_settle_failed %s",
+                json.dumps({"project_id": project_id, "error_type": type(exc).__name__}),
+            )
 
     async def _run_presentation_render(self, job: GenerationJob) -> None:
         """Render one immutable revision and publish every requested format, or fail."""
@@ -269,6 +291,8 @@ class JobRunner:
                 "rendered_formats": missing,
             },
         )
+        # complete_job delivered every job this render was publishing for.
+        await self._settle_session(job.project_id)
 
     async def _run_presentation_edit(self, job: GenerationJob) -> None:
         """Apply a parked fix batch against its base revision; commit or propose with the job.
@@ -319,8 +343,9 @@ class JobRunner:
         progress = self._progress(job)
 
         async def commit(deck: DeckSpec, base: str | None) -> CommitOutcome:
-            # Commit and job completion are one fenced transaction; the render of
-            # the committed revision is queued with it (ADR §6.3).
+            # Commit and job settlement are one fenced transaction; the render of
+            # the committed revision is queued (or reused) with it, and this job
+            # stays 'committed' until that render publishes (ADR §6.3).
             return await store.finish_generation_job(
                 job_id=job.id,
                 worker_id=self._worker_id,
@@ -331,13 +356,8 @@ class JobRunner:
                 idempotency_key=f"chat-edit:{job.id}",
                 renderer_version=renderer_version(),
                 render_formats=list(WEB_FILE_FORMATS),
+                render_max_attempts=self._config.render_max_attempts,
             )
-
-        async def deliver(
-            deck: DeckSpec, revision_id: str, formats: list[ExportFormat]
-        ) -> list[str]:
-            # Rendering is the presentation_render job finish_generation_job queued.
-            return []
 
         try:
             result = await dispatch_fix(
@@ -349,13 +369,21 @@ class JobRunner:
                 progress=progress,
                 base_revision_id=base_revision_id,
                 commit=commit,
-                deliver=deliver,
+                # This job's render delivers the edit; the session holds the fix
+                # until that render settles the job.
+                deliver=None,
+                delivery_job_id=job.id,
             )
         finally:
             await bot.session.close()
 
-        if result.status in (FixStatus.DELIVERED, FixStatus.PROPOSED, FixStatus.UNCHANGED):
-            # finish_generation_job already completed the job with this outcome.
+        if result.status in (
+            FixStatus.COMMITTED,
+            FixStatus.DELIVERED,
+            FixStatus.PROPOSED,
+            FixStatus.UNCHANGED,
+        ):
+            # finish_generation_job already settled the job with this outcome.
             logger.info(
                 "worker_job_completed %s",
                 json.dumps(
@@ -444,6 +472,7 @@ class JobRunner:
                 idempotency_key=f"job:{job.id}:deck",
                 renderer_version=renderer_version(),
                 render_formats=file_formats(formats),
+                render_max_attempts=self._config.render_max_attempts,
             )
             revision_id = renderable(outcome)
         finally:
@@ -471,7 +500,8 @@ class JobRunner:
                     json.dumps({"job_id": job.id, "error_type": type(exc).__name__}),
                 )
 
-        # finish_generation_job completed the job in the commit's transaction.
+        # finish_generation_job settled the job in the commit's transaction:
+        # 'committed' while its render publishes, or already 'completed'.
         logger.info(
             "worker_job_completed %s",
             json.dumps(
@@ -479,6 +509,8 @@ class JobRunner:
                     "job_id": job.id,
                     "project_id": job.project_id,
                     "outcome": outcome.status.value,
+                    "job_status": outcome.job_status,
+                    "render_job_id": outcome.render_job_id,
                     "revision_id": revision_id,
                     "proposal_id": outcome.proposal_id,
                 }
@@ -493,7 +525,7 @@ async def _reap(queue: JobQueue, stale_seconds: int) -> None:
         logger.warning("worker_reap_error %s", json.dumps({"error_type": type(exc).__name__}))
         return
     for job in failed:
-        # Failed and, when paid, refunded by reap_stale_jobs itself.
+        # Failed (or delivery_failed) and, when paid, refunded by reap_stale_jobs itself.
         logger.warning(
             "worker_job_reaped %s",
             json.dumps({"job_id": job.id, "error_message": job.error_message}),
@@ -531,7 +563,8 @@ async def _amain(args: argparse.Namespace) -> int:
             return 1
         await runner.run(claimed)
         final = await queue.get_job(args.job_id)
-        return 0 if final is not None and final.status.value == "completed" else 1
+        # 'committed' is success for this run: its render job delivers it.
+        return 0 if final is not None and final.status.value in ("completed", "committed") else 1
 
     while True:
         await _reap(queue, args.stale_seconds)

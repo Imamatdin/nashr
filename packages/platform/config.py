@@ -67,6 +67,14 @@ class PlatformConfig:
     supabase_jwt_secret: str = ""
     app_jwt_ttl_seconds: int = 3600
     web_cors_origins: tuple[str, ...] = field(default_factory=tuple)
+    # How many times a render job runs before its delivery fails and the paid job
+    # it delivers is refunded: 3 attempts = 2 automatic retries. Render failures
+    # are mostly transient (a Chromium crash, an OOM on the 4 GB VM, a storage
+    # upload error); a retry is free (renders are never charged) and cheap (it
+    # renders only the formats not yet registered). Three attempts bound the
+    # user's wait for a refund to roughly three render times. The database
+    # accepts 1-5 (RENDER_MAX_ATTEMPTS).
+    render_max_attempts: int = 3
 
     @classmethod
     def from_env(cls) -> PlatformConfig:
@@ -103,7 +111,18 @@ class PlatformConfig:
             supabase_jwt_secret=os.environ.get("SUPABASE_JWT_SECRET", ""),
             app_jwt_ttl_seconds=_parse_ttl(os.environ.get("APP_JWT_TTL_SECONDS", "3600")),
             web_cors_origins=_parse_origins(os.environ.get("WEB_CORS_ORIGINS", "")),
+            render_max_attempts=_parse_render_attempts(os.environ.get("RENDER_MAX_ATTEMPTS", "3")),
         )
+
+
+def _parse_render_attempts(raw: str) -> int:
+    """Render attempts per job, 1-5 (the database's bound); 3 on garbage input."""
+
+    try:
+        attempts = int(raw)
+    except ValueError:
+        return 3
+    return attempts if 1 <= attempts <= 5 else 3
 
 
 def _parse_port(raw: str) -> int:

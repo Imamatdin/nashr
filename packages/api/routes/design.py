@@ -37,7 +37,7 @@ from packages.platform.document_models import (
     user_actor,
 )
 from packages.platform.exports import renderer_version
-from packages.platform.jobs import DuplicateActiveJobError, JobType
+from packages.platform.jobs import JobStatus
 from packages.platform.rate_limit import DESIGN_RENDER_ACTION
 
 router = APIRouter(prefix="/projects", tags=["design"])
@@ -258,7 +258,7 @@ async def restore_design(
 async def render_design(
     request: Request, project_id: str, body: RenderDesignRequest, auth: Authenticated
 ) -> RenderDesignView:
-    """Queue rendering of one exact revision; an identical active render is reused."""
+    """Render the missing formats of one exact revision; a covering active render is reused."""
 
     user_id = str(auth.user_id)
     await _owned_presentation(request, project_id, user_id)
@@ -274,56 +274,28 @@ async def render_design(
     if not decision.allowed:
         raise HTTPException(status_code=429, detail="rate_limited")
     version = renderer_version()
-    # Resume, never redo: a format already registered for this revision and
-    # renderer is immutable (first writer wins), so only the missing ones render.
-    registered = {
-        record.format.value
-        for record in await document_store(request).exports([revision.id])
-        if record.renderer_version == version
-    }
-    formats = [name for name in file_formats(_RENDER_FORMATS) if name not in registered]
-    if not formats:
+    # One SQL decision under a per-revision lock (request_render): formats already
+    # registered are never rendered again (first writer wins), and an active render
+    # whose formats cover the rest is reused (superset match), so overlapping
+    # requests share one job.
+    render = await request.app.state.job_queue.request_render(
+        project_id=project_id,
+        user_id=user_id,
+        revision_id=revision.id,
+        renderer_version=version,
+        formats=file_formats(_RENDER_FORMATS),
+        max_attempts=request.app.state.config.render_max_attempts,
+    )
+    if render.job_id is None:
         return RenderDesignView(
             job_id=None, status="ready", revision_id=UUID(revision.id), renderer_version=version
         )
-    existing = await request.app.state.job_queue.get_active_render_job(
-        revision.id, version, formats
-    )
-    if existing is not None:
-        return RenderDesignView(
-            job_id=existing.id,
-            status=existing.status.value,
-            existing=True,
-            revision_id=UUID(revision.id),
-            renderer_version=version,
-            formats=formats,
-        )
-    try:
-        job = await request.app.state.job_queue.enqueue(
-            project_id=project_id,
-            user_id=user_id,
-            job_type=JobType.PRESENTATION_RENDER,
-            payload={
-                "document_id": revision.document_id,
-                "revision_id": revision.id,
-                "renderer_version": version,
-                "formats": formats,
-            },
-        )
-    except DuplicateActiveJobError as exc:
-        job = exc.existing
-        return RenderDesignView(
-            job_id=job.id,
-            status=job.status.value,
-            existing=True,
-            revision_id=UUID(revision.id),
-            renderer_version=version,
-            formats=formats,
-        )
+    job = await request.app.state.job_queue.get_job(render.job_id)
     return RenderDesignView(
-        job_id=job.id,
-        status=job.status.value,
+        job_id=render.job_id,
+        status=job.status.value if job is not None else JobStatus.QUEUED.value,
+        existing=render.status == "reused",
         revision_id=UUID(revision.id),
         renderer_version=version,
-        formats=formats,
+        formats=render.formats,
     )

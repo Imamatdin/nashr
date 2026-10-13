@@ -30,7 +30,7 @@ from packages.platform.database import DatabaseClient
 from packages.platform.document_models import DocumentKind
 from packages.platform.document_store import DocumentStore
 from packages.platform.exports import renderer_version
-from packages.platform.jobs import DuplicateActiveJobError, GenerationJob, JobStatus, JobType
+from packages.platform.jobs import JobQueue
 from packages.platform.rate_limit import RateDecision
 from tests.unit.fake_documents import seed_presentation
 from tests.unit.test_database_client import FakeSupabaseClient
@@ -91,46 +91,6 @@ class _FakeLimiter:
         )
 
 
-class _FakeQueue:
-    """Active render jobs are unique on (revision, renderer, formats), like the index."""
-
-    def __init__(self) -> None:
-        self.enqueued: list[dict[str, Any]] = []
-        self.jobs: list[GenerationJob] = []
-
-    async def get_active_render_job(
-        self, revision_id: str, renderer_version: str, formats: list[str]
-    ) -> GenerationJob | None:
-        for job in self.jobs:
-            payload = job.payload
-            if (
-                payload["revision_id"] == revision_id
-                and payload["renderer_version"] == renderer_version
-                and sorted(payload["formats"]) == sorted(formats)
-            ):
-                return job
-        return None
-
-    async def enqueue(self, **kwargs: Any) -> GenerationJob:
-        payload = kwargs["payload"]
-        existing = await self.get_active_render_job(
-            payload["revision_id"], payload["renderer_version"], payload["formats"]
-        )
-        if existing is not None:
-            raise DuplicateActiveJobError(existing)
-        self.enqueued.append(kwargs)
-        job = GenerationJob(
-            id=f"render-{len(self.jobs) + 1}",
-            project_id=kwargs["project_id"],
-            user_id=kwargs["user_id"],
-            job_type=kwargs["job_type"],
-            status=JobStatus.QUEUED,
-            payload=payload,
-        )
-        self.jobs.append(job)
-        return job
-
-
 class _Harness:
     def __init__(self, *, with_deck: bool = True, head: dict[str, Any] | None = None) -> None:
         self.fake = FakeSupabaseClient()
@@ -143,7 +103,8 @@ class _Harness:
             _doc, self.revision_id = seed_presentation(
                 self.fake.tables, project_id=_PROJECT_ID, content=content
             )
-        self.queue = _FakeQueue()
+        # The real queue over the same fake: request_render runs the 016 emulator.
+        self.queue = JobQueue(DatabaseClient(cfg, client=cast(Any, self.fake)))
         app = create_app(
             config=cfg,
             db=cast(Any, _FakeDb()),
@@ -276,18 +237,28 @@ async def test_manual_save_commits_even_while_an_ai_edit_is_running() -> None:
     # The old route refused manual saves while an edit job ran. The database now
     # arbitrates: the manual save commits; a racing AI edit becomes a proposal.
     h = _Harness()
-    h.queue.jobs.append(
-        GenerationJob(
-            id="edit-1",
-            project_id=_PROJECT_ID,
-            user_id=str(_USER_ID),
-            job_type=JobType.PRESENTATION_EDIT,
-            status=JobStatus.PROCESSING,
-            payload={"revision_id": "x", "renderer_version": "x", "formats": []},
-        )
+    h.fake.tables.setdefault("generation_jobs", []).append(
+        {
+            "id": "edit-1",
+            "project_id": _PROJECT_ID,
+            "user_id": str(_USER_ID),
+            "job_type": "presentation_edit",
+            "status": "processing",
+            "payload": {},
+            "attempts": 1,
+            "max_attempts": 1,
+        }
     )
     saved = await h.save(str(h.revision_id), _deck("Human").model_dump(mode="json"), "busy")
     assert saved.status_code == 200
+
+
+def _renders(h: _Harness) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in h.fake.tables.get("generation_jobs", [])
+        if row["job_type"] == "presentation_render"
+    ]
 
 
 async def test_render_queues_the_exact_revision_with_renderer_and_formats() -> None:
@@ -299,13 +270,15 @@ async def test_render_queues_the_exact_revision_with_renderer_and_formats() -> N
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["job_id"] == "render-1" and body["existing"] is False
+    [render] = _renders(h)
+    assert body["job_id"] == render["id"] and body["existing"] is False
     assert body["renderer_version"] == renderer_version()
-    payload = h.queue.enqueued[0]["payload"]
-    assert h.queue.enqueued[0]["job_type"] is JobType.PRESENTATION_RENDER
+    payload = render["payload"]
     assert payload["revision_id"] == h.revision_id
     assert payload["formats"] == ["html", "pdf", "pptx"]
     assert payload["renderer_version"] == renderer_version()
+    # Render retries come from config (PlatformConfig.render_max_attempts).
+    assert render["max_attempts"] == 3
 
 
 async def test_render_of_the_same_revision_reuses_the_active_job() -> None:
@@ -315,7 +288,22 @@ async def test_render_of_the_same_revision_reuses_the_active_job() -> None:
     second = await h.client.post(url, json={"revision_id": h.revision_id}, headers=_headers())
     assert second.json()["job_id"] == first.json()["job_id"]
     assert second.json()["existing"] is True
-    assert len(h.queue.enqueued) == 1
+    assert len(_renders(h)) == 1
+
+
+async def test_render_reuses_an_active_render_whose_formats_cover_the_request() -> None:
+    # B1-FIX2 item 5: the automatic render for [html, pdf, pptx] registered html;
+    # "Update exports" now needs [pdf, pptx], which that active job covers. The old
+    # exact-tuple dedupe queued a second job rendering pdf and pptx twice.
+    h = _Harness()
+    url = f"/projects/{_PROJECT_ID}/design/render"
+    first = await h.client.post(url, json={"revision_id": h.revision_id}, headers=_headers())
+    _register(h, ("html",))
+    second = await h.client.post(url, json={"revision_id": h.revision_id}, headers=_headers())
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert second.json()["existing"] is True
+    assert second.json()["formats"] == ["pdf", "pptx"]
+    assert len(_renders(h)) == 1
 
 
 async def test_render_of_another_revision_gets_its_own_job() -> None:
@@ -363,7 +351,7 @@ async def test_render_resumes_a_partial_set_with_only_the_missing_formats() -> N
     )
     assert response.status_code == 200
     assert response.json()["formats"] == ["pdf", "pptx"]
-    assert h.queue.enqueued[0]["payload"]["formats"] == ["pdf", "pptx"]
+    assert _renders(h)[0]["payload"]["formats"] == ["pdf", "pptx"]
 
 
 async def test_render_of_a_complete_set_queues_nothing() -> None:
@@ -376,7 +364,7 @@ async def test_render_of_a_complete_set_queues_nothing() -> None:
     )
     body = response.json()
     assert (body["status"], body["job_id"], body["formats"]) == ("ready", None, [])
-    assert h.queue.enqueued == []
+    assert _renders(h) == []
 
 
 async def test_render_of_an_unknown_revision_is_404() -> None:
