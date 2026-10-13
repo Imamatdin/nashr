@@ -567,16 +567,50 @@ async def test_complete_sends_the_same_id_on_vertex_transport() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("region", ["global", "us", "eu"])
-async def test_complete_accepts_vertex_locations_that_serve_claude_5(region: str) -> None:
+async def test_complete_accepts_the_global_vertex_location() -> None:
     async def behaviour() -> Message:
         return _make_message("ok")
 
     fake = _FakeAsyncAnthropic(behaviour)
-    fake.region = region  # type: ignore[attr-defined]
+    fake.region = "global"  # type: ignore[attr-defined]
     client = LLMClient(client=fake, transport="vertex")  # type: ignore[arg-type]
     await client.complete(system="sys", user="usr", model=SONNET)
     assert fake.messages.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("region", ["us", "eu"])
+async def test_complete_refuses_undeployed_multi_regions_before_sending(region: str) -> None:
+    # Served by Google, but anthropic 0.84 builds {region}-aiplatform.googleapis.com
+    # instead of aiplatform.{region}.rep.googleapis.com, and the 1.1x price is unmodeled.
+    async def behaviour() -> Message:
+        return _make_message("never")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    fake.region = region  # type: ignore[attr-defined]
+    client = LLMClient(client=fake, transport="vertex")  # type: ignore[arg-type]
+    with pytest.raises(UnknownModelError, match="not deployed"):
+        await client.complete(system="sys", user="usr", model=SONNET)
+    assert fake.messages.calls == 0
+
+
+@pytest.mark.parametrize("region", ["us", "eu", "us-east5"])
+def test_build_default_client_refuses_undeployed_regions_before_construction(
+    monkeypatch: pytest.MonkeyPatch, region: str
+) -> None:
+    monkeypatch.setenv("LLM_TRANSPORT", "vertex")
+    monkeypatch.setenv("VERTEX_PROJECT", "nashr-prod")
+    monkeypatch.setenv("VERTEX_CLAUDE_REGION", region)
+    created: list[str] = []
+
+    class _FakeVertex:
+        def __init__(self, *, project_id: str, region: str) -> None:
+            created.append(region)
+
+    monkeypatch.setattr("packages.core.llm.AsyncAnthropicVertex", _FakeVertex)
+    with pytest.raises(UnknownModelError, match="not deployed"):
+        build_default_anthropic_client()
+    assert created == []
 
 
 @pytest.mark.asyncio

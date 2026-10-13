@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.core.constants import DEFAULT_LLM_MAX_RETRIES, DEFAULT_LLM_TIMEOUT_SECONDS
 from packages.core.model_registry import (
+    DEPLOYED_VERTEX_LOCATIONS,
     Provider,
     Role,
     Transport,
@@ -151,15 +152,12 @@ def build_default_anthropic_client(
         or os.environ.get("CLOUD_ML_REGION")
         or "global"
     )
-    if region != "global":
-        # Multi-region Vertex endpoints carry a ~10% pricing premium over global;
-        # the registry prices global rates only, so estimated per-call cost will
-        # undercount on this endpoint. Single regions do not serve Claude 5.x at
-        # all; LLMClient refuses them before the first request.
-        logger.warning(
-            "vertex region %s is non-global; estimated_cost_usd uses global rates "
-            "and undercounts the ~10%% regional premium",
-            region,
+    if region not in DEPLOYED_VERTEX_LOCATIONS:
+        # Refused before the SDK client exists: anthropic 0.84 would build the wrong
+        # URL for the us/eu multi-regions, and their 1.1x price is not modeled.
+        raise UnknownModelError(
+            f"Vertex Claude region {region!r} is not deployed; use one of"
+            f" {DEPLOYED_VERTEX_LOCATIONS} (see packages/core/model_registry.py)"
         )
     logger.info(
         "llm client using AnthropicVertex (project=%s, region=%s)",

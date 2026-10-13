@@ -17,6 +17,7 @@ from packages.core.llm import (
     thinking_config,
 )
 from packages.core.model_registry import (
+    DEPLOYED_VERTEX_LOCATIONS,
     ENV_OVERRIDES,
     MODELS,
     REFUSED_IDS,
@@ -244,8 +245,6 @@ def test_haiku_cannot_be_sent_over_a_gemini_transport(transport: Transport) -> N
     [
         ("anthropic", None, "claude-haiku-5-5"),
         ("vertex", "global", "claude-haiku-5-5"),
-        ("vertex", "us", "claude-haiku-5-5"),
-        ("vertex", "eu", "claude-haiku-5-5"),
         ("injected", None, "claude-haiku-5-5"),
     ],
 )
@@ -260,10 +259,30 @@ def test_llm_client_refuses_claude_5_on_a_single_vertex_region() -> None:
         claude_request_id("claude-haiku-5-5", "vertex", "us-east5")
 
 
-def test_gemini_is_served_only_from_the_global_vertex_location() -> None:
+def test_served_locations_are_provider_facts_and_deployment_is_global_only() -> None:
+    assert DEPLOYED_VERTEX_LOCATIONS == ("global",)
+    # Availability as published (Vertex model pages, read 2026-10-13).
+    assert MODELS["claude-haiku-5-5"].vertex_locations == ("global", "us", "eu")
+    assert MODELS["gemini-3.8-flash"].vertex_locations == ("global", "us", "eu")
+    assert MODELS["gemini-3.1-pro-preview"].vertex_locations == ("global",)
     assert transport_id("gemini-3.8-flash", Transport.VERTEX_GEMINI, "global") == "gemini-3.8-flash"
-    with pytest.raises(UnknownModelError):
-        transport_id("gemini-3.8-flash", Transport.VERTEX_GEMINI, "us-central1")
+
+
+@pytest.mark.parametrize(
+    ("model", "transport", "location", "message"),
+    [
+        ("claude-haiku-5-5", Transport.VERTEX_ANTHROPIC, "us", "not deployed"),
+        ("claude-haiku-5-5", Transport.VERTEX_ANTHROPIC, "eu", "not deployed"),
+        ("gemini-3.8-flash", Transport.VERTEX_GEMINI, "us", "not deployed"),
+        ("gemini-3.8-flash", Transport.VERTEX_GEMINI, "us-central1", "not served"),
+        ("gemini-3.1-pro-preview", Transport.VERTEX_GEMINI, "eu", "not served"),
+    ],
+)
+def test_vertex_location_refusals(
+    model: str, transport: Transport, location: str, message: str
+) -> None:
+    with pytest.raises(UnknownModelError, match=message):
+        transport_id(model, transport, location)
 
 
 # The per-model thinking table (platform.claude.com build-with-claude/thinking,
@@ -333,9 +352,19 @@ def test_env_override_names_only_image_generation() -> None:
     assert ENV_OVERRIDES == {"NASHR_IMAGE_MODEL": Role.IMAGE_GENERATION}
 
 
-def test_image_override_accepts_a_registered_gemini_model(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_image_override_accepts_a_registered_image_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NASHR_IMAGE_MODEL", "gemini-3-pro-image")
+    assert model_for(Role.IMAGE_GENERATION) == "gemini-3-pro-image"
+
+
+def test_image_override_refuses_a_text_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A Gemini text model passed the provider check but then failed at the first
+    # generate_image (no per-image price); it is now refused at resolution.
     monkeypatch.setenv("NASHR_IMAGE_MODEL", "gemini-3.8-flash")
-    assert model_for(Role.IMAGE_GENERATION) == "gemini-3.8-flash"
+    with pytest.raises(UnknownModelError, match="not an image model"):
+        model_for(Role.IMAGE_GENERATION)
 
 
 @pytest.mark.parametrize(

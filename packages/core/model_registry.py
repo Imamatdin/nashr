@@ -140,7 +140,8 @@ class ModelSpec(BaseModel):
     key: str
     provider: Provider
     ids: dict[Transport, str]
-    # Vertex locations that serve it (the global endpoint is what we deploy).
+    # Vertex locations the provider serves it from (availability, not policy;
+    # DEPLOYED_VERTEX_LOCATIONS is the policy).
     vertex_locations: tuple[str, ...]
     lifecycle: Lifecycle
     fallback: str | None
@@ -189,6 +190,14 @@ _IMAGE = "gemini-3-pro-image"
 
 _CLAUDE_VERTEX_LOCATIONS = ("global", "us", "eu")  # 5.x: no single-region endpoints
 
+# Deployment policy: the only Vertex location Nashr calls. The us / eu
+# multi-regions are served but unsupported here for two reasons: anthropic 0.84's
+# AsyncAnthropicVertex builds https://{region}-aiplatform.googleapis.com for them,
+# while Google serves multi-regions at https://aiplatform.{region}.rep.googleapis.com;
+# and multi-region calls bill 1.1x, which these price rows do not model. Refusing
+# them keeps every accepted call on a working endpoint at a correct price.
+DEPLOYED_VERTEX_LOCATIONS: Final[tuple[str, ...]] = ("global",)
+
 
 def _claude(
     key: str,
@@ -212,12 +221,18 @@ def _claude(
     )
 
 
-def _gemini(key: str, lifecycle: Lifecycle, fallback: str | None, price: Price) -> ModelSpec:
+def _gemini(
+    key: str,
+    lifecycle: Lifecycle,
+    fallback: str | None,
+    price: Price,
+    served: tuple[str, ...] = ("global",),
+) -> ModelSpec:
     return ModelSpec(
         key=key,
         provider=Provider.GOOGLE,
         ids={Transport.GEMINI_API: key, Transport.VERTEX_GEMINI: key},
-        vertex_locations=("global",),
+        vertex_locations=served,
         lifecycle=lifecycle,
         fallback=fallback,
         price=price,
@@ -295,6 +310,7 @@ MODELS: Final[dict[str, ModelSpec]] = {
                 source=_VERTEX_PRICING,
                 verified="google-index",
             ),
+            served=("global", "us", "eu"),  # Vertex 3-8-flash model page, 2026-10-13
         ),
         _gemini(
             _PRO,
@@ -450,6 +466,8 @@ def model_for(role: Role) -> str:
             raise UnknownModelError(f"{env_var}: {exc}") from exc
         if entry.provider is not spec(default).provider:
             raise UnknownModelError(f"{env_var}={value!r} is not a {spec(default).provider} model")
+        if role is Role.IMAGE_GENERATION and entry.price.per_image is None:
+            raise UnknownModelError(f"{env_var}={value!r} is not an image model")
         return entry.key
     return default
 
@@ -474,11 +492,17 @@ def transport_id(model: str, transport: Transport, location: str | None = None) 
     if transport not in PROVIDER_TRANSPORTS[entry.provider]:
         raise UnknownModelError(f"{entry.key} ({entry.provider}) cannot be called over {transport}")
     is_vertex = transport in (Transport.VERTEX_ANTHROPIC, Transport.VERTEX_GEMINI)
-    if is_vertex and location is not None and location not in entry.vertex_locations:
-        raise UnknownModelError(
-            f"{entry.key} is not served from Vertex location {location!r};"
-            f" use one of {entry.vertex_locations}"
-        )
+    if is_vertex and location is not None:
+        if location not in entry.vertex_locations:
+            raise UnknownModelError(
+                f"{entry.key} is not served from Vertex location {location!r};"
+                f" use one of {entry.vertex_locations}"
+            )
+        if location not in DEPLOYED_VERTEX_LOCATIONS:
+            raise UnknownModelError(
+                f"Vertex location {location!r} serves {entry.key} but is not deployed: see"
+                f" DEPLOYED_VERTEX_LOCATIONS (use one of {DEPLOYED_VERTEX_LOCATIONS})"
+            )
     return entry.ids[transport]
 
 
@@ -555,6 +579,7 @@ def lifecycle_risks(today: date, horizon_days: int = 30) -> list[str]:
 
 
 __all__ = [
+    "DEPLOYED_VERTEX_LOCATIONS",
     "ENV_OVERRIDES",
     "MODELS",
     "PROVIDER_TRANSPORTS",
