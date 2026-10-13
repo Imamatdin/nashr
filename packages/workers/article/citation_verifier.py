@@ -28,10 +28,10 @@ import time
 from collections.abc import Iterator
 from typing import Any, Final
 
-from packages.core.constants import MODEL_ROUTING
 from packages.core.enums import CitationVerdict
 from packages.core.gemini import gemini_cost_for
 from packages.core.llm import LLMResponse
+from packages.core.model_registry import Role, model_for
 from packages.core.model_router import ModelRouter
 from packages.core.models.article import ArticleSection, CitationRef
 from packages.core.models.evidence import EvidenceMatrix
@@ -72,9 +72,8 @@ class CitationVerifier:
     """Batched citation verifier built on :class:`ModelRouter` + Gemini.
 
     Stateless apart from the injected router. ``model`` defaults to
-    :data:`MODEL_ROUTING["citation_verification"]` so the routing table
-    in :mod:`packages.core.constants` stays the single source of truth
-    for which provider runs the inspection pass.
+    the ``CITATION_VERIFICATION`` role in :mod:`packages.core.model_registry`,
+    the single source of truth for which model runs the inspection pass.
     """
 
     def __init__(
@@ -83,7 +82,7 @@ class CitationVerifier:
         router: ModelRouter | None = None,
     ) -> None:
         self._router = router if router is not None else ModelRouter()
-        self._model = model or MODEL_ROUTING["citation_verification"]
+        self._model = model or model_for(Role.CITATION_VERIFICATION)
 
     async def verify_article(
         self,
