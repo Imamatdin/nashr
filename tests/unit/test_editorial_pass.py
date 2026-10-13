@@ -33,9 +33,10 @@ from packages.core.enums import (
     PresentationMood,
     SlideType,
 )
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
+from packages.core.gemini import GEMINI_FLASH_MODEL
 from packages.core.gemini_tools import ToolTurnResult
 from packages.core.llm import LLMResponse
+from packages.core.model_registry import Role, model_for
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
     AuditCheckResult,
@@ -143,7 +144,7 @@ class _StubGemini:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_3_5_MODEL,
+        model: str = GEMINI_FLASH_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -2383,7 +2384,7 @@ async def test_interactive_uses_gemini_flash_model() -> None:
     async def capture_complete(
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_3_5_MODEL,
+        model: str = GEMINI_FLASH_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
@@ -2402,7 +2403,7 @@ async def test_interactive_uses_gemini_flash_model() -> None:
         chunks=[],
         source_metadata=[],
     )
-    assert captured.get("model") == GEMINI_FLASH_3_5_MODEL
+    assert captured.get("model") == model_for(Role.INTERACTIVE_CONTENT)
 
 
 # ---------------------------------------------------------------------------

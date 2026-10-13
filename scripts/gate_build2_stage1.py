@@ -51,7 +51,7 @@ from google.genai import errors as genai_errors  # noqa: E402
 from google.genai import types as genai_types  # noqa: E402
 
 from packages.core.gemini import (  # noqa: E402
-    GEMINI_PRO_3_1_MODEL,
+    GEMINI_PRO_MODEL,
     GeminiClient,
     GeminiToolCallError,
 )
@@ -277,7 +277,7 @@ async def _amain() -> int:
     reporter = _GateReporter()
     client = GeminiClient()
     strict_client = GeminiClient(max_retries=0)
-    print(f"Gate model: {GEMINI_PRO_3_1_MODEL}")
+    print(f"Gate model: {GEMINI_PRO_MODEL}")
     try:
         total_cost = await _run_gate(client, strict_client, reporter)
     except (genai_errors.APIError, GeminiToolCallError) as exc:

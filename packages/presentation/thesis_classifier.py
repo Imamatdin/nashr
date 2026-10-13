@@ -26,13 +26,10 @@ Design choices:
 
 * **One call per plan, not per section.** A 7-section plan costs one
   Gemini call, not seven. Latency and cost are O(plan), not O(section).
-* **Gemini 3.5 Flash (opt-in).** Passes
-  :data:`packages.core.gemini.GEMINI_FLASH_3_5_MODEL` explicitly on
-  every :meth:`GeminiClient.complete` call. The classifier is the only
-  caller wired to 3.5 Flash today; editorial's existing interactive
-  pass stays on 2.5 Flash unchanged. The cost entry for 3.5 Flash lives
-  in :data:`packages.core.gemini.GEMINI_COSTS` so per-call cost
-  accounting picks it up automatically.
+* **Gemini Flash, by role.** Passes the ``THESIS_CLASSIFIER`` role's
+  model from :mod:`packages.core.model_registry` explicitly on every
+  :meth:`GeminiClient.complete` call; its price row lives there too, so
+  per-call cost accounting picks it up automatically.
 * **No silent degradation.** A classifier that can't classify must fail
   loud — :class:`ThesisClassifierError` raises through
   :meth:`ThesisClassifier.classify` and the validator's async path. The
@@ -53,7 +50,8 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from packages.core.enums import Language
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, GeminiClient
+from packages.core.gemini import GeminiClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.presentation import ThesisVerdict
 from packages.core.prompts import (
     THESIS_CLASSIFIER_RETRY_SUFFIX,
@@ -152,7 +150,7 @@ class ThesisClassifier:
         first = await self._get_gemini().complete(
             system=system,
             user=user,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.THESIS_CLASSIFIER),
             max_tokens=CLASSIFIER_MAX_TOKENS,
         )
         parsed = _parse_verdicts(first.content, expected=expected)
@@ -166,7 +164,7 @@ class ThesisClassifier:
         retry = await self._get_gemini().complete(
             system=system,
             user=user + THESIS_CLASSIFIER_RETRY_SUFFIX,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.THESIS_CLASSIFIER),
             max_tokens=CLASSIFIER_MAX_TOKENS,
         )
         parsed = _parse_verdicts(retry.content, expected=expected)

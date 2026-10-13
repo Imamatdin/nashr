@@ -131,7 +131,7 @@ class FixBatchResult(BaseModel):
     per-fix :class:`SlideRegenResult`\\ s. They do NOT gate the session — the edit
     cap is a per-tier fix counter, not a cost — but the real cost is surfaced
     rather than discarded. The dollar value of the images
-    (``image_count`` × :data:`IMAGE_COST_USD`) is folded in by the session,
+    (``image_count`` × the image model's registry price) is folded in by the session,
     keeping LLM and image spend separately attributable.
     """
 
@@ -1024,7 +1024,7 @@ def _count_generated_images(slide: SlideSpec) -> int:
     """Count the PAID generated image slots filled on a freshly regenerated slide.
 
     Only the generated figure and the title-hero background go through the paid
-    image model (:data:`IMAGE_COST_USD`); Commons portraits are free. A regen
+    image model (priced in :mod:`packages.core.model_registry`); Commons portraits are free. A regen
     emits the slide with null image URLs and the image pass fills them, so a
     non-null url on either slot means one paid image was generated this regen.
     """

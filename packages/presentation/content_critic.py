@@ -51,8 +51,9 @@ from packages.core.enums import (
     Language,
     SlideType,
 )
-from packages.core.gemini import GEMINI_PRO_3_1_MODEL, GeminiClient
+from packages.core.gemini import GeminiClient
 from packages.core.llm import LLMResponse
+from packages.core.model_registry import Role, model_for
 from packages.core.models.presentation import (
     AuditCheckResult,
     DeckPlan,
@@ -316,7 +317,7 @@ async def _call_critic_with_retry(
     first = await gemini.complete(
         system=CONTENT_CRITIC_SYSTEM,
         user=user,
-        model=GEMINI_PRO_3_1_MODEL,
+        model=model_for(Role.CONTENT_CRITIC),
         max_tokens=CRITIC_MAX_TOKENS,
     )
     _log_usage(first, "content_critic")
@@ -331,7 +332,7 @@ async def _call_critic_with_retry(
     retry = await gemini.complete(
         system=CONTENT_CRITIC_SYSTEM,
         user=user + CONTENT_CRITIC_RETRY_SUFFIX,
-        model=GEMINI_PRO_3_1_MODEL,
+        model=model_for(Role.CONTENT_CRITIC),
         max_tokens=CRITIC_MAX_TOKENS,
     )
     _log_usage(retry, "content_critic_retry")

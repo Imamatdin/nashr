@@ -32,7 +32,7 @@ from typing import Final, Protocol
 import google.genai as genai
 from google.genai import types as genai_types
 
-from packages.core.gemini import GEMINI_PRO_3_1_MODEL, build_default_genai_client
+from packages.core.gemini import GEMINI_PRO_MODEL, build_default_genai_client, gemini_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ class BrainContextCache:
         *,
         system: str,
         tools: list[genai_types.Tool],
-        model: str = GEMINI_PRO_3_1_MODEL,
+        model: str = GEMINI_PRO_MODEL,
         ttl_seconds: int = DEFAULT_BRAIN_CACHE_TTL_SECONDS,
         enabled: bool | None = None,
         create_cache_fn: CreateCacheFn | None = None,
@@ -130,7 +130,7 @@ class BrainContextCache:
     ) -> None:
         self._system = system
         self._tools = list(tools)
-        self._model = model
+        self._model = gemini_request_id(model)
         self._ttl_seconds = ttl_seconds
         self._enabled = brain_cache_enabled() if enabled is None else enabled
         self._create_cache_fn = create_cache_fn or _default_create_cache_fn()

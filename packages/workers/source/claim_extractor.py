@@ -1,7 +1,7 @@
 """Extracts factual claims from chunked source text using the LLM.
 
 This is the first LLM-touching module in the source pipeline; it uses
-:class:`packages.core.gemini.GeminiClient` (Gemini 3.5 Flash) for the call
+:class:`packages.core.gemini.GeminiClient` (the CLAIM_EXTRACTION role, Gemini Flash) for the call
 itself and the prompt constants from :mod:`packages.core.prompts`.
 
 The extractor is deliberately tolerant of bad model output:
@@ -29,7 +29,8 @@ from typing import Any, Final
 from pydantic import ValidationError
 
 from packages.core.enums import ClaimStrength, ClaimType
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL, GeminiClient
+from packages.core.gemini import GeminiClient
+from packages.core.model_registry import Role, model_for
 from packages.core.models.source import (
     SourceChunkCreate,
     SourceClaimCreate,
@@ -48,7 +49,7 @@ CLAIM_BATCH_SIZE: Final[int] = 5
 CLAIM_MIN_TEXT_LENGTH: Final[int] = 10
 CLAIM_MAX_TEXT_LENGTH: Final[int] = 500
 CLAIM_MAX_QUOTE_LENGTH: Final[int] = 500
-# Gemini 3.5 Flash spends "thoughts" tokens before visible output; a chunk can
+# Gemini 3.x Flash spends "thoughts" tokens before visible output; a chunk can
 # yield a dozen-plus claims, so the budget must clear the thinking phase plus the
 # JSON array or the response truncates and the chunk's claims are lost on retry.
 CLAIM_MAX_TOKENS: Final[int] = 8_000
@@ -115,7 +116,7 @@ class ClaimExtractor:
         first_response = await self._gemini.complete(
             system=system_prompt,
             user=user_prompt,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.CLAIM_EXTRACTION),
             max_tokens=CLAIM_MAX_TOKENS,
         )
         parsed = _try_parse_array(first_response.content)
@@ -126,7 +127,7 @@ class ClaimExtractor:
         second_response = await self._gemini.complete(
             system=system_prompt,
             user=retry_prompt,
-            model=GEMINI_FLASH_3_5_MODEL,
+            model=model_for(Role.CLAIM_EXTRACTION),
             max_tokens=CLAIM_MAX_TOKENS,
         )
         parsed = _try_parse_array(second_response.content)

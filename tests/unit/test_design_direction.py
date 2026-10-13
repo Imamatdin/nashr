@@ -21,7 +21,7 @@ from packages.core.enums import (
     ClaimType,
     PresentationMood,
 )
-from packages.core.gemini import GEMINI_FLASH_3_5_MODEL
+from packages.core.gemini import GEMINI_FLASH_MODEL
 from packages.core.llm import LLMResponse
 from packages.core.models.presentation import (
     DesignDirectionSpec,
@@ -52,7 +52,7 @@ class _StubGemini:
         self,
         system: str,
         user: str,
-        model: str = GEMINI_FLASH_3_5_MODEL,
+        model: str = GEMINI_FLASH_MODEL,
         max_tokens: int = 2000,
         temperature: float = 0.0,
     ) -> LLMResponse:
