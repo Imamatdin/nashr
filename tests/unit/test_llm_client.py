@@ -229,8 +229,66 @@ async def test_complete_sends_no_temperature_and_pins_thinking_per_model() -> No
     for kwargs in (haiku_kwargs, sonnet_kwargs):
         assert not {"temperature", "top_p", "top_k"} & set(kwargs)
         assert "thinking" not in kwargs  # sent as a body field, see below
-    assert haiku_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert sonnet_kwargs["extra_body"] == {"thinking": {"type": "between_tools"}}
+    assert haiku_kwargs["extra_body"] == {
+        "thinking": {"type": "disabled"},
+        "output_config": {"effort": "medium"},
+    }
+    assert sonnet_kwargs["extra_body"] == {
+        "thinking": {"type": "between_tools"},
+        "output_config": {"effort": "high"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_never_forces_a_tool_or_prefills() -> None:
+    # Sonnet 5.5 rejects tool_choice "any"/"tool" with a 400, and 4.6+ models reject
+    # a prefilled assistant turn. LLMClient is the only Claude request site, so its
+    # request carries no tools at all and exactly one user turn.
+    async def behaviour() -> Message:
+        return _make_message("ok")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    client = LLMClient(client=fake)  # type: ignore[arg-type]
+    await client.complete(system="sys", user="usr", model=SONNET)
+
+    kwargs = fake.messages.last_kwargs
+    assert not {"tools", "tool_choice"} & set(kwargs)
+    assert not {"tools", "tool_choice"} & set(kwargs["extra_body"])
+    assert kwargs["messages"] == [{"role": "user", "content": "usr"}]
+
+
+@pytest.mark.asyncio
+async def test_complete_records_thinking_tokens_and_truncation() -> None:
+    async def behaviour() -> Message:
+        message = _make_message("partial", input_tokens=10, output_tokens=500)
+        message.stop_reason = "max_tokens"
+        # SDK 0.84's Usage has no field for this; the API sends it and the model keeps it.
+        message.usage = Usage.model_validate(
+            {
+                **message.usage.model_dump(),
+                "output_tokens_details": {"thinking_tokens": 320},
+            }
+        )
+        return message
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    response = await LLMClient(client=fake).complete(system="s", user="u")  # type: ignore[arg-type]
+
+    assert response.thinking_tokens == 320
+    assert response.output_tokens == 500  # billed total, thinking included
+    assert response.stop_reason == "max_tokens"
+
+
+@pytest.mark.asyncio
+async def test_complete_without_thinking_details_reports_zero() -> None:
+    async def behaviour() -> Message:
+        return _make_message("ok")
+
+    fake = _FakeAsyncAnthropic(behaviour)
+    response = await LLMClient(client=fake).complete(system="s", user="u")  # type: ignore[arg-type]
+
+    assert response.thinking_tokens == 0
+    assert response.stop_reason == "end_turn"
 
 
 @pytest.mark.asyncio

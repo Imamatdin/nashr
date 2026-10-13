@@ -29,7 +29,7 @@ import json
 import logging
 import os
 import time
-from typing import Literal
+from typing import Literal, cast
 
 from anthropic import APIError, AsyncAnthropic, AuthenticationError, RateLimitError
 from anthropic.lib.vertex import AsyncAnthropicVertex
@@ -94,6 +94,20 @@ def thinking_config(model: str) -> dict[str, str]:
     if mode is None:
         raise UnknownModelError(f"{model} records no thinking mode")
     return {"type": mode.value}
+
+
+def request_body_extras(model: str) -> dict[str, dict[str, str]]:
+    """Body fields SDK 0.84 has no types for: the pinned thinking mode and effort.
+
+    Effort is pinned to the model's documented default (sending the default is
+    documented as identical to omitting it), so a future default change cannot
+    pair the thinking mode with an effort level that rejects it.
+    """
+
+    effort = spec(model).claude_effort
+    if effort is None:
+        raise UnknownModelError(f"{model} records no effort level")
+    return {"thinking": thinking_config(model), "output_config": {"effort": effort.value}}
 
 
 def resolve_llm_transport() -> LLMTransport:
@@ -187,6 +201,10 @@ class LLMResponse(BaseModel):
     output_tokens: int = Field(ge=0)
     cache_read_input_tokens: int = Field(default=0, ge=0)
     cache_creation_input_tokens: int = Field(default=0, ge=0)
+    # The thinking share of output_tokens (output_tokens is the billed total).
+    thinking_tokens: int = Field(default=0, ge=0)
+    # Provider stop reason; "max_tokens" (Claude) / "MAX_TOKENS" (Gemini) = truncated.
+    stop_reason: str | None = Field(default=None, max_length=64)
     latency_ms: int = Field(ge=0)
     estimated_cost_usd: float = Field(ge=0.0)
 
@@ -306,7 +324,7 @@ class LLMClient:
         # Translated once here so the API call, cost, logs and response all agree.
         location = getattr(llm_client, "region", None) if self._transport == "vertex" else None
         model = claude_request_id(model, self._transport, location)
-        thinking = thinking_config(model)
+        body_extras = request_body_extras(model)
         effective_timeout = timeout if timeout is not None else self._timeout_seconds
         system_param: str | list[TextBlockParam]
         if cache is False:
@@ -326,9 +344,7 @@ class LLMClient:
                         max_tokens=max_tokens,
                         system=system_param,
                         messages=messages,
-                        # SDK 0.84 has no type for "between_tools"; the body field is
-                        # the API's, so it goes through extra_body for every model.
-                        extra_body={"thinking": thinking},
+                        extra_body=body_extras,
                     ),
                     timeout=effective_timeout,
                 )
@@ -357,6 +373,8 @@ class LLMClient:
             usage = message.usage
             input_tokens = int(usage.input_tokens)
             output_tokens = int(usage.output_tokens)
+            thinking_tokens = _thinking_tokens(usage)
+            stop_reason = message.stop_reason
             cache_read = int(usage.cache_read_input_tokens or 0)
             cache_creation = int(usage.cache_creation_input_tokens or 0)
             creation = usage.cache_creation
@@ -389,6 +407,8 @@ class LLMClient:
                         "cache_read_input_tokens": cache_read,
                         "cache_creation_input_tokens": cache_creation,
                         "total_prompt_tokens": input_tokens + cache_read + cache_creation,
+                        "thinking_tokens": thinking_tokens,
+                        "stop_reason": stop_reason,
                         "latency_ms": latency_ms,
                         "estimated_cost_usd": round(cost, 6),
                     }
@@ -402,12 +422,35 @@ class LLMClient:
                 output_tokens=output_tokens,
                 cache_read_input_tokens=cache_read,
                 cache_creation_input_tokens=cache_creation,
+                thinking_tokens=thinking_tokens,
+                stop_reason=stop_reason,
                 latency_ms=latency_ms,
                 estimated_cost_usd=cost,
             )
 
         assert last_error is not None
         raise last_error
+
+
+def _thinking_tokens(usage: object) -> int:
+    """``usage.output_tokens_details.thinking_tokens`` (a subset of output_tokens).
+
+    SDK 0.84's ``Usage`` has no field for it; the model keeps unknown fields, so
+    it is read from the extras, as a dict or an object.
+    """
+
+    extra: object = getattr(usage, "model_extra", None)
+    details: object = (
+        cast("dict[str, object]", extra).get("output_tokens_details")
+        if isinstance(extra, dict)
+        else None
+    )
+    raw: object = (
+        cast("dict[str, object]", details).get("thinking_tokens")
+        if isinstance(details, dict)
+        else getattr(details, "thinking_tokens", None)
+    )
+    return raw if isinstance(raw, int) and raw >= 0 else 0
 
 
 def _extract_text(message: object) -> str:
