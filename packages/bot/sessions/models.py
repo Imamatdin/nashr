@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from google.genai import types as genai_types
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from packages.bot.orchestrators.article_orchestrator import SourceProcessingResult
 from packages.core.enums import ExportFormat, GenerationPackage
@@ -97,8 +97,9 @@ class TurnOutcome:
 class PendingDelivery(BaseModel):
     """An AI edit committed by a queued job whose exports are still rendering.
 
-    It holds one fix of the allowance until the job is delivered (counted) or its
-    delivery fails (released). See :mod:`packages.bot.sessions.delivery`.
+    A view of a ``reserved`` edit_deliveries row (B1-FIX3): it holds one fix of the
+    allowance until the render delivers it (counted) or fails for good (released).
+    The database settles it; the session only reads it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -157,18 +158,37 @@ class BrainSession(BaseModel):
     formats: list[ExportFormat] = Field(min_length=1)
     approval_state: ApprovalState = ApprovalState.IDLE
     pending_action: PendingAction | None = None
-    # The edit allowance is a COUNTER (see budget.has_fixes_remaining): bumped only
-    # after a fix succeeds, so a refused/failed fix never consumes one.
-    fixes_used: int = Field(default=0, ge=0)
-    # Edits committed but still rendering: each holds one fix until it settles.
-    pending_deliveries: list[PendingDelivery] = Field(
-        default_factory=list[PendingDelivery], max_length=20
-    )
+    # The edit allowance is a COUNTER (see budget.has_fixes_remaining) of DELIVERED
+    # edits, so a refused/failed fix never consumes one. Two sources (B1-FIX3):
+    # ``inline_fixes_used`` is brain_sessions.fixes_used, written only by the bot's
+    # inline edit path (and pre-016 history); ``delivered_edits`` counts this
+    # session's delivered edit_deliveries rows and is never stored.
+    inline_fixes_used: int = Field(default=0, ge=0)
+    delivered_edits: int = Field(default=0, ge=0)
+    # Reserved edit_deliveries rows: edits committed, still rendering, each holding
+    # one fix until the database settles it.
+    pending_deliveries: list[PendingDelivery] = Field(default_factory=list[PendingDelivery])
+    # Notices already folded into the session (brain_sessions.delivery_notes_json).
     delivery_notes: list[DeliveryNote] = Field(default_factory=list[DeliveryNote], max_length=50)
+    # Notices of settled rows no session write has folded in yet: shown by readers,
+    # folded (and acknowledged) by the next write.
+    unfolded_notes: list[DeliveryNote] = Field(default_factory=list[DeliveryNote])
     # ACTUAL spend, for billing/analytics ONLY — does not gate the session.
     accumulated_cost_usd: float = Field(default=0.0, ge=0.0)
     accumulated_image_count: int = Field(default=0, ge=0)
     figures_loaded: bool = False
+    # The row this session was read from, and its compare-and-swap version.
+    session_id: str | None = None
+    version: int = Field(default=0, ge=0)
+    # The persisted column values as they were read: the base of a three-way merge
+    # when a write loses its compare-and-swap (store.persist_session).
+    _base: dict[str, object] | None = PrivateAttr(default=None)
+
+    @property
+    def fixes_used(self) -> int:
+        """Delivered edits: inline (bot, legacy) plus delivered queued edits."""
+
+        return self.inline_fixes_used + self.delivered_edits
 
 
 def requires_approval(outcome: TurnOutcome, *, user_initiated: bool) -> bool:

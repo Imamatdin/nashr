@@ -268,6 +268,23 @@ async def _design_revision_payload(
     return {"document_id": document_id, "base_revision_id": revision_id}
 
 
+def _delivery_stamp(
+    slides_changed: int, history_len: int, session_id: str | None
+) -> dict[str, Any]:
+    """What an edit job carries for its delivery (B1-FIX3).
+
+    ``finish_generation_job`` records the edit's allowance hold for ``session_id``
+    with ``slides_changed``; a load matches the session's unanswered call to this
+    job by ``history_len`` and answers it from the job's receipt if the worker died
+    before it could.
+    """
+
+    stamp: dict[str, Any] = {"slides_changed": slides_changed, "history_len": history_len}
+    if session_id is not None:
+        stamp["session_id"] = session_id
+    return stamp
+
+
 @router.post("/{project_id}/chat", response_model=ChatTurnView)
 async def post_chat(
     request: Request, project_id: str, body: ChatRequest, auth: Authenticated
@@ -348,6 +365,7 @@ async def post_chat(
                 "call_count": result.fix_call_count,
                 "reply_text": result.reply_text,
                 **revision_payload,
+                **_delivery_stamp(len(result.fixes), result.history_len, result.session_id),
             },
         )
     except DuplicateActiveJobError:
@@ -411,6 +429,7 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
                 "from_pending": True,
                 "call_count": pending.call_count,
                 **revision_payload,
+                **_delivery_stamp(len(pending.fixes), pending.history_len, pending.session_id),
             },
         )
     except DuplicateActiveJobError:

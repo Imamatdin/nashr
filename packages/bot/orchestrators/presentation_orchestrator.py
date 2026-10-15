@@ -45,6 +45,7 @@ from packages.core.enums import (
     GenerationPackage,
     SourceQuality,
 )
+from packages.core.export_formats import WIRE_NAME
 from packages.core.models.evidence import EvidenceMatrix
 from packages.core.models.presentation import (
     DeckSpec,
@@ -72,13 +73,10 @@ ProgressCallback = Callable[[str, int, int], Awaitable[None]]
 # source → matrix → interview → design → editorial → images → render
 TOTAL_STEPS: Final[int] = 7
 
-# Map :class:`ExportFormat` to the worker CLI's ``--format`` argument
-# and the on-disk extension the renderer writes.
-_FORMAT_TO_CLI: Final[dict[ExportFormat, tuple[str, str]]] = {
-    ExportFormat.HTML: ("html", "html"),
-    ExportFormat.PPTX_EDITABLE: ("pptx", "pptx"),
-    ExportFormat.PPTX_STUDIO: ("pptx", "pptx"),
-    ExportFormat.PDF: ("pdf", "pdf"),
+# The worker CLI's ``--format`` argument and the on-disk extension the renderer
+# writes are both the format's wire name (packages.core.export_formats).
+_FORMAT_TO_CLI: Final[Mapping[ExportFormat, tuple[str, str]]] = {
+    fmt: (name, name) for fmt, name in WIRE_NAME.items()
 }
 
 # Node CLI per-format timeout. Generous for PDF (Playwright cold-starts

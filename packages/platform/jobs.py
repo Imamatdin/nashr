@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from packages.platform.database import DatabaseClient
 
@@ -106,8 +107,48 @@ class DuplicateActiveJobError(Exception):
         super().__init__(f"active {existing.job_type} job {existing.id} already queued")
 
 
+class JobDataInvalidError(Exception):
+    """A persisted generation_jobs row does not parse (B1-FIX3, Codex A3).
+
+    The generic queue schema allows any JSON in ``payload`` and ``progress``; the
+    Python model requires objects. A read of such a row is a state error the API
+    answers with 409 ``job_data_invalid``, never a 500, and the row is left as it is.
+    """
+
+    def __init__(self, job_id: str, detail: str) -> None:
+        self.job_id = job_id
+        self.detail = detail
+        super().__init__(f"generation job {job_id} is malformed: {detail}")
+
+
 def _row_to_job(row: dict[str, Any]) -> GenerationJob:
-    return GenerationJob.model_validate(row)
+    try:
+        return GenerationJob.model_validate(row)
+    except ValidationError as exc:
+        job_id = str(row.get("id") or "unknown")
+        fields = sorted({".".join(str(p) for p in error["loc"]) for error in exc.errors()})
+        detail = ",".join(fields) or "row"
+        logger.error("job_data_invalid %s", json.dumps({"job_id": job_id, "fields": detail}))
+        raise JobDataInvalidError(job_id, detail) from None
+
+
+def validated_payload(payload: object) -> dict[str, Any]:
+    """Refuse a job payload that is not a JSON object before it is written.
+
+    Every reader parses the payload as an object; the enqueue boundary is where
+    anything else is stopped (Codex A3).
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError("job payload must be a JSON object")
+    typed = cast(dict[Any, Any], payload)
+    if not all(isinstance(key, str) for key in typed):
+        raise ValueError("job payload keys must be strings")
+    try:
+        json.dumps(typed, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"job payload is not JSON: {exc}") from None
+    return cast(dict[str, Any], typed)
 
 
 class JobQueue:
@@ -201,7 +242,7 @@ class JobQueue:
             "user_id": user_id,
             "job_type": job_type.value,
             "status": JobStatus.QUEUED.value,
-            "payload": payload,
+            "payload": validated_payload(payload),
             "max_attempts": max_attempts,
         }
 
@@ -230,7 +271,7 @@ class JobQueue:
             "user_id": user_id,
             "job_type": job_type.value,
             "status": JobStatus.PROCESSING.value,
-            "payload": payload,
+            "payload": validated_payload(payload),
             "max_attempts": 1,
             "attempts": 1,
             "worker_id": worker_id,
@@ -341,7 +382,7 @@ class JobQueue:
         rows = cast(list[dict[str, Any]], list(result.data or []))
         if not rows:
             return None
-        return _row_to_job(rows[0])
+        return await self._claimed(rows[0], worker_id)
 
     async def claim_job(self, job_id: str, worker_id: str) -> GenerationJob | None:
         """Atomically claim ONE specific queued job (the --job-id path).
@@ -358,7 +399,24 @@ class JobQueue:
         rows = cast(list[dict[str, Any]], list(result.data or []))
         if not rows:
             return None
-        return _row_to_job(rows[0])
+        return await self._claimed(rows[0], worker_id)
+
+    async def _claimed(self, row: dict[str, Any], worker_id: str) -> GenerationJob | None:
+        """The claimed job, or None after failing a row no worker can run.
+
+        A malformed row is failed under the claim just taken (and refunded, when it
+        charged, by fail_job) instead of being retried by the reaper forever.
+        """
+
+        try:
+            return _row_to_job(row)
+        except JobDataInvalidError as exc:
+            attempts = row.get("attempts")
+            if isinstance(attempts, int):
+                await self.fail(
+                    exc.job_id, worker_id, attempts, step="claim", message="job_data_invalid"
+                )
+            return None
 
     async def heartbeat(self, job_id: str, worker_id: str, claim_token: int) -> bool:
         """Bump heartbeat_at; False means the claim is no longer ours (reaped or reclaimed)."""
@@ -454,7 +512,14 @@ class JobQueue:
             lambda: self._db.rpc("reap_stale_jobs", {"p_stale_seconds": stale_seconds})
         )
         rows = cast(list[dict[str, Any]], list(result.data or []))
-        return [_row_to_job(r) for r in rows]
+        reaped: list[GenerationJob] = []
+        for row in rows:
+            # Returned for logging only; a malformed row is already settled.
+            try:
+                reaped.append(_row_to_job(row))
+            except JobDataInvalidError:
+                continue
+        return reaped
 
 
 @contextlib.asynccontextmanager
@@ -499,9 +564,11 @@ __all__ = [
     "TERMINAL_STATUSES",
     "DuplicateActiveJobError",
     "GenerationJob",
+    "JobDataInvalidError",
     "JobQueue",
     "JobStatus",
     "JobType",
     "RenderRequest",
     "heartbeat_while",
+    "validated_payload",
 ]

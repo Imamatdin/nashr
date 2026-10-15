@@ -35,20 +35,20 @@ from typing import TYPE_CHECKING
 from google.genai import types as genai_types
 
 from packages.bot.sessions.budget import has_fixes_remaining, session_fix_limit
-from packages.bot.sessions.delivery import fixes_reserved
+from packages.bot.sessions.delivery import fixes_reserved, visible_notes
 from packages.bot.sessions.models import (
     ApprovalState,
     BrainSession,
     PendingAction,
     requires_approval,
 )
+from packages.bot.sessions.session_rows import dangling_call_parts
 from packages.bot.sessions.store import (
     load_revision_deck,
     load_session,
     move_session_to_head,
     persist_session,
 )
-from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
 from packages.core.models.presentation import SlideFix
 from packages.platform.database import DatabaseClient
 from packages.sessions_core.apply import (
@@ -91,11 +91,17 @@ class TurnKind(StrEnum):
 
 @dataclass(frozen=True)
 class PendingActionView:
-    """A parked change, as the caller renders it."""
+    """A parked change, as the caller renders it.
+
+    ``history_len`` and ``session_id`` are what the API stamps on the edit job that
+    carries it, so a load can match an unanswered call to its job's receipt.
+    """
 
     reason: str
     fixes: tuple[SlideFix, ...]
     call_count: int
+    history_len: int = 0
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +119,10 @@ class TurnResult:
     fixes_pending: int = 0
     # The revision the brain saw this turn: a parked edit commits against it.
     revision_id: str | None = None
+    # Stamped on the edit job (B1-FIX3): the conversation length with the parked
+    # call, and the session whose allowance the edit holds.
+    history_len: int = 0
+    session_id: str | None = None
 
 
 @dataclass
@@ -165,7 +175,7 @@ def history_for_wire(session: BrainSession) -> list[dict[str, str]]:
     """
 
     messages: list[dict[str, str]] = []
-    notes = sorted(session.delivery_notes, key=lambda note: note.history_index)
+    notes = sorted(visible_notes(session), key=lambda note: note.history_index)
     next_note = 0
     for index, content in enumerate(session.history):
         while next_note < len(notes) and notes[next_note].history_index <= index:
@@ -191,13 +201,17 @@ def history_for_wire(session: BrainSession) -> list[dict[str, str]]:
     return messages[-_MAX_WIRE_MESSAGES:]
 
 
-def _pending_view(pending: PendingAction | None) -> PendingActionView | None:
+def _pending_view(
+    pending: PendingAction | None, session: BrainSession | None = None
+) -> PendingActionView | None:
     if pending is None:
         return None
     return PendingActionView(
         reason=pending.reason,
         fixes=tuple(pending.fixes),
         call_count=pending.call_count,
+        history_len=len(session.history) if session is not None else 0,
+        session_id=session.session_id if session is not None else None,
     )
 
 
@@ -209,20 +223,11 @@ def has_dangling_call(session: BrainSession) -> int:
 
     Zero means the conversation is answerable. A positive count means a fix was
     parked and its answer never arrived — either it is in flight (an edit job is
-    active) or the job that carried it is gone.
+    active) or the job that carried it is gone. A job that committed before its
+    worker died is not this case: loading answered its call from the receipt.
     """
 
-    if not session.history:
-        return 0
-    last = session.history[-1]
-    if (last.role or "") != "model":
-        return 0
-    return sum(
-        1
-        for part in (last.parts or [])
-        if part.function_call is not None
-        and (part.function_call.name or EDIT_SLIDES_TOOL_NAME) == EDIT_SLIDES_TOOL_NAME
-    )
+    return dangling_call_parts(session)
 
 
 def append_fix_result(session: BrainSession, response: dict[str, object], *, count: int) -> None:
@@ -263,9 +268,11 @@ async def repair_dangling_call(db: DatabaseClient, session: BrainSession) -> boo
 async def read_session(db: DatabaseClient, project_id: str) -> ChatSessionView:
     """The chat pane's read: history, parked decision, allowance, deck size.
 
-    ``can_edit=False`` is the honest answer for a project with no persisted
-    deck — the session store refuses to invent one, and the UI must say so
-    rather than offering an editor that cannot work.
+    A pure read (B1-FIX3): nothing is written, so a poll can never overwrite what
+    a worker or another request saved meanwhile. ``can_edit=False`` is the honest
+    answer for a project with no persisted deck — the session store refuses to
+    invent one, and the UI must say so rather than offering an editor that cannot
+    work.
     """
 
     session = await load_session(db, project_id)
@@ -412,6 +419,8 @@ async def run_web_turn(
         fixes_used=session.fixes_used,
         fixes_pending=len(session.pending_deliveries),
         revision_id=session.revision_id,
+        history_len=len(session.history),
+        session_id=session.session_id,
     )
 
 
@@ -447,7 +456,7 @@ async def park_pending_for_apply(db: DatabaseClient, project_id: str) -> Pending
     session = await load_session(db, project_id)
     if session is None or session.pending_action is None:
         return None
-    return _pending_view(session.pending_action)
+    return _pending_view(session.pending_action, session)
 
 
 async def reject_pending(db: DatabaseClient, project_id: str) -> bool:

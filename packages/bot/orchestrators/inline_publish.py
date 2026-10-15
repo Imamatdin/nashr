@@ -20,9 +20,9 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from packages.bot.orchestrators.deck_revisions import file_formats
 from packages.bot.orchestrators.presentation_orchestrator import PresentationRenderResult
 from packages.core.enums import ExportFormat
+from packages.core.export_formats import wire_formats
 from packages.platform.database import DatabaseClient
 from packages.platform.document_models import ExportFileFormat, bot_actor
 from packages.platform.document_store import DocumentStore
@@ -78,7 +78,7 @@ async def publish_inline(
                 "document_id": document_id,
                 "revision_id": revision_id,
                 "renderer_version": version,
-                "formats": file_formats(formats),
+                "formats": wire_formats(formats),
             },
             worker_id=worker_id,
         )

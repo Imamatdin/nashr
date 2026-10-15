@@ -24,8 +24,7 @@ from packages.api.services.revisions import (
     raise_store_error,
     stale_revision,
 )
-from packages.bot.orchestrators.deck_revisions import file_formats
-from packages.core.enums import ExportFormat
+from packages.core.export_formats import PRIMARY_FORMATS, wire_formats
 from packages.core.models.presentation import DeckSpec
 from packages.platform.document_models import (
     CommitOutcome,
@@ -41,12 +40,6 @@ from packages.platform.jobs import JobStatus
 from packages.platform.rate_limit import DESIGN_RENDER_ACTION
 
 router = APIRouter(prefix="/projects", tags=["design"])
-
-_RENDER_FORMATS: list[ExportFormat] = [
-    ExportFormat.HTML,
-    ExportFormat.PPTX_EDITABLE,
-    ExportFormat.PDF,
-]
 
 
 class SaveKind(StrEnum):
@@ -283,7 +276,7 @@ async def render_design(
         user_id=user_id,
         revision_id=revision.id,
         renderer_version=version,
-        formats=file_formats(_RENDER_FORMATS),
+        formats=wire_formats(PRIMARY_FORMATS),
         max_attempts=request.app.state.config.render_max_attempts,
     )
     if render.job_id is None:

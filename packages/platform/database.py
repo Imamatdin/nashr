@@ -20,12 +20,28 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from postgrest.exceptions import APIError
+
 from packages.platform.config import PlatformConfig
 from supabase import Client, create_client
 
 SUBSCRIBER_ID_MIN: int = 100_000
 SUBSCRIBER_ID_MAX: int = 999_999
 INVOICE_EXPIRY_HOURS: int = 24
+
+
+class SessionVersionConflictError(Exception):
+    """A session write lost its compare-and-swap: the row moved since it was read."""
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"brain session {key} changed since it was read")
+
+
+def _is_session_conflict(exc: APIError) -> bool:
+    """A unique violation (row created concurrently) or the CAS trigger's refusal."""
+
+    return exc.code in ("23505", "40001") or "session_version_conflict" in str(exc.message)
 
 
 def generate_subscriber_id(existing_ids: set[str]) -> str:
@@ -420,85 +436,88 @@ class DatabaseClient:
 
     # --------------------------------------------------------- brain sessions
 
-    # The brain editing session (Build 2, Stage 4). One row per project, upserted
-    # on the ``brain_sessions_project_id_key`` unique constraint exactly like
-    # decks, so the session is recoverable from project_id alone. This layer
-    # deals only in JSON-ready values: the bot-side session store owns the
-    # (de)serialization of the history / sources, which reference SDK and bot
-    # types this platform module must not import. ``findings_json`` is omitted
-    # from the payload so a Stage-4 upsert preserves whatever Stage 5 wrote.
+    # The brain editing session (Build 2, Stage 4). One row per project (the
+    # ``brain_sessions_project_id_key`` unique constraint), so the session is
+    # recoverable from project_id alone. Every write is a compare-and-swap on
+    # ``version`` (B1-FIX3); migration 016's trigger refuses any update that does
+    # not advance it by one. This layer deals only in JSON-ready values: the
+    # bot-side session store owns the (de)serialization and the merge on conflict.
+    # ``findings_json`` is never written here, so Stage 5's value is preserved.
 
     # Every session column EXCEPT the heavy figures_json — the light per-turn read.
     _SESSION_LIGHT_COLUMNS: str = (
         "id,project_id,history_json,sources_json,package,formats_json,"
         "approval_state,pending_action_json,fixes_used,accumulated_cost_usd,"
-        "accumulated_image_count,findings_json,revision_id,pending_deliveries_json,"
-        "delivery_notes_json,created_at,updated_at"
+        "accumulated_image_count,findings_json,revision_id,delivery_notes_json,version,"
+        "created_at,updated_at"
     )
 
-    async def save_brain_session(
-        self,
-        project_id: str,
-        *,
-        history_json: list[dict[str, Any]],
-        sources_json: dict[str, Any],
-        package: str,
-        formats_json: list[str],
-        approval_state: str,
-        pending_action_json: dict[str, Any] | None,
-        fixes_used: int,
-        accumulated_cost_usd: float,
-        accumulated_image_count: int,
-        figures_json: list[dict[str, Any]] | None = None,
-        revision_id: str | None = None,
-        pending_deliveries_json: list[dict[str, Any]] | None = None,
-        delivery_notes_json: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Upsert the project's single brain session and return the saved row.
+    async def insert_brain_session(self, project_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """Create the project's session at version 0 and return the saved row.
 
-        The first call inserts, every later turn updates the same row in place
-        (the unique constraint makes "one session per project" a DB invariant).
-        Only the columns passed here are written; ``findings_json`` and the
-        timestamp columns are left to Stage 5 and the DB defaults/trigger.
-
-        ``figures_json`` is WRITE-ONCE: pass the figure list when creating the
-        session, then omit it (``None``) on every per-turn save so the upsert
-        preserves the stored figures rather than wiping them — the source figures
-        never change during editing, only the deck and the conversation do.
-
-        ``revision_id`` is the document revision the session is editing (ADR 0001).
-        ``pending_deliveries_json`` / ``delivery_notes_json`` are the edits still
-        rendering and the chat notices about settled ones (B1-FIX2); omitted, the
-        stored values are kept.
+        ``fields`` are JSON-ready column values. A row that already exists for
+        the project (another writer created it first) is a version conflict.
         """
 
-        payload: dict[str, Any] = {
-            "project_id": project_id,
-            "history_json": history_json,
-            "sources_json": sources_json,
-            "package": package,
-            "formats_json": formats_json,
-            "approval_state": approval_state,
-            "pending_action_json": pending_action_json,
-            "fixes_used": fixes_used,
-            "accumulated_cost_usd": accumulated_cost_usd,
-            "accumulated_image_count": accumulated_image_count,
-            "revision_id": revision_id,
-        }
-        if figures_json is not None:
-            payload["figures_json"] = figures_json
-        if pending_deliveries_json is not None:
-            payload["pending_deliveries_json"] = pending_deliveries_json
-        if delivery_notes_json is not None:
-            payload["delivery_notes_json"] = delivery_notes_json
+        payload: dict[str, Any] = {**fields, "project_id": project_id, "version": 0}
+        try:
+            result = await asyncio.to_thread(
+                lambda: self._client.table("brain_sessions").insert(payload).execute()
+            )
+        except APIError as exc:
+            if _is_session_conflict(exc):
+                raise SessionVersionConflictError(project_id) from exc
+            raise
+        return cast(dict[str, Any], result.data[0])
+
+    async def update_brain_session(
+        self, session_id: str, expected_version: int, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Compare-and-swap the session row; return it at ``expected_version + 1``.
+
+        Writes only ``fields`` (``figures_json`` stays write-once unless passed),
+        and only if the row is still at ``expected_version``. Anything else - the
+        row moved, or it was replaced - raises :class:`SessionVersionConflictError`
+        so the caller reloads and merges instead of overwriting (Codex A2).
+        """
+
+        payload: dict[str, Any] = {**fields, "version": expected_version + 1}
+        try:
+            result = await asyncio.to_thread(
+                lambda: (
+                    self._client.table("brain_sessions")
+                    .update(payload)
+                    .eq("id", session_id)
+                    .eq("version", expected_version)
+                    .execute()
+                )
+            )
+        except APIError as exc:
+            if _is_session_conflict(exc):
+                raise SessionVersionConflictError(session_id) from exc
+            raise
+        if not result.data:
+            raise SessionVersionConflictError(session_id)
+        return cast(dict[str, Any], result.data[0])
+
+    async def delete_brain_session(self, session_id: str, expected_version: int) -> None:
+        """Delete the session row only if it is still at ``expected_version``.
+
+        A regeneration replaces the session: the old row goes (its edit deliveries
+        keep their history, unattached) and a new one starts the new allowance.
+        """
+
         result = await asyncio.to_thread(
             lambda: (
                 self._client.table("brain_sessions")
-                .upsert(payload, on_conflict="project_id")
+                .delete()
+                .eq("id", session_id)
+                .eq("version", expected_version)
                 .execute()
             )
         )
-        return cast(dict[str, Any], result.data[0])
+        if not result.data:
+            raise SessionVersionConflictError(session_id)
 
     async def get_brain_session(self, project_id: str) -> dict[str, Any] | None:
         """Get the project's brain session row WITHOUT figures, or ``None``.

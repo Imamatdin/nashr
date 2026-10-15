@@ -54,6 +54,7 @@ from packages.core.models.presentation import (
 from packages.core.models.source import SourceChunkCreate, SourceClaimCreate
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditAction, CreditEntry, CreditLedger
+from packages.platform.database import SessionVersionConflictError
 from packages.platform.document_models import ExportFileFormat, export_storage_key
 from packages.platform.exports import renderer_version
 from packages.platform.jobs import GenerationJob, JobStatus, JobType
@@ -222,7 +223,11 @@ class StubDb:
         light, figures = serialize_sources(_sources(self.source_id))
         self.brain_sessions: dict[str, dict[str, Any]] = {
             PROJECT_READY: {
+                "id": str(uuid.uuid4()),
+                "version": 0,
                 "project_id": PROJECT_READY,
+                "delivery_notes_json": [],
+                "revision_id": None,
                 "history_json": [],
                 "sources_json": light,
                 "package": "presentation_premium",
@@ -329,12 +334,39 @@ class StubDb:
     async def get_brain_session_figures(self, project_id: str) -> list[dict[str, Any]] | None:
         return self.session_figures.get(project_id)
 
-    async def save_brain_session(self, project_id: str, **kwargs: Any) -> None:
-        row = self.brain_sessions.setdefault(project_id, {"project_id": project_id})
-        for key, value in kwargs.items():
-            if key == "figures_json" and value is None:
-                continue
-            row[key] = value
+    async def insert_brain_session(self, project_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        if project_id in self.brain_sessions:
+            raise SessionVersionConflictError(project_id)
+        figures = fields.pop("figures_json", None)
+        if figures is not None:
+            self.session_figures[project_id] = figures
+        row = {
+            "fixes_used": 0,
+            "delivery_notes_json": [],
+            **fields,
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "version": 0,
+        }
+        self.brain_sessions[project_id] = row
+        return row
+
+    async def update_brain_session(
+        self, session_id: str, expected_version: int, fields: dict[str, Any]
+    ) -> dict[str, Any]:
+        row = next((r for r in self.brain_sessions.values() if r.get("id") == session_id), None)
+        if row is None or row.get("version") != expected_version:
+            raise SessionVersionConflictError(session_id)
+        row.update(fields)
+        row["version"] = expected_version + 1
+        return row
+
+    async def delete_brain_session(self, session_id: str, expected_version: int) -> None:
+        for project_id, row in list(self.brain_sessions.items()):
+            if row.get("id") == session_id and row.get("version") == expected_version:
+                del self.brain_sessions[project_id]
+                return
+        raise SessionVersionConflictError(session_id)
 
     def _query(self, table: str) -> Any:
         return self._documents.table(table)

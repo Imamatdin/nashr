@@ -1,0 +1,70 @@
+{
+  "schema": "app as of fdb14bc (packages/, scripts/worker_run_job.py; the B1-FIX2 review's SHA) with the current tests",
+  "module": "tests/unit/test_b1_fix3_regressions.py",
+  "tests": {
+    "tests.unit.test_b1_fix3_regressions::test_a_worker_killed_after_the_commit_still_counts_the_edit_once_and_says_so_once": {
+      "expect": "fail",
+      "match": "AssertionError: the delivered edit was not counted"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_a_worker_killed_after_the_commit_still_holds_the_fix_until_the_render_fails": {
+      "expect": "fail",
+      "match": "AssertionError: the committed edit held nothing"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_no_web_or_worker_path_writes_fixes_used": {
+      "expect": "fail",
+      "match": "AssertionError: a web/worker session write wrote fixes_used"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_get_chat_performs_no_writes": {
+      "expect": "fail",
+      "match": "AssertionError: GET /chat wrote to the database"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_a_poll_overlapping_a_worker_loses_nothing_the_worker_saved": {
+      "expect": "fail",
+      "match": "AssertionError: the poll overwrote the worker's answer"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_a_poll_overlapping_a_turn_loses_nothing_the_turn_saved": {
+      "expect": "fail",
+      "match": "AssertionError: the poll overwrote the turn the user just had"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_the_old_fixture_format_value_is_409_session_invalid_not_500": {
+      "expect": "fail",
+      "match": "ValueError: 'pptx' is not a valid ExportFormat"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_a_session_row_missing_a_column_is_409_session_invalid": {
+      "expect": "fail",
+      "match": "ValueError: None is not a valid GenerationPackage"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_bad_array_items_in_a_session_row_are_409_session_invalid[formats_json-value0]": {
+      "expect": "fail",
+      "match": "ValueError: 7 is not a valid ExportFormat"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_bad_array_items_in_a_session_row_are_409_session_invalid[delivery_notes_json-value1]": {
+      "expect": "fail",
+      "match": "ValidationError: 1 validation error for DeliveryNote"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_bad_array_items_in_a_session_row_are_409_session_invalid[history_json-value2]": {
+      "expect": "fail",
+      "match": "ValidationError: 1 validation error for Content"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_bad_array_items_in_a_session_row_are_409_session_invalid[pending_action_json-value3]": {
+      "expect": "fail",
+      "match": "ValidationError: 1 validation error for PendingAction"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_malformed_parent_and_child_job_rows_are_409_job_data_invalid[parent_payload_array]": {
+      "expect": "fail",
+      "match": "ValidationError: 1 validation error for GenerationJob\\s+payload"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_malformed_parent_and_child_job_rows_are_409_job_data_invalid[parent_progress_array]": {
+      "expect": "fail",
+      "match": "ValidationError: 1 validation error for GenerationJob\\s+progress"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_malformed_parent_and_child_job_rows_are_409_job_data_invalid[child_progress]": {
+      "expect": "fail",
+      "match": "ValidationError: 1 validation error for GenerationJob\\s+progress"
+    },
+    "tests.unit.test_b1_fix3_regressions::test_malformed_parent_and_child_job_rows_are_409_job_data_invalid[child_payload]": {
+      "expect": "fail",
+      "match": "ValidationError: 1 validation error for GenerationJob\\s+payload"
+    }
+  }
+}

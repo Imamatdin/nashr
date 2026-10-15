@@ -37,25 +37,6 @@ class PublishedRender(BaseModel):
     exports: list[PublishedExport]
 
 
-_RENDER_FORMAT: dict[str, ExportFormat] = {
-    "html": ExportFormat.HTML,
-    "pptx": ExportFormat.PPTX_EDITABLE,
-    "pdf": ExportFormat.PDF,
-}
-
-
-def file_formats(formats: list[ExportFormat]) -> list[str]:
-    """The sorted, de-duplicated file formats a render request produces."""
-
-    return sorted({"pptx" if fmt.value.startswith("pptx") else fmt.value for fmt in formats})
-
-
-def render_formats(names: list[str]) -> list[ExportFormat]:
-    """Renderer formats for stored file-format names (``html``, ``pptx``, ``pdf``)."""
-
-    return [_RENDER_FORMAT[name] for name in sorted(set(names))]
-
-
 def renderable(outcome: CommitOutcome) -> str | None:
     """The revision to render after a commit, or None when nothing new was committed."""
 
@@ -144,8 +125,6 @@ async def render_and_publish(
 __all__ = [
     "PublishedRender",
     "commit_generated_deck",
-    "file_formats",
     "render_and_publish",
-    "render_formats",
     "renderable",
 ]

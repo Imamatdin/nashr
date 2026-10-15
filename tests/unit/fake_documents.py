@@ -381,7 +381,67 @@ class DocumentRpcEmulator:
                         "delivery": "delivered",
                     },
                 )
+                self._settle_edit_delivery(str(parent["id"]), "delivered")
         return True
+
+    def _settle_edit_delivery(self, job_id: str, status: str) -> None:
+        """_settle_edit_delivery: a reserved hold settles with its job."""
+
+        row = self._one("edit_deliveries", job_id=job_id, status="reserved")
+        if row is not None:
+            now = self._now()
+            row.update(status=status, settled_at=now, updated_at=now)
+
+    def _record_edit_delivery(self, job: dict[str, Any], revision_id: str, delivered: bool) -> None:
+        """_record_edit_delivery: the hold an AI edit's committed revision takes."""
+
+        if self._one("edit_deliveries", job_id=job["id"]) is not None:
+            return
+        payload = cast(dict[str, Any], job.get("payload") or {})
+        stamped = payload.get("session_id")
+        if stamped is not None:
+            found = self._one("brain_sessions", id=stamped, project_id=job["project_id"])
+            session_id = found["id"] if found is not None else None
+        else:
+            found = self._one("brain_sessions", project_id=job["project_id"])
+            if found is None:
+                raise refuse("session_not_found")
+            session_id = found["id"]
+        slides = payload.get("slides_changed")
+        if not isinstance(slides, int):
+            fixes = payload.get("fixes")
+            slides = len(cast(list[Any], fixes)) if isinstance(fixes, list) else 0
+        now = self._now()
+        self._rows("edit_deliveries").append(
+            {
+                "job_id": job["id"],
+                "project_id": job["project_id"],
+                "session_id": session_id,
+                "revision_id": revision_id,
+                "slides_changed": slides,
+                "status": "delivered" if delivered else "reserved",
+                "notice_acknowledged": False,
+                "created_at": now,
+                "settled_at": now if delivered else None,
+                "updated_at": now,
+            }
+        )
+
+    def acknowledge_edit_notices(self, params: dict[str, Any]) -> int:
+        """Mark settled rows' notices as folded into the session."""
+
+        wanted = set(cast(list[str], params.get("p_job_ids") or []))
+        count = 0
+        for row in self._rows("edit_deliveries"):
+            if (
+                row.get("session_id") == params.get("p_session_id")
+                and row["job_id"] in wanted
+                and row["status"] != "reserved"
+                and not row.get("notice_acknowledged")
+            ):
+                row.update(notice_acknowledged=True, updated_at=self._now())
+                count += 1
+        return count
 
     def _parents_of(self, render_job_id: str) -> list[dict[str, Any]]:
         return [
@@ -419,6 +479,7 @@ class DocumentRpcEmulator:
             progress={**(job.get("progress") or {}), "step": "done", "delivery": "failed"},
         )
         self._refund_job(job)
+        self._settle_edit_delivery(str(job["id"]), "released")
 
     def _settle_failure(self, job: dict[str, Any], error: str) -> None:
         """Fail the job and refund its stamped charge once (one SQL transaction)."""
@@ -686,6 +747,8 @@ class DocumentRpcEmulator:
             if outcome["revision_id"] is None
             else "ready"
         )
+        if job["job_type"] == "presentation_edit" and outcome["revision_id"] is not None:
+            self._record_edit_delivery(job, str(outcome["revision_id"]), render_job is None)
         job.update(
             status="committed" if render_job is not None else "completed",
             render_job_id=render_job,
@@ -914,6 +977,7 @@ class DocumentRpcEmulator:
             "fail_job": self.fail_job,
             "request_render": self.request_render,
             "record_proposal_validation": self.record_proposal_validation,
+            "acknowledge_edit_notices": self.acknowledge_edit_notices,
         }.get(fn)
         if handler is None:
             return None

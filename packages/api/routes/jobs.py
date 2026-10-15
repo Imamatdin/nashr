@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
 from packages.core.enums import ExportFormat, GenerationPackage, Language
+from packages.core.export_formats import PRIMARY_FORMATS
 from packages.platform.credits import CreditLedger
 from packages.platform.jobs import (
     DuplicateActiveJobError,
@@ -292,9 +293,7 @@ async def enqueue_job(request: Request, body: EnqueueRequest, auth: Authenticate
         # Web delivery is all three primary formats (SPEC §0 rule 7): an
         # omitted list means html+pptx+pdf, not the orchestrator's bot-era
         # two-format default (P2 gate defect 3).
-        "formats": [f.value for f in body.formats]
-        if body.formats
-        else [ExportFormat.HTML.value, ExportFormat.PPTX_EDITABLE.value, ExportFormat.PDF.value],
+        "formats": [f.value for f in (body.formats or PRIMARY_FORMATS)],
         "answers": body.answers,
         "topic": body.topic or None,
     }

@@ -578,7 +578,7 @@ async def test_turn_still_runs_when_the_fix_allowance_is_spent() -> None:
     db, _fake, deck, _sources = await _provision(package=GenerationPackage.PRESENTATION_BASIC)
     session = await load_session(db, "proj-1")
     assert session is not None
-    session.fixes_used = 1  # basic's single edit already used
+    session.inline_fixes_used = 1  # basic's single edit already used
     await persist_session(db, session)
 
     driver = ScriptedStubDriver()
@@ -912,7 +912,7 @@ async def test_open_brain_session_false_when_the_session_write_fails() -> None:
     async def broken(*_args: Any, **_kwargs: Any) -> Any:
         raise RuntimeError("database unavailable")
 
-    db.save_brain_session = broken
+    db.insert_brain_session = broken
 
     can_edit = await pf._open_brain_session(
         db,

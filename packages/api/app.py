@@ -28,6 +28,7 @@ from packages.api.routes.public import router as public_router
 from packages.api.routes.research import router as research_router
 from packages.api.routes.sources import router as sources_router
 from packages.api.services.identity import IdentityService
+from packages.api.state_errors import install_state_error_handlers
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
@@ -99,6 +100,7 @@ def create_app(
     app.include_router(public_router)
     app.include_router(research_router)
     app.add_api_route("/health", _health, methods=["GET"])
+    install_state_error_handlers(app)
 
     return app
 

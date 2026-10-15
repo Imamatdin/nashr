@@ -1,25 +1,25 @@
-"""Settle AI edits whose exports render asynchronously (B1-FIX2).
+"""What the session knows about AI edits whose exports render asynchronously.
 
 A queued web edit commits its revision in the job's transaction and leaves the
 job ``committed`` while a render job publishes the exports. The edit is
-*delivered* only when that render succeeds, so the session holds one fix of the
-allowance for it (a :class:`PendingDelivery`) until the job settles:
+*delivered* only when that render succeeds. Since B1-FIX3 the hold it takes on the
+allowance is an ``edit_deliveries`` row written by migration 016 in the same
+transactions that commit the edit and settle its render, so no worker crash or
+lost session write can lose it (Codex A1):
 
-* ``completed``: the exports are published; the fix is counted and the chat says
-  the edit is ready.
-* ``delivery_failed`` (or any other end without delivery): the hold is released,
-  so the allowance is restored, and the chat says the edit was saved but its
-  files could not be produced.
+* ``reserved``: committed, still rendering; it holds one fix;
+* ``delivered``: the exports are published; the fix is counted and the chat says
+  the edit is ready;
+* ``released``: the render failed for good; the allowance is restored and the
+  chat says the edit was saved but its files could not be produced.
 
-Settlement reads the job row, which the database settles in the same
-transaction as the render's own outcome, so it is correct whoever ended the
-render: the worker, a retry, or the reaper. It runs whenever a session is loaded
-and is idempotent: a settled hold is gone, so it is never counted twice.
+This module only projects those rows onto a loaded session: the counts, the
+holds, and the chat notice of each settled row that no session write has folded
+in yet. Projecting is a pure read (Codex A2: a GET never writes).
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Final
 
 from packages.bot.sessions.models import (
@@ -29,9 +29,7 @@ from packages.bot.sessions.models import (
     PendingDelivery,
 )
 from packages.core.enums import Language
-from packages.platform.jobs import JobQueue, JobStatus
-
-logger = logging.getLogger(__name__)
+from packages.platform.edit_deliveries import EditDelivery, EditDeliveryStatus
 
 # What the chat tells the user, in the deck's language. ``{n}`` is the number of
 # slides the edit changed.
@@ -74,11 +72,6 @@ _NOTES: Final[dict[Language, dict[DeliveryNoteKind, str]]] = {
     },
 }
 
-# Job states that still mean "the render may yet deliver".
-_IN_FLIGHT: Final[frozenset[JobStatus]] = frozenset(
-    {JobStatus.QUEUED, JobStatus.PROCESSING, JobStatus.COMMITTED}
-)
-
 
 def delivery_note_text(language: Language, kind: DeliveryNoteKind, slides_changed: int) -> str:
     """The localized chat line for one settled delivery."""
@@ -92,43 +85,86 @@ def fixes_reserved(session: BrainSession) -> int:
     return session.fixes_used + len(session.pending_deliveries)
 
 
-async def settle_deliveries(queue: JobQueue, session: BrainSession) -> bool:
-    """Settle every pending delivery whose job has ended; True when the session changed."""
+def apply_deliveries(session: BrainSession, rows: list[EditDelivery]) -> None:
+    """Project the session's edit_deliveries rows onto it (no I/O, no writes).
 
-    if not session.pending_deliveries:
-        return False
+    Delivered rows are counted, reserved rows are holds, and every settled row
+    whose notice is neither acknowledged nor already folded in becomes an unfolded
+    notice placed after the conversation as it stands.
+    """
+
     language = session.deck.language if session.deck is not None else Language.UZ
-    still_pending: list[PendingDelivery] = []
-    changed = False
-    for pending in session.pending_deliveries:
-        job = await queue.get_job(pending.job_id)
-        if job is not None and job.status in _IN_FLIGHT:
-            still_pending.append(pending)
+    folded = {note.job_id for note in session.delivery_notes}
+    session.delivered_edits = sum(1 for row in rows if row.status is EditDeliveryStatus.DELIVERED)
+    session.pending_deliveries = [
+        PendingDelivery(
+            job_id=row.job_id, revision_id=row.revision_id, slides_changed=row.slides_changed
+        )
+        for row in rows
+        if row.status is EditDeliveryStatus.RESERVED
+    ]
+    unfolded: list[DeliveryNote] = []
+    for row in sorted(rows, key=_settled_order):
+        if row.status is EditDeliveryStatus.RESERVED:
             continue
-        delivered = job is not None and job.status is JobStatus.COMPLETED
-        kind = DeliveryNoteKind.DELIVERED if delivered else DeliveryNoteKind.FAILED
-        if delivered:
-            session.fixes_used += 1
-        session.delivery_notes = [
-            *session.delivery_notes,
+        if row.notice_acknowledged or row.job_id in folded:
+            continue
+        kind = (
+            DeliveryNoteKind.DELIVERED
+            if row.status is EditDeliveryStatus.DELIVERED
+            else DeliveryNoteKind.FAILED
+        )
+        unfolded.append(
             DeliveryNote(
                 kind=kind,
-                job_id=pending.job_id,
-                text=delivery_note_text(language, kind, pending.slides_changed),
+                job_id=row.job_id,
+                text=delivery_note_text(language, kind, row.slides_changed),
                 history_index=len(session.history),
-            ),
-        ][-_MAX_NOTES:]
-        logger.info(
-            "edit_delivery_settled project=%s job=%s status=%s",
-            session.project_id,
-            pending.job_id,
-            job.status.value if job is not None else "missing",
+            )
         )
-        changed = True
-    session.pending_deliveries = still_pending
-    return changed
+    session.unfolded_notes = unfolded
 
 
-_MAX_NOTES: Final[int] = 50
+def fold_notes(session: BrainSession) -> list[str]:
+    """Move unfolded notices into the persisted ones; returns their job ids.
 
-__all__ = ["delivery_note_text", "fixes_reserved", "settle_deliveries"]
+    A writer calls this before it saves, so a notice keeps the place in the
+    conversation where it was first shown, and acknowledges the ids after the save.
+    """
+
+    if not session.unfolded_notes:
+        return []
+    folded = [note.job_id for note in session.unfolded_notes]
+    session.delivery_notes = [*session.delivery_notes, *session.unfolded_notes][-MAX_NOTES:]
+    session.unfolded_notes = []
+    return folded
+
+
+def visible_notes(session: BrainSession) -> list[DeliveryNote]:
+    """Every notice a reader shows: folded ones, then unfolded ones, once per job."""
+
+    seen: set[str] = set()
+    notes: list[DeliveryNote] = []
+    for note in [*session.delivery_notes, *session.unfolded_notes]:
+        if note.job_id in seen:
+            continue
+        seen.add(note.job_id)
+        notes.append(note)
+    return notes
+
+
+def _settled_order(row: EditDelivery) -> str:
+    stamp = row.settled_at or row.created_at
+    return stamp.isoformat() if stamp is not None else ""
+
+
+MAX_NOTES: Final[int] = 50
+
+__all__ = [
+    "MAX_NOTES",
+    "apply_deliveries",
+    "delivery_note_text",
+    "fixes_reserved",
+    "fold_notes",
+    "visible_notes",
+]

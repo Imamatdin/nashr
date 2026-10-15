@@ -35,6 +35,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 from packages.core.enums import ExportFormat, GenerationPackage
+from packages.core.export_formats import (
+    PRIMARY_FORMATS,
+    InvalidExportFormatsError,
+    from_wire_formats,
+    parse_export_formats,
+    wire_formats,
+)
 from packages.platform.config import PlatformConfig
 from packages.platform.credits import CreditLedger
 from packages.platform.database import DatabaseClient
@@ -64,7 +71,7 @@ logger = logging.getLogger("nashr.worker")
 
 POLL_INTERVAL_SECONDS = 5.0
 # What a web edit is rendered into: every primary format (SPEC §0 rule 7).
-WEB_FILE_FORMATS: tuple[str, ...] = ("html", "pdf", "pptx")
+WEB_FILE_FORMATS: tuple[str, ...] = tuple(wire_formats(PRIMARY_FORMATS))
 
 
 def _worker_id() -> str:
@@ -149,10 +156,6 @@ class JobRunner:
                     "worker_fail_row_not_ours %s",
                     json.dumps({"job_id": job.id, "step": str(step)}),
                 )
-            if job.job_type is JobType.PRESENTATION_RENDER:
-                # A render that failed for good settled the edits it was delivering
-                # (delivery_failed); tell their sessions now rather than on next read.
-                await self._settle_session(job.project_id)
 
     def _executor_for(self, job_type: JobType) -> Callable[[GenerationJob], Awaitable[None]] | None:
         """The coroutine that runs this job type, or None when unsupported."""
@@ -213,30 +216,12 @@ class JobRunner:
             json.dumps({"job_id": job.id, "project_id": job.project_id, **outcome}),
         )
 
-    async def _settle_session(self, project_id: str) -> None:
-        """Settle the project's pending edit deliveries now; best-effort.
-
-        Loading the session settles them against their jobs and persists the
-        result. Any reader would do the same later, so a failure here only delays
-        the chat notice.
-        """
-
-        try:
-            from packages.bot.sessions.store import load_session
-
-            await load_session(self._db, project_id)
-        except Exception as exc:
-            logger.warning(
-                "worker_session_settle_failed %s",
-                json.dumps({"project_id": project_id, "error_type": type(exc).__name__}),
-            )
-
     async def _run_presentation_render(self, job: GenerationJob) -> None:
         """Render one immutable revision and publish every requested format, or fail."""
 
         from aiogram import Bot
 
-        from packages.bot.orchestrators.deck_revisions import render_and_publish, render_formats
+        from packages.bot.orchestrators.deck_revisions import render_and_publish
         from packages.core.models.presentation import DeckSpec
 
         payload = job.payload
@@ -276,7 +261,7 @@ class JobRunner:
                     document_id=revision.document_id,
                     revision_id=revision_id,
                     deck=deck,
-                    formats=render_formats(missing),
+                    formats=from_wire_formats(missing),
                     progress=self._progress(job),
                 )
             finally:
@@ -291,8 +276,8 @@ class JobRunner:
                 "rendered_formats": missing,
             },
         )
-        # complete_job delivered every job this render was publishing for.
-        await self._settle_session(job.project_id)
+        # complete_job delivered every job this render was publishing for, and
+        # their edit holds, in its own transaction (B1-FIX3): no session write.
 
     async def _run_presentation_edit(self, job: GenerationJob) -> None:
         """Apply a parked fix batch against its base revision; commit or propose with the job.
@@ -416,14 +401,17 @@ class JobRunner:
         # pipeline stack just to parse args.
         from aiogram import Bot
 
-        from packages.bot.orchestrators.deck_revisions import file_formats, renderable
+        from packages.bot.orchestrators.deck_revisions import renderable
 
         payload = job.payload
         package = GenerationPackage(str(payload.get("package", "presentation_standard")))
         formats_raw = payload.get("formats")
         formats = [ExportFormat.HTML, ExportFormat.PPTX_EDITABLE]
-        if isinstance(formats_raw, list) and formats_raw:
-            formats = [ExportFormat(str(f)) for f in cast(list[Any], formats_raw)]
+        if formats_raw is not None:
+            try:
+                formats = parse_export_formats(formats_raw)
+            except InvalidExportFormatsError as exc:
+                raise RuntimeError(f"presentation_generation payload formats: {exc}") from None
         sources_raw = payload.get("sources")
         file_infos: list[dict[str, object]] = []
         if isinstance(sources_raw, list):
@@ -471,7 +459,7 @@ class JobRunner:
                 else RevisionKind.REGENERATION,
                 idempotency_key=f"job:{job.id}:deck",
                 renderer_version=renderer_version(),
-                render_formats=file_formats(formats),
+                render_formats=wire_formats(formats),
                 render_max_attempts=self._config.render_max_attempts,
             )
             revision_id = renderable(outcome)

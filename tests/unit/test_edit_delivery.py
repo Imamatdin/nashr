@@ -1,11 +1,12 @@
 """Asynchronous delivery of queued AI edits and paid jobs (B1-FIX2), over the 016 emulator.
 
 A queued edit commits with its job, which stays ``committed`` while the render the
-commit queued publishes the exports. The session holds one fix for it until that
-render settles the job: delivered, the fix is counted and the chat says the edit
-is ready; failed for good, the hold is released (the allowance is restored) and
-the chat says so in the deck's language. The real-PostgreSQL versions of the
-database half live in ``tests/db/test_b1_fix2_regressions.py``.
+commit queued publishes the exports. Its edit_deliveries row holds one fix until
+that render settles the job: delivered, the fix is counted and the chat says the
+edit is ready; failed for good, the hold is released (the allowance is restored)
+and the chat says so in the deck's language. The real-PostgreSQL versions of the
+database half live in ``tests/db/test_b1_fix2_regressions.py`` and
+``tests/db/test_b1_fix3_regressions.py``.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from typing import Any, cast
 import pytest
 
 from packages.bot.sessions.budget import session_fix_limit
-from packages.bot.sessions.delivery import delivery_note_text, settle_deliveries
+from packages.bot.sessions.delivery import delivery_note_text, visible_notes
 from packages.bot.sessions.models import DeliveryNoteKind
 from packages.bot.sessions.store import load_session, persist_session
 from packages.core.enums import Language
@@ -24,7 +25,7 @@ from packages.core.models.presentation import SlideFix
 from packages.platform.database import DatabaseClient
 from packages.platform.document_models import RevisionKind
 from packages.platform.document_store import DocumentStore
-from packages.platform.jobs import JobQueue, JobStatus
+from packages.platform.jobs import JobStatus
 from packages.sessions_core.apply import FixStatus
 from packages.sessions_core.chat import dispatch_fix, history_for_wire
 from tests.unit.test_brain_session import _provision  # pyright: ignore[reportPrivateUsage]
@@ -67,7 +68,8 @@ async def _queued_edit(
             "worker_id": "w1",
             "attempts": 1,
             "max_attempts": 1,
-            "payload": {},
+            # As the chat route stamps it (B1-FIX3).
+            "payload": {"slides_changed": 1},
             "progress": {},
             "heartbeat_at": "2026-01-01T00:00:00+00:00",
         }
@@ -189,11 +191,20 @@ async def test_published_edit_is_counted_once_and_the_chat_says_it_is_ready() ->
     assert session is not None
     assert session.fixes_used == 1 and session.pending_deliveries == []
     expected = delivery_note_text(deck.language, DeliveryNoteKind.DELIVERED, 1)
-    assert [note.text for note in session.delivery_notes] == [expected]
+    assert [note.text for note in visible_notes(session)] == [expected]
     assert history_for_wire(session)[-1] == {"role": "system", "text": expected}
-    # Settling is idempotent: a second read counts nothing again.
+    # Reading is idempotent: a second read counts nothing again, shows one notice.
     again = await load_session(db, "proj-1")
-    assert again is not None and again.fixes_used == 1 and len(again.delivery_notes) == 1
+    assert again is not None and again.fixes_used == 1 and len(visible_notes(again)) == 1
+    # The next session write folds the notice in and acknowledges its row, so it
+    # keeps its place and is still shown exactly once.
+    await persist_session(db, again)
+    after = await load_session(db, "proj-1")
+    assert after is not None and after.fixes_used == 1
+    assert [note.text for note in after.delivery_notes] == [expected]
+    assert after.unfolded_notes == [] and len(visible_notes(after)) == 1
+    [row] = _tables(db)["edit_deliveries"]
+    assert row["notice_acknowledged"] is True
 
 
 async def test_a_render_failure_with_attempts_left_is_retried_and_the_edit_stays_held() -> None:
@@ -230,7 +241,7 @@ async def test_a_render_that_fails_for_good_restores_the_allowance_and_says_so()
     assert session is not None
     assert session.fixes_used == 0 and session.pending_deliveries == []
     expected = delivery_note_text(deck.language, DeliveryNoteKind.FAILED, 1)
-    assert [note.text for note in session.delivery_notes] == [expected]
+    assert [note.text for note in visible_notes(session)] == [expected]
     # The revision the edit committed stays: only the delivery failed.
     assert session.revision_id is not None
 
@@ -240,7 +251,7 @@ async def test_edits_still_rendering_count_against_the_allowance() -> None:
     await _park_a_dangling_call(db)
     session = await _session(db)
     limit = session_fix_limit(session.package)
-    session.fixes_used = limit - 1
+    session.inline_fixes_used = limit - 1
     await persist_session(db, session)
     _first, _job_id = await _queued_edit(db, deck)
 
@@ -255,7 +266,7 @@ async def test_a_failed_delivery_frees_the_held_fix_for_the_next_edit() -> None:
     db, _fake, deck, _sources = await _provision()
     await _park_a_dangling_call(db)
     session = await _session(db)
-    session.fixes_used = session_fix_limit(session.package) - 1
+    session.inline_fixes_used = session_fix_limit(session.package) - 1
     await persist_session(db, session)
     _first, job_id = await _queued_edit(db, deck, attempts=1)
     await _render_fails(db, _job(db, job_id)["render_job_id"])
@@ -267,29 +278,33 @@ async def test_a_failed_delivery_frees_the_held_fix_for_the_next_edit() -> None:
     assert second.status is FixStatus.COMMITTED
 
 
-async def test_a_delivery_whose_job_is_gone_is_released_not_counted() -> None:
+async def test_a_delivery_whose_job_is_gone_holds_nothing_and_counts_nothing() -> None:
     db, _fake, deck, _sources = await _provision()
     await _park_a_dangling_call(db)
     _result, job_id = await _queued_edit(db, deck)
+    # Deleting a job cascades to its edit_deliveries row (as the foreign key does).
     _tables(db)["generation_jobs"] = [
         row for row in _tables(db)["generation_jobs"] if row["id"] != job_id
+    ]
+    _tables(db)["edit_deliveries"] = [
+        row for row in _tables(db)["edit_deliveries"] if row["job_id"] != job_id
     ]
 
     session = await load_session(db, "proj-1")
 
     assert session is not None
     assert session.fixes_used == 0 and session.pending_deliveries == []
-    assert session.delivery_notes[-1].kind is DeliveryNoteKind.FAILED
 
 
-async def test_settle_deliveries_leaves_in_flight_jobs_alone() -> None:
+async def test_an_in_flight_delivery_stays_a_hold_on_every_read() -> None:
     db, _fake, deck, _sources = await _provision()
     await _park_a_dangling_call(db)
     _result, job_id = await _queued_edit(db, deck)
-    session = await _session(db)
 
-    assert await settle_deliveries(JobQueue(db), session) is False
-    assert [p.job_id for p in session.pending_deliveries] == [job_id]
+    for _ in range(2):
+        session = await _session(db)
+        assert [p.job_id for p in session.pending_deliveries] == [job_id]
+        assert session.fixes_used == 0 and session.delivery_notes == []
 
 
 @pytest.mark.parametrize("language", list(Language))

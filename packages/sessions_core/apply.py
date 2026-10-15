@@ -9,9 +9,12 @@ so the next turn's history stays coherent.
 Allowance rule: one edit is consumed only when the edit was delivered —
 committed, rendered and published. A refused, failed, unchanged, conflicting or
 proposed edit consumes nothing. When the queued job's own render publishes the
-exports (``deliver=None``), the committed edit holds one fix as a pending delivery
-until that render settles (:mod:`packages.bot.sessions.delivery`): delivered, it
-is counted; failed, the hold is released and the allowance restored.
+exports (``deliver=None``), the hold and the count are not this module's to
+write: ``finish_generation_job`` records the edit's edit_deliveries row in the
+commit's own transaction and the render settles it (B1-FIX3), so a worker that
+dies right after the commit loses neither. The session here only mirrors that row
+in memory for the turn's reply. The bot's inline path (``deliver`` given) counts
+its delivered edit on the session's inline counter, the only writer of it.
 """
 
 from __future__ import annotations
@@ -24,8 +27,13 @@ from typing import Any, Protocol
 
 from packages.bot.sessions.budget import has_fixes_remaining, session_fix_limit
 from packages.bot.sessions.delivery import fixes_reserved
+from packages.bot.sessions.fix_responses import (
+    committed_response,
+    delivered_response,
+    proposed_response,
+    unchanged_response,
+)
 from packages.bot.sessions.models import ApprovalState, BrainSession, PendingDelivery
-from packages.bot.sessions.roster_format import render_roster_payload
 from packages.bot.sessions.store import hydrate_figures, persist_session
 from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
 from packages.core.enums import ExportFormat, GenerationPackage
@@ -216,7 +224,7 @@ async def apply_fix_batch(
         return await _finish(
             db,
             session,
-            {"unchanged": True},
+            unchanged_response(),
             call_count,
             FixDispatchResult(FixStatus.UNCHANGED, revision_id=outcome.revision_id),
         )
@@ -224,10 +232,7 @@ async def apply_fix_batch(
         return await _finish(
             db,
             session,
-            {
-                "proposed": True,
-                "detail": "the deck changed while this edit ran; it was saved for review",
-            },
+            proposed_response(),
             call_count,
             FixDispatchResult(
                 FixStatus.PROPOSED,
@@ -243,6 +248,8 @@ async def apply_fix_batch(
         assert delivery_job_id is not None
         # Images were generated (and paid for) whether or not the render succeeds.
         session.accumulated_image_count += int(batch.image_count)
+        # finish_generation_job recorded the edit's hold (or, when every format
+        # already existed, its delivery) with the commit; mirror it for the reply.
         if outcome.job_status == JobStatus.COMMITTED.value:
             session.pending_deliveries = [
                 *session.pending_deliveries,
@@ -253,27 +260,17 @@ async def apply_fix_batch(
             return await _finish(
                 db,
                 session,
-                {
-                    "committed": True,
-                    "delivery": "rendering",
-                    "slides_changed": len(fixes),
-                    "roster": render_roster_payload(edited),
-                },
+                committed_response(edited, len(fixes)),
                 call_count,
                 FixDispatchResult(
                     FixStatus.COMMITTED, slides_changed=len(fixes), revision_id=revision_id
                 ),
             )
-        # Every format already existed for this revision: delivered in the commit.
-        session.fixes_used += 1
+        session.delivered_edits += 1
         return await _finish(
             db,
             session,
-            {
-                "delivered": True,
-                "slides_changed": len(fixes),
-                "roster": render_roster_payload(edited),
-            },
+            delivered_response(edited, len(fixes)),
             call_count,
             FixDispatchResult(
                 FixStatus.DELIVERED, slides_changed=len(fixes), revision_id=revision_id
@@ -297,16 +294,12 @@ async def apply_fix_batch(
             ),
         )
 
-    session.fixes_used += 1
+    session.inline_fixes_used += 1
     session.accumulated_image_count += int(batch.image_count)
     return await _finish(
         db,
         session,
-        {
-            "delivered": True,
-            "slides_changed": len(fixes),
-            "roster": render_roster_payload(edited),
-        },
+        delivered_response(edited, len(fixes)),
         call_count,
         FixDispatchResult(
             FixStatus.DELIVERED,

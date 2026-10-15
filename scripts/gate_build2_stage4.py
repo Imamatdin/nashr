@@ -306,7 +306,7 @@ async def _run_gate(
     limit = session_fix_limit(_PACKAGE)
     capped = await load_session(db, project_id)
     assert capped is not None
-    capped.fixes_used = limit  # the tier's edits are spent
+    capped.inline_fixes_used = limit  # the tier's edits are spent (bot inline counter)
     await persist_session(db, capped)
     driver.queue(
         StubResponse(

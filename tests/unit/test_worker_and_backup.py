@@ -812,6 +812,10 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     world = _World(tmp_path, job)
     document_id, base = world.seed_revision("Before")
     job.payload.update(document_id=document_id, base_revision_id=base)
+    # An edit is parked on a session, whose allowance its commit holds a fix of.
+    world.fake.tables.setdefault("brain_sessions", []).append(
+        {"id": "session-p1", "project_id": "p1", "version": 3}
+    )
     world.patch(monkeypatch)
     edited = _render_deck("After the AI edit")
 
@@ -844,6 +848,13 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     assert renders[0]["payload"]["formats"] == ["html", "pdf", "pptx"]
     assert row["render_job_id"] == renders[0]["id"] == seen["outcome"].render_job_id
     assert world.queue.completed == [] and world.queue.failed == []
+    # The hold was recorded with the commit, not by a later session write.
+    [hold] = world.fake.tables["edit_deliveries"]
+    assert (hold["job_id"], hold["session_id"], hold["status"]) == (
+        job.id,
+        "session-p1",
+        "reserved",
+    )
 
 
 @pytest.mark.asyncio

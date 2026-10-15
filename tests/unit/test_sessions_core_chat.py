@@ -413,7 +413,7 @@ async def test_user_fix_turn_parks_the_unanswered_call_durably() -> None:
 async def test_fix_turn_with_the_allowance_spent_answers_the_call() -> None:
     db, _fake, _deck, _sources = await _provision(package=GenerationPackage.PRESENTATION_BASIC)
     session = await _session(db)
-    session.fixes_used = 1  # basic's single edit is gone
+    session.inline_fixes_used = 1  # basic's single edit is gone
     await persist_session(db, session)
     driver = _FakeDriver(
         reply_text="on it",
@@ -603,7 +603,7 @@ async def test_dispatch_refuses_before_calling_the_runner_when_exhausted() -> No
     db, _fake, deck, _sources = await _provision(package=GenerationPackage.PRESENTATION_BASIC)
     await _park_a_dangling_call(db)
     session = await _session(db)
-    session.fixes_used = 1
+    session.inline_fixes_used = 1
     await persist_session(db, session)
     runner = _FakeOrchestrator(deck)
 

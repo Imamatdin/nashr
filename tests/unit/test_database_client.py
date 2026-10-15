@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from postgrest.exceptions import APIError
 
 from packages.core.enums import (
     AudienceType,
@@ -51,6 +52,26 @@ from tests.unit.fake_documents import DocumentRpcEmulator
 # --------------------------------------------------------------- fakes
 
 OWNER_TELEGRAM_ID = 777_001
+
+
+# Column defaults the real tables apply to an insert that omits them.
+_COLUMN_DEFAULTS: dict[str, dict[str, Any]] = {
+    "brain_sessions": {
+        "history_json": [],
+        "sources_json": {},
+        "figures_json": [],
+        "formats_json": [],
+        "approval_state": "idle",
+        "pending_action_json": None,
+        "fixes_used": 0,
+        "accumulated_cost_usd": 0,
+        "accumulated_image_count": 0,
+        "findings_json": None,
+        "revision_id": None,
+        "delivery_notes_json": [],
+        "version": 0,
+    },
+}
 
 
 class _FakeQuery:
@@ -88,6 +109,10 @@ class _FakeQuery:
     def update(self, payload: dict[str, Any]) -> _FakeQuery:
         self._mode = "update"
         self._payload = payload
+        return self
+
+    def delete(self) -> _FakeQuery:
+        self._mode = "delete"
         return self
 
     def upsert(self, payload: dict[str, Any], *, on_conflict: str = "") -> _FakeQuery:
@@ -150,6 +175,9 @@ class FakeSupabaseClient:
         self.updates: list[tuple[str, dict[str, Any], list[tuple[str, Any]]]] = []
         self.documents = DocumentRpcEmulator(self.tables)
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+        self.deletes: list[tuple[str, list[tuple[str, Any]]]] = []
+        # Called before every select with (table, filters): a test barrier hook.
+        self.before_select: Callable[[str, list[tuple[str, Any]]], None] | None = None
 
     def rpc(self, fn: str, params: dict[str, Any]) -> SimpleNamespace:
         """The migration-016 document functions, emulated over the fake tables."""
@@ -203,6 +231,8 @@ class FakeSupabaseClient:
         lt_filters = lt_filters or []
         in_filters = in_filters or []
         rows = self.tables.setdefault(table, [])
+        if mode == "select" and self.before_select is not None:
+            self.before_select(table, list(filters))
         if mode == "select":
             filtered = [r for r in rows if self._matches(r, filters, in_filters)]
             filtered = [
@@ -224,12 +254,29 @@ class FakeSupabaseClient:
                 wanted = [c.strip() for c in select_cols.split(",")]
                 data = [{c: r.get(c) for c in wanted} for r in filtered]
             return SimpleNamespace(data=data)
+        if mode == "delete":
+            gone = [r for r in rows if self._matches(r, filters, in_filters)]
+            self.tables[table] = [r for r in rows if not self._matches(r, filters, in_filters)]
+            self.deletes.append((table, list(filters)))
+            if table == "brain_sessions":
+                ids = {r.get("id") for r in gone}
+                for delivery in self.tables.get("edit_deliveries", []):
+                    if delivery.get("session_id") in ids:
+                        delivery["session_id"] = None  # on delete set null
+            return SimpleNamespace(data=gone)
         if mode == "insert":
             assert payload is not None
-            row = dict(payload)
+            if table == "brain_sessions" and any(
+                r.get("project_id") == payload.get("project_id") for r in rows
+            ):
+                # brain_sessions_project_id_key, as PostgREST reports it.
+                raise APIError(
+                    {"message": "duplicate key", "code": "23505", "hint": None, "details": None}
+                )
+            row = {**_COLUMN_DEFAULTS.get(table, {}), **payload}
             row.setdefault("id", str(uuid.uuid4()))
             rows.append(row)
-            self.inserts.append((table, dict(row)))
+            self.inserts.append((table, dict(payload)))
             return SimpleNamespace(data=[row])
         if mode == "update":
             assert payload is not None
@@ -760,23 +807,42 @@ async def test_get_deck_reads_the_decks_view_and_never_writes() -> None:
 
 async def test_brain_session_persists_the_revision_it_edits() -> None:
     db, _ = _make_db()
-    await db.save_brain_session(
+    created = await db.insert_brain_session(
         "proj-1",
-        history_json=[],
-        sources_json={},
-        package="presentation_standard",
-        formats_json=["html"],
-        approval_state="idle",
-        pending_action_json=None,
-        fixes_used=0,
-        accumulated_cost_usd=0.0,
-        accumulated_image_count=0,
-        revision_id="revision-7",
+        {
+            "history_json": [],
+            "sources_json": {},
+            "package": "presentation_standard",
+            "formats_json": ["html"],
+            "revision_id": "revision-7",
+        },
     )
 
     row = await db.get_brain_session("proj-1")
 
     assert row is not None and row["revision_id"] == "revision-7"
+    assert row["version"] == 0 and row["id"] == created["id"]
+
+
+async def test_brain_session_writes_are_compare_and_swap_on_version() -> None:
+    # Imported here: tests/unit/test_b1_fix3_regressions.py reuses this module's
+    # fakes against fdb14bc's packages, which have no such error.
+    from packages.platform.database import SessionVersionConflictError
+
+    db, _ = _make_db()
+    created = await db.insert_brain_session("proj-1", {"package": "presentation_standard"})
+
+    moved = await db.update_brain_session(created["id"], 0, {"revision_id": "r2"})
+    assert moved["version"] == 1 and moved["revision_id"] == "r2"
+    # A writer still holding version 0 is refused, and writes nothing.
+    with pytest.raises(SessionVersionConflictError):
+        await db.update_brain_session(created["id"], 0, {"revision_id": "stale"})
+    with pytest.raises(SessionVersionConflictError):
+        await db.delete_brain_session(created["id"], 0)
+    with pytest.raises(SessionVersionConflictError):
+        await db.insert_brain_session("proj-1", {"package": "presentation_standard"})
+    row = await db.get_brain_session("proj-1")
+    assert row is not None and (row["revision_id"], row["version"]) == ("r2", 1)
 
 
 async def test_get_deck_returns_none_when_absent() -> None:
