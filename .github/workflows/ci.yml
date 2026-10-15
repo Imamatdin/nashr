@@ -50,6 +50,9 @@ jobs:
           python -m pytest tests/ -q -ra --junitxml=artifacts/pytest-unit.xml 2>&1 | tee artifacts/pytest-unit.log
       - name: pyright
         run: python -m pyright packages/ 2>&1 | tee artifacts/pyright.log; exit ${PIPESTATUS[0]}
+      - name: Journey console classifier tests (B1-FIX3 N1)
+        working-directory: scripts/webshots
+        run: node --test console_rules.test.mjs
       - name: Web unit tests, typecheck, production build
         working-directory: packages/web
         env:
@@ -138,6 +141,15 @@ jobs:
           set -e
           python -m tests.db.expect_failures artifacts/prefix2.xml tests/db/inventory_fix1.json \
             | tee artifacts/prefix2-verdict.log
+          exit ${PIPESTATUS[0]}
+      - name: Pre-fix run — B1-FIX3 regressions must FAIL on 016 as of fdb14bc
+        run: |
+          set +e
+          NASHR_TEST_SCHEMA=fix2 python -m pytest tests/db/test_b1_fix3_regressions.py -v -ra \
+            --junitxml=artifacts/prefix3.xml 2>&1 | tee artifacts/prefix3.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prefix3.xml tests/db/inventory_fix2.json \
+            | tee artifacts/prefix3-verdict.log
           exit ${PIPESTATUS[0]}
       - name: Mutation run — property test must FAIL with the document row lock removed
         run: |
@@ -265,23 +277,106 @@ jobs:
             !artifacts/seed.json
           retention-days: 5
 
-  journey-prefix:
-    name: browser journey pre-fix (delivery steps must FAIL on 8cc000b)
+  prefix-fdb14bc:
+    name: pre-fix — B1-FIX3 unit, web and console regressions must FAIL on fdb14bc
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # The app under test is the B1-FIX review's SHA; the journey, its fixture
-      # and the local stack stay current. The fixture adapts to 8cc000b's 016.
-      - name: The app as of 8cc000b
+      # The application is the B1-FIX2 review's SHA; the tests stay current.
+      - name: The app as of fdb14bc
         run: |
-          # checkout restores 8cc000b's files but keeps files added since; remove
+          # Files added since fdb14bc go (or the "old" app imports new modules),
+          # except the new tests themselves.
+          git diff --name-only --diff-filter=A fdb14bc HEAD -- packages scripts/worker_run_job.py \
+            | grep -v '\.test\.ts$' | xargs -r rm -f
+          git checkout fdb14bc -- packages scripts/worker_run_job.py
+          git diff --stat fdb14bc -- packages scripts/worker_run_job.py | tail -1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          # node --test's junit reporter
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/web/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Unit regressions must FAIL on fdb14bc
+        run: |
+          mkdir -p artifacts
+          set +e
+          python -m pytest tests/unit/test_b1_fix3_regressions.py -v -ra \
+            --junitxml=artifacts/prefix-unit.xml 2>&1 | tee artifacts/prefix-unit.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prefix-unit.xml tests/prefix/unit_fix2.json \
+            | tee artifacts/prefix-unit-verdict.log
+          exit ${PIPESTATUS[0]}
+      - name: Web regressions must FAIL on fdb14bc
+        working-directory: packages/web
+        run: |
+          npm ci
+          set +e
+          npx vitest run lib/use-live-job.test.ts --reporter=junit \
+            --outputFile=../../artifacts/prefix-web.xml 2>&1 | tee ../../artifacts/prefix-web.log
+          set -e
+          cd ../.. && python -m tests.db.expect_failures artifacts/prefix-web.xml \
+            tests/prefix/web_fix2.json | tee artifacts/prefix-web-verdict.log
+          exit ${PIPESTATUS[0]}
+      - name: Console classifier regressions must FAIL on fdb14bc's rules
+        working-directory: scripts/webshots
+        run: |
+          set +e
+          CONSOLE_RULES=./prefix/console_rules_fdb14bc.mjs node --test --test-reporter=junit \
+            --test-reporter-destination=../../artifacts/prefix-console.xml console_rules.test.mjs
+          set -e
+          cd ../.. && python -m tests.db.expect_failures artifacts/prefix-console.xml \
+            tests/prefix/console_fix2.json | tee artifacts/prefix-console-verdict.log
+          exit ${PIPESTATUS[0]}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prefix-fdb14bc-logs
+          path: artifacts/
+          retention-days: 5
+
+  journey-prefix:
+    name: browser journey pre-fix (${{ matrix.only }} steps must FAIL on ${{ matrix.ref }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # B1-FIX2's delivery steps against the B1-FIX review's SHA
+          - ref: 8cc000b
+            only: delivery
+            inventory: journey_inventory_fix1.json
+          # B1-FIX3's first-sight step against the B1-FIX2 review's SHA (Codex A4)
+          - ref: fdb14bc
+            only: fix3
+            inventory: journey_inventory_fix2.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The app under test is a reviewed SHA; the journey, its fixture and the
+      # local stack stay current. The fixture adapts to each SHA's 016.
+      - name: The app as of ${{ matrix.ref }}
+        run: |
+          # checkout restores the old files but keeps files added since; remove
           # those too, or the "old" app still builds against new modules.
-          git diff --name-only --diff-filter=A 8cc000b HEAD -- packages supabase | xargs -r rm -f
-          git checkout 8cc000b -- packages supabase scripts/worker_run_job.py
-          git diff --stat 8cc000b -- packages supabase scripts/worker_run_job.py | tail -1
+          git diff --name-only --diff-filter=A ${{ matrix.ref }} HEAD -- packages supabase \
+            | xargs -r rm -f
+          git checkout ${{ matrix.ref }} -- packages supabase scripts/worker_run_job.py
+          git diff --stat ${{ matrix.ref }} -- packages supabase scripts/worker_run_job.py | tail -1
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -339,24 +434,24 @@ jobs:
         run: |
           python scripts/local_stack/seed.py > artifacts/seed.json
           python scripts/local_stack/fixtures.py artifacts/fixtures
-      - name: Playwright delivery steps — must FAIL on 8cc000b
+      - name: Playwright ${{ matrix.only }} steps — must FAIL on ${{ matrix.ref }}
         working-directory: scripts/webshots
         env:
           JOURNEY_RECORD: "1"
-          JOURNEY_ONLY: delivery
+          JOURNEY_ONLY: ${{ matrix.only }}
         run: |
           npm ci
           npx playwright install --with-deps chromium
           set +e
           node evidence_journey.mjs ../../artifacts/seed.json ../../artifacts/fixtures ../../artifacts/journey
           set -e
-          python expect_journey.py ../../artifacts/journey/results.json journey_inventory_fix1.json \
+          python expect_journey.py ../../artifacts/journey/results.json ${{ matrix.inventory }} \
             | tee ../../artifacts/journey-prefix-verdict.log
           exit ${PIPESTATUS[0]}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: journey-prefix-artifacts
+          name: journey-prefix-${{ matrix.ref }}-artifacts
           path: |
             artifacts/
             !artifacts/seed.json
@@ -365,7 +460,7 @@ jobs:
   minutes:
     name: minutes used
     if: always()
-    needs: [unit, postgres, journey, journey-prefix]
+    needs: [unit, postgres, prefix-fdb14bc, journey, journey-prefix]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
