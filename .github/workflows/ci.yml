@@ -52,7 +52,7 @@ jobs:
         run: python -m pyright packages/ 2>&1 | tee artifacts/pyright.log; exit ${PIPESTATUS[0]}
       - name: Journey console classifier tests (B1-FIX3 N1)
         working-directory: scripts/webshots
-        run: node --test console_rules.test.mjs
+        run: node --test console_rules.test.mjs console_rules_empty.test.mjs
       - name: Web unit tests, typecheck, production build
         working-directory: packages/web
         env:
@@ -154,7 +154,8 @@ jobs:
       - name: Mutation run — property test must FAIL with the document row lock removed
         run: |
           set +e
-          NASHR_TEST_MUTATION=no_document_lock python -m pytest tests/db/test_property.py -v -ra \
+          NASHR_TEST_MUTATION=no_document_lock python -m pytest tests/db/test_property.py \
+            -k test_concurrent_lifecycle_preserves_every_invariant -v -ra \
             --junitxml=artifacts/mutation.xml 2>&1 | tee artifacts/mutation.log
           set -e
           python -m tests.db.expect_failures artifacts/mutation.xml tests/db/inventory_mutation.json \

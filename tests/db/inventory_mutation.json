@@ -5,9 +5,7 @@
     "tests.db.test_property::test_concurrent_lifecycle_preserves_every_invariant": {
       "expect": "fail",
       "match": "writes committed against the same pre-round head|not on the head's parent chain|no write from the head committed"
-    },
-    "tests.db.test_property::test_n_interleaved_writers_never_lose_work": {
-      "expect": "pass"
     }
-  }
+  },
+  "note": "Only the lifecycle property test is the mutation's designed detector; the interleaved-writers test may or may not catch the unlocked race by timing (Codex N2), so it is not gated here."
 }
