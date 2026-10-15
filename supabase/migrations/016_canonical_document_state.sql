@@ -917,8 +917,8 @@ $$;
 -- render it queued publishes, 'delivered' when every format already existed. The
 -- session is the one the API stamped on the job when it was parked; a job queued
 -- before that stamp existed uses the project's session. A session that has since
--- been replaced (a regeneration) owns nothing: the row is kept, unattached. A
--- replayed finish finds the row already there.
+-- been replaced (a regeneration), or none at all, owns nothing: the row is kept,
+-- unattached, and never blocks the commit. A replayed finish finds the row there.
 create or replace function _record_edit_delivery(
     p_job generation_jobs, p_revision_id uuid, p_delivered boolean
 ) returns void
@@ -937,9 +937,6 @@ begin
          where s.id::text = v_stamped and s.project_id = p_job.project_id;
     else
         select s.id into v_session from brain_sessions s where s.project_id = p_job.project_id;
-        if v_session is null then
-            raise exception 'session_not_found' using errcode = 'P0002';
-        end if;
     end if;
     if jsonb_typeof(p_job.payload -> 'slides_changed') = 'number' then
         v_slides := (p_job.payload ->> 'slides_changed')::numeric::integer;

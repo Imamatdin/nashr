@@ -13,7 +13,6 @@ that had not seen the latest version from overwriting it (A2).
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -44,7 +43,7 @@ class Edit(Paid):
         await self.admin.execute(
             "update generation_jobs set payload = $2::jsonb where id = $1",
             uuid.UUID(self.job),
-            json.dumps({"slides_changed": slides, "session_id": self.session, "history_len": 2}),
+            {"slides_changed": slides, "session_id": self.session, "history_len": 2},
         )
         return self
 

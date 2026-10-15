@@ -404,9 +404,7 @@ class DocumentRpcEmulator:
             session_id = found["id"] if found is not None else None
         else:
             found = self._one("brain_sessions", project_id=job["project_id"])
-            if found is None:
-                raise refuse("session_not_found")
-            session_id = found["id"]
+            session_id = found["id"] if found is not None else None
         slides = payload.get("slides_changed")
         if not isinstance(slides, int):
             fixes = payload.get("fixes")

@@ -440,7 +440,8 @@ B1-FIX3 (Codex Review A, A1) the hold is a database row, not session JSON:
 * `finish_generation_job` writes the row in its own transaction for a
   `presentation_edit` that committed a revision: `reserved` while its render runs,
   `delivered` when every format already existed. The session is the one the API
-  stamped on the job (`session_id`), else the project's session; `slides_changed` and
+  stamped on the job (`session_id`), else the project's session; with none (or a
+  replaced one) the row is kept unattached and never blocks the commit; `slides_changed` and
   `history_len` are stamped too. A worker that dies right after the commit therefore
   loses nothing: the hold and the commit are one transaction.
 * The render's completion (`_deliver_parents`), its final failure (`_fail_delivery`)
