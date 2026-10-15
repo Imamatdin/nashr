@@ -181,16 +181,70 @@ create table if not exists revision_validations (
 );
 
 alter table brain_sessions add column if not exists revision_id uuid;
--- AI edits committed but not yet published (their render is running): each holds
--- one fix of the allowance until its job is delivered or its delivery fails.
-alter table brain_sessions add column if not exists pending_deliveries_json jsonb
-    not null default '[]'::jsonb check (jsonb_typeof(pending_deliveries_json) = 'array');
--- What the chat tells the user about those deliveries, in the session language.
+-- Chat notices about settled edit deliveries, folded in by the session write that
+-- first carried them (edit_deliveries.notice_acknowledged), in the session language.
 alter table brain_sessions add column if not exists delivery_notes_json jsonb
     not null default '[]'::jsonb check (jsonb_typeof(delivery_notes_json) = 'array');
 alter table brain_sessions drop constraint if exists brain_sessions_revision_fk;
 alter table brain_sessions add constraint brain_sessions_revision_fk
     foreign key (revision_id) references document_revisions(id) on delete set null;
+
+-- Every session write is a compare-and-swap on version (B1-FIX3, Codex A2): the
+-- writer names the version it read in its WHERE clause and sets the next one. The
+-- trigger refuses any update that does not advance the version by exactly one, so
+-- a blind whole-row upsert (the way a stale reader used to overwrite newer history)
+-- fails instead of silently winning.
+alter table brain_sessions add column if not exists version bigint not null default 0
+    check (version >= 0);
+
+create or replace function brain_sessions_require_cas() returns trigger
+language plpgsql
+set search_path = public, pg_temp
+as $$
+begin
+    -- A referential action (revision_id set null while a project is deleted)
+    -- runs inside the foreign key's own trigger; it is not a session write.
+    if pg_trigger_depth() > 1 then
+        return new;
+    end if;
+    if new.version is distinct from old.version + 1 then
+        raise exception 'session_version_conflict' using errcode = '40001',
+            detail = format('version %s -> %s', old.version, new.version);
+    end if;
+    return new;
+end;
+$$;
+drop trigger if exists brain_sessions_require_cas on brain_sessions;
+create trigger brain_sessions_require_cas before update on brain_sessions
+    for each row execute function brain_sessions_require_cas();
+
+-- An AI edit committed by a queued job holds one fix of the allowance until its
+-- render settles (B1-FIX3, Codex A1). The row is written in finish_generation_job's
+-- transaction, so it exists exactly when the edit's revision does, whatever happens
+-- to the worker afterwards; the render's completion makes it 'delivered' and its
+-- final failure 'released', in the transactions that settle the parent job. The
+-- allowance counts delivered rows; nothing about it is stored on the session.
+-- notice_acknowledged: a session write has folded the settled row's chat notice
+-- into brain_sessions.delivery_notes_json, so readers stop deriving it.
+-- session_id is set null when a regeneration replaces the session: the new
+-- session's allowance starts from zero, and the history stays.
+create table if not exists edit_deliveries (
+    job_id              uuid primary key references generation_jobs(id) on delete cascade,
+    project_id          uuid not null references projects(id) on delete cascade,
+    session_id          uuid references brain_sessions(id) on delete set null,
+    revision_id         uuid not null references document_revisions(id) on delete cascade,
+    slides_changed      integer not null check (slides_changed between 0 and 1000),
+    status              text not null check (status in ('reserved', 'delivered', 'released')),
+    notice_acknowledged boolean not null default false,
+    created_at          timestamptz not null default now(),
+    settled_at          timestamptz,
+    updated_at          timestamptz not null default now(),
+    check ((status = 'reserved') = (settled_at is null)),
+    check (not notice_acknowledged or status <> 'reserved')
+);
+create index if not exists idx_edit_deliveries_session
+    on edit_deliveries (session_id, status);
+create index if not exists idx_edit_deliveries_project on edit_deliveries (project_id);
 
 -- ---------------------------------------------------------------------------
 -- 4. Row security: owners read; nobody writes directly
@@ -264,13 +318,21 @@ create policy revision_validations_owner_select on revision_validations
                 where r.id = revision_validations.revision_id and p.user_id = app_uid())
     );
 
+alter table edit_deliveries enable row level security;
+drop policy if exists edit_deliveries_owner_select on edit_deliveries;
+create policy edit_deliveries_owner_select on edit_deliveries
+    for select using (
+        exists (select 1 from projects p
+                where p.id = edit_deliveries.project_id and p.user_id = app_uid())
+    );
+
 revoke all on table documents, document_revisions, revision_proposals, revision_exports,
     revision_validations, document_schema_versions, document_operation_receipts,
-    proposal_validations
+    proposal_validations, edit_deliveries
     from public, anon, authenticated, service_role;
 grant select on table documents, document_revisions, revision_proposals, revision_exports,
     revision_validations, document_schema_versions, document_operation_receipts,
-    proposal_validations
+    proposal_validations, edit_deliveries
     to authenticated, service_role;
 
 -- ---------------------------------------------------------------------------
@@ -850,6 +912,87 @@ $$;
 -- render completing or failing for good settles it (completed, or
 -- delivery_failed and refunded). When every format already exists, or the result
 -- is a proposal (nothing to render until the owner accepts it), the job completes.
+-- The hold an AI edit job's committed revision takes on the allowance (B1-FIX3).
+-- Called by finish_generation_job in its own transaction: 'reserved' while the
+-- render it queued publishes, 'delivered' when every format already existed. The
+-- session is the one the API stamped on the job when it was parked; a job queued
+-- before that stamp existed uses the project's session. A session that has since
+-- been replaced (a regeneration) owns nothing: the row is kept, unattached. A
+-- replayed finish finds the row already there.
+create or replace function _record_edit_delivery(
+    p_job generation_jobs, p_revision_id uuid, p_delivered boolean
+) returns void
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+    v_session uuid;
+    v_stamped text;
+    v_slides integer := 0;
+begin
+    v_stamped := case when jsonb_typeof(p_job.payload) = 'object'
+                      then p_job.payload ->> 'session_id' end;
+    if v_stamped is not null then
+        select s.id into v_session from brain_sessions s
+         where s.id::text = v_stamped and s.project_id = p_job.project_id;
+    else
+        select s.id into v_session from brain_sessions s where s.project_id = p_job.project_id;
+        if v_session is null then
+            raise exception 'session_not_found' using errcode = 'P0002';
+        end if;
+    end if;
+    if jsonb_typeof(p_job.payload -> 'slides_changed') = 'number' then
+        v_slides := (p_job.payload ->> 'slides_changed')::numeric::integer;
+    elsif jsonb_typeof(p_job.payload -> 'fixes') = 'array' then
+        v_slides := jsonb_array_length(p_job.payload -> 'fixes');
+    end if;
+    if v_slides is null or v_slides not between 0 and 1000 then
+        raise exception 'invalid_slides_changed' using errcode = '22023';
+    end if;
+    insert into edit_deliveries (
+        job_id, project_id, session_id, revision_id, slides_changed, status, settled_at
+    ) values (
+        p_job.id, p_job.project_id, v_session, p_revision_id, v_slides,
+        case when p_delivered then 'delivered' else 'reserved' end,
+        case when p_delivered then now() end
+    )
+    on conflict (job_id) do nothing;
+end;
+$$;
+
+-- A reserved hold settles with its job: 'delivered' or 'released'. The caller holds
+-- the job's row lock and is settling it in the same transaction.
+create or replace function _settle_edit_delivery(p_job_id uuid, p_status text)
+returns void
+language sql
+set search_path = public, pg_temp
+as $$
+    update edit_deliveries
+       set status = p_status, settled_at = now(), updated_at = now()
+     where job_id = p_job_id and status = 'reserved';
+$$;
+
+-- A session write folded these settled deliveries' notices into
+-- brain_sessions.delivery_notes_json; readers stop deriving them. Service role only.
+create or replace function acknowledge_edit_notices(p_session_id uuid, p_job_ids uuid[])
+returns integer
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+declare
+    v_count integer;
+begin
+    update edit_deliveries e
+       set notice_acknowledged = true, updated_at = now()
+     where e.session_id = p_session_id
+       and e.job_id = any(coalesce(p_job_ids, '{}'::uuid[]))
+       and e.status <> 'reserved'
+       and not e.notice_acknowledged;
+    get diagnostics v_count = row_count;
+    return v_count;
+end;
+$$;
+
 drop function if exists finish_generation_job(
     uuid, text, integer, uuid, jsonb, text, integer, text, text, text[]
 );
@@ -1005,6 +1148,9 @@ begin
           ) r;
     end if;
     v_job_status := case when v_render_job is null then 'completed' else 'committed' end;
+    if v_job.job_type = 'presentation_edit' and v_result.revision_id is not null then
+        perform _record_edit_delivery(v_job, v_result.revision_id, v_render_job is null);
+    end if;
 
     update generation_jobs
        set status = v_job_status,
@@ -1028,17 +1174,24 @@ end;
 $$;
 
 -- The caller holds the render job's lock and the render just completed: every
--- parent it was delivering is now delivered.
+-- parent it was delivering is now delivered, and so is each AI edit's hold.
 create or replace function _deliver_parents(p_render_job uuid)
 returns void
 language sql
 set search_path = public, pg_temp
 as $$
-    update generation_jobs p
-       set status = 'completed',
-           completed_at = now(),
-           progress = p.progress || jsonb_build_object('step', 'done', 'delivery', 'delivered')
-     where p.render_job_id = p_render_job and p.status = 'committed';
+    with delivered as (
+        update generation_jobs p
+           set status = 'completed',
+               completed_at = now(),
+               progress = p.progress || jsonb_build_object('step', 'done', 'delivery', 'delivered')
+         where p.render_job_id = p_render_job and p.status = 'committed'
+        returning p.id
+    )
+    update edit_deliveries e
+       set status = 'delivered', settled_at = now(), updated_at = now()
+      from delivered
+     where e.job_id = delivered.id and e.status = 'reserved';
 $$;
 
 -- Complete a job that commits nothing (render, source processing). Jobs that
@@ -1123,8 +1276,8 @@ end;
 $$;
 
 -- A committed job whose delivery cannot happen: delivery_failed and refunded. Its
--- revision stays (it is canonical history); only the charge is returned. The
--- caller holds the job row lock.
+-- revision stays (it is canonical history); only the charge is returned, and an AI
+-- edit's hold on the allowance is released. The caller holds the job row lock.
 create or replace function _fail_delivery(p_job generation_jobs, p_error text)
 returns generation_jobs
 language plpgsql
@@ -1140,6 +1293,7 @@ begin
      where id = p_job.id
     returning * into v_row;
     perform _refund_job(p_job);
+    perform _settle_edit_delivery(p_job.id, 'released');
     return v_row;
 end;
 $$;
@@ -1269,6 +1423,7 @@ begin
                set status = 'completed', completed_at = now(),
                    progress = progress || jsonb_build_object('step', 'done', 'delivery', 'delivered')
              where id = v_job.id;
+            perform _settle_edit_delivery(v_job.id, 'delivered');
         elsif v_child_status in ('failed', 'cancelled', 'delivery_failed') then
             return next _fail_delivery(v_job, 'reaped: its render job ' || v_child_status);
         end if;
@@ -1608,6 +1763,13 @@ revoke all on function _refund_job(generation_jobs) from public, anon, authentic
 revoke all on function _fail_delivery(generation_jobs, text)
     from public, anon, authenticated, service_role;
 revoke all on function _deliver_parents(uuid) from public, anon, authenticated, service_role;
+revoke all on function _record_edit_delivery(generation_jobs, uuid, boolean)
+    from public, anon, authenticated, service_role;
+revoke all on function _settle_edit_delivery(uuid, text)
+    from public, anon, authenticated, service_role;
+revoke all on function brain_sessions_require_cas() from public, anon, authenticated, service_role;
+revoke all on function acknowledge_edit_notices(uuid, uuid[]) from public, anon, authenticated;
+grant execute on function acknowledge_edit_notices(uuid, uuid[]) to service_role;
 revoke all on function request_render(uuid, uuid, uuid, text, text[], integer)
     from public, anon, authenticated;
 grant execute on function request_render(uuid, uuid, uuid, text, text[], integer) to service_role;
@@ -1958,10 +2120,15 @@ alter table documents replica identity full;
 -- ===========================================================================
 -- DOWN MIGRATION (run manually, in one transaction). Additive objects
 -- (revision_proposals, revision_exports, revision_validations,
--- document_schema_versions, brain_sessions.revision_id, the refund index)
--- are left in place: pre-016 code ignores them, and proposals are kept.
+-- document_schema_versions, brain_sessions.revision_id, brain_sessions.version,
+-- edit_deliveries, the refund index) are left in place: pre-016 code ignores
+-- them, and proposals are kept.
 -- ===========================================================================
 -- begin;
+-- -- pre-016 code upserts sessions without a version: the CAS guard must go
+-- drop trigger if exists brain_sessions_require_cas on brain_sessions;
+-- drop function if exists brain_sessions_require_cas();
+-- drop function if exists acknowledge_edit_notices(uuid, uuid[]);
 -- -- decks back to a table, re-projected from the current heads (rows edited
 -- -- after 016 exist only as revisions; this copies the head of each).
 -- drop view if exists decks;  -- drops its trigger with it

@@ -1,0 +1,46 @@
+{
+  "schema": "fix2 (migrations 001-015 + 016 as Review A saw it, blob 07b3809c at fdb14bc)",
+  "module": "tests/db/test_b1_fix3_regressions.py",
+  "tests": {
+    "tests.db.test_b1_fix3_regressions::test_finish_records_the_edit_hold_in_the_commit_transaction": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_a_finish_that_rolls_back_leaves_no_hold": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_the_render_completing_delivers_the_hold_with_the_parent": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_the_render_failing_for_good_releases_the_hold_with_the_parent": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_the_reaper_settles_the_hold_when_it_settles_the_parent": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_acknowledging_a_notice_marks_only_settled_rows_of_that_session": {
+      "expect": "fail",
+      "match": "UndefinedFunctionError: function acknowledge_edit_notices\\("
+    },
+    "tests.db.test_b1_fix3_regressions::test_no_api_role_writes_a_hold_directly[authenticated]": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_no_api_role_writes_a_hold_directly[service_role]": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_only_the_owner_reads_their_holds": {
+      "expect": "fail",
+      "match": "UndefinedTableError: relation \"edit_deliveries\" does not exist"
+    },
+    "tests.db.test_b1_fix3_regressions::test_a_session_write_must_advance_the_version_by_one": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*SerializationError"
+    }
+  }
+}

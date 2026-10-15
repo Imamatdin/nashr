@@ -813,6 +813,7 @@ _MATRIX_TABLES = (
     "proposal_validations",
     "migration_reports",
     "credit_ledger_legacy_duplicate_refunds",
+    "edit_deliveries",
 )
 _MATRIX_ROLES = ("anon", "authenticated", "authenticator", "service_role", "public")
 _TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
@@ -854,3 +855,22 @@ async def test_the_privilege_matrix_is_exactly_read_only(world: World) -> None:
                 ):
                     wrong.append(f"{role} column {privilege} on {table}")
     assert wrong == []
+
+
+async def test_deleting_a_project_with_a_session_and_edit_holds_still_works(db: Db) -> None:
+    """The session CAS trigger lets the foreign keys' own cascades through (B1-FIX3)."""
+
+    from tests.db.test_b1_fix3_regressions import Edit
+
+    edit = await Edit().build_edit(db)
+    await edit.finish(attempts=1)
+    await edit.admin.execute(
+        "update brain_sessions set revision_id = (select head_revision_id from documents"
+        " where project_id = $1), version = version + 1 where project_id = $1",
+        uuid.UUID(edit.project),
+    )
+
+    await edit.admin.execute("delete from projects where id = $1", uuid.UUID(edit.project))
+
+    for table in ("brain_sessions", "edit_deliveries", "generation_jobs"):
+        assert await edit.admin.fetchval(f"select count(*) from {table}") == 0

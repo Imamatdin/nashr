@@ -5,7 +5,9 @@ with ``bootstrap_roles.sql``. ``NASHR_TEST_SCHEMA`` picks the chain:
 ``legacy`` (001–015, the pre-B1 schema test_bug_regressions must fail against),
 ``baseline`` (001–015 plus the reviewed 016, the schema test_b1_fix_regressions
 must fail against), ``fix1`` (001–015 plus 016 as of 8cc000b, the schema
-test_b1_fix2_regressions must fail against) or ``current`` (default, every migration).
+test_b1_fix2_regressions must fail against), ``fix2`` (001–015 plus 016 as of
+fdb14bc, the schema test_b1_fix3_regressions must fail against) or ``current``
+(default, every migration).
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from tests.db.support import ADMIN_URL, SCHEMA, Db, create_database, drop_databa
 LEGACY = SCHEMA == "legacy"
 BASELINE = SCHEMA == "baseline"
 FIX1 = SCHEMA == "fix1"
+FIX2 = SCHEMA == "fix2"
 CURRENT = SCHEMA == "current"
 
 

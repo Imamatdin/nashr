@@ -26,13 +26,17 @@ BASELINE_016 = Path(__file__).with_name("baseline") / "016_canonical_document_st
 # Migration 016 exactly as the B1-FIX review saw it (blob 1d38a9cc at 8cc000b).
 # The B1-FIX2 regression tests must fail against it and pass against the fixed 016.
 FIX1_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_8cc000b.sql"
+# Migration 016 exactly as the B1-FIX2 review (Review A) saw it (blob 07b3809c at
+# fdb14bc). The B1-FIX3 regression tests must fail against it.
+FIX2_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_fdb14bc.sql"
 ADMIN_URL = os.environ.get("NASHR_TEST_DATABASE_URL", "")
 # legacy = 001–015 (pre-B1); baseline = 001–015 + the 016 the B1 review saw;
-# fix1 = 001–015 + the 016 the B1-FIX review saw; current = all.
+# fix1 = 001–015 + the 016 the B1-FIX review saw; fix2 = 001–015 + the 016 the
+# B1-FIX2 review saw; current = all.
 SCHEMA = os.environ.get("NASHR_TEST_SCHEMA", "current")
-if SCHEMA not in ("legacy", "baseline", "fix1", "current"):
+if SCHEMA not in ("legacy", "baseline", "fix1", "fix2", "current"):
     raise RuntimeError(
-        f"NASHR_TEST_SCHEMA must be legacy, baseline, fix1 or current, not {SCHEMA!r}"
+        f"NASHR_TEST_SCHEMA must be legacy, baseline, fix1, fix2 or current, not {SCHEMA!r}"
     )
 
 
@@ -53,6 +57,8 @@ def migrations_for(schema: str = SCHEMA) -> list[Path]:
         return [*migrations_through("015"), BASELINE_016]
     if schema == "fix1":
         return [*migrations_through("015"), FIX1_016]
+    if schema == "fix2":
+        return [*migrations_through("015"), FIX2_016]
     return migrations_through(None)
 
 
@@ -65,6 +71,8 @@ def migration_016(schema: str = SCHEMA) -> Path:
         return BASELINE_016
     if schema == "fix1":
         return FIX1_016
+    if schema == "fix2":
+        return FIX2_016
     return migrations_through(None)[-1]
 
 
