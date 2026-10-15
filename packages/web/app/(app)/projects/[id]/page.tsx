@@ -287,6 +287,7 @@ export default function ProjectPage() {
     withAuth,
     onDeckChanged,
     enabled: deckProject,
+    hasDeck: deck !== null,
   });
 
   // --------------------------------------------------------------- RLS reads

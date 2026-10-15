@@ -27,6 +27,15 @@ export function isInFlight(job: JobView | null): boolean {
 }
 
 /**
+ * True when the job has committed a revision, so a deck must exist: the page
+ * keeps re-reading it until it does (B1-FIX3).
+ */
+export function expectsDeck(job: JobView | null): boolean {
+  if (job === null) return false;
+  return job.status === "committed" || job.status === "completed" || job.status === "delivery_failed";
+}
+
+/**
  * Everything about a job's delivery that should make the workspace re-read its
  * exports: the parent's status and the render's status and progress. When it
  * changes — the render started, published a format, finished or failed — the

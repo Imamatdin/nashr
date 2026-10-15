@@ -22,11 +22,23 @@
 // delivery fingerprint re-reads the exports (onDeckChanged). While anything is
 // in flight it polls from 3 s backing off to 30 s, whether or not Realtime is
 // connected and whether or not a deck exists yet.
+//
+// B1-FIX3 (Codex A4) — a job that ran and finished entirely between two polls is
+// first seen already terminal, so no fingerprint ever changes. The first
+// observation of a terminal job therefore refreshes the deck, and while a job
+// says a revision exists but the page has no deck, the deck is re-read on its
+// own 3 s → 30 s backoff, independent of fingerprints and of Realtime.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { ApiError, type JobView, getLatestJob } from "./api";
-import { deliveryFingerprint, isInFlight, nextPollDelay, POLL_FIRST_MS } from "./delivery";
+import {
+  deliveryFingerprint,
+  expectsDeck,
+  isInFlight,
+  nextPollDelay,
+  POLL_FIRST_MS,
+} from "./delivery";
 import type { AppSession } from "./session";
 import { createRlsClient } from "./supabase";
 
@@ -61,6 +73,11 @@ export interface LiveJobOptions {
    * polled or subscribed, and the state is "absent" rather than a stream of 404s.
    */
   enabled?: boolean;
+  /**
+   * Whether the page holds a deck. While a job says a revision exists and this is
+   * false, the deck is re-read on a backoff until it arrives.
+   */
+  hasDeck?: boolean;
 }
 
 export function useLiveJob({
@@ -69,6 +86,7 @@ export function useLiveJob({
   withAuth,
   onDeckChanged,
   enabled = true,
+  hasDeck,
 }: LiveJobOptions): LiveJob {
   const [job, setJob] = useState<JobView | null>(null);
   const [state, setState] = useState<JobLoadState>("loading");
@@ -95,9 +113,11 @@ export function useLiveJob({
       setState("loaded");
       setError(null);
       const print = deliveryFingerprint(view);
+      const first = lastPrint.current === null;
       const changed = print !== lastPrint.current;
-      if (changed && lastPrint.current !== null) {
-        // The render started, published, finished or failed: refresh downloads.
+      if (changed && (!first || !isInFlight(view))) {
+        // The render started, published, finished or failed — or the first job
+        // this page ever saw had already finished: refresh downloads.
         deckCallback.current();
       }
       lastPrint.current = print;
@@ -207,6 +227,26 @@ export function useLiveJob({
       if (channel) void channel.unsubscribe();
     };
   }, [projectId, session, enabled, readJob, schedule]);
+
+  // The missing-deck retry: a job says a revision exists, the page has none.
+  const deckMissing = enabled && hasDeck === false && expectsDeck(job);
+  useEffect(() => {
+    if (!deckMissing) return;
+    let delay = nextPollDelay(null);
+    let timer: number | null = null;
+    let done = false;
+    const retry = () => {
+      if (done) return;
+      deckCallback.current();
+      delay = nextPollDelay(delay);
+      timer = window.setTimeout(retry, delay);
+    };
+    timer = window.setTimeout(retry, delay);
+    return () => {
+      done = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [deckMissing]);
 
   return { job, state, error, live, refresh };
 }

@@ -1,0 +1,14 @@
+{
+  "schema": "packages/web as of fdb14bc (lib/use-live-job.ts, lib/delivery.ts) with the current test",
+  "module": "packages/web/lib/use-live-job.test.ts",
+  "tests": {
+    "lib/use-live-job.test.ts::useLiveJob without Realtime (B1-FIX3 A4) > refreshes the deck when the first job it sees has already finished": {
+      "expect": "fail",
+      "match": "a job first seen finished never refreshed the deck"
+    },
+    "lib/use-live-job.test.ts::useLiveJob without Realtime (B1-FIX3 A4) > keeps re-reading a missing deck while the job says one exists, without any fingerprint change": {
+      "expect": "fail",
+      "match": "the missing deck was never asked for again"
+    }
+  }
+}
