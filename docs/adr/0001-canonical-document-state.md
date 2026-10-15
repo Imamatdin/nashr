@@ -431,16 +431,62 @@ queued render job; the edit job stays `committed` until that render settles it, 
 generation (§6.7). A chat edit on a project without a document is no longer possible
 (backfill), which removes the `save_deck` fallback.
 
-The edit allowance is consumed only by a **delivered** edit (B1-FIX2). The worker
-passes no inline `deliver`; the session records the committed edit as a pending
-delivery (`brain_sessions.pending_deliveries_json`) that holds one fix of the
-allowance, so a burst of edits cannot overdraw it. Every load of the session settles
-pending deliveries against their jobs: `completed` counts the fix and adds a chat
-notice that the edit is ready; `delivery_failed` (or a job that is gone) releases the
-hold, restoring the allowance, and adds a notice that the edit was saved but its files
-could not be produced (`delivery_notes_json`, in uz/ru/kaa/en by the deck's language).
-Settlement reads the job row the database settled with the render, so it is right
-whoever ended the render: the worker, a retry, or the reaper.
+The edit allowance is consumed only by a **delivered** edit (B1-FIX2). Since
+B1-FIX3 (Codex Review A, A1) the hold is a database row, not session JSON:
+
+* **`edit_deliveries`** (job_id PK, project, session, revision, slides_changed, status
+  `reserved | delivered | released`, `notice_acknowledged`, timestamps). RLS lets the
+  owner read; no application role may insert, update or delete (privilege matrix).
+* `finish_generation_job` writes the row in its own transaction for a
+  `presentation_edit` that committed a revision: `reserved` while its render runs,
+  `delivered` when every format already existed. The session is the one the API
+  stamped on the job (`session_id`), else the project's session; `slides_changed` and
+  `history_len` are stamped too. A worker that dies right after the commit therefore
+  loses nothing: the hold and the commit are one transaction.
+* The render's completion (`_deliver_parents`), its final failure (`_fail_delivery`)
+  and the reaper settle the row to `delivered` / `released` in the same transaction
+  that settles the parent job.
+* The allowance is **computed**: `brain_sessions.fixes_used` (the bot's inline counter,
+  §6.4) plus this session's delivered rows; reserved rows are holds. A regeneration
+  replaces the session row (new id), so its allowance starts from zero; the old rows
+  stay, unattached (`session_id` set null).
+* **Notices.** A settled row's chat notice (uz/ru/kaa/en) is derived on read. The next
+  session write folds it into `delivery_notes_json` at its place in the conversation
+  and acknowledges the row (`acknowledge_edit_notices`); readers dedupe by job id, so
+  a notice is shown exactly once even if the acknowledgement is lost.
+* **Answer recovery.** If the session's history ends in an unanswered `edit_slides`
+  call and the project's latest edit job carries a finish receipt (committed,
+  completed or delivery_failed, with `progress.outcome`) and the job's stamped
+  `history_len` equals the conversation length, the load answers the call from the
+  receipt, in memory; the next write persists it. A job that failed without a receipt
+  is left to the dangling-call repair (an honest error answer).
+
+### 6.3b Session writes (B1-FIX3, Codex Review A, A2/A3)
+
+* **Reads never write.** `GET /chat` loads, projects the delivery rows and answers from
+  receipts in memory; nothing is persisted.
+* **Every write is a compare-and-swap** on `brain_sessions.version`: the writer names
+  the version it read and sets the next. A trigger refuses any update that does not
+  advance the version by exactly one (referential actions excepted), so a blind upsert
+  fails instead of overwriting. Only columns the writer changed are written.
+* **Conflict → reload and merge.** A lost CAS reloads the row and three-way merges
+  (base = what the writer read): unchanged-by-us columns take theirs; spend counters
+  add deltas; notices union by job; the conversation merges when one side's tail
+  extends the other's, or when both answered the same parked call (theirs, already
+  continued, wins). Two genuinely diverging conversations raise `SessionConflictError`
+  (409 `session_busy`). A replaced session (regeneration) is never merged into.
+* **Corrupt persisted state is 409, never 500.** A session row that does not parse
+  raises `SessionDataInvalidError` naming the column (409 `session_invalid`); a job row
+  whose payload or progress is not an object raises `JobDataInvalidError` (409
+  `job_data_invalid`). Both log a structured line; neither repairs or rewrites the row,
+  so no allowance is reset and no receipt dropped. A worker that claims a malformed
+  job fails it under its own claim instead of looping. Job payloads are validated as
+  JSON objects at enqueue.
+* **One export-format mapping** (`packages/core/export_formats.py`): session/job
+  formats are `ExportFormat` (`pptx_editable`, …); render jobs and exports use wire
+  names (`html`, `pptx`, `pdf`); every conversion goes through this module, tested
+  against `ExportFileFormat` and the 016 CHECK lists. Session formats are parsed
+  strictly: a wire name stored as a session format is invalid state.
 
 ### 6.4 Bot
 
@@ -651,6 +697,12 @@ Open:
    can commit a revision, fail its render and refund. I11 is scoped to queued jobs and
    does not cover them. Moving bot generation onto queued jobs (or giving it job-stamped
    settlement) is B8.
+6. **`brain_sessions.fixes_used` (decided 2026-10-15).** Queued (web) edits count only
+   from `edit_deliveries`; nothing about them is stored on the session, and a unit test
+   asserts no web or worker path writes `fixes_used`. The column remains the counter of
+   the bot's inline edit path (which has no job to key a row on) and of pre-016
+   history. B8 moves bot edits onto the queue so they create `edit_deliveries` rows;
+   after B8 the column becomes read-only legacy history (no new writes).
 
 ## 11. Verification
 
@@ -676,6 +728,19 @@ to `ci/**` branches and on manual dispatch, never on `main`:
    and must fail its linearizability oracle (`inventory_mutation.json`). The journey's
    delivery steps run once against the app as of 8cc000b and must fail
    (`scripts/webshots/journey_inventory_fix1.json`).
+   B1-FIX3 adds the fdb14bc tier: `tests/db/test_b1_fix3_regressions.py` on 016 as of
+   fdb14bc (blob 07b3809c, `tests/db/inventory_fix2.json`); the `prefix-fdb14bc` job
+   runs the unit regressions (`tests/unit/test_b1_fix3_regressions.py`), the web hook
+   tests (`packages/web/lib/use-live-job.test.ts`) and the journey console classifier
+   tests (against a verbatim copy of fdb14bc's rules) against fdb14bc's application
+   (`tests/prefix/*.json`); and the journey's first-sight step runs against fdb14bc
+   (`journey_inventory_fix2.json`). Codex A4 (web): the first observed terminal job
+   refreshes the deck, and a missing-deck retry (3 s → 30 s) runs whenever a job says
+   a revision exists and the page has no deck, independent of fingerprints and
+   Realtime. Codex N1: the journey refuses Realtime with `routeWebSocket` (route()
+   never intercepted sockets) and accepts a Realtime console error only in a context
+   that blocked it and only as the exact handshake-404 refusal; 500 and auth failures
+   are defects.
 5. The presentation-worker suite, including PPTX determinism and the Chromium PDF
    tests, and its typecheck.
 
