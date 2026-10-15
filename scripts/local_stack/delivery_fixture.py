@@ -9,11 +9,18 @@ same 016 functions, and prints JSON for the journey:
     python scripts/local_stack/delivery_fixture.py publish <render_job_id> <claim_token>
     python scripts/local_stack/delivery_fixture.py edit <project_id> <user_id>
     python scripts/local_stack/delivery_fixture.py fail <render_job_id> <claim_token>
+    python scripts/local_stack/delivery_fixture.py empty <user_id>
+    python scripts/local_stack/delivery_fixture.py delivered <project_id> <user_id>
+
+``delivered`` (B1-FIX3, Codex A4) runs a paid generation's whole life - job,
+commit, render claim, every export, completion - in ONE transaction, so a page
+polling the project can never observe it in flight: the first job it sees is
+already completed.
 
 A job's finish and the claim of the render it queued run in ONE transaction, so
-the stack's own worker loop never sees that render queued. Works against either
-migration 016 (the fixed one, or 8cc000b's for the journey's pre-fix run): it
-reads finish_generation_job's arity from the catalogue. Talks only to the local
+the stack's own worker loop never sees that render queued. Works against every
+migration 016 the journey runs on (the fixed one, fdb14bc's and 8cc000b's for
+the pre-fix runs): it reads the schema from the catalogue. Talks only to the local
 Postgres container and the local S3 stand-in; refuses anything else.
 """
 
@@ -82,6 +89,25 @@ def _fixed_schema() -> bool:
 
     arity = _sql("select max(pronargs) from pg_proc where proname = 'finish_generation_job'")
     return int(arity) == 11
+
+
+def _has(sql_exists: str) -> bool:
+    return _sql(f"select exists ({sql_exists})") == "t"
+
+
+def _holds_in_table() -> bool:
+    """B1-FIX3's 016: finish_generation_job records an edit's hold itself."""
+
+    return _has("select 1 from pg_tables where tablename = 'edit_deliveries'")
+
+
+def _holds_in_session() -> bool:
+    """fdb14bc's 016: the worker's session write recorded the hold as JSON."""
+
+    return _has(
+        "select 1 from information_schema.columns where table_name = 'brain_sessions'"
+        " and column_name = 'pending_deliveries_json'"
+    )
 
 
 def _finish_and_claim(
@@ -195,17 +221,23 @@ def edit(project: str, user: str) -> dict[str, Any]:
         insert into generation_jobs (id, project_id, user_id, job_type, status, worker_id, payload,
                                      attempts, max_attempts, claimed_at, heartbeat_at, started_at)
         values ('{job}', '{project}', '{user}', 'presentation_edit', 'processing', '{WORKER}',
-                {_literal({"document_id": head["document"], "base_revision_id": head["revision"]})},
+                {_literal({"document_id": head["document"], "base_revision_id": head["revision"], "slides_changed": 1})},
                 1, 1, now(), now(), now());
         """
     )
     content = dict(head["content"])
     content["title"] = f"{content.get('title', 'Deck')} (tahrir)"
     result = _finish_and_claim(job, head["revision"], content, "ai_edit", f"chat-edit:{job}")
-    # What the worker's dispatcher records for the edit. Fixed: the edit holds
-    # one fix as a pending delivery until its render settles. 8cc000b: the edit
-    # was counted as delivered at once (its deliver() was a no-op).
-    if _fixed_schema():
+    # What the worker's dispatcher records for the edit. B1-FIX3: nothing about
+    # the hold - finish_generation_job wrote it; the session only moves (a CAS
+    # write). fdb14bc: the hold was session JSON. 8cc000b: the edit was counted
+    # as delivered at once (its deliver() was a no-op).
+    if _holds_in_table():
+        _sql(
+            f"update brain_sessions set revision_id = '{result['revision']}',"
+            f" version = version + 1 where project_id = '{project}'"
+        )
+    elif _holds_in_session():
         pending = [{"job_id": job, "revision_id": result["revision"], "slides_changed": 1}]
         _sql(
             f"update brain_sessions set revision_id = '{result['revision']}',"
@@ -227,6 +259,79 @@ def fail(render: str, token: int) -> dict[str, Any]:
     return {"render_status": status}
 
 
+def empty(user: str) -> dict[str, Any]:
+    """A presentation project with no job and no deck yet."""
+
+    project = str(uuid.uuid4())
+    _sql(
+        f"""
+        insert into projects (id, user_id, type, title, language, audience, package_tier)
+        values ('{project}', '{user}', 'presentation', 'Orol dengizi taqdimoti', 'uz', 'talaba',
+                'presentation_standard');
+        """
+    )
+    return {"project": project}
+
+
+def delivered(project: str, user: str) -> dict[str, Any]:
+    """A paid generation created, committed, rendered and completed in one transaction."""
+
+    job = str(uuid.uuid4())
+    deck = deck_fixtures._make_deck(  # pyright: ignore[reportPrivateUsage]
+        title="Orol dengizi", audience=AudienceType.UNDERGRADUATE
+    )
+    content = deck.model_dump(mode="json")
+    content["project_id"] = project
+    attempts = ", 1" if _fixed_schema() else ""
+    body = "'journey ' || f || ' export of ' || r.revision_id"
+    digest = f"encode(sha256(convert_to({body}, 'UTF8')), 'hex')"
+    out = _sql(
+        f"""
+        begin;
+        insert into generation_jobs (id, project_id, user_id, job_type, status, worker_id, payload,
+                                     attempts, max_attempts, claimed_at, heartbeat_at, started_at)
+        values ('{job}', '{project}', '{user}', 'presentation_generation', 'processing',
+                '{WORKER}', {_literal({"package": "presentation_standard", "deducted_amount": PRICE})},
+                1, 1, now(), now(), now());
+        create temp table finished on commit drop as
+        select * from finish_generation_job(
+            '{job}', '{WORKER}', 1, null, {_literal(content)}::jsonb, 'generation', 1,
+            'job:{job}:deck', '{RENDERER}', '{{html,pdf,pptx}}'{attempts});
+        create temp table render on commit drop as
+        select c.id, c.attempts, f.revision_id, f.document_id
+          from finished f,
+               claim_job((select id from generation_jobs where job_type = 'presentation_render'
+                           and payload ->> 'requested_by_job' = '{job}'), '{RENDER_WORKER}') c;
+        select count(*) from render r, unnest(array['html', 'pdf', 'pptx']) f,
+             register_export(
+                 r.id, '{RENDER_WORKER}', r.attempts, r.revision_id, f, '{RENDERER}',
+                 'exports/' || r.document_id || '/' || r.revision_id || '/{RENDERER}/' || f || '/'
+                     || {digest} || '.' || f,
+                 {digest}, octet_length(convert_to({body}, 'UTF8')), null);
+        select complete_job(r.id, '{RENDER_WORKER}', r.attempts, '{{}}'::jsonb) from render r;
+        select row_to_json(x) from (
+            select r.revision_id, r.document_id, j.status
+              from render r, generation_jobs j where j.id = '{job}') x;
+        commit;
+        """
+    )
+    state = json.loads(next(line for line in out.splitlines() if line.startswith("{")))
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=S3_URL,
+        aws_access_key_id="local-access",
+        aws_secret_access_key="local-secret",
+        region_name="us-east-1",
+    )
+    revision, document = state["revision_id"], state["document_id"]
+    for fmt in ("html", "pdf", "pptx"):
+        data = f"journey {fmt} export of {revision}".encode()
+        sha = hashlib.sha256(data).hexdigest()
+        key = f"exports/{document}/{revision}/{RENDERER}/{fmt}/{sha}.{fmt}"
+        s3.put_object(Bucket=BUCKET, Key=key, Body=data)
+    return {"project": project, "job": job, "status": state["status"]}
+
+
 def main() -> None:
     command, *args = sys.argv[1:]
     if command == "paid":
@@ -237,6 +342,10 @@ def main() -> None:
         out = edit(args[0], args[1])
     elif command == "fail":
         out = fail(args[0], int(args[1]))
+    elif command == "empty":
+        out = empty(args[0])
+    elif command == "delivered":
+        out = delivered(args[0], args[1])
     else:
         raise SystemExit(f"unknown command {command}")
     print(json.dumps(out))

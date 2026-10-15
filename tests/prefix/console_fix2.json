@@ -1,0 +1,28 @@
+{
+  "schema": "the journey console classifier as of fdb14bc (scripts/webshots/prefix/console_rules_fdb14bc.mjs)",
+  "module": "scripts/webshots/console_rules.test.mjs",
+  "tests": {
+    "test::the deliberate refusal is accepted in the context that blocked Realtime": {
+      "expect": "pass"
+    },
+    "test::a Realtime handshake 500 is a defect even where Realtime is blocked": {
+      "expect": "fail",
+      "match": "a handshake 500 was accepted as the injected refusal"
+    },
+    "test::a Realtime auth failure is a defect even where Realtime is blocked": {
+      "expect": "fail",
+      "match": "a handshake 401 was accepted as the injected refusal"
+    },
+    "test::the refusal outside a context that blocked Realtime is a defect": {
+      "expect": "fail",
+      "match": "a Realtime failure was accepted in a context that never blocked Realtime"
+    },
+    "test::any other error located at the Realtime socket is a defect": {
+      "expect": "fail",
+      "match": "an error located at the Realtime URL was accepted by URL alone"
+    },
+    "test::the article steps' injected failures are still accepted": {
+      "expect": "pass"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "app": "packages/, supabase/ and the worker as of fdb14bc (the B1-FIX2 review's SHA)",
+  "steps": {
+    "delivery: a job created and finished between polls shows its downloads without reload or Realtime": {
+      "match": "downloads did not appear within 60 s without a reload"
+    }
+  }
+}

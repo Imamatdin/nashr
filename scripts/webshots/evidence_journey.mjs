@@ -6,10 +6,13 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { expectedConsoleError } from "./console_rules.mjs";
 
 const [seedPath, fixturesDir, outDir] = process.argv.slice(2);
-// JOURNEY_ONLY=delivery runs only the B1-FIX2 delivery steps (the pre-fix job).
+// JOURNEY_ONLY selects one step group for a pre-fix run: "delivery" (the B1-FIX2
+// delivery steps, gated on 8cc000b) or "fix3" (the B1-FIX3 step, gated on fdb14bc).
 const ONLY = process.env.JOURNEY_ONLY ?? "";
+const runs = (group) => ONLY === "" || ONLY === group;
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WEB = "http://127.0.0.1:3100";
 const API = "http://127.0.0.1:8090";
@@ -20,24 +23,9 @@ const results = [];
 const consoleErrors = [];
 const failedRequests = [];
 let currentPage = null;
-// The only browser errors the journey accepts are the ones it causes on purpose,
-// matched by URL and kind. Everything else is a defect and fails the run.
-const EXPECTED_ERRORS = [
-  // recovery steps abort or reset the article save request
-  { url: /\/documents\/article$/, kind: /^net::ERR_(INTERNET_DISCONNECTED|CONNECTION_RESET|FAILED)$/ },
-  // conflict steps save elsewhere first, so the browser's stale save gets 409
-  { url: /\/documents\/article$/, kind: /^409$/ },
-  // the local stack runs no Realtime server; the client falls back to polling
-  { url: /\/realtime\/v1\//, kind: /.*/ },
-];
-const errorKind = (text) => text.match(/net::ERR_[A-Z_]+/)?.[0] ?? text.match(/status of (\d{3})/)?.[1] ?? "other";
-// The delivery steps refuse Realtime on purpose. Chromium reports a failed
-// WebSocket handshake with the calling script's location, not the socket URL,
-// so that one injected failure is recognised by its message.
-const REFUSED_REALTIME = /^WebSocket connection to 'ws:\/\/127\.0\.0\.1:54321\/realtime\/v1\/websocket\?/;
-const expectedError = (url, kind, text = "") =>
-  REFUSED_REALTIME.test(text) ||
-  EXPECTED_ERRORS.some((rule) => rule.url.test(url.split("?")[0]) && rule.kind.test(kind));
+// The only browser errors the journey accepts are the ones it causes on purpose
+// (console_rules.mjs): the article steps' injected save failures, and the Realtime
+// refusal only inside a context that blocks Realtime. Everything else fails the run.
 const redact = (text) =>
   text.replace(/apikey=[^&\s']+/g, "apikey=<redacted>").replace(/X-Amz-[A-Za-z]+=[^&\s]+/g, "X-Amz=<redacted>");
 
@@ -90,10 +78,9 @@ async function openProject(
     if (message.type() !== "error") return;
     const text = message.text();
     const url = message.location()?.url ?? "";
-    const kind = errorKind(text);
     consoleErrors.push({
       text: redact(`${locale}: ${text.slice(0, 300)} @ ${new URL(url || "about:blank").pathname}`),
-      expected: expectedError(url, kind, text),
+      expected: expectedConsoleError({ text, url, realtimeBlocked: !realtime }),
     });
   });
   page.on("pageerror", (error) =>
@@ -104,8 +91,11 @@ async function openProject(
   });
   currentPage = page;
   if (!realtime) {
-    // Delivery must not depend on Realtime: refuse the websocket outright.
-    await context.route(/\/realtime\/v1\//, (route) => route.abort());
+    // Delivery must not depend on Realtime: refuse the socket outright. route()
+    // never sees WebSockets; routeWebSocket does, and closes it without a server.
+    await context.routeWebSocket(/\/realtime\/v1\//, (socket) =>
+      socket.close({ code: 1008, reason: "journey: Realtime blocked" }),
+    );
   }
   await page.goto(`${WEB}/projects/${projectId ?? seed.projects[locale]}`);
   return { context, page };
@@ -191,6 +181,36 @@ async function deliverySteps(browser) {
   });
 }
 
+// B1-FIX3 (Codex A4): a page with no deck and no job; a paid job is created and
+// finished entirely between two of its polls (one transaction), with Realtime
+// blocked. The first job the page ever sees is already completed, so no delivery
+// fingerprint changes; the downloads must still appear without a reload.
+async function firstSightStep(browser) {
+  await step("delivery: a job created and finished between polls shows its downloads without reload or Realtime", async () => {
+    const { project } = fixture("empty", seed.session.userId);
+    const noJobYet = () => failedRequests.filter((line) => line.endsWith("404 GET /jobs")).length;
+    const before = noJobYet();
+    const { context, page } = await openProject(browser, "uz", { projectId: project, realtime: false });
+    try {
+      // The page has asked and been told there is no job (logged before navigation).
+      await eventually(async () => noJobYet() > before, "the page never polled the project's job", 90_000);
+      await page.evaluate(() => {
+        window.__journeyNoReload = true;
+      });
+      const done = fixture("delivered", project, seed.session.userId);
+      assert.equal(done.status, "completed", `the job is ${done.status}, not completed, at first sight`);
+      await eventually(
+        async () => (await page.locator(".designer-downloads a[download]").count()) === 2,
+        "downloads did not appear within 60 s without a reload",
+      );
+      assert.equal(await page.evaluate(() => window.__journeyNoReload === true), true, "the page reloaded");
+      await shot(page, "12-first-sight-delivered");
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 const ready = (page) => page.locator(".article-page textarea").first().waitFor({ timeout: 90_000 });
 const shot = (page, name) => page.screenshot({ path: join(outDir, `${name}.png`), fullPage: true });
 const status = (page, label) => page.locator(".article-save", { hasText: label }).waitFor({ timeout: 30_000 });
@@ -239,8 +259,9 @@ const saveRoute = (url) => url.pathname.endsWith("/documents/article");
 
 const browser = await chromium.launch();
 try {
-  await deliverySteps(browser);
-  if (ONLY !== "delivery") {
+  if (runs("delivery")) await deliverySteps(browser);
+  if (runs("fix3")) await firstSightStep(browser);
+  if (ONLY === "") {
   // ------------------------------------------------------------------ UZ core
   const uz = seed.projects.uz;
   const { context, page } = await openProject(browser, "uz");
