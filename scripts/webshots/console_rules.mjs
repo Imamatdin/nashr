@@ -9,7 +9,9 @@
 //   a socket ever gets past that block the proxy answers its handshake 404 —
 //   exactly that failure is accepted, and only in such a context. A handshake
 //   that fails any other way (a 500, an auth failure) or any Realtime error in a
-//   context that did not block it is a defect.
+//   context that did not block it is a defect;
+// * the first-sight step opens a project that has no job and no deck yet, so in
+//   that context only, its own /jobs, deck and decisions reads answer 404.
 
 const ARTICLE_SAVE = /\/documents\/article$/;
 const ARTICLE_RULES = [
@@ -33,9 +35,15 @@ export function errorKind(text) {
  * `url` is the location Chromium reports; `realtimeBlocked` is whether the
  * browser context it came from refuses Realtime deliberately.
  */
-export function expectedConsoleError({ text, url = "", realtimeBlocked = false }) {
+export function expectedConsoleError({ text, url = "", realtimeBlocked = false, emptyProject = null }) {
   if (realtimeBlocked && BLOCKED_REALTIME.test(text)) return true;
   const path = url.split("?")[0];
   const kind = errorKind(text);
+  // A context opened on a project that deliberately has no job and no deck yet:
+  // its own "not ready yet" answers, and nothing else.
+  if (emptyProject !== null && kind === "404") {
+    const own = new RegExp(`/projects/${emptyProject}/(deck|decisions)$`);
+    if (/^https?:\/\/[^/]+\/jobs$/.test(path) || own.test(new URL(path, "http://x").pathname)) return true;
+  }
   return ARTICLE_RULES.some((rule) => rule.url.test(path) && rule.kind.test(kind));
 }

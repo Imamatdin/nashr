@@ -49,7 +49,7 @@ let traceCount = 0;
 async function openProject(
   browser,
   locale,
-  { viewport = { width: 1440, height: 1000 }, session = seed.session, projectId = null, realtime = true } = {},
+  { viewport = { width: 1440, height: 1000 }, session = seed.session, projectId = null, realtime = true, empty = false } = {},
 ) {
   const context = await browser.newContext({
     viewport,
@@ -80,7 +80,12 @@ async function openProject(
     const url = message.location()?.url ?? "";
     consoleErrors.push({
       text: redact(`${locale}: ${text.slice(0, 300)} @ ${new URL(url || "about:blank").pathname}`),
-      expected: expectedConsoleError({ text, url, realtimeBlocked: !realtime }),
+      expected: expectedConsoleError({
+        text,
+        url,
+        realtimeBlocked: !realtime,
+        emptyProject: empty ? projectId : null,
+      }),
     });
   });
   page.on("pageerror", (error) =>
@@ -190,7 +195,7 @@ async function firstSightStep(browser) {
     const { project } = fixture("empty", seed.session.userId);
     const noJobYet = () => failedRequests.filter((line) => line.endsWith("404 GET /jobs")).length;
     const before = noJobYet();
-    const { context, page } = await openProject(browser, "uz", { projectId: project, realtime: false });
+    const { context, page } = await openProject(browser, "uz", { projectId: project, realtime: false, empty: true });
     try {
       // The page has asked and been told there is no job (logged before navigation).
       await eventually(async () => noJobYet() > before, "the page never polled the project's job", 90_000);
