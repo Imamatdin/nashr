@@ -1,0 +1,25 @@
+{
+  "schema": "the journey console classifier as of 3723d30 (scripts/webshots/prefix/console_rules_3723d30.mjs)",
+  "module": "scripts/webshots/console_rules_empty_scope.test.mjs",
+  "tests": {
+    "test::the empty project's own not-ready reads are accepted while it is not ready": {
+      "expect": "pass"
+    },
+    "test::another project's /jobs 404 is a defect in the empty project's context": {
+      "expect": "fail",
+      "match": "another project's /jobs 404 was accepted"
+    },
+    "test::a /jobs 404 with any other query is a defect": {
+      "expect": "fail",
+      "match": "a /jobs 404 with another query was accepted"
+    },
+    "test::a not-ready 404 from anywhere but the API is a defect": {
+      "expect": "fail",
+      "match": "a 404 from outside the API was accepted"
+    },
+    "test::once the not-ready phase is over the same 404s are defects": {
+      "expect": "pass"
+    }
+  },
+  "note": "The phase itself is enforced by the journey (evidence_journey.mjs ends it once the page has been told the job exists); the classifier already refused a null emptyProject, so that case is coverage."
+}

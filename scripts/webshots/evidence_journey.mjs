@@ -74,6 +74,8 @@ async function openProject(
     }
   }, [JSON.stringify(session), locale]);
   const page = await context.newPage();
+  // An empty project's "not ready yet" phase lasts until the step ends it.
+  const phase = { notReady: empty };
   page.on("console", (message) => {
     if (message.type() !== "error") return;
     const text = message.text();
@@ -84,7 +86,7 @@ async function openProject(
         text,
         url,
         realtimeBlocked: !realtime,
-        emptyProject: empty ? projectId : null,
+        emptyProject: phase.notReady ? projectId : null,
       }),
     });
   });
@@ -103,7 +105,7 @@ async function openProject(
     );
   }
   await page.goto(`${WEB}/projects/${projectId ?? seed.projects[locale]}`);
-  return { context, page };
+  return { context, page, endNotReady: () => { phase.notReady = false; } };
 }
 
 // The stand-in render worker (scripts/local_stack/delivery_fixture.py).
@@ -195,7 +197,7 @@ async function firstSightStep(browser) {
     const { project } = fixture("empty", seed.session.userId);
     const noJobYet = () => failedRequests.filter((line) => line.endsWith("404 GET /jobs")).length;
     const before = noJobYet();
-    const { context, page } = await openProject(browser, "uz", { projectId: project, realtime: false, empty: true });
+    const { context, page, endNotReady } = await openProject(browser, "uz", { projectId: project, realtime: false, empty: true });
     try {
       // The page has asked and been told there is no job (logged before navigation).
       await eventually(async () => noJobYet() > before, "the page never polled the project's job", 90_000);
@@ -204,6 +206,16 @@ async function firstSightStep(browser) {
       });
       const done = fixture("delivered", project, seed.session.userId);
       assert.equal(done.status, "completed", `the job is ${done.status}, not completed, at first sight`);
+      // The not-ready phase ends once the page has been told the job exists: any
+      // 404 for this project from here on is a defect (B1-FIX4).
+      await page.waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return url.pathname === "/jobs" && url.searchParams.get("project_id") === project && response.status() === 200;
+        },
+        { timeout: 60_000 },
+      );
+      endNotReady();
       await eventually(
         async () => (await page.locator(".designer-downloads a[download]").count()) === 2,
         "downloads did not appear within 60 s without a reload",
