@@ -33,15 +33,24 @@ class Edit(Paid):
 
     async def build_edit(self, db: Db, *, slides: int = 2) -> Edit:
         await self.build(db, job_type="presentation_edit")
-        self.session = str(uuid.uuid4())
-        await self.admin.execute(
-            "insert into brain_sessions (id, project_id, package, formats_json)"
-            " values ($1, $2, 'presentation_premium', '[\"html\"]')",
-            uuid.UUID(self.session),
-            uuid.UUID(self.project),
+        # Since B1-FIX4 the job was queued for a call parked on the project's real
+        # session (tests.db.support.Db.job); 016 as of fdb14bc has no such identity.
+        stamped = await self.admin.fetchval(
+            "select payload ->> 'session_id' from generation_jobs where id = $1",
+            uuid.UUID(self.job),
         )
+        if stamped is not None:
+            self.session = str(stamped)
+        else:
+            self.session = str(uuid.uuid4())
+            await self.admin.execute(
+                "insert into brain_sessions (id, project_id, package, formats_json)"
+                " values ($1, $2, 'presentation_premium', '[\"html\"]')",
+                uuid.UUID(self.session),
+                uuid.UUID(self.project),
+            )
         await self.admin.execute(
-            "update generation_jobs set payload = $2::jsonb where id = $1",
+            "update generation_jobs set payload = payload || $2::jsonb where id = $1",
             uuid.UUID(self.job),
             {"slides_changed": slides, "session_id": self.session, "history_len": 2},
         )

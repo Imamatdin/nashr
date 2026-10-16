@@ -162,6 +162,9 @@ _RACE_REFUSALS = (
     # enqueue dedupe: one active job per (project, type), one active render per
     # (revision, renderer, formats); the app hands back the existing job
     "uq_generation_jobs_active",
+    # a later edit turn parked a new call on the session, so an edit queued for
+    # the earlier call is refused at enqueue or at its finish (B1-FIX4)
+    "edit_operation_stale",
 )
 
 OPS = [

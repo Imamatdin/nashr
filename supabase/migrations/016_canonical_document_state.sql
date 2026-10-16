@@ -218,6 +218,14 @@ drop trigger if exists brain_sessions_require_cas on brain_sessions;
 create trigger brain_sessions_require_cas before update on brain_sessions
     for each row execute function brain_sessions_require_cas();
 
+-- The identity of the edit_slides call the session has parked, unanswered
+-- (B1-FIX4, Codex F2/F3). Set when a call is parked, cleared by whatever answers
+-- it. A queued AI edit names this operation and its session; the database admits
+-- the job and its commit only while the session still has exactly that call
+-- parked, and a reader recovers a dead worker's answer only from the job carrying
+-- both ids, never from another conversation that happens to have the same length.
+alter table brain_sessions add column if not exists parked_operation_id uuid;
+
 -- An AI edit committed by a queued job holds one fix of the allowance until its
 -- render settles (B1-FIX3, Codex A1). The row is written in finish_generation_job's
 -- transaction, so it exists exactly when the edit's revision does, whatever happens
@@ -912,31 +920,86 @@ $$;
 -- render completing or failing for good settles it (completed, or
 -- delivery_failed and refunded). When every format already exists, or the result
 -- is a proposal (nothing to render until the owner accepts it), the job completes.
+-- An AI edit's identity (B1-FIX4, Codex F2/F3): the job's payload names the
+-- session whose allowance it spends (session_id) and the parked call it answers
+-- (operation_id). The session must exist, belong to the job's project and user,
+-- and still have exactly that call parked. Checked when the job is inserted and
+-- again by finish_generation_job before it commits, under a share lock on the
+-- session, so the call cannot be answered elsewhere between the check and the
+-- commit. Returns the session. Every AI edit takes this path: there is no
+-- sessionless edit.
+create or replace function _edit_session(p_project_id uuid, p_user_id uuid, p_payload jsonb)
+returns uuid
+language plpgsql
+set search_path = public, pg_temp
+as $$
+declare
+    v_uuid constant text := '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+    v_session text;
+    v_operation text;
+    v_id uuid;
+    v_parked uuid;
+begin
+    if jsonb_typeof(p_payload) = 'object'
+       and jsonb_typeof(p_payload -> 'session_id') = 'string'
+       and jsonb_typeof(p_payload -> 'operation_id') = 'string' then
+        v_session := lower(p_payload ->> 'session_id');
+        v_operation := lower(p_payload ->> 'operation_id');
+    end if;
+    if v_session is null or v_operation is null
+       or v_session !~ v_uuid or v_operation !~ v_uuid then
+        raise exception 'edit_identity_missing' using errcode = '22023';
+    end if;
+    select s.id, s.parked_operation_id into v_id, v_parked
+      from brain_sessions s
+      join projects p on p.id = s.project_id
+     where s.id = v_session::uuid
+       and s.project_id = p_project_id
+       and p.user_id = p_user_id
+       for share of s;
+    if v_id is null then
+        raise exception 'edit_session_not_found' using errcode = 'P0002';
+    end if;
+    if v_parked is distinct from v_operation::uuid then
+        raise exception 'edit_operation_stale' using errcode = '55000';
+    end if;
+    return v_id;
+end;
+$$;
+
+create or replace function generation_jobs_require_edit_identity() returns trigger
+language plpgsql security definer
+set search_path = public, pg_temp
+as $$
+begin
+    if new.job_type = 'presentation_edit' then
+        perform _edit_session(new.project_id, new.user_id, new.payload);
+    end if;
+    return new;
+end;
+$$;
+drop trigger if exists generation_jobs_require_edit_identity on generation_jobs;
+create trigger generation_jobs_require_edit_identity before insert on generation_jobs
+    for each row execute function generation_jobs_require_edit_identity();
+
 -- The hold an AI edit job's committed revision takes on the allowance (B1-FIX3).
--- Called by finish_generation_job in its own transaction: 'reserved' while the
--- render it queued publishes, 'delivered' when every format already existed. The
--- session is the one the API stamped on the job when it was parked; a job queued
--- before that stamp existed uses the project's session. A session that has since
--- been replaced (a regeneration), or none at all, owns nothing: the row is kept,
--- unattached, and never blocks the commit. A replayed finish finds the row there.
+-- Called by finish_generation_job in its own transaction, only for an edit that
+-- changed the document (B1-FIX4, Codex F1: an unchanged edit holds nothing):
+-- 'reserved' while the render it queued publishes, 'delivered' when every format
+-- already existed. The session is the one _edit_session verified; a regeneration
+-- that later replaces it leaves the row unattached. A replayed finish finds the
+-- row there.
 create or replace function _record_edit_delivery(
-    p_job generation_jobs, p_revision_id uuid, p_delivered boolean
+    p_job generation_jobs, p_session uuid, p_revision_id uuid, p_delivered boolean
 ) returns void
 language plpgsql
 set search_path = public, pg_temp
 as $$
 declare
-    v_session uuid;
-    v_stamped text;
     v_slides integer := 0;
 begin
-    v_stamped := case when jsonb_typeof(p_job.payload) = 'object'
-                      then p_job.payload ->> 'session_id' end;
-    if v_stamped is not null then
-        select s.id into v_session from brain_sessions s
-         where s.id::text = v_stamped and s.project_id = p_job.project_id;
-    else
-        select s.id into v_session from brain_sessions s where s.project_id = p_job.project_id;
+    if p_session is null then
+        raise exception 'edit_session_not_found' using errcode = 'P0002';
     end if;
     if jsonb_typeof(p_job.payload -> 'slides_changed') = 'number' then
         v_slides := (p_job.payload ->> 'slides_changed')::numeric::integer;
@@ -949,7 +1012,7 @@ begin
     insert into edit_deliveries (
         job_id, project_id, session_id, revision_id, slides_changed, status, settled_at
     ) values (
-        p_job.id, p_job.project_id, v_session, p_revision_id, v_slides,
+        p_job.id, p_job.project_id, p_session, p_revision_id, v_slides,
         case when p_delivered then 'delivered' else 'reserved' end,
         case when p_delivered then now() end
     )
@@ -1032,6 +1095,8 @@ declare
     v_render_status text;
     v_render_job uuid;
     v_job_status text;
+    v_session uuid;
+    v_unchanged_edit boolean;
 begin
     if p_renderer_version is null or coalesce(cardinality(p_render_formats), 0) = 0 then
         raise exception 'render_required' using errcode = '22023';
@@ -1110,6 +1175,11 @@ begin
     if v_type not in ('presentation', 'research_package') then
         raise exception 'document_kind_mismatch' using errcode = '22023';
     end if;
+    -- An AI edit commits only for the session and parked call it was queued for
+    -- (B1-FIX4, Codex F3): a missing, foreign or stale identity writes nothing.
+    if v_job.job_type = 'presentation_edit' then
+        v_session := _edit_session(v_job.project_id, v_job.user_id, v_job.payload);
+    end if;
 
     insert into documents (project_id, kind, schema_version)
     values (
@@ -1137,7 +1207,11 @@ begin
         raise exception 'finish_unexpected_status %', v_result.status using errcode = 'XX000';
     end if;
 
-    if v_result.revision_id is not null then
+    -- An AI edit whose content equals the head changed nothing (Codex F1): it
+    -- renders nothing, holds and spends no allowance, and completes with an
+    -- 'unchanged' receipt. A regeneration keeps rendering a head that lacks exports.
+    v_unchanged_edit := v_job.job_type = 'presentation_edit' and v_result.status = 'unchanged';
+    if v_result.revision_id is not null and not v_unchanged_edit then
         select r.status, r.job_id into v_render_status, v_render_job
           from _enqueue_render(
               v_job.project_id, v_owner, v_doc, v_result.revision_id, p_renderer_version,
@@ -1145,8 +1219,8 @@ begin
           ) r;
     end if;
     v_job_status := case when v_render_job is null then 'completed' else 'committed' end;
-    if v_job.job_type = 'presentation_edit' and v_result.revision_id is not null then
-        perform _record_edit_delivery(v_job, v_result.revision_id, v_render_job is null);
+    if v_job.job_type = 'presentation_edit' and v_result.status in ('committed', 'duplicate') then
+        perform _record_edit_delivery(v_job, v_session, v_result.revision_id, v_render_job is null);
     end if;
 
     update generation_jobs
@@ -1161,6 +1235,7 @@ begin
                'delivery', case
                    when v_render_job is not null then 'rendering'
                    when v_result.revision_id is null then 'proposal'
+                   when v_unchanged_edit then 'unchanged'
                    else 'ready' end)
      where id = p_job_id;
 
@@ -1760,7 +1835,11 @@ revoke all on function _refund_job(generation_jobs) from public, anon, authentic
 revoke all on function _fail_delivery(generation_jobs, text)
     from public, anon, authenticated, service_role;
 revoke all on function _deliver_parents(uuid) from public, anon, authenticated, service_role;
-revoke all on function _record_edit_delivery(generation_jobs, uuid, boolean)
+revoke all on function _record_edit_delivery(generation_jobs, uuid, uuid, boolean)
+    from public, anon, authenticated, service_role;
+revoke all on function _edit_session(uuid, uuid, jsonb)
+    from public, anon, authenticated, service_role;
+revoke all on function generation_jobs_require_edit_identity()
     from public, anon, authenticated, service_role;
 revoke all on function _settle_edit_delivery(uuid, text)
     from public, anon, authenticated, service_role;
@@ -2118,13 +2197,19 @@ alter table documents replica identity full;
 -- DOWN MIGRATION (run manually, in one transaction). Additive objects
 -- (revision_proposals, revision_exports, revision_validations,
 -- document_schema_versions, brain_sessions.revision_id, brain_sessions.version,
--- edit_deliveries, the refund index) are left in place: pre-016 code ignores
+-- brain_sessions.parked_operation_id, edit_deliveries, the refund index) are left
+-- in place: pre-016 code ignores
 -- them, and proposals are kept.
 -- ===========================================================================
 -- begin;
 -- -- pre-016 code upserts sessions without a version: the CAS guard must go
 -- drop trigger if exists brain_sessions_require_cas on brain_sessions;
 -- drop function if exists brain_sessions_require_cas();
+-- -- pre-016 code queues edits without an operation identity
+-- drop trigger if exists generation_jobs_require_edit_identity on generation_jobs;
+-- drop function if exists generation_jobs_require_edit_identity();
+-- drop function if exists _record_edit_delivery(generation_jobs, uuid, uuid, boolean);
+-- drop function if exists _edit_session(uuid, uuid, jsonb);
 -- drop function if exists acknowledge_edit_notices(uuid, uuid[]);
 -- -- decks back to a table, re-projected from the current heads (rows edited
 -- -- after 016 exist only as revisions; this copies the head of each).

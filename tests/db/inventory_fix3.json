@@ -1,0 +1,57 @@
+{
+  "schema": "fix3 (migrations 001-015 + 016 as the B1-FIX3 review saw it, blob 0a90a2cb at 3723d30)",
+  "module": "tests/db/test_b1_fix4_regressions.py",
+  "tests": {
+    "tests.db.test_b1_fix4_regressions::test_an_unchanged_edit_holds_spends_and_renders_nothing[complete]": {
+      "expect": "fail",
+      "match": "an edit that changed nothing took an allowance hold\nassert \\[\\{'job_id': '[^\n]*'delivered'\\}\\] == \\[\\]"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_unchanged_edit_holds_spends_and_renders_nothing[incomplete]": {
+      "expect": "fail",
+      "match": "an edit that changed nothing took an allowance hold\nassert \\[\\{'job_id': '[^\n]*'reserved'\\}\\] == \\[\\]"
+    },
+    "tests.db.test_b1_fix4_regressions::test_a_replayed_unchanged_finish_returns_the_same_receipt_and_holds_nothing": {
+      "expect": "fail",
+      "match": "the replay of an unchanged edit took an allowance hold"
+    },
+    "tests.db.test_b1_fix4_regressions::test_a_changed_edit_still_holds_one_fix": {
+      "expect": "pass"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_edit_without_a_full_identity_is_refused_at_enqueue[no_identity]": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_edit_without_a_full_identity_is_refused_at_enqueue[no_operation]": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_edit_without_a_full_identity_is_refused_at_enqueue[no_session]": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_edit_without_a_full_identity_is_refused_at_enqueue[operation_not_uuid]": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_edit_without_a_full_identity_is_refused_at_enqueue[operation_number]": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_edit_for_another_users_session_is_refused_at_enqueue": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_an_edit_for_a_call_no_longer_parked_is_refused_at_enqueue": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_finish_refuses_an_edit_whose_session_was_replaced": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    },
+    "tests.db.test_b1_fix4_regressions::test_finish_refuses_an_edit_whose_call_was_answered_elsewhere": {
+      "expect": "fail",
+      "match": "DID NOT RAISE .*PostgresError"
+    }
+  }
+}

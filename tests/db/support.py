@@ -29,15 +29,17 @@ FIX1_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_
 # Migration 016 exactly as the B1-FIX2 review (Review A) saw it (blob 07b3809c at
 # fdb14bc). The B1-FIX3 regression tests must fail against it.
 FIX2_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_fdb14bc.sql"
+# Migration 016 exactly as the B1-FIX3 review saw it (blob 0a90a2cb at 3723d30).
+# The B1-FIX4 regression tests must fail against it.
+FIX3_016 = Path(__file__).with_name("baseline") / "016_canonical_document_state_3723d30.sql"
 ADMIN_URL = os.environ.get("NASHR_TEST_DATABASE_URL", "")
 # legacy = 001–015 (pre-B1); baseline = 001–015 + the 016 the B1 review saw;
 # fix1 = 001–015 + the 016 the B1-FIX review saw; fix2 = 001–015 + the 016 the
-# B1-FIX2 review saw; current = all.
+# B1-FIX2 review saw; fix3 = 001–015 + the 016 the B1-FIX3 review saw; current = all.
 SCHEMA = os.environ.get("NASHR_TEST_SCHEMA", "current")
-if SCHEMA not in ("legacy", "baseline", "fix1", "fix2", "current"):
-    raise RuntimeError(
-        f"NASHR_TEST_SCHEMA must be legacy, baseline, fix1, fix2 or current, not {SCHEMA!r}"
-    )
+_SCHEMAS = ("legacy", "baseline", "fix1", "fix2", "fix3", "current")
+if SCHEMA not in _SCHEMAS:
+    raise RuntimeError(f"NASHR_TEST_SCHEMA must be one of {', '.join(_SCHEMAS)}, not {SCHEMA!r}")
 
 
 def migrations_through(last_prefix: str | None) -> list[Path]:
@@ -59,6 +61,8 @@ def migrations_for(schema: str = SCHEMA) -> list[Path]:
         return [*migrations_through("015"), FIX1_016]
     if schema == "fix2":
         return [*migrations_through("015"), FIX2_016]
+    if schema == "fix3":
+        return [*migrations_through("015"), FIX3_016]
     return migrations_through(None)
 
 
@@ -73,6 +77,8 @@ def migration_016(schema: str = SCHEMA) -> Path:
         return FIX1_016
     if schema == "fix2":
         return FIX2_016
+    if schema == "fix3":
+        return FIX3_016
     return migrations_through(None)[-1]
 
 
@@ -150,6 +156,7 @@ class Db:
         self.dsn = database_url(name)
         self._open: list[Any] = []
         self._seeder: Any = None
+        self._parks_operations: bool | None = None
 
     async def admin(self) -> Any:
         conn = await connect(self.dsn)
@@ -201,6 +208,42 @@ class Db:
         )
         return project_id
 
+    async def parks_operations(self) -> bool:
+        """True when this schema gives AI edits an operation identity (B1-FIX4)."""
+
+        if self._parks_operations is None:
+            conn = await self._seed()
+            self._parks_operations = bool(
+                await conn.fetchval(
+                    "select exists (select 1 from information_schema.columns"
+                    " where table_name = 'brain_sessions'"
+                    " and column_name = 'parked_operation_id')"
+                )
+            )
+        return self._parks_operations
+
+    async def park(self, project_id: str, conn: Any = None) -> tuple[str, str]:
+        """Park a new edit_slides call on the project's session; (session, operation).
+
+        The session is created if the project has none; parking replaces whatever
+        call was parked before, as a new turn would. One statement, so concurrent
+        callers on their own connections cannot interleave halfway.
+        """
+
+        conn = conn if conn is not None else await self._seed()
+        operation = str(uuid.uuid4())
+        session = await conn.fetchval(
+            "insert into brain_sessions (project_id, package, formats_json, parked_operation_id)"
+            " values ($1, 'presentation_premium', '[\"html\"]', $2)"
+            " on conflict (project_id) do update"
+            " set parked_operation_id = excluded.parked_operation_id,"
+            " version = brain_sessions.version + 1"
+            " returning id",
+            uuid.UUID(project_id),
+            uuid.UUID(operation),
+        )
+        return str(session), operation
+
     async def job(
         self,
         project_id: str,
@@ -213,11 +256,15 @@ class Db:
         attempts: int = 1,
         conn: Any = None,
         max_attempts: int | None = None,
+        identity: bool = True,
     ) -> str:
         """A job row; a processing one holds a live claim (``worker``, attempt ``attempts``).
 
         ``conn`` lets concurrent callers insert on their own connection (the shared
-        seeding connection runs one statement at a time).
+        seeding connection runs one statement at a time). An AI edit is queued the
+        way the API queues one: a call is parked on the project's real session and
+        the job names both (B1-FIX4). ``identity=False`` inserts the payload as
+        given, for the tests of the refusal itself.
         """
 
         conn = conn if conn is not None else await self._seed()
@@ -225,6 +272,14 @@ class Db:
         body = payload if payload is not None else {}
         if job_type == "presentation_render":
             body = {"renderer_version": "pw-test", "formats": ["html"], **body}
+        if (
+            job_type == "presentation_edit"
+            and identity
+            and "operation_id" not in body
+            and await self.parks_operations()
+        ):
+            session, operation = await self.park(project_id, conn)
+            body = {**body, "session_id": session, "operation_id": operation}
         await conn.execute(
             "insert into generation_jobs (id, project_id, user_id, job_type, status, worker_id,"
             " payload, attempts, max_attempts, claimed_at, heartbeat_at)"

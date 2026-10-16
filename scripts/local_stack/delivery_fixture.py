@@ -101,6 +101,15 @@ def _holds_in_table() -> bool:
     return _has("select 1 from pg_tables where tablename = 'edit_deliveries'")
 
 
+def _parks_operations() -> bool:
+    """The current 016: an AI edit names its session and parked call (B1-FIX4)."""
+
+    return _has(
+        "select 1 from information_schema.columns where table_name = 'brain_sessions'"
+        " and column_name = 'parked_operation_id'"
+    )
+
+
 def _holds_in_session() -> bool:
     """fdb14bc's 016: the worker's session write recorded the hold as JSON."""
 
@@ -215,13 +224,22 @@ def edit(project: str, user: str) -> dict[str, Any]:
         on conflict (project_id) do update set revision_id = excluded.revision_id;
         """
     )
+    identity: dict[str, str] = {}
+    if _parks_operations():
+        # The chat turn parked the edit_slides call this job answers (a CAS write).
+        operation = str(uuid.uuid4())
+        session = _sql(
+            f"update brain_sessions set parked_operation_id = '{operation}',"
+            f" version = version + 1 where project_id = '{project}' returning id"
+        )
+        identity = {"session_id": session, "operation_id": operation}
     job = str(uuid.uuid4())
     _sql(
         f"""
         insert into generation_jobs (id, project_id, user_id, job_type, status, worker_id, payload,
                                      attempts, max_attempts, claimed_at, heartbeat_at, started_at)
         values ('{job}', '{project}', '{user}', 'presentation_edit', 'processing', '{WORKER}',
-                {_literal({"document_id": head["document"], "base_revision_id": head["revision"], "slides_changed": 1})},
+                {_literal({"document_id": head["document"], "base_revision_id": head["revision"], "slides_changed": 1, **identity})},
                 1, 1, now(), now(), now());
         """
     )
@@ -233,8 +251,10 @@ def edit(project: str, user: str) -> dict[str, Any]:
     # write). fdb14bc: the hold was session JSON. 8cc000b: the edit was counted
     # as delivered at once (its deliver() was a no-op).
     if _holds_in_table():
+        # Answering the call clears it (B1-FIX4; a no-op column before it).
+        answered = ", parked_operation_id = null" if identity else ""
         _sql(
-            f"update brain_sessions set revision_id = '{result['revision']}',"
+            f"update brain_sessions set revision_id = '{result['revision']}'{answered},"
             f" version = version + 1 where project_id = '{project}'"
         )
     elif _holds_in_session():
