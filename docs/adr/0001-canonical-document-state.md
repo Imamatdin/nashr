@@ -438,12 +438,31 @@ B1-FIX3 (Codex Review A, A1) the hold is a database row, not session JSON:
   `reserved | delivered | released`, `notice_acknowledged`, timestamps). RLS lets the
   owner read; no application role may insert, update or delete (privilege matrix).
 * `finish_generation_job` writes the row in its own transaction for a
-  `presentation_edit` that committed a revision: `reserved` while its render runs,
-  `delivered` when every format already existed. The session is the one the API
-  stamped on the job (`session_id`), else the project's session; with none (or a
-  replaced one) the row is kept unattached and never blocks the commit; `slides_changed` and
-  `history_len` are stamped too. A worker that dies right after the commit therefore
-  loses nothing: the hold and the commit are one transaction.
+  `presentation_edit` whose outcome changed the document (`committed`, or `duplicate`
+  on a replay): `reserved` while its render runs, `delivered` when every format
+  already existed. An edit whose content equals the head (`unchanged`, B1-FIX4,
+  Codex F1) renders nothing, writes no row and completes with an `unchanged` receipt
+  (`progress.delivery = 'unchanged'`): it holds and spends nothing and shows no
+  notice; a replayed finish returns the same receipt. A worker that dies right after
+  the commit loses nothing: the hold and the commit are one transaction.
+* **Edit identity (B1-FIX4, Codex F2/F3).** Parking an `edit_slides` call (a queued
+  edit, or an approval) gives it an operation id, persisted as
+  `brain_sessions.parked_operation_id`; whatever answers the call clears it. The job
+  payload carries `session_id` and `operation_id` (with `slides_changed`). Migration
+  016 enforces the identity twice, through one function (`_edit_session`): a
+  `before insert` trigger on `generation_jobs` refuses a `presentation_edit` whose
+  session does not exist, is not the job's project and user, or no longer has exactly
+  that operation parked (`edit_identity_missing` / `edit_session_not_found` /
+  `edit_operation_stale`), for every role including the service role; and
+  `finish_generation_job` checks it again under a share lock on the session before it
+  commits anything. There is no sessionless edit and no exemption: every test and
+  fixture that queues an edit parks a call on a real session first. The worker
+  (`dispatch_fix`) refuses a job whose call is not the parked one without applying,
+  committing or answering anything (`operation_stale`), so a call is answered at most
+  once; a session write that loses its CAS to a row that already answered the same
+  call drops its duplicate answer (and keeps the row's next parked call). An approval
+  parked before operation ids existed gets one when it is approved. The API answers
+  an identity refusal at enqueue with 409 `session_busy` (`why` names the refusal).
 * The render's completion (`_deliver_parents`), its final failure (`_fail_delivery`)
   and the reaper settle the row to `delivered` / `released` in the same transaction
   that settles the parent job.
@@ -456,11 +475,16 @@ B1-FIX3 (Codex Review A, A1) the hold is a database row, not session JSON:
   and acknowledges the row (`acknowledge_edit_notices`); readers dedupe by job id, so
   a notice is shown exactly once even if the acknowledgement is lost.
 * **Answer recovery.** If the session's history ends in an unanswered `edit_slides`
-  call and the project's latest edit job carries a finish receipt (committed,
-  completed or delivery_failed, with `progress.outcome`) and the job's stamped
-  `history_len` equals the conversation length, the load answers the call from the
-  receipt, in memory; the next write persists it. A job that failed without a receipt
-  is left to the dangling-call repair (an honest error answer).
+  call, the load looks up the edit job queued for exactly that call: the session's id
+  and its parked operation id, both in the job's payload (B1-FIX4; matching by
+  conversation length is gone, Codex F2). If that job carries a finish receipt
+  (committed, completed or delivery_failed), the receipt is parsed into a typed
+  `EditReceipt` (outcome enum, revision uuid, operation and session uuids, slides
+  changed) before anything is queried with it; the load then answers the call from
+  it, in memory, and the next write persists it. A receipt that does not parse is a
+  `JobDataInvalidError` (409 `job_data_invalid`, structured log, row untouched; Codex
+  F4). A job that failed without a receipt is left to the dangling-call repair (an
+  honest error answer).
 
 ### 6.3b Session writes (B1-FIX3, Codex Review A, A2/A3)
 
@@ -473,8 +497,10 @@ B1-FIX3 (Codex Review A, A1) the hold is a database row, not session JSON:
 * **Conflict → reload and merge.** A lost CAS reloads the row and three-way merges
   (base = what the writer read): unchanged-by-us columns take theirs; spend counters
   add deltas; notices union by job; the conversation merges when one side's tail
-  extends the other's, or when both answered the same parked call (theirs, already
-  continued, wins). Two genuinely diverging conversations raise `SessionConflictError`
+  extends the other's, or when both answered the same parked call: a write whose
+  only change to the conversation is answering an operation the row has already
+  answered drops that answer (B1-FIX4); otherwise theirs, already continued, wins
+  only if our answer is the same turn. Two genuinely diverging conversations raise `SessionConflictError`
   (409 `session_busy`). A replaced session (regeneration) is never merged into.
 * **Corrupt persisted state is 409, never 500.** A session row that does not parse
   raises `SessionDataInvalidError` naming the column (409 `session_invalid`); a job row
@@ -704,6 +730,22 @@ Open:
    the bot's inline edit path (which has no job to key a row on) and of pre-016
    history. B8 moves bot edits onto the queue so they create `edit_deliveries` rows;
    after B8 the column becomes read-only legacy history (no new writes).
+7. **Migration 016 stays one file (decided 2026-10-16, B1-FIX4).** Codex recommended
+   splitting it by concern only if one outer transaction is preserved; the test
+   runner and the deployment apply each file in its own transaction, so a split would
+   change how a failed deployment rolls back. Instead §12 carries a generated
+   concern-level review map (`scripts/migration_review_map.py`, kept current by a
+   unit test).
+8. **Unchanged edits render nothing (decided 2026-10-16, B1-FIX4).** An AI edit
+   whose content equals the head completes without queuing a render even when the
+   head lacks exports; refreshing exports is the explicit "update exports" request,
+   not a side effect of an edit that changed nothing. A regeneration with unchanged
+   content still renders a head that lacks exports.
+9. **Edits queued before B1-FIX4.** The identity trigger checks inserts only; an edit
+   already queued without an identity when 016 is applied is refused at its finish
+   (`edit_identity_missing`) and fails, and its parked call is answered by the
+   dangling-call repair. 016 has never been applied to a persistent database, so no
+   such job exists yet.
 
 ## 11. Verification
 
@@ -742,11 +784,40 @@ to `ci/**` branches and on manual dispatch, never on `main`:
    never intercepted sockets) and accepts a Realtime console error only in a context
    that blocked it and only as the exact handshake-404 refusal; 500 and auth failures
    are defects.
+   B1-FIX4 adds the 3723d30 tier: `tests/db/test_b1_fix4_regressions.py` on 016 as of
+   3723d30 (blob 0a90a2cb, `tests/db/inventory_fix3.json`: unchanged edits, the
+   identity refusals at enqueue and at finish); the `prefix-3723d30` job runs the unit
+   regressions (`tests/unit/test_b1_fix4_regressions.py`: the replacement-session
+   receipt barrier, at-most-once answering, malformed receipts) and the console
+   classifier's empty-project scope tests against 3723d30's application and rules
+   (`tests/prefix/*_fix3.json`). The mutation gate now runs
+   `tests/db/test_document_lock.py` (Codex N2): two writers are held at a test-only
+   barrier after reading the head, the test inspects their database waits, then
+   releases them; with the row lock the second writer waits for the row before it can
+   read and exactly one commits, without it both commit against the same head. It
+   needs no lucky schedule. The lifecycle property test stays in the post-change suite.
 5. The presentation-worker suite, including PPTX determinism and the Chromium PDF
    tests, and its typecheck.
 
 Each run uploads traces, videos, screenshots and logs as short-retention artifacts
 and reports the minutes it used.
+
+## 12. Migration 016 review map (by concern)
+
+<!-- migration-016-review-map:start (scripts/migration_review_map.py) -->
+
+Generated from `supabase/migrations/016_canonical_document_state.sql` (2279 lines); regenerate with `python scripts/migration_review_map.py`. Each object's lines run from its definition to the next one, so its comments and grants travel with it.
+
+| Concern | Lines | Objects (first–last line) |
+|---|---|---|
+| Schema and constraints | 128 | `section 1 notes` 27–30, `document_schema_versions` 31–40, `section 2 notes` 41–44, `do block @45` 45–56, `document_revisions` 57–87, `section 3 notes` 88–91, `revision_proposals` 92–112, `idx_revision_proposals_document` 113–115, `document_revisions` 116–121, `revision_exports` 122–139, `document_operation_receipts` 140–154 |
+| Canonical revision functions | 521 | `proposal_validations` 167–174, `revision_validations` 175–182, `section 5 notes` 346–352, `_caller_is_end_user` 353–366, `_document_write_owner` 367–436, `_content_sha256` 437–443, `section 6 notes` 444–447, `ensure_document` 448–485, `section 7 notes` 486–492, `_commit_core` 493–627, `commit_revision` 628–666, `section 8 notes` 1520–1523, `accept_proposal` 1524–1643, `reject_proposal` 1644–1675, `record_proposal_validation` 1782–1795, `record_revision_validation` 1796–1809 |
+| Job, export and delivery lifecycle | 997 | `edit_deliveries` 239–252, `idx_edit_deliveries_session` 253–254, `idx_edit_deliveries_project` 255–256, `section 7b notes` 667–679, `generation_jobs` 680–687, `idx_generation_jobs_render_job` 688–689, `idx_generation_jobs_committed` 690–692, `_claim_ttl` 693–698, `_lock_claimed_job` 699–725, `claim_job` 726–742, `heartbeat_job` 743–767, `_enqueue_render` 768–875, `request_render` 876–930, `_record_edit_delivery` 992–1024, `_settle_edit_delivery` 1025–1036, `finish_generation_job` 1059–1249, `_deliver_parents` 1250–1275, `complete_job` 1276–1313, `section 7c notes` 1314–1324, `_refund_job` 1325–1352, `_fail_delivery` 1353–1374, `_settle_failure` 1375–1407, `fail_job` 1408–1449, `reap_stale_jobs` 1450–1519, `section 9 notes` 1676–1692, `register_export` 1693–1781, `section 11 notes` 1918–1922, `uq_generation_jobs_active` 1923–1926, `uq_generation_jobs_active_render` 1927–1949, `generation_jobs` 1950–1961, `section 12 notes` 1962–1970, `credit_ledger_legacy_duplicate_refunds` 1971–1981, `do block @1982` 1982–2020 |
+| Session compare-and-swap and edit identity | 139 | `brain_sessions` 183–199, `brain_sessions_require_cas` 200–217, `trigger brain_sessions_require_cas` 218–226, `brain_sessions` 227–238, `_edit_session` 931–969, `generation_jobs_require_edit_identity` 970–981, `trigger generation_jobs_require_edit_identity` 982–991, `acknowledge_edit_notices` 1037–1058 |
+| Grants, row security and hardening | 197 | `section 4 notes` 257–260, `document_schema_versions` 261–261, `revision_proposals` 262–262, `revision_exports` 263–263, `revision_validations` 264–264, `document_operation_receipts` 265–265, `proposal_validations` 266–268, `policy document_schema_versions_read` 269–273, `policy documents_owner_select` 274–281, `policy document_revisions_owner_select` 282–288, `policy revision_proposals_owner_select` 289–295, `policy revision_exports_owner_select` 296–304, `policy document_operation_receipts_owner_select` 305–311, `policy proposal_validations_owner_select` 312–320, `policy revision_validations_owner_select` 321–328, `edit_deliveries` 329–330, `policy edit_deliveries_owner_select` 331–345, `section 10 notes` 1810–1888, `section 10b notes` 1889–1901, `do block @1902` 1902–1917 |
+| Backfill, view swap and validation | 297 | `(header)` 1–17, `do block @18` 18–26, `migration_reports` 155–166, `section 13 notes` 2021–2024, `do block @2025` 2025–2042, `do block @2043` 2043–2050, `do block @2051` 2051–2112, `do block @2113` 2113–2141, `decks` 2142–2165, `decks_refuse_writes` 2166–2176, `trigger decks_refuse_writes` 2177–2182, `do block @2183` 2183–2193, `documents` 2194–2279 |
+
+<!-- migration-016-review-map:end -->
 
 ## Appendix A — inventory (2026-10-11, tree at `a1ab4dc` + uncommitted work)
 
