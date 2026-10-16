@@ -19,6 +19,11 @@ no turn may run against a session that has one, because resending a dangling
 ``function_call`` to Gemini is a 400. It is durable (it lives in
 ``brain_sessions.history_json``), so it survives a restart of either process.
 
+Parking also gives the call an operation id (B1-FIX4): the job carries it with
+the session id, the database admits the job and its commit only while that call
+is still parked, and the worker refuses a job for any other call. A call is
+answered at most once.
+
 What the unanswered call cannot do by itself is notice that the job carrying
 its answer died. That is :func:`repair_dangling_call`'s job: a session whose
 history ends in an unanswered call while NO edit job is active is healed with
@@ -42,6 +47,7 @@ from packages.bot.sessions.models import (
     PendingAction,
     requires_approval,
 )
+from packages.bot.sessions.parked import park_call
 from packages.bot.sessions.session_rows import dangling_call_parts
 from packages.bot.sessions.store import (
     load_revision_deck,
@@ -93,15 +99,15 @@ class TurnKind(StrEnum):
 class PendingActionView:
     """A parked change, as the caller renders it.
 
-    ``history_len`` and ``session_id`` are what the API stamps on the edit job that
-    carries it, so a load can match an unanswered call to its job's receipt.
+    ``session_id`` and ``operation_id`` identify the parked call; the API stamps
+    both on the edit job that carries it (B1-FIX4).
     """
 
     reason: str
     fixes: tuple[SlideFix, ...]
     call_count: int
-    history_len: int = 0
     session_id: str | None = None
+    operation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,10 +125,10 @@ class TurnResult:
     fixes_pending: int = 0
     # The revision the brain saw this turn: a parked edit commits against it.
     revision_id: str | None = None
-    # Stamped on the edit job (B1-FIX3): the conversation length with the parked
-    # call, and the session whose allowance the edit holds.
-    history_len: int = 0
+    # Stamped on the edit job (B1-FIX4): the session whose allowance the edit
+    # holds and the parked call it answers.
     session_id: str | None = None
+    operation_id: str | None = None
 
 
 @dataclass
@@ -210,8 +216,8 @@ def _pending_view(
         reason=pending.reason,
         fixes=tuple(pending.fixes),
         call_count=pending.call_count,
-        history_len=len(session.history) if session is not None else 0,
         session_id=session.session_id if session is not None else None,
+        operation_id=session.parked_operation_id if session is not None else None,
     )
 
 
@@ -377,6 +383,7 @@ async def run_web_turn(
             call_count=max(1, outcome.fix_call_count),
         )
         session.approval_state = ApprovalState.AWAITING_APPROVAL
+        park_call(session)
         await persist_session(db, session)
         return TurnResult(
             TurnKind.APPROVAL_REQUIRED,
@@ -407,8 +414,9 @@ async def run_web_turn(
         )
 
     # Park: history holds the unanswered call, so no other turn can run until a
-    # worker answers it. Persist BEFORE the caller enqueues — a job that exists
-    # without the parked call would answer a call that is not there.
+    # worker answers it. Persist BEFORE the caller enqueues — the database admits
+    # the job only for the call this write parks.
+    operation_id = park_call(session)
     await persist_session(db, session)
     return TurnResult(
         TurnKind.FIX_READY,
@@ -419,8 +427,8 @@ async def run_web_turn(
         fixes_used=session.fixes_used,
         fixes_pending=len(session.pending_deliveries),
         revision_id=session.revision_id,
-        history_len=len(session.history),
         session_id=session.session_id,
+        operation_id=operation_id,
     )
 
 
@@ -459,6 +467,23 @@ async def park_pending_for_apply(db: DatabaseClient, project_id: str) -> Pending
     return _pending_view(session.pending_action, session)
 
 
+async def pending_for_approval(db: DatabaseClient, project_id: str) -> PendingActionView | None:
+    """The parked decision an approve call is about to queue, with its call's identity.
+
+    A decision parked before operation ids existed (B1-FIX4) gets one now, persisted
+    before the caller enqueues, so the database can admit the job. The decision
+    itself stays on the row (see :func:`park_pending_for_apply`).
+    """
+
+    session = await load_session(db, project_id)
+    if session is None or session.pending_action is None:
+        return None
+    if session.parked_operation_id is None:
+        park_call(session)
+        await persist_session(db, session)
+    return _pending_view(session.pending_action, session)
+
+
 async def reject_pending(db: DatabaseClient, project_id: str) -> bool:
     """Discard the parked change and answer its call. True iff one was parked."""
 
@@ -488,9 +513,16 @@ async def dispatch_fix(
     base_revision_id: str,
     commit: CommitDeck,
     deliver: DeliverRevision | None,
+    session_id: str,
+    operation_id: str,
     delivery_job_id: str | None = None,
 ) -> FixDispatchResult:
     """Apply a parked fix batch against the revision the brain saw. Worker-side.
+
+    ``session_id`` and ``operation_id`` name the parked call the job was queued
+    for. A session that was replaced, or whose call was answered meanwhile, is not
+    this job's: nothing is applied, committed or answered (B1-FIX4), and the
+    session is left exactly as it is.
 
     ``base_revision_id`` was stamped when the batch was parked. If the session has
     since moved (the bot reloaded, or a later web turn followed the head), the
@@ -501,6 +533,14 @@ async def dispatch_fix(
     session = await load_session(db, project_id)
     if session is None:
         return FixDispatchResult(FixStatus.NO_SESSION, reason="no_session")
+    if (session.session_id, session.parked_operation_id) != (session_id, operation_id):
+        logger.warning(
+            "fix_operation_stale project=%s session_matches=%s operation_parked=%s",
+            project_id,
+            session.session_id == session_id,
+            session.parked_operation_id is not None,
+        )
+        return FixDispatchResult(FixStatus.OPERATION_STALE, reason="operation_stale")
     if session.revision_id != base_revision_id:
         revision_id, deck = await load_revision_deck(db, project_id, base_revision_id)
         if revision_id != base_revision_id:
@@ -540,6 +580,7 @@ __all__ = [
     "has_dangling_call",
     "history_for_wire",
     "park_pending_for_apply",
+    "pending_for_approval",
     "read_session",
     "reject_pending",
     "repair_dangling_call",

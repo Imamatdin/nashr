@@ -764,8 +764,19 @@ async def test_export_job_has_no_executor_and_is_failed() -> None:
     assert credits.refunds == []
 
 
+# The parked call an edit job answers (B1-FIX4): the API stamps both ids.
+_SESSION_ID = "5e551017-0000-4000-8000-000000000001"
+_OPERATION_ID = "0be7a710-0000-4000-8000-000000000002"
+
+
 def _edit_payload(**extra: Any) -> dict[str, Any]:
-    return {"document_id": "document-1", "base_revision_id": "revision-1", **extra}
+    return {
+        "document_id": "document-1",
+        "base_revision_id": "revision-1",
+        "session_id": _SESSION_ID,
+        "operation_id": _OPERATION_ID,
+        **extra,
+    }
 
 
 @pytest.mark.asyncio
@@ -796,6 +807,7 @@ async def test_edit_inline_fixes_reach_dispatch_against_the_stamped_base(
     assert kwargs["project_id"] == "p1"
     assert kwargs["call_count"] == 2
     assert kwargs["base_revision_id"] == "revision-1"
+    assert (kwargs["session_id"], kwargs["operation_id"]) == (_SESSION_ID, _OPERATION_ID)
     fixes = cast(list[SlideFix], kwargs["fixes"])
     assert [f.slide_id for f in fixes] == ["s2", "s5"]
     # A delivered edit was completed by its commit (finish_generation_job), so
@@ -814,7 +826,12 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     job.payload.update(document_id=document_id, base_revision_id=base)
     # An edit is parked on a session, whose allowance its commit holds a fix of.
     world.fake.tables.setdefault("brain_sessions", []).append(
-        {"id": "session-p1", "project_id": "p1", "version": 3}
+        {
+            "id": _SESSION_ID,
+            "project_id": "p1",
+            "version": 3,
+            "parked_operation_id": _OPERATION_ID,
+        }
     )
     world.patch(monkeypatch)
     edited = _render_deck("After the AI edit")
@@ -852,9 +869,18 @@ async def test_edit_commit_callback_commits_an_ai_edit_as_this_worker(
     [hold] = world.fake.tables["edit_deliveries"]
     assert (hold["job_id"], hold["session_id"], hold["status"]) == (
         job.id,
-        "session-p1",
+        _SESSION_ID,
         "reserved",
     )
+
+
+@pytest.mark.asyncio
+async def test_edit_without_an_operation_identity_is_refused() -> None:
+    runner = _runner(_FakeQueue(), _FakeCredits())
+    payload = _edit_payload(fixes=[{"slide_id": "s1", "instruction": "x"}])
+    del payload["operation_id"]
+    with pytest.raises(RuntimeError, match="no operation identity"):
+        await runner._run_presentation_edit(_edit_job(payload))  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio

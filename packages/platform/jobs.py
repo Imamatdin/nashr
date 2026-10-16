@@ -107,6 +107,27 @@ class DuplicateActiveJobError(Exception):
         super().__init__(f"active {existing.job_type} job {existing.id} already queued")
 
 
+# Why migration 016 refuses an AI edit's identity (B1-FIX4, Codex F3).
+EDIT_IDENTITY_REFUSALS: frozenset[str] = frozenset(
+    {"edit_identity_missing", "edit_session_not_found", "edit_operation_stale"}
+)
+
+
+class EditIdentityRefusedError(Exception):
+    """The database refused an AI edit: no session, someone else's, or a call no longer parked."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f"AI edit refused: {code}")
+
+
+def edit_identity_refusal(exc: BaseException) -> str | None:
+    """The identity refusal an error from the database carries, if it is one."""
+
+    text = f"{getattr(exc, 'message', '') or ''} {exc}"
+    return next((code for code in sorted(EDIT_IDENTITY_REFUSALS) if code in text), None)
+
+
 class JobDataInvalidError(Exception):
     """A persisted generation_jobs row does not parse (B1-FIX3, Codex A3).
 
@@ -192,6 +213,35 @@ class JobQueue:
                 .select("*")
                 .eq("project_id", project_id)
                 .eq("job_type", job_type.value)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+
+        result = await asyncio.to_thread(run)
+        if not result.data:
+            return None
+        return _row_to_job(cast(dict[str, Any], result.data[0]))
+
+    async def get_edit_job(
+        self, project_id: str, session_id: str, operation_id: str
+    ) -> GenerationJob | None:
+        """The latest edit job queued for one parked call: its session AND its operation.
+
+        A parked call is identified by both ids (B1-FIX4, Codex F2), never by the
+        conversation's length, so another session's or another call's job cannot
+        be taken for this one. An approval re-approved after its job failed queues
+        a second job for the same call; the latest one carries the outcome.
+        """
+
+        def run() -> Any:
+            return (
+                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
+                .select("*")
+                .eq("project_id", project_id)
+                .eq("job_type", JobType.PRESENTATION_EDIT.value)
+                .eq("payload->>session_id", session_id)
+                .eq("payload->>operation_id", operation_id)
                 .order("created_at", desc=True)
                 .limit(1)
                 .execute()
@@ -352,6 +402,9 @@ class JobQueue:
         try:
             result = await asyncio.to_thread(run)
         except Exception as exc:
+            refusal = edit_identity_refusal(exc)
+            if refusal is not None:
+                raise EditIdentityRefusedError(refusal) from exc
             existing = await self._existing_for(row)
             if existing is not None:
                 raise DuplicateActiveJobError(existing) from exc
@@ -560,15 +613,18 @@ async def heartbeat_while(
 
 __all__ = [
     "DEFAULT_STALE_SECONDS",
+    "EDIT_IDENTITY_REFUSALS",
     "HEARTBEAT_INTERVAL_SECONDS",
     "TERMINAL_STATUSES",
     "DuplicateActiveJobError",
+    "EditIdentityRefusedError",
     "GenerationJob",
     "JobDataInvalidError",
     "JobQueue",
     "JobStatus",
     "JobType",
     "RenderRequest",
+    "edit_identity_refusal",
     "heartbeat_while",
     "validated_payload",
 ]

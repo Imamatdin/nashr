@@ -1,0 +1,38 @@
+{
+  "schema": "the application as of 3723d30 (packages/ and scripts/worker_run_job.py), current tests and emulator",
+  "module": "tests/unit/test_b1_fix4_regressions.py",
+  "tests": {
+    "tests.unit.test_b1_fix4_regressions::test_a_replacement_sessions_call_never_adopts_the_old_sessions_receipt": {
+      "expect": "fail",
+      "match": "S2's call was answered from S1's job receipt"
+    },
+    "tests.unit.test_b1_fix4_regressions::test_a_worker_never_answers_a_call_that_was_already_answered": {
+      "expect": "fail",
+      "match": "the worker applied an edit for a call that was not parked"
+    },
+    "tests.unit.test_b1_fix4_regressions::test_a_second_worker_for_the_same_call_answers_nothing": {
+      "expect": "fail",
+      "match": "the worker applied an edit for a call that was not parked"
+    },
+    "tests.unit.test_b1_fix4_regressions::test_a_receipt_with_a_malformed_revision_id_is_409_job_data_invalid": {
+      "expect": "fail",
+      "match": "APIError: \\{'message': 'invalid input syntax for type uuid: \\\"not-a-uuid\\\"', 'code': '22P02'"
+    },
+    "tests.unit.test_b1_fix4_regressions::test_other_malformed_receipts_are_409_job_data_invalid[committed_without_revision]": {
+      "expect": "fail",
+      "match": "AssertionError: \\{\"can_edit\":true"
+    },
+    "tests.unit.test_b1_fix4_regressions::test_other_malformed_receipts_are_409_job_data_invalid[unknown_outcome]": {
+      "expect": "fail",
+      "match": "AssertionError: \\{\"can_edit\":true"
+    },
+    "tests.unit.test_b1_fix4_regressions::test_other_malformed_receipts_are_409_job_data_invalid[revision_not_a_string]": {
+      "expect": "fail",
+      "match": "AssertionError: \\{\"can_edit\":true"
+    },
+    "tests.unit.test_b1_fix4_regressions::test_an_unchanged_edit_shows_no_notice_and_spends_nothing": {
+      "expect": "pass"
+    }
+  },
+  "note": "The emulator carries the fixed SQL, so the unchanged-edit view test passes on 3723d30 (coverage); F1 and F3 are gated on real PostgreSQL in tests/db/inventory_fix3.json."
+}

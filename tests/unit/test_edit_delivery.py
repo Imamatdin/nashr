@@ -28,6 +28,7 @@ from packages.platform.document_store import DocumentStore
 from packages.platform.jobs import JobStatus
 from packages.sessions_core.apply import FixStatus
 from packages.sessions_core.chat import dispatch_fix, history_for_wire
+from tests.unit.parked_edit import park_edit
 from tests.unit.test_brain_session import _provision  # pyright: ignore[reportPrivateUsage]
 from tests.unit.test_sessions_core_chat import (  # pyright: ignore[reportPrivateUsage]
     _FakeOrchestrator,
@@ -57,6 +58,7 @@ async def _queued_edit(
 ) -> tuple[Any, str]:
     """Run one parked edit the way the worker does: finish with the job, deliver=None."""
 
+    identity = await park_edit(db, "proj-1")
     job_id = str(uuid.uuid4())
     _tables(db).setdefault("generation_jobs", []).append(
         {
@@ -68,8 +70,8 @@ async def _queued_edit(
             "worker_id": "w1",
             "attempts": 1,
             "max_attempts": 1,
-            # As the chat route stamps it (B1-FIX3).
-            "payload": {"slides_changed": 1},
+            # As the chat route stamps it (B1-FIX3; the call's identity, B1-FIX4).
+            "payload": {"slides_changed": 1, **identity},
             "progress": {},
             "heartbeat_at": "2026-01-01T00:00:00+00:00",
         }
@@ -102,6 +104,7 @@ async def _queued_edit(
         commit=commit,
         deliver=None,
         delivery_job_id=job_id,
+        **identity,
     )
     return result, job_id
 

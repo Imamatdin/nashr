@@ -69,9 +69,18 @@ _COLUMN_DEFAULTS: dict[str, dict[str, Any]] = {
         "findings_json": None,
         "revision_id": None,
         "delivery_notes_json": [],
+        "parked_operation_id": None,
         "version": 0,
     },
 }
+
+
+def _is_uuid_text(value: object) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True
 
 
 class _FakeQuery:
@@ -233,6 +242,18 @@ class FakeSupabaseClient:
         rows = self.tables.setdefault(table, [])
         if mode == "select" and self.before_select is not None:
             self.before_select(table, list(filters))
+        if table == "document_revisions":
+            for column, value in filters:
+                if column == "id" and not _is_uuid_text(value):
+                    # PostgREST casts the filter to the uuid column: 22P02.
+                    raise APIError(
+                        {
+                            "message": f'invalid input syntax for type uuid: "{value}"',
+                            "code": "22P02",
+                            "hint": None,
+                            "details": None,
+                        }
+                    )
         if mode == "select":
             filtered = [r for r in rows if self._matches(r, filters, in_filters)]
             filtered = [
@@ -275,6 +296,9 @@ class FakeSupabaseClient:
                 )
             row = {**_COLUMN_DEFAULTS.get(table, {}), **payload}
             row.setdefault("id", str(uuid.uuid4()))
+            if table == "generation_jobs" and row.get("job_type") == "presentation_edit":
+                # generation_jobs_require_edit_identity (migration 016, B1-FIX4)
+                self.documents.edit_session(row)
             rows.append(row)
             self.inserts.append((table, dict(payload)))
             return SimpleNamespace(data=[row])

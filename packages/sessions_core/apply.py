@@ -34,10 +34,9 @@ from packages.bot.sessions.fix_responses import (
     unchanged_response,
 )
 from packages.bot.sessions.models import ApprovalState, BrainSession, PendingDelivery
+from packages.bot.sessions.parked import answer_calls
 from packages.bot.sessions.store import hydrate_figures, persist_session
-from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
 from packages.core.enums import ExportFormat, GenerationPackage
-from packages.core.gemini_tools import FunctionResult, build_function_responses_content
 from packages.core.models.presentation import DeckSpec, SlideFix
 from packages.platform.database import DatabaseClient
 from packages.platform.document_models import CommitOutcome, CommitStatus
@@ -78,6 +77,9 @@ class FixStatus(StrEnum):
     RENDER_FAILED = "render_failed"
     EXHAUSTED = "fixes_exhausted"
     NO_SESSION = "no_session"
+    # The job is not for the call the session has parked (B1-FIX4): another
+    # session, or a call already answered. Nothing was applied or answered.
+    OPERATION_STALE = "operation_stale"
 
 
 @dataclass(frozen=True)
@@ -103,13 +105,11 @@ def answer_fix_calls(session: BrainSession, response: dict[str, object], *, coun
     """Answer each of the turn's ``edit_slides`` call parts with ``response``.
 
     Gemini requires every tool-call part that ended a turn to be answered by its
-    own function_response part before the next user turn (else HTTP 400).
+    own function_response part before the next user turn (else HTTP 400). The
+    call's operation is no longer parked once answered (B1-FIX4).
     """
 
-    parts = [
-        FunctionResult(name=EDIT_SLIDES_TOOL_NAME, response=response) for _ in range(max(1, count))
-    ]
-    session.history = [*session.history, build_function_responses_content(parts)]
+    answer_calls(session, response, count=count)
 
 
 async def _finish(

@@ -158,6 +158,10 @@ class BrainSession(BaseModel):
     formats: list[ExportFormat] = Field(min_length=1)
     approval_state: ApprovalState = ApprovalState.IDLE
     pending_action: PendingAction | None = None
+    # The identity of the edit_slides call parked unanswered at the end of the
+    # history (B1-FIX4): a queued edit names it, the database admits the edit only
+    # while it is parked, and whatever answers the call clears it.
+    parked_operation_id: str | None = None
     # The edit allowance is a COUNTER (see budget.has_fixes_remaining) of DELIVERED
     # edits, so a refused/failed fix never consumes one. Two sources (B1-FIX3):
     # ``inline_fixes_used`` is brain_sessions.fixes_used, written only by the bot's

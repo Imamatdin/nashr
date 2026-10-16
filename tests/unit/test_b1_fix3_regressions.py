@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import logging
 import threading
 import uuid
@@ -155,6 +156,10 @@ class _World:
         await persist_session(self.db, session)
         reloaded = await load_session(self.db, _PROJECT)
         assert reloaded is not None and has_dangling_call(reloaded) == 1
+        # The call's identity (B1-FIX4), written as the turn's park write does; the
+        # application as of fdb14bc ignores the column and the payload keys.
+        operation_id = str(uuid.uuid4())
+        self.session_row()["parked_operation_id"] = operation_id
         job_id = str(uuid.uuid4())
         self.fake.tables.setdefault("generation_jobs", []).append(
             {
@@ -168,8 +173,10 @@ class _World:
                 "max_attempts": 1,
                 "payload": {
                     "slides_changed": 1,
+                    # fdb14bc matched receipts by this; the fix ignores it.
                     "history_len": len(reloaded.history),
                     "session_id": str(self.session_row()["id"]),
+                    "operation_id": operation_id,
                     "base_revision_id": reloaded.revision_id,
                 },
                 "progress": {},
@@ -179,7 +186,9 @@ class _World:
         )
         return job_id
 
-    async def dispatch(self, job_id: str, title: str, *, kill: bool = False) -> None:
+    async def dispatch(
+        self, job_id: str, title: str, *, kill: bool = False, runner: Any = None
+    ) -> None:
         """The worker's edit: commit with the job (one transaction), then answer."""
 
         store = DocumentStore(self.db)
@@ -203,8 +212,15 @@ class _World:
 
         session = await load_session(self.db, _PROJECT)
         assert session is not None and session.revision_id is not None
+        payload = _job(self.db, job_id)["payload"]
+        identity: dict[str, Any] = (
+            {"session_id": payload["session_id"], "operation_id": payload["operation_id"]}
+            if "operation_id" in inspect.signature(dispatch_fix).parameters
+            else {}  # fdb14bc's dispatch_fix takes no operation identity
+        )
         await dispatch_fix(
-            runner=cast(Any, _FakeOrchestrator(self.deck.model_copy(update={"title": title}))),
+            runner=runner
+            or cast(Any, _FakeOrchestrator(self.deck.model_copy(update={"title": title}))),
             db=self.db,
             project_id=_PROJECT,
             fixes=[SlideFix(slide_id="s0", instruction="tighten")],
@@ -214,6 +230,7 @@ class _World:
             commit=commit,
             deliver=None,
             delivery_job_id=job_id,
+            **identity,
         )
 
     async def delivered_edit(self, title: str) -> str:

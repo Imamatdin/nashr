@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from collections.abc import Callable
 from typing import Any, Final, cast
 
@@ -45,6 +46,7 @@ COLUMNS: Final[tuple[str, ...]] = (
     "formats_json",
     "approval_state",
     "pending_action_json",
+    "parked_operation_id",
     "fixes_used",
     "accumulated_cost_usd",
     "accumulated_image_count",
@@ -55,6 +57,13 @@ _ADDITIVE: Final[frozenset[str]] = frozenset(
     {"fixes_used", "accumulated_cost_usd", "accumulated_image_count"}
 )
 _MAX_NOTES: Final[int] = 50
+# What answering the parked call changes; a duplicate answer yields all of them.
+_ANSWER_COLUMNS: Final[tuple[str, ...]] = (
+    "history_json",
+    "parked_operation_id",
+    "pending_action_json",
+    "approval_state",
+)
 
 
 class SessionDataInvalidError(Exception):
@@ -119,6 +128,12 @@ def _pending_action(value: Any) -> PendingAction | None:
     return PendingAction.model_validate(value)
 
 
+def _operation(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(uuid.UUID(str(value)))
+
+
 def _sources(value: Any) -> SourceProcessingResult:
     if not isinstance(value, dict):
         raise TypeError(f"expected a JSON object, got {type(value).__name__}")
@@ -143,6 +158,7 @@ def parse_row(project_id: str, row: dict[str, Any]) -> BrainSession:
             formats=_column(project_id, row, "formats_json", parse_export_formats),
             approval_state=_column(project_id, row, "approval_state", ApprovalState),
             pending_action=_column(project_id, row, "pending_action_json", _pending_action),
+            parked_operation_id=_column(project_id, row, "parked_operation_id", _operation),
             inline_fixes_used=_column(project_id, row, "fixes_used", _count),
             accumulated_cost_usd=_column(project_id, row, "accumulated_cost_usd", _amount),
             accumulated_image_count=_column(project_id, row, "accumulated_image_count", _count),
@@ -171,6 +187,7 @@ def columns_of(session: BrainSession) -> dict[str, object]:
         "pending_action_json": (
             session.pending_action.model_dump(mode="json") if session.pending_action else None
         ),
+        "parked_operation_id": session.parked_operation_id,
         "fixes_used": session.inline_fixes_used,
         "accumulated_cost_usd": session.accumulated_cost_usd,
         "accumulated_image_count": session.accumulated_image_count,
@@ -183,8 +200,9 @@ def columns_from_row(row: dict[str, Any]) -> dict[str, object]:
     """The JSON value of every writable column, as the row holds it."""
 
     values: dict[str, object] = {column: row.get(column) for column in COLUMNS}
-    if values["revision_id"] is not None:
-        values["revision_id"] = str(values["revision_id"])
+    for column in ("revision_id", "parked_operation_id"):
+        if values[column] is not None:
+            values[column] = str(values[column])
     return values
 
 
@@ -218,12 +236,18 @@ def _merge_history(
         return theirs
     if our_tail[: len(their_tail)] == their_tail:
         return ours
-    # Both answered the same parked call (a reader recovered the answer from the
-    # job's receipt before the worker saved its own): theirs came first and the
-    # conversation already continued from it, so our duplicate answer is dropped.
+    # A session parked before operation ids (B1-FIX4) answered by both sides:
+    # theirs came first and the conversation continued from it, so ours is dropped.
     if len(our_tail) == 1 and _is_answer(our_tail[0]) and their_tail and _is_answer(their_tail[0]):
         return theirs
     raise SessionConflictError(project_id, "history_diverged")
+
+
+def _only_answered(base: list[Any], ours: list[Any]) -> bool:
+    """True when this writer's only change to the conversation is one answer turn."""
+
+    tail = ours[len(base) :]
+    return ours[: len(base)] == base and len(tail) == 1 and _is_answer(tail[0])
 
 
 def _notes(value: object) -> list[dict[str, Any]]:
@@ -248,6 +272,20 @@ def merge(
     """Three-way merge of a session write that lost its compare-and-swap."""
 
     merged: dict[str, object] = {}
+    parked = base.get("parked_operation_id")
+    if (
+        parked is not None
+        and ours.get("parked_operation_id") != parked != theirs.get("parked_operation_id")
+        and _only_answered(_list(base.get("history_json")), _list(ours.get("history_json")))
+    ):
+        # Both sides answered the same parked call (B1-FIX4) and answering is all
+        # this writer did: the row answered it first, so this answer is a duplicate
+        # and is dropped with the parked/approval state it implied (theirs may have
+        # parked the next call already). Everything else this writer changed still
+        # merges. A writer that also continued the conversation falls through to the
+        # history merge, which keeps it only if the row's answer is the same turn.
+        answered = {column: theirs.get(column) for column in _ANSWER_COLUMNS}
+        ours, base = {**ours, **answered}, {**base, **answered}
     for column in COLUMNS:
         b, o, t = base.get(column), ours.get(column), theirs.get(column)
         if column == "history_json":

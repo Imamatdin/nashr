@@ -36,6 +36,7 @@ from packages.sessions_core.chat import (
     repair_dangling_call,
     run_web_turn,
 )
+from tests.unit.parked_edit import park_edit
 from tests.unit.test_brain_session import (
     _FakeOrchestrator,  # pyright: ignore[reportPrivateUsage]
     _provision,  # pyright: ignore[reportPrivateUsage]
@@ -184,6 +185,8 @@ async def _dispatch(*, fake: Any, **kwargs: Any) -> Any:
     path does it.
     """
 
+    db: DatabaseClient = kwargs["db"]
+    identity = await park_edit(db, "proj-1")
     job_id = str(uuid.uuid4())
     fake.tables.setdefault("generation_jobs", []).append(
         {
@@ -195,9 +198,9 @@ async def _dispatch(*, fake: Any, **kwargs: Any) -> Any:
             "worker_id": "w1",
             "attempts": 1,
             "heartbeat_at": "2026-01-01T00:00:00+00:00",
+            "payload": dict(identity),
         }
     )
-    db: DatabaseClient = kwargs["db"]
     runner = kwargs["runner"]
     session = await _session(db)
     store = DocumentStore(db)
@@ -223,7 +226,11 @@ async def _dispatch(*, fake: Any, **kwargs: Any) -> Any:
         return list(render.warnings)
 
     return await dispatch_fix(
-        base_revision_id=str(session.revision_id), commit=commit, deliver=deliver, **kwargs
+        base_revision_id=str(session.revision_id),
+        commit=commit,
+        deliver=deliver,
+        **identity,
+        **kwargs,
     )
 
 

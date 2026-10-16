@@ -106,22 +106,24 @@ async def load_session(db: DatabaseClient, project_id: str) -> BrainSession | No
 
     A pure read. The source figures are NOT loaded (``figures_loaded`` is False);
     the fix path calls :func:`hydrate_figures` first. The edit allowance and the
-    chat notices come from the session's edit_deliveries rows, and an unanswered
-    call whose job left a receipt is answered from it, in memory: the next write
-    persists both. Raises :class:`SessionDataInvalidError` for a corrupt row.
+    chat notices come from the session's edit_deliveries rows, and a parked call
+    whose job (matched by session and operation id) left a receipt is answered
+    from it, in memory: the next write persists both. Raises
+    :class:`SessionDataInvalidError` for a corrupt row and
+    :class:`~packages.platform.jobs.JobDataInvalidError` for a corrupt receipt.
     """
 
     row = await db.get_brain_session(project_id)
     if row is None:
         return None
     session = parse_row(project_id, row)
-    job = await receipt_for(db, session)
-    revision = receipt_revision(job) if job is not None else None
+    receipt = await receipt_for(db, session)
+    revision = receipt_revision(receipt) if receipt is not None else None
     session.revision_id, session.deck = await load_revision_deck(
         db, project_id, revision or session.revision_id
     )
-    if job is not None:
-        answer_from_receipt(session, job, session.deck if revision is not None else None)
+    if receipt is not None:
+        answer_from_receipt(session, receipt, session.deck if revision is not None else None)
     try:
         rows = await session_deliveries(db, str(session.session_id))
     except ValidationError as exc:
@@ -203,6 +205,7 @@ def _adopt(session: BrainSession, row: dict[str, Any]) -> None:
     merged = parse_row(session.project_id, row)
     session.history = merged.history
     session.pending_action = merged.pending_action
+    session.parked_operation_id = merged.parked_operation_id
     session.approval_state = merged.approval_state
     session.inline_fixes_used = merged.inline_fixes_used
     session.accumulated_cost_usd = merged.accumulated_cost_usd

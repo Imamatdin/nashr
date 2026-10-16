@@ -520,12 +520,14 @@ async def test_approve_queues_from_the_session_and_leaves_the_decision_parked() 
         "call_count": 1,
         "document_id": document_id,
         "base_revision_id": session.revision_id,
-        # B1-FIX3: what the job's finish records its allowance hold with, and how
-        # a load matches the parked call to this job's receipt.
+        # What the job's finish records its allowance hold with (B1-FIX3), and
+        # the parked call it answers: the database admits the job only for it,
+        # and a load matches this job's receipt to it (B1-FIX4).
         "slides_changed": len(session.pending_action.fixes),
-        "history_len": len(session.history),
         "session_id": session.session_id,
+        "operation_id": session.parked_operation_id,
     }
+    assert session.parked_operation_id is not None
     follow_up = await harness.client.get(f"/projects/{_PROJECT_ID}/chat", headers=_headers())
     assert follow_up.json()["pending_action"] is not None
 

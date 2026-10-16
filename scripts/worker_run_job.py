@@ -321,6 +321,12 @@ class JobRunner:
         base_revision_id = payload.get("base_revision_id")
         if not isinstance(document_id, str) or not isinstance(base_revision_id, str):
             raise RuntimeError("presentation_edit carries no document revision to edit")
+        # The parked call this job answers (B1-FIX4); the database admitted the job
+        # only with both, and dispatch_fix refuses it once the call is not parked.
+        session_id = payload.get("session_id")
+        operation_id = payload.get("operation_id")
+        if not isinstance(session_id, str) or not isinstance(operation_id, str):
+            raise RuntimeError("presentation_edit carries no operation identity")
 
         store = DocumentStore(self._db)
         bot = Bot(token=self._config.telegram_bot_token)
@@ -357,6 +363,8 @@ class JobRunner:
                 # This job's render delivers the edit; the session holds the fix
                 # until that render settles the job.
                 deliver=None,
+                session_id=session_id,
+                operation_id=operation_id,
                 delivery_job_id=job.id,
             )
         finally:
@@ -383,7 +391,9 @@ class JobRunner:
             )
             return
         # dispatch_fix already answered the parked call and persisted, so the
-        # session is coherent; the job row just has to say what happened.
+        # session is coherent; the job row just has to say what happened. A job
+        # whose call is no longer parked (operation_stale) answered nothing: the
+        # call is someone else's to answer.
         failed_by_us = await self._queue.fail(
             job.id,
             self._worker_id,

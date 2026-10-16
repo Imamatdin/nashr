@@ -80,6 +80,7 @@ from packages.bot.sessions import (
     requires_approval,
 )
 from packages.bot.sessions.budget import session_fix_limit
+from packages.bot.sessions.parked import park_call
 from packages.bot.sessions.store import move_session_to_head
 from packages.bot.states import PresentationStates
 from packages.core.enums import ExportFormat, GenerationPackage
@@ -991,6 +992,8 @@ async def _run_chat_turn(
             call_count=max(1, outcome.fix_call_count),
         )
         session.approval_state = ApprovalState.AWAITING_APPROVAL
+        # The web may approve this decision, queuing an edit for this exact call.
+        park_call(session)
         await persist_session(db, session)
         return _ChatResult(_ChatOutcome.AWAITING_APPROVAL, reason=outcome.reason or "")
 

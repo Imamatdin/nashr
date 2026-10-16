@@ -19,6 +19,7 @@ the same way it watches a generation.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -27,13 +28,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from packages.api.middleware.auth import Authenticated
 from packages.core.models.presentation import SlideFix
 from packages.platform.document_models import DocumentKind
-from packages.platform.jobs import DuplicateActiveJobError, JobQueue, JobType
+from packages.platform.jobs import (
+    DuplicateActiveJobError,
+    EditIdentityRefusedError,
+    JobQueue,
+    JobType,
+)
 from packages.platform.rate_limit import CHAT_ACTION, RateLimiter
 from packages.sessions_core import (
     PendingActionView,
     TurnKind,
     abandon_parked_fix,
-    park_pending_for_apply,
+    pending_for_approval,
     read_session,
     reject_pending,
     run_web_turn,
@@ -268,21 +274,50 @@ async def _design_revision_payload(
     return {"document_id": document_id, "base_revision_id": revision_id}
 
 
-def _delivery_stamp(
-    slides_changed: int, history_len: int, session_id: str | None
-) -> dict[str, Any]:
-    """What an edit job carries for its delivery (B1-FIX3).
+class EditStamp(BaseModel):
+    """What an edit job carries for its identity and delivery (B1-FIX4).
 
-    ``finish_generation_job`` records the edit's allowance hold for ``session_id``
-    with ``slides_changed``; a load matches the session's unanswered call to this
-    job by ``history_len`` and answers it from the job's receipt if the worker died
-    before it could.
+    ``session_id`` and ``operation_id`` name the parked call the job answers: the
+    database admits the job, and ``finish_generation_job`` its commit, only while
+    that session still has that call parked, and a load recovers a dead worker's
+    answer only from the job carrying both. ``slides_changed`` sizes the edit's
+    allowance hold and its chat notice.
     """
 
-    stamp: dict[str, Any] = {"slides_changed": slides_changed, "history_len": history_len}
-    if session_id is not None:
-        stamp["session_id"] = session_id
-    return stamp
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID
+    operation_id: uuid.UUID
+    slides_changed: int = Field(ge=0, le=1000)
+
+
+def _delivery_stamp(
+    slides_changed: int, session_id: str | None, operation_id: str | None
+) -> dict[str, Any]:
+    """The stamp, or 409 ``session_not_ready`` when the parked call has no identity."""
+
+    if session_id is None or operation_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail={"reason": "session_not_ready"}
+        )
+    stamp = EditStamp(
+        session_id=uuid.UUID(session_id),
+        operation_id=uuid.UUID(operation_id),
+        slides_changed=slides_changed,
+    )
+    return stamp.model_dump(mode="json")
+
+
+def _identity_refused(exc: EditIdentityRefusedError) -> HTTPException:
+    """The database refused the edit's identity: the parked call changed under us.
+
+    To the user this is the conversation moving underneath the request, the same
+    answer a lost session write gets (``session_busy``); ``why`` names the refusal.
+    """
+
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT, detail={"reason": "session_busy", "why": exc.code}
+    )
 
 
 @router.post("/{project_id}/chat", response_model=ChatTurnView)
@@ -349,6 +384,7 @@ async def post_chat(
     # the batch. An enqueue that fails must un-park, or the session stays wedged.
     try:
         revision_payload = await _design_revision_payload(request, project_id, result.revision_id)
+        stamp = _delivery_stamp(len(result.fixes), result.session_id, result.operation_id)
     except HTTPException:
         await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
         raise
@@ -365,7 +401,7 @@ async def post_chat(
                 "call_count": result.fix_call_count,
                 "reply_text": result.reply_text,
                 **revision_payload,
-                **_delivery_stamp(len(result.fixes), result.history_len, result.session_id),
+                **stamp,
             },
         )
     except DuplicateActiveJobError:
@@ -373,6 +409,11 @@ async def post_chat(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "brain_busy"}
         ) from None
+    except EditIdentityRefusedError as exc:
+        # The call this turn parked was answered or replaced before the job could
+        # be queued; un-parking answers it only if it is still there.
+        await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
+        raise _identity_refused(exc) from None
     except Exception:
         await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
         logger.exception("chat_edit_enqueue_failed project=%s", project_id)
@@ -405,7 +446,7 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
     await _refuse_if_busy(queue, project_id)
 
     db = request.app.state.db
-    pending = await park_pending_for_apply(db, project_id)
+    pending = await pending_for_approval(db, project_id)
     if pending is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "no_pending_action"}
@@ -417,6 +458,7 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
         else None
     )
     revision_payload = await _design_revision_payload(request, project_id, session_revision)
+    stamp = _delivery_stamp(len(pending.fixes), pending.session_id, pending.operation_id)
 
     # The batch is NOT copied into the payload: it stays on the session row so a
     # lost job leaves the decision re-presentable instead of silently dropped.
@@ -429,13 +471,15 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
                 "from_pending": True,
                 "call_count": pending.call_count,
                 **revision_payload,
-                **_delivery_stamp(len(pending.fixes), pending.history_len, pending.session_id),
+                **stamp,
             },
         )
     except DuplicateActiveJobError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "brain_busy"}
         ) from None
+    except EditIdentityRefusedError as exc:
+        raise _identity_refused(exc) from None
     except Exception:
         # No un-parking here (unlike the turn route): the decision deliberately
         # stays on the session row, so a failed enqueue leaves it re-presentable.

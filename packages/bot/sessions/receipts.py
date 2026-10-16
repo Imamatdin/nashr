@@ -1,4 +1,4 @@
-"""Recover a parked edit's answer from its job's receipt (B1-FIX3, Codex A1).
+"""Recover a parked edit's answer from its job's receipt (B1-FIX3; identity since B1-FIX4).
 
 A queued edit's worker commits the revision with ``finish_generation_job`` and only
 then answers the parked ``edit_slides`` call in a separate session write. If the
@@ -7,18 +7,25 @@ recorded, in the same transaction) but the conversation still ends in the
 unanswered call. The job row is the receipt: ``finish_generation_job`` left it
 ``committed`` (or settled it) with the outcome and revision in ``progress``.
 
-On load, a session whose history ends in an unanswered call is matched to the
-project's latest edit job by the conversation length the API stamped on the job
-when it parked the call. A match whose job has a receipt gets the answer the worker
-would have written; the next session write persists it. A job that failed without
-a receipt is left to the dangling-call repair, which answers with an honest error.
+On load, a session with a parked call is matched to the edit job queued for that
+exact call: the job's payload names the session and the parked operation
+(Codex F2). Nothing else matches, so another conversation's receipt is never
+adopted. The receipt is parsed into :class:`EditReceipt` before anything is read
+with it; a receipt that does not parse is a :class:`JobDataInvalidError` (409
+``job_data_invalid``), never a query with a malformed id (Codex F4). A matched job
+that failed without a receipt is left to the dangling-call repair, which answers
+with an honest error.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Final, cast
+import uuid
+from enum import StrEnum
+from typing import Any, Final, Self, cast
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from packages.bot.sessions.fix_responses import (
     committed_response,
@@ -27,12 +34,11 @@ from packages.bot.sessions.fix_responses import (
     unchanged_response,
 )
 from packages.bot.sessions.models import ApprovalState, BrainSession
+from packages.bot.sessions.parked import answer_calls
 from packages.bot.sessions.session_rows import dangling_call_parts
-from packages.core.brain_loop import EDIT_SLIDES_TOOL_NAME
-from packages.core.gemini_tools import FunctionResult, build_function_responses_content
 from packages.core.models.presentation import DeckSpec
 from packages.platform.database import DatabaseClient
-from packages.platform.jobs import GenerationJob, JobQueue, JobStatus, JobType
+from packages.platform.jobs import GenerationJob, JobDataInvalidError, JobQueue, JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -40,74 +46,161 @@ logger = logging.getLogger(__name__)
 _SETTLED: Final[frozenset[JobStatus]] = frozenset(
     {JobStatus.COMMITTED, JobStatus.COMPLETED, JobStatus.DELIVERY_FAILED}
 )
-_COMMITTED_OUTCOMES: Final[frozenset[str]] = frozenset({"committed", "duplicate"})
 
 
-def slides_changed(job: GenerationJob) -> int:
-    """The number of slides the job's batch edits, as the API stamped it."""
+class ReceiptOutcome(StrEnum):
+    """What ``finish_generation_job`` did with the edit (its ``progress.outcome``)."""
 
-    stamped = job.payload.get("slides_changed")
-    if isinstance(stamped, int) and not isinstance(stamped, bool) and stamped >= 0:
-        return stamped
-    fixes = job.payload.get("fixes")
+    COMMITTED = "committed"
+    DUPLICATE = "duplicate"
+    PROPOSED = "proposed"
+    UNCHANGED = "unchanged"
+
+
+_WITH_REVISION: Final[frozenset[ReceiptOutcome]] = frozenset(
+    {ReceiptOutcome.COMMITTED, ReceiptOutcome.DUPLICATE, ReceiptOutcome.UNCHANGED}
+)
+
+
+class EditReceipt(BaseModel):
+    """A settled edit job's receipt, as the session reads it.
+
+    ``session_id`` and ``operation_id`` are the parked call the job was queued for;
+    ``revision_id`` is the revision the edit committed (or, unchanged, the head it
+    matched), absent only for a proposal.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job_id: str = Field(min_length=1)
+    session_id: uuid.UUID
+    operation_id: uuid.UUID
+    outcome: ReceiptOutcome
+    revision_id: uuid.UUID | None
+    slides_changed: int = Field(ge=0, le=1000)
+    rendering: bool
+
+    @model_validator(mode="after")
+    def _revision_matches_outcome(self) -> Self:
+        if (self.outcome in _WITH_REVISION) != (self.revision_id is not None):
+            raise ValueError(f"outcome {self.outcome.value} with revision_id {self.revision_id}")
+        return self
+
+
+def _slides_changed(payload: dict[str, Any]) -> object:
+    """The number of slides the batch edits, as the API stamped it."""
+
+    if "slides_changed" in payload:
+        return payload["slides_changed"]
+    fixes = payload.get("fixes")
     return len(cast(list[Any], fixes)) if isinstance(fixes, list) else 0
 
 
-async def receipt_for(db: DatabaseClient, session: BrainSession) -> GenerationJob | None:
-    """The settled edit job that carries the session's unanswered call, if any."""
+def receipt_of(job: GenerationJob) -> EditReceipt:
+    """Parse a settled edit job's receipt, or raise :class:`JobDataInvalidError`.
+
+    The row is not touched: the structured log names the job and the fields, and
+    the reader answers 409 ``job_data_invalid``.
+    """
+
+    progress = job.progress
+    try:
+        return EditReceipt.model_validate(
+            {
+                "job_id": job.id,
+                "session_id": job.payload.get("session_id"),
+                "operation_id": job.payload.get("operation_id"),
+                "outcome": progress.get("outcome"),
+                "revision_id": progress.get("revision_id"),
+                "slides_changed": _slides_changed(job.payload),
+                "rendering": job.render_job_id is not None
+                or progress.get("render_job_id") is not None,
+            }
+        )
+    except ValidationError as exc:
+        fields = sorted(
+            {".".join(str(p) for p in error["loc"]) or "receipt" for error in exc.errors()}
+        )
+        detail = "receipt:" + ",".join(fields)
+        logger.error("job_data_invalid %s", json.dumps({"job_id": job.id, "fields": detail}))
+        raise JobDataInvalidError(job.id, detail) from None
+
+
+async def receipt_for(db: DatabaseClient, session: BrainSession) -> EditReceipt | None:
+    """The receipt of the edit job queued for the session's parked call, if it settled."""
 
     if dangling_call_parts(session) == 0:
         return None
-    job = await JobQueue(db).get_latest_job(session.project_id, JobType.PRESENTATION_EDIT)
+    if session.session_id is None or session.parked_operation_id is None:
+        return None
+    job = await JobQueue(db).get_edit_job(
+        session.project_id, session.session_id, session.parked_operation_id
+    )
     if job is None or job.status not in _SETTLED:
         return None
-    if job.payload.get("history_len") != len(session.history):
-        return None
-    outcome = job.progress.get("outcome")
-    if outcome not in (*_COMMITTED_OUTCOMES, "proposed", "unchanged"):
-        return None
-    return job
+    receipt = receipt_of(job)
+    if (str(receipt.session_id), str(receipt.operation_id)) != (
+        session.session_id,
+        session.parked_operation_id,
+    ):
+        logger.error(
+            "job_data_invalid %s",
+            json.dumps({"job_id": job.id, "fields": "receipt:identity_mismatch"}),
+        )
+        raise JobDataInvalidError(job.id, "receipt:identity_mismatch")
+    return receipt
 
 
-def answer_from_receipt(session: BrainSession, job: GenerationJob, deck: DeckSpec | None) -> None:
-    """Answer the unanswered call with what the job's receipt says happened.
+def answer_from_receipt(session: BrainSession, receipt: EditReceipt, deck: DeckSpec | None) -> None:
+    """Answer the parked call with what the job's receipt says happened.
 
     ``deck`` is the deck of the receipt's revision when it committed one; the
     caller has loaded it and moves the session onto that revision.
     """
 
-    outcome = str(job.progress.get("outcome"))
-    changed = slides_changed(job)
     response: dict[str, object]
-    if outcome in _COMMITTED_OUTCOMES and deck is not None:
-        rendering = job.render_job_id is not None or job.progress.get("render_job_id") is not None
+    committed = receipt.outcome in (ReceiptOutcome.COMMITTED, ReceiptOutcome.DUPLICATE)
+    if committed and deck is not None:
         response = (
-            committed_response(deck, changed) if rendering else delivered_response(deck, changed)
+            committed_response(deck, receipt.slides_changed)
+            if receipt.rendering
+            else delivered_response(deck, receipt.slides_changed)
         )
-    elif outcome == "proposed":
+    elif receipt.outcome is ReceiptOutcome.PROPOSED:
         response = proposed_response()
-    elif outcome == "unchanged":
+    elif receipt.outcome is ReceiptOutcome.UNCHANGED:
         response = unchanged_response()
     else:
         response = {"error": "fix_failed", "detail": "edit_receipt_unreadable"}
-    count = dangling_call_parts(session)
-    parts = [FunctionResult(name=EDIT_SLIDES_TOOL_NAME, response=response) for _ in range(count)]
-    session.history = [*session.history, build_function_responses_content(parts)]
+    answer_calls(session, response, count=dangling_call_parts(session))
     session.pending_action = None
     session.approval_state = ApprovalState.IDLE
     logger.warning(
         "session_answer_recovered %s",
-        json.dumps({"project_id": session.project_id, "job_id": job.id, "outcome": outcome}),
+        json.dumps(
+            {
+                "project_id": session.project_id,
+                "job_id": receipt.job_id,
+                "operation_id": str(receipt.operation_id),
+                "outcome": receipt.outcome.value,
+            }
+        ),
     )
 
 
-def receipt_revision(job: GenerationJob) -> str | None:
+def receipt_revision(receipt: EditReceipt) -> str | None:
     """The revision the receipt committed, if it committed one."""
 
-    if job.progress.get("outcome") not in _COMMITTED_OUTCOMES:
+    if receipt.outcome not in (ReceiptOutcome.COMMITTED, ReceiptOutcome.DUPLICATE):
         return None
-    revision = job.progress.get("revision_id")
-    return revision if isinstance(revision, str) and revision else None
+    return str(receipt.revision_id)
 
 
-__all__ = ["answer_from_receipt", "receipt_for", "receipt_revision", "slides_changed"]
+__all__ = [
+    "EditReceipt",
+    "ReceiptOutcome",
+    "answer_from_receipt",
+    "receipt_for",
+    "receipt_of",
+    "receipt_revision",
+]

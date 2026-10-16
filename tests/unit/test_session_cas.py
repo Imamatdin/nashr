@@ -126,10 +126,12 @@ async def test_two_writers_extending_the_conversation_differently_conflict() -> 
 async def test_a_receipt_from_another_parked_call_is_not_used() -> None:
     world = await _World().open()
     job_id = await world.park()
-    _job(world.db, job_id)["payload"]["history_len"] = 99  # not this conversation
     await world.dispatch(job_id, "Edited")  # answers normally
     second = await world.park()
     _job(world.db, second).update(status="failed")  # died without a receipt
+    # The first call's settled job is the project's latest edit; it is still not
+    # this call's (B1-FIX4: matched by session and operation, never recency).
+    _job(world.db, job_id)["created_at"] = "2099-01-01T00:00:00+00:00"
 
     session = await load_session(world.db, "proj-1")
     assert session is not None and has_dangling_call(session) == 1

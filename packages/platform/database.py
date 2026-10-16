@@ -447,7 +447,7 @@ class DatabaseClient:
     # Every session column EXCEPT the heavy figures_json — the light per-turn read.
     _SESSION_LIGHT_COLUMNS: str = (
         "id,project_id,history_json,sources_json,package,formats_json,"
-        "approval_state,pending_action_json,fixes_used,accumulated_cost_usd,"
+        "approval_state,pending_action_json,parked_operation_id,fixes_used,accumulated_cost_usd,"
         "accumulated_image_count,findings_json,revision_id,delivery_notes_json,version,"
         "created_at,updated_at"
     )

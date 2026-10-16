@@ -59,6 +59,12 @@ class _World:
     def __init__(self) -> None:
         self.fake = FakeSupabaseClient()
         self.fake.seed("projects", [{"id": _PROJECT_ID, "user_id": str(_USER_ID)}])
+        # The AI edit was queued for a call parked on the project's session (B1-FIX4).
+        session_id, operation_id = str(uuid4()), str(uuid4())
+        self.fake.seed(
+            "brain_sessions",
+            [{"id": session_id, "project_id": _PROJECT_ID, "parked_operation_id": operation_id}],
+        )
         self.fake.seed(
             "generation_jobs",
             [
@@ -71,6 +77,7 @@ class _World:
                     "worker_id": "w1",
                     "attempts": 1,
                     "heartbeat_at": "2026-01-01T00:00:00+00:00",
+                    "payload": {"session_id": session_id, "operation_id": operation_id},
                 }
             ],
         )

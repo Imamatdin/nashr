@@ -45,6 +45,16 @@ def refuse(code: str) -> APIError:
     return APIError({"message": code, "code": "P0001", "hint": None, "details": None})
 
 
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return len(value) == 36
+
+
 def content_hash(content: dict[str, Any]) -> str:
     """Stable digest of a JSON object (stands in for sha256(jsonb::text))."""
 
@@ -392,19 +402,42 @@ class DocumentRpcEmulator:
             now = self._now()
             row.update(status=status, settled_at=now, updated_at=now)
 
-    def _record_edit_delivery(self, job: dict[str, Any], revision_id: str, delivered: bool) -> None:
+    def edit_session(self, job: dict[str, Any]) -> str:
+        """_edit_session (B1-FIX4): the session and parked call an AI edit names.
+
+        Also the generation_jobs insert trigger: the fake client calls it for every
+        presentation_edit row it inserts.
+        """
+
+        payload = job.get("payload")
+        session_id = operation_id = None
+        if isinstance(payload, dict):
+            typed = cast(dict[str, Any], payload)
+            session_id, operation_id = typed.get("session_id"), typed.get("operation_id")
+        if not (_is_uuid(session_id) and _is_uuid(operation_id)):
+            raise refuse("edit_identity_missing")
+        session = self._one("brain_sessions", id=str(session_id).lower())
+        project = self._one("projects", id=job.get("project_id"))
+        if (
+            session is None
+            or session.get("project_id") != job.get("project_id")
+            or project is None
+            or job.get("user_id") is None
+            or str(project.get("user_id")) != str(job.get("user_id"))
+        ):
+            raise refuse("edit_session_not_found")
+        if str(session.get("parked_operation_id") or "") != str(operation_id).lower():
+            raise refuse("edit_operation_stale")
+        return str(session["id"])
+
+    def _record_edit_delivery(
+        self, job: dict[str, Any], session_id: str, revision_id: str, delivered: bool
+    ) -> None:
         """_record_edit_delivery: the hold an AI edit's committed revision takes."""
 
         if self._one("edit_deliveries", job_id=job["id"]) is not None:
             return
         payload = cast(dict[str, Any], job.get("payload") or {})
-        stamped = payload.get("session_id")
-        if stamped is not None:
-            found = self._one("brain_sessions", id=stamped, project_id=job["project_id"])
-            session_id = found["id"] if found is not None else None
-        else:
-            found = self._one("brain_sessions", project_id=job["project_id"])
-            session_id = found["id"] if found is not None else None
         slides = payload.get("slides_changed")
         if not isinstance(slides, int):
             fixes = payload.get("fixes")
@@ -704,6 +737,7 @@ class DocumentRpcEmulator:
         owner = str(project["user_id"])
         if job.get("user_id") is None or str(job["user_id"]) != owner:
             raise refuse("not_document_owner")
+        session_id = self.edit_session(job) if job["job_type"] == "presentation_edit" else None
         document = self._one("documents", project_id=job["project_id"], kind="presentation")
         if document is None:
             now = self._now()
@@ -727,7 +761,8 @@ class DocumentRpcEmulator:
             )
         outcome = result[0]
         render_job: str | None = None
-        if outcome["revision_id"] is not None:
+        unchanged_edit = job["job_type"] == "presentation_edit" and outcome["status"] == "unchanged"
+        if outcome["revision_id"] is not None and not unchanged_edit:
             render_job = self._enqueue_render(
                 project_id=str(job["project_id"]),
                 user_id=owner,
@@ -743,10 +778,18 @@ class DocumentRpcEmulator:
             if render_job is not None
             else "proposal"
             if outcome["revision_id"] is None
+            else "unchanged"
+            if unchanged_edit
             else "ready"
         )
-        if job["job_type"] == "presentation_edit" and outcome["revision_id"] is not None:
-            self._record_edit_delivery(job, str(outcome["revision_id"]), render_job is None)
+        if job["job_type"] == "presentation_edit" and outcome["status"] in (
+            "committed",
+            "duplicate",
+        ):
+            assert session_id is not None
+            self._record_edit_delivery(
+                job, session_id, str(outcome["revision_id"]), render_job is None
+            )
         job.update(
             status="committed" if render_job is not None else "completed",
             render_job_id=render_job,
