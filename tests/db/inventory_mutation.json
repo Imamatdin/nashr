@@ -1,11 +1,11 @@
 {
   "schema": "current 016 with every document row lock removed (NASHR_TEST_MUTATION=no_document_lock)",
-  "module": "tests/db/test_property.py",
+  "module": "tests/db/test_document_lock.py",
   "tests": {
-    "tests.db.test_property::test_concurrent_lifecycle_preserves_every_invariant": {
+    "tests.db.test_document_lock::test_two_writers_on_one_head_serialize_on_the_document_row": {
       "expect": "fail",
-      "match": "writes committed against the same pre-round head|not on the head's parent chain|no write from the head committed"
+      "match": "2 writes committed against the same pre-round head [0-9a-f-]+ \\(waits at the barrier: \\['Lock:advisory', 'Lock:advisory'\\]\\)"
     }
   },
-  "note": "Only the lifecycle property test is the mutation's designed detector; the interleaved-writers test may or may not catch the unlocked race by timing (Codex N2), so it is not gated here."
+  "note": "The designed detector is deterministic (B1-FIX4, Codex N2): both writers are held at a barrier after reading the head and the gate inspects their database waits before releasing them. The lifecycle property test still runs in the post-change suite but is no longer the gate: under the mutation it found the defect only when Hypothesis drew an overlapping schedule."
 }
