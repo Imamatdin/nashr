@@ -50,9 +50,9 @@ jobs:
           python -m pytest tests/ -q -ra --junitxml=artifacts/pytest-unit.xml 2>&1 | tee artifacts/pytest-unit.log
       - name: pyright
         run: python -m pyright packages/ 2>&1 | tee artifacts/pyright.log; exit ${PIPESTATUS[0]}
-      - name: Journey console classifier tests (B1-FIX3 N1)
+      - name: Journey console classifier tests (B1-FIX3 N1, B1-FIX4)
         working-directory: scripts/webshots
-        run: node --test console_rules.test.mjs console_rules_empty.test.mjs
+        run: node --test console_rules.test.mjs console_rules_empty.test.mjs console_rules_empty_scope.test.mjs
       - name: Web unit tests, typecheck, production build
         working-directory: packages/web
         env:
@@ -151,12 +151,22 @@ jobs:
           python -m tests.db.expect_failures artifacts/prefix3.xml tests/db/inventory_fix2.json \
             | tee artifacts/prefix3-verdict.log
           exit ${PIPESTATUS[0]}
-      - name: Mutation run — property test must FAIL with the document row lock removed
+      - name: Pre-fix run — B1-FIX4 regressions must FAIL on 016 as of 3723d30
         run: |
           set +e
-          NASHR_TEST_MUTATION=no_document_lock python -m pytest tests/db/test_property.py \
-            -k test_concurrent_lifecycle_preserves_every_invariant -v -ra \
-            --junitxml=artifacts/mutation.xml 2>&1 | tee artifacts/mutation.log
+          NASHR_TEST_SCHEMA=fix3 python -m pytest tests/db/test_b1_fix4_regressions.py -v -ra \
+            --junitxml=artifacts/prefix4.xml 2>&1 | tee artifacts/prefix4.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prefix4.xml tests/db/inventory_fix3.json \
+            | tee artifacts/prefix4-verdict.log
+          exit ${PIPESTATUS[0]}
+      # The barrier test is deterministic (Codex N2): it holds both writers after
+      # they read the head and inspects their waits, so no schedule is left to chance.
+      - name: Mutation run — the document-lock barrier test must FAIL with the row lock removed
+        run: |
+          set +e
+          NASHR_TEST_MUTATION=no_document_lock python -m pytest tests/db/test_document_lock.py \
+            -v -ra --junitxml=artifacts/mutation.xml 2>&1 | tee artifacts/mutation.log
           set -e
           python -m tests.db.expect_failures artifacts/mutation.xml tests/db/inventory_mutation.json \
             | tee artifacts/mutation-verdict.log
@@ -348,6 +358,63 @@ jobs:
           path: artifacts/
           retention-days: 5
 
+  prefix-3723d30:
+    name: pre-fix — B1-FIX4 unit and console regressions must FAIL on 3723d30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The application is the B1-FIX3 review's SHA; the tests stay current.
+      - name: The app as of 3723d30
+        run: |
+          # Files added since 3723d30 go (or the "old" app imports new modules).
+          git diff --name-only --diff-filter=A 3723d30 HEAD -- packages scripts/worker_run_job.py \
+            | grep -v '\.test\.ts$' | xargs -r rm -f
+          git checkout 3723d30 -- packages scripts/worker_run_job.py
+          git diff --stat 3723d30 -- packages scripts/worker_run_job.py | tail -1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          # node --test's junit reporter
+          node-version: "22"
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Unit regressions must FAIL on 3723d30
+        run: |
+          mkdir -p artifacts
+          set +e
+          python -m pytest tests/unit/test_b1_fix4_regressions.py -v -ra \
+            --junitxml=artifacts/prefix-unit.xml 2>&1 | tee artifacts/prefix-unit.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prefix-unit.xml tests/prefix/unit_fix3.json \
+            | tee artifacts/prefix-unit-verdict.log
+          exit ${PIPESTATUS[0]}
+      - name: Console classifier regressions must FAIL on 3723d30's rules
+        working-directory: scripts/webshots
+        run: |
+          set +e
+          CONSOLE_RULES=./prefix/console_rules_3723d30.mjs node --test --test-reporter=junit \
+            --test-reporter-destination=../../artifacts/prefix-console.xml \
+            console_rules_empty_scope.test.mjs
+          set -e
+          cd ../.. && python -m tests.db.expect_failures artifacts/prefix-console.xml \
+            tests/prefix/console_fix3.json | tee artifacts/prefix-console-verdict.log
+          exit ${PIPESTATUS[0]}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prefix-3723d30-logs
+          path: artifacts/
+          retention-days: 5
+
   journey-prefix:
     name: browser journey pre-fix (${{ matrix.only }} steps must FAIL on ${{ matrix.ref }})
     runs-on: ubuntu-24.04
@@ -461,7 +528,7 @@ jobs:
   minutes:
     name: minutes used
     if: always()
-    needs: [unit, postgres, prefix-fdb14bc, journey, journey-prefix]
+    needs: [unit, postgres, prefix-fdb14bc, prefix-3723d30, journey, journey-prefix]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
