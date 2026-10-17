@@ -49,8 +49,11 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from packages.bot.keyboards import (
+    APPROVE_PREFIX,
+    REJECT_PREFIX,
     deck_changed_keyboard,
     main_menu_keyboard,
+    parse_approval_callback,
     payment_provider_keyboard,
     presentation_approval_keyboard,
     presentation_chat_keyboard,
@@ -80,7 +83,7 @@ from packages.bot.sessions import (
     requires_approval,
 )
 from packages.bot.sessions.budget import session_fix_limit
-from packages.bot.sessions.parked import park_call
+from packages.bot.sessions.parked import is_parked, park_call
 from packages.bot.sessions.store import move_session_to_head
 from packages.bot.states import PresentationStates
 from packages.core.enums import ExportFormat, GenerationPackage
@@ -833,9 +836,14 @@ async def edit_with_ai(callback: CallbackQuery, state: FSMContext, db: DatabaseC
         # restart). Re-present the decision — never enter chat with an unanswered call.
         await state.set_state(PresentationStates.awaiting_approval)
         if isinstance(callback.message, Message):
+            assert session.session_id is not None
             await callback.message.answer(
                 labels.approval_prompt.format(reason=session.pending_action.reason),
-                reply_markup=presentation_approval_keyboard(lang),
+                reply_markup=presentation_approval_keyboard(
+                    lang,
+                    session_id=session.session_id,
+                    operation_id=session.parked_operation_id,
+                ),
             )
         await callback.answer()
         return
@@ -928,6 +936,8 @@ class _ChatOutcome(StrEnum):
     NO_SESSION = "no_session"
     DECK_CHANGED = "deck_changed"
     UNCHANGED = "unchanged"
+    # The button's decision was answered or replaced since it was shown (B1-FIX5).
+    DECISION_STALE = "decision_stale"
 
 
 @dataclass
@@ -940,6 +950,9 @@ class _ChatResult:
     slides_changed: int = 0
     fix_limit: int = 0  # the tier's edit allowance, for the FIXES_EXHAUSTED message
     warnings: list[str] = field(default_factory=list[str])
+    # AWAITING_APPROVAL: the parked decision the buttons name (B1-FIX5).
+    session_id: str | None = None
+    operation_id: str | None = None
 
 
 async def _run_chat_turn(
@@ -975,7 +988,12 @@ async def _run_chat_turn(
         # would resend a dangling function_call and 400 (the sharp case: a restart
         # dropped the FSM pointer, the user re-enters chat, and sends a message). Route
         # back to the pending decision; _apply_pending / _reject_pending answer the call.
-        return _ChatResult(_ChatOutcome.AWAITING_APPROVAL, reason=session.pending_action.reason)
+        return _ChatResult(
+            _ChatOutcome.AWAITING_APPROVAL,
+            reason=session.pending_action.reason,
+            session_id=session.session_id,
+            operation_id=session.parked_operation_id,
+        )
 
     outcome = await driver.run_turn(session, user_text)
     session.history = outcome.history
@@ -995,7 +1013,12 @@ async def _run_chat_turn(
         # The web may approve this decision, queuing an edit for this exact call.
         park_call(session)
         await persist_session(db, session)
-        return _ChatResult(_ChatOutcome.AWAITING_APPROVAL, reason=outcome.reason or "")
+        return _ChatResult(
+            _ChatOutcome.AWAITING_APPROVAL,
+            reason=outcome.reason or "",
+            session_id=session.session_id,
+            operation_id=session.parked_operation_id,
+        )
 
     return await _dispatch_fix(
         orchestrator=orchestrator,
@@ -1110,13 +1133,21 @@ async def _apply_pending(
     db: DatabaseClient,
     project_id: str,
     telegram_id: int,
+    session_id: str,
+    operation_id: str | None,
     storage: FileStorage | None = None,
 ) -> _ChatResult:
-    """Approve path: fire the parked change. A button — not the model — got here."""
+    """Approve path: fire the parked change. A button — not the model — got here.
+
+    Only the decision the button was shown for (B1-FIX5): one answered or replaced
+    since is DECISION_STALE and nothing is applied or written.
+    """
 
     session = await load_session(db, project_id)
     if session is None or session.pending_action is None:
         return _ChatResult(_ChatOutcome.NO_SESSION)
+    if not is_parked(session, session_id, operation_id):
+        return _ChatResult(_ChatOutcome.DECISION_STALE)
     return await _dispatch_fix(
         orchestrator=orchestrator,
         db=db,
@@ -1128,12 +1159,20 @@ async def _apply_pending(
     )
 
 
-async def _reject_pending(*, db: DatabaseClient, project_id: str) -> _ChatResult:
-    """Reject path: discard the parked change and clear the gate."""
+async def _reject_pending(
+    *, db: DatabaseClient, project_id: str, session_id: str, operation_id: str | None
+) -> _ChatResult:
+    """Reject path: discard the parked change and clear the gate.
+
+    Only the decision the button was shown for (B1-FIX5): one answered or replaced
+    since is DECISION_STALE and nothing is written.
+    """
 
     session = await load_session(db, project_id)
     if session is None:
         return _ChatResult(_ChatOutcome.NO_SESSION)
+    if session.pending_action is not None and not is_parked(session, session_id, operation_id):
+        return _ChatResult(_ChatOutcome.DECISION_STALE)
     if session.pending_action is not None:
         # Answer EACH parked edit_slides call so the next turn's history stays coherent
         # (a dangling/under-answered function_call before a user turn is a Gemini 400).
@@ -1159,7 +1198,11 @@ async def _render_chat_result(
         await target.answer(labels.edit_render_failed)
     elif result.outcome is _ChatOutcome.AWAITING_APPROVAL:
         prompt = labels.approval_prompt.format(reason=result.reason or "")
-        await target.answer(prompt, reply_markup=presentation_approval_keyboard(lang))
+        assert result.session_id is not None
+        keyboard = presentation_approval_keyboard(
+            lang, session_id=result.session_id, operation_id=result.operation_id
+        )
+        await target.answer(prompt, reply_markup=keyboard)
     elif result.outcome is _ChatOutcome.FIXES_EXHAUSTED:
         await target.answer(labels.edit_fixes_exhausted.format(limit=result.fix_limit))
     elif result.outcome is _ChatOutcome.DISCARDED:
@@ -1168,6 +1211,8 @@ async def _render_chat_result(
         await target.answer(labels.deck_changed_elsewhere, reply_markup=deck_changed_keyboard(lang))
     elif result.outcome is _ChatOutcome.UNCHANGED:
         await target.answer(labels.edit_unchanged, reply_markup=presentation_chat_keyboard(lang))
+    elif result.outcome is _ChatOutcome.DECISION_STALE:
+        await target.answer(labels.approval_stale)
     else:
         await target.answer(labels.edit_session_not_found)
 
@@ -1250,7 +1295,19 @@ async def blocked_during_approval(message: Message, state: FSMContext) -> None:
     await message.answer(labels.approval_required_first)
 
 
-@router.callback_query(PresentationStates.awaiting_approval, F.data == "approve_redeliver")
+@router.callback_query(F.data.in_({"approve_redeliver", "reject_redeliver"}))
+async def legacy_approval_button(callback: CallbackQuery, state: FSMContext) -> None:
+    """A button sent before decisions were named (B1-FIX5): it can name none, so it does nothing."""
+
+    labels = get_bot_labels(_flow_language(await state.get_data()))
+    if isinstance(callback.message, Message):
+        await callback.message.answer(labels.approval_stale)
+    await callback.answer()
+
+
+@router.callback_query(
+    PresentationStates.awaiting_approval, F.data.startswith(f"{APPROVE_PREFIX}:")
+)
 async def approve_redeliver(
     callback: CallbackQuery,
     state: FSMContext,
@@ -1265,9 +1322,11 @@ async def approve_redeliver(
     project_id = str(data.get("project_id", ""))
     lang = _flow_language(data)
     labels = get_bot_labels(lang)
-    if not isinstance(callback.message, Message):
+    named = parse_approval_callback(callback.data or "")
+    if not isinstance(callback.message, Message) or named is None:
         await callback.answer()
         return
+    _prefix, session_id, operation_id = named
     orchestrator = _orchestrator(bot, db, credits, storage)
     async with (
         _session_lock(project_id),
@@ -1280,14 +1339,19 @@ async def approve_redeliver(
             db=db,
             project_id=project_id,
             telegram_id=callback.from_user.id,
+            session_id=session_id,
+            operation_id=operation_id,
             storage=storage,
         )
     await _render_chat_result(callback.message, lang, labels, result)
-    await state.set_state(PresentationStates.talking_to_brain)
+    if result.outcome is not _ChatOutcome.DECISION_STALE:
+        await state.set_state(PresentationStates.talking_to_brain)
     await callback.answer()
 
 
-@router.callback_query(PresentationStates.awaiting_approval, F.data == "reject_redeliver")
+@router.callback_query(
+    PresentationStates.awaiting_approval, F.data.startswith(f"{REJECT_PREFIX}:")
+)
 async def reject_redeliver(callback: CallbackQuery, state: FSMContext, db: DatabaseClient) -> None:
     """The user declined the parked change: discard it, resume chatting."""
 
@@ -1295,13 +1359,18 @@ async def reject_redeliver(callback: CallbackQuery, state: FSMContext, db: Datab
     project_id = str(data.get("project_id", ""))
     lang = _flow_language(data)
     labels = get_bot_labels(lang)
-    if not isinstance(callback.message, Message):
+    named = parse_approval_callback(callback.data or "")
+    if not isinstance(callback.message, Message) or named is None:
         await callback.answer()
         return
+    _prefix, session_id, operation_id = named
     async with _session_lock(project_id):
-        result = await _reject_pending(db=db, project_id=project_id)
+        result = await _reject_pending(
+            db=db, project_id=project_id, session_id=session_id, operation_id=operation_id
+        )
     await _render_chat_result(callback.message, lang, labels, result)
-    await state.set_state(PresentationStates.talking_to_brain)
+    if result.outcome is not _ChatOutcome.DECISION_STALE:
+        await state.set_state(PresentationStates.talking_to_brain)
     await callback.answer()
 
 

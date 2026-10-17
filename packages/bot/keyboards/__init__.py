@@ -10,6 +10,10 @@ the user's language code and the keyboard picks the right strings.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import uuid
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from packages.bot.labels import get_bot_labels
@@ -242,13 +246,56 @@ def deck_changed_keyboard(lang: str) -> InlineKeyboardMarkup:
     )
 
 
-def presentation_approval_keyboard(lang: str) -> InlineKeyboardMarkup:
+APPROVE_PREFIX = "apr"
+REJECT_PREFIX = "rej"
+
+
+def _short(value: str | None) -> str:
+    """A uuid as 22 base64url characters ('' for none): callback data is 64 bytes max."""
+
+    if value is None:
+        return ""
+    return base64.urlsafe_b64encode(uuid.UUID(value).bytes).decode("ascii").rstrip("=")
+
+
+def _long(value: str) -> str | None:
+    if value == "":
+        return None
+    return str(uuid.UUID(bytes=base64.urlsafe_b64decode(value + "==")))
+
+
+def approval_callback(prefix: str, session_id: str, operation_id: str | None) -> str:
+    """``<prefix>:<session>:<operation>``: the button names the decision it answers."""
+
+    return f"{prefix}:{_short(session_id)}:{_short(operation_id)}"
+
+
+def parse_approval_callback(data: str) -> tuple[str, str, str | None] | None:
+    """(prefix, session_id, operation_id) of an approval button, or None if malformed."""
+
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] not in (APPROVE_PREFIX, REJECT_PREFIX) or not parts[1]:
+        return None
+    try:
+        session_id = _long(parts[1])
+        operation_id = _long(parts[2])
+    except (ValueError, binascii.Error):
+        return None
+    if session_id is None:
+        return None
+    return parts[0], session_id, operation_id
+
+
+def presentation_approval_keyboard(
+    lang: str, *, session_id: str, operation_id: str | None
+) -> InlineKeyboardMarkup:
     """Approve / reject buttons for the brain's code-side approval gate.
 
     The user pressing approve is the ONLY thing that authorizes a gated
     re-delivering change — the model can never synthesize this callback, which is
     what makes the gate code-side rather than model-self-granted (Build 2,
-    Stage 4).
+    Stage 4). Each button names the decision it was shown for (B1-FIX5): pressed
+    after that decision was answered or replaced, it changes nothing.
     """
 
     labels = get_bot_labels(lang)
@@ -256,9 +303,13 @@ def presentation_approval_keyboard(lang: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=labels.approval_approve, callback_data="approve_redeliver"
+                    text=labels.approval_approve,
+                    callback_data=approval_callback(APPROVE_PREFIX, session_id, operation_id),
                 ),
-                InlineKeyboardButton(text=labels.approval_reject, callback_data="reject_redeliver"),
+                InlineKeyboardButton(
+                    text=labels.approval_reject,
+                    callback_data=approval_callback(REJECT_PREFIX, session_id, operation_id),
+                ),
             ]
         ]
     )

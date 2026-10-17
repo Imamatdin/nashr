@@ -528,8 +528,15 @@ async def test_approve_fires_pending_and_clears_gate() -> None:
     )
     assert orch.calls == []  # still gated (model-proposed)
 
+    parked = await load_session(db, "proj-1")
+    assert parked is not None and parked.session_id is not None
     result = await pf._apply_pending(
-        orchestrator=orch, db=db, project_id="proj-1", telegram_id=OWNER_TELEGRAM_ID
+        orchestrator=orch,
+        db=db,
+        project_id="proj-1",
+        telegram_id=OWNER_TELEGRAM_ID,
+        session_id=parked.session_id,
+        operation_id=parked.parked_operation_id,
     )
 
     assert result.outcome is pf._ChatOutcome.REDELIVERED
@@ -562,7 +569,14 @@ async def test_reject_discards_pending_without_firing_tool() -> None:
         telegram_id=OWNER_TELEGRAM_ID,
     )
 
-    result = await pf._reject_pending(db=db, project_id="proj-1")
+    parked = await load_session(db, "proj-1")
+    assert parked is not None and parked.session_id is not None
+    result = await pf._reject_pending(
+        db=db,
+        project_id="proj-1",
+        session_id=parked.session_id,
+        operation_id=parked.parked_operation_id,
+    )
 
     assert result.outcome is pf._ChatOutcome.DISCARDED
     assert orch.calls == []
