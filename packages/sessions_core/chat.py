@@ -47,7 +47,7 @@ from packages.bot.sessions.models import (
     PendingAction,
     requires_approval,
 )
-from packages.bot.sessions.parked import park_call
+from packages.bot.sessions.parked import is_parked, park_call
 from packages.bot.sessions.session_rows import dangling_call_parts
 from packages.bot.sessions.store import (
     load_revision_deck,
@@ -287,7 +287,7 @@ async def read_session(db: DatabaseClient, project_id: str) -> ChatSessionView:
     return ChatSessionView(
         can_edit=session.deck is not None,
         messages=history_for_wire(session),
-        pending=_pending_view(session.pending_action),
+        pending=_pending_view(session.pending_action, session),
         fixes_used=session.fixes_used,
         fixes_pending=len(session.pending_deliveries),
         delivering_job_ids=[pending.job_id for pending in session.pending_deliveries],
@@ -332,7 +332,7 @@ async def run_web_turn(
         # dangling function_call.
         return TurnResult(
             TurnKind.AWAITING_APPROVAL,
-            pending=_pending_view(session.pending_action),
+            pending=_pending_view(session.pending_action, session),
             fix_limit=session_fix_limit(session.package),
             fixes_used=session.fixes_used,
             fixes_pending=len(session.pending_deliveries),
@@ -388,7 +388,7 @@ async def run_web_turn(
         return TurnResult(
             TurnKind.APPROVAL_REQUIRED,
             reply_text=outcome.reply_text,
-            pending=_pending_view(session.pending_action),
+            pending=_pending_view(session.pending_action, session),
             fix_limit=fix_limit,
             fixes_used=session.fixes_used,
             fixes_pending=len(session.pending_deliveries),
@@ -432,66 +432,122 @@ async def run_web_turn(
     )
 
 
-async def abandon_parked_fix(db: DatabaseClient, project_id: str, *, call_count: int) -> None:
-    """Undo a park whose job could not be enqueued.
+class DecisionStaleError(Exception):
+    """The parked decision the caller acted on is no longer the one parked (B1-FIX5).
+
+    It was answered, or replaced by another call or another session, since the
+    caller saw it. Nothing was written; the caller re-reads and re-presents.
+    """
+
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
+        super().__init__(f"the parked decision of project {project_id} has changed")
+
+
+def _stale(project_id: str, action: str, session: BrainSession, session_id: str | None) -> None:
+    logger.warning(
+        "parked_call_stale project=%s action=%s session_matches=%s operation_parked=%s",
+        project_id,
+        action,
+        session.session_id == session_id,
+        session.parked_operation_id is not None,
+    )
+
+
+async def abandon_parked_fix(
+    db: DatabaseClient,
+    project_id: str,
+    *,
+    session_id: str | None,
+    operation_id: str | None,
+    call_count: int,
+) -> bool:
+    """Undo a park whose job could not be enqueued; True iff it answered the call.
 
     Called by the route when the enqueue that was supposed to carry the parked
     batch fails; without it the session stays wedged until the next request
-    happens to find it.
+    happens to find it. Only the call the failed request parked is answered
+    (B1-FIX5, Codex B1): if that session or call has moved on (repaired, answered,
+    replaced by another park or another session), nothing is written. A change
+    landing after the check is handled by the write's compare-and-swap merge.
     """
 
     session = await load_session(db, project_id)
     if session is None:
-        return
-    if has_dangling_call(session) == 0:
-        return
+        return False
+    if not is_parked(session, session_id, operation_id) or has_dangling_call(session) == 0:
+        _stale(project_id, "abandon", session, session_id)
+        return False
     append_fix_result(
         session, {"error": "fix_failed", "detail": "enqueue_failed"}, count=call_count
     )
     session.pending_action = None
     session.approval_state = ApprovalState.IDLE
     await persist_session(db, session)
+    return True
 
 
-async def park_pending_for_apply(db: DatabaseClient, project_id: str) -> PendingActionView | None:
-    """Read back the parked decision an approve call is about to run.
+async def park_pending_for_apply(
+    db: DatabaseClient, project_id: str, *, session_id: str, operation_id: str
+) -> PendingActionView | None:
+    """Read back the parked decision an approved job is about to run, if it is that job's.
 
     The pending action is deliberately NOT cleared here: it stays on the row
     until :func:`dispatch_fix` consumes it, so a lost job leaves the decision
-    re-presentable rather than silently dropped.
+    re-presentable rather than silently dropped. A decision that is not the job's
+    own call (B1-FIX5) is not returned: the job must not apply someone else's batch.
     """
 
     session = await load_session(db, project_id)
     if session is None or session.pending_action is None:
+        return None
+    if not is_parked(session, session_id, operation_id):
+        _stale(project_id, "apply_pending", session, session_id)
         return None
     return _pending_view(session.pending_action, session)
 
 
-async def pending_for_approval(db: DatabaseClient, project_id: str) -> PendingActionView | None:
-    """The parked decision an approve call is about to queue, with its call's identity.
+async def pending_for_approval(
+    db: DatabaseClient, project_id: str, *, session_id: str, operation_id: str | None
+) -> PendingActionView | None:
+    """The parked decision the user approved, with its call's identity; None if none.
 
-    A decision parked before operation ids existed (B1-FIX4) gets one now, persisted
-    before the caller enqueues, so the database can admit the job. The decision
-    itself stays on the row (see :func:`park_pending_for_apply`).
+    ``session_id``/``operation_id`` are the decision the user saw; a different one
+    raises :class:`DecisionStaleError` and nothing is written (B1-FIX5). A decision
+    parked before operation ids existed (B1-FIX4; the user saw ``operation_id=None``)
+    gets one now, persisted before the caller enqueues, so the database can admit
+    the job. The decision itself stays on the row (see :func:`park_pending_for_apply`).
     """
 
     session = await load_session(db, project_id)
     if session is None or session.pending_action is None:
         return None
+    if not is_parked(session, session_id, operation_id):
+        _stale(project_id, "approve", session, session_id)
+        raise DecisionStaleError(project_id)
     if session.parked_operation_id is None:
         park_call(session)
         await persist_session(db, session)
     return _pending_view(session.pending_action, session)
 
 
-async def reject_pending(db: DatabaseClient, project_id: str) -> bool:
-    """Discard the parked change and answer its call. True iff one was parked."""
+async def reject_pending(
+    db: DatabaseClient, project_id: str, *, session_id: str, operation_id: str | None
+) -> bool:
+    """Discard the parked change the user saw and answer its call. True iff one was parked.
+
+    A different decision than the one named raises :class:`DecisionStaleError` and
+    nothing is written (B1-FIX5).
+    """
 
     session = await load_session(db, project_id)
     if session is None:
         return False
     if session.pending_action is None:
         return False
+    if not is_parked(session, session_id, operation_id):
+        _stale(project_id, "reject", session, session_id)
+        raise DecisionStaleError(project_id)
     append_fix_result(session, {"discarded": True}, count=session.pending_action.call_count)
     session.pending_action = None
     session.approval_state = ApprovalState.IDLE
@@ -569,6 +625,7 @@ async def dispatch_fix(
 
 __all__ = [
     "ChatSessionView",
+    "DecisionStaleError",
     "FixDispatchResult",
     "FixRunner",
     "PendingActionView",

@@ -224,6 +224,14 @@ async def _park_pending(db: DatabaseClient) -> None:
     await persist_session(db, session)
 
 
+async def _decision(db: DatabaseClient) -> dict[str, str | None]:
+    """The parked decision as the chat shows it: what approve/reject name (B1-FIX5)."""
+
+    session = await load_session(db, _PROJECT_ID)
+    assert session is not None and session.session_id is not None
+    return {"session_id": session.session_id, "operation_id": session.parked_operation_id}
+
+
 # --------------------------------------------------------------------- read side
 
 
@@ -463,14 +471,15 @@ async def test_over_cap_turn_is_rejected_before_a_single_model_token() -> None:
 async def test_every_chat_route_hides_a_project_the_caller_does_not_own() -> None:
     harness = await _harness(owner="u1", script=_fix_script())
     base = f"/projects/{_PROJECT_ID}"
+    stranger = {"session_id": str(uuid4()), "operation_id": None}
 
     responses = [
         await harness.client.get(f"{base}/chat", headers=_headers()),
         await harness.client.post(
             f"{base}/chat", json={"message": "Change slide 2."}, headers=_headers()
         ),
-        await harness.client.post(f"{base}/chat/approve", headers=_headers()),
-        await harness.client.post(f"{base}/chat/reject", headers=_headers()),
+        await harness.client.post(f"{base}/chat/approve", json=stranger, headers=_headers()),
+        await harness.client.post(f"{base}/chat/reject", json=stranger, headers=_headers()),
     ]
 
     assert [response.status_code for response in responses] == [404, 404, 404, 404]
@@ -486,7 +495,9 @@ async def test_approve_without_a_parked_action_is_a_conflict() -> None:
     harness = await _harness()
 
     response = await harness.client.post(
-        f"/projects/{_PROJECT_ID}/chat/approve", headers=_headers()
+        f"/projects/{_PROJECT_ID}/chat/approve",
+        json=await _decision(harness.db),
+        headers=_headers(),
     )
 
     assert response.status_code == 409
@@ -499,7 +510,9 @@ async def test_approve_queues_from_the_session_and_leaves_the_decision_parked() 
     await _park_pending(harness.db)
 
     response = await harness.client.post(
-        f"/projects/{_PROJECT_ID}/chat/approve", headers=_headers()
+        f"/projects/{_PROJECT_ID}/chat/approve",
+        json=await _decision(harness.db),
+        headers=_headers(),
     )
 
     assert response.status_code == 200
@@ -536,7 +549,9 @@ async def test_reject_discards_the_parked_action() -> None:
     harness = await _harness()
     await _park_pending(harness.db)
 
-    response = await harness.client.post(f"/projects/{_PROJECT_ID}/chat/reject", headers=_headers())
+    response = await harness.client.post(
+        f"/projects/{_PROJECT_ID}/chat/reject", json=await _decision(harness.db), headers=_headers()
+    )
 
     assert response.status_code == 200
     assert response.json()["kind"] == "reply"
@@ -549,7 +564,9 @@ async def test_reject_discards_the_parked_action() -> None:
 async def test_reject_without_a_parked_action_is_a_conflict() -> None:
     harness = await _harness()
 
-    response = await harness.client.post(f"/projects/{_PROJECT_ID}/chat/reject", headers=_headers())
+    response = await harness.client.post(
+        f"/projects/{_PROJECT_ID}/chat/reject", json=await _decision(harness.db), headers=_headers()
+    )
 
     assert response.status_code == 409
     assert response.json()["detail"] == {"reason": "no_pending_action"}
@@ -669,7 +686,9 @@ async def test_approve_keeps_the_decision_parked_when_the_edit_job_is_a_duplicat
     harness.queue.enqueue_raises = DuplicateActiveJobError(_job(JobType.PRESENTATION_EDIT))
 
     response = await harness.client.post(
-        f"/projects/{_PROJECT_ID}/chat/approve", headers=_headers()
+        f"/projects/{_PROJECT_ID}/chat/approve",
+        json=await _decision(harness.db),
+        headers=_headers(),
     )
 
     assert response.status_code == 409
@@ -690,7 +709,9 @@ async def test_approve_keeps_the_decision_parked_when_the_queue_is_unavailable()
     harness.queue.enqueue_raises = RuntimeError("the queue backend is gone")
 
     response = await harness.client.post(
-        f"/projects/{_PROJECT_ID}/chat/approve", headers=_headers()
+        f"/projects/{_PROJECT_ID}/chat/approve",
+        json=await _decision(harness.db),
+        headers=_headers(),
     )
 
     assert response.status_code == 503
@@ -730,6 +751,8 @@ async def test_a_turn_behind_a_parked_decision_re_presents_it_rather_than_errori
     assert body["kind"] == "approval_required"
     assert body["job_id"] is None
     assert body["pending_action"] == {
+        # The decision the client's approve/reject name (B1-FIX5).
+        **(await _decision(harness.db)),
         "reason": "Tighten the opener.",
         "fixes": [{"slide_id": _FIX.slide_id, "instruction": _FIX.instruction}],
     }
@@ -774,7 +797,9 @@ async def test_over_cap_approve_is_rejected_before_the_job_is_queued() -> None:
     harness.limiter.allowed = False
 
     response = await harness.client.post(
-        f"/projects/{_PROJECT_ID}/chat/approve", headers=_headers()
+        f"/projects/{_PROJECT_ID}/chat/approve",
+        json=await _decision(harness.db),
+        headers=_headers(),
     )
 
     assert response.status_code == 429
@@ -787,7 +812,9 @@ async def test_reject_stays_available_to_a_user_who_has_hit_the_cap() -> None:
     await _park_pending(harness.db)
     harness.limiter.allowed = False
 
-    response = await harness.client.post(f"/projects/{_PROJECT_ID}/chat/reject", headers=_headers())
+    response = await harness.client.post(
+        f"/projects/{_PROJECT_ID}/chat/reject", json=await _decision(harness.db), headers=_headers()
+    )
 
     assert response.status_code == 200
     # Intentional asymmetry with its two siblings: rejecting spends no model tokens

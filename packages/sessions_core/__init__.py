@@ -22,6 +22,7 @@ from __future__ import annotations
 from packages.sessions_core.apply import FixStatus
 from packages.sessions_core.chat import (
     ChatSessionView,
+    DecisionStaleError,
     FixDispatchResult,
     FixRunner,
     PendingActionView,
@@ -38,6 +39,7 @@ from packages.sessions_core.chat import (
 
 __all__ = [
     "ChatSessionView",
+    "DecisionStaleError",
     "FixDispatchResult",
     "FixRunner",
     "FixStatus",

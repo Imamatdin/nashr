@@ -299,8 +299,19 @@ class JobRunner:
         if isinstance(raw_count, int) and raw_count >= 1:
             call_count = raw_count
 
+        # The parked call this job answers (B1-FIX4); the database admitted the job
+        # only with both, and dispatch_fix refuses it once the call is not parked.
+        session_id = payload.get("session_id")
+        operation_id = payload.get("operation_id")
+
         if payload.get("from_pending") is True:
-            pending = await park_pending_for_apply(self._db, job.project_id)
+            if not isinstance(session_id, str) or not isinstance(operation_id, str):
+                raise RuntimeError("presentation_edit carries no operation identity")
+            # Only this job's own approved call (B1-FIX5): another parked decision
+            # is not returned, so its batch is never applied by this job.
+            pending = await park_pending_for_apply(
+                self._db, job.project_id, session_id=session_id, operation_id=operation_id
+            )
             if pending is None:
                 raise RuntimeError("approved change is no longer parked on the session")
             fixes = list(pending.fixes)
@@ -321,10 +332,6 @@ class JobRunner:
         base_revision_id = payload.get("base_revision_id")
         if not isinstance(document_id, str) or not isinstance(base_revision_id, str):
             raise RuntimeError("presentation_edit carries no document revision to edit")
-        # The parked call this job answers (B1-FIX4); the database admitted the job
-        # only with both, and dispatch_fix refuses it once the call is not parked.
-        session_id = payload.get("session_id")
-        operation_id = payload.get("operation_id")
         if not isinstance(session_id, str) or not isinstance(operation_id, str):
             raise RuntimeError("presentation_edit carries no operation identity")
 

@@ -26,6 +26,22 @@ def park_call(session: BrainSession) -> str:
     return session.parked_operation_id
 
 
+def is_parked(session: BrainSession, session_id: str | None, operation_id: str | None) -> bool:
+    """True when ``session`` is the session named and still has exactly that call parked.
+
+    Every caller that answers or consumes a parked call on behalf of a particular
+    request (a failed enqueue, an approve or reject button, a worker) checks this
+    after loading and writes nothing when it is false (B1-FIX5, Codex B1): the call
+    it was asked about has been answered, or replaced by another one. A decision
+    parked before operation ids existed has none, so ``operation_id=None`` names it.
+    """
+
+    return session_id is not None and (session.session_id, session.parked_operation_id) == (
+        session_id,
+        operation_id,
+    )
+
+
 def answer_calls(session: BrainSession, response: dict[str, object], *, count: int) -> None:
     """Answer each parked ``edit_slides`` call part with ``response``; nothing stays parked.
 
@@ -40,4 +56,4 @@ def answer_calls(session: BrainSession, response: dict[str, object], *, count: i
     session.parked_operation_id = None
 
 
-__all__ = ["answer_calls", "park_call"]
+__all__ = ["answer_calls", "is_parked", "park_call"]

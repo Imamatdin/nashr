@@ -433,11 +433,17 @@ def _patch_dispatch_fix(
     return calls
 
 
-def _patch_pending(monkeypatch: pytest.MonkeyPatch, pending: PendingActionView | None) -> None:
-    async def _park(db: Any, project_id: str) -> PendingActionView | None:
+def _patch_pending(
+    monkeypatch: pytest.MonkeyPatch, pending: PendingActionView | None
+) -> list[dict[str, Any]]:
+    asked: list[dict[str, Any]] = []
+
+    async def _park(db: Any, project_id: str, **identity: Any) -> PendingActionView | None:
+        asked.append(identity)
         return pending
 
     monkeypatch.setattr("packages.sessions_core.park_pending_for_apply", _park)
+    return asked
 
 
 def _edit_job(payload: dict[str, Any]) -> GenerationJob:
@@ -914,7 +920,7 @@ async def test_edit_from_pending_uses_the_parked_batch_and_its_call_count(
     world = _World(tmp_path, job)
     world.patch(monkeypatch)
     calls = _patch_dispatch_fix(monkeypatch, FixDispatchResult(FixStatus.DELIVERED))
-    _patch_pending(
+    asked = _patch_pending(
         monkeypatch,
         PendingActionView(
             reason="approved",
@@ -928,6 +934,8 @@ async def test_edit_from_pending_uses_the_parked_batch_and_its_call_count(
     kwargs = calls[0]
     assert [f.slide_id for f in cast(list[SlideFix], kwargs["fixes"])] == ["s9"]
     assert kwargs["call_count"] == 7
+    # Only the job's own approved call is looked up (B1-FIX5).
+    assert asked == [{"session_id": _SESSION_ID, "operation_id": _OPERATION_ID}]
     assert world.queue.failed == []
 
 
@@ -938,7 +946,7 @@ async def test_edit_from_pending_with_nothing_parked_fails_without_refund(
     queue, credits = _FakeQueue(), _FakeCredits()
     _patch_pending(monkeypatch, None)
     runner = _runner(queue, credits)
-    job = _edit_job({"from_pending": True, "product_type": "presentation_standard"})
+    job = _edit_job(_edit_payload(from_pending=True, product_type="presentation_standard"))
 
     with pytest.raises(RuntimeError, match="no longer parked"):
         await runner._run_presentation_edit(job)  # pyright: ignore[reportPrivateUsage]

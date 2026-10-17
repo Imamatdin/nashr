@@ -489,8 +489,14 @@ async def test_live_edit_job_refuses_the_turn_instead_of_repairing() -> None:
 async def test_abandon_parked_fix_unwedges_a_failed_enqueue() -> None:
     db, _fake, _deck, _sources = await _provision()
     await _park_a_dangling_call(db)
+    parked = await _session(db)
 
-    await abandon_parked_fix(db, "proj-1", call_count=1)
+    # The request's own (pre-operation-id) park: its session, no operation.
+    answered = await abandon_parked_fix(
+        db, "proj-1", session_id=parked.session_id, operation_id=None, call_count=1
+    )
+
+    assert answered is True
 
     reloaded = await _session(db)
     assert has_dangling_call(reloaded) == 0
@@ -503,7 +509,11 @@ async def test_abandon_parked_fix_is_a_noop_without_a_dangling_call() -> None:
     session.history = [_user_turn("hi"), _model_turn("hello")]
     await persist_session(db, session)
 
-    await abandon_parked_fix(db, "proj-1", call_count=1)
+    answered = await abandon_parked_fix(
+        db, "proj-1", session_id=session.session_id, operation_id=None, call_count=1
+    )
+
+    assert answered is False
 
     reloaded = await _session(db)
     assert len(reloaded.history) == 2

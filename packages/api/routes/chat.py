@@ -36,8 +36,10 @@ from packages.platform.jobs import (
 )
 from packages.platform.rate_limit import CHAT_ACTION, RateLimiter
 from packages.sessions_core import (
+    DecisionStaleError,
     PendingActionView,
     TurnKind,
+    TurnResult,
     abandon_parked_fix,
     pending_for_approval,
     read_session,
@@ -66,8 +68,16 @@ class FixView(BaseModel):
 
 
 class PendingView(BaseModel):
+    """A parked decision; ``session_id``/``operation_id`` are what approve/reject name.
+
+    ``operation_id`` is null only for a decision parked before operation ids
+    existed (B1-FIX4); it is the identity the client sends back (B1-FIX5).
+    """
+
     model_config = ConfigDict(extra="forbid")
 
+    session_id: str | None
+    operation_id: str | None
     reason: str
     fixes: list[FixView]
 
@@ -128,7 +138,32 @@ def _fix_views(fixes: tuple[SlideFix, ...]) -> list[FixView]:
 def _pending_view(pending: PendingActionView | None) -> PendingView | None:
     if pending is None:
         return None
-    return PendingView(reason=pending.reason, fixes=_fix_views(pending.fixes))
+    return PendingView(
+        session_id=pending.session_id,
+        operation_id=pending.operation_id,
+        reason=pending.reason,
+        fixes=_fix_views(pending.fixes),
+    )
+
+
+class DecisionRequest(BaseModel):
+    """The parked decision the user is approving or rejecting, as the chat showed it.
+
+    The route acts only on that decision (B1-FIX5): one answered or replaced since
+    (another tab, the bot, a regeneration) is 409 ``decision_changed``, nothing
+    written, and the client re-reads the chat.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID
+    operation_id: uuid.UUID | None
+
+
+def _decision_changed() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT, detail={"reason": "decision_changed"}
+    )
 
 
 def _client_ip(request: Request) -> str:
@@ -320,6 +355,18 @@ def _identity_refused(exc: EditIdentityRefusedError) -> HTTPException:
     )
 
 
+async def _abandon(db: Any, project_id: str, result: TurnResult) -> None:
+    """Answer the call THIS request parked, and only that one (B1-FIX5, Codex B1)."""
+
+    await abandon_parked_fix(
+        db,
+        project_id,
+        session_id=result.session_id,
+        operation_id=result.operation_id,
+        call_count=result.fix_call_count,
+    )
+
+
 @router.post("/{project_id}/chat", response_model=ChatTurnView)
 async def post_chat(
     request: Request, project_id: str, body: ChatRequest, auth: Authenticated
@@ -386,7 +433,7 @@ async def post_chat(
         revision_payload = await _design_revision_payload(request, project_id, result.revision_id)
         stamp = _delivery_stamp(len(result.fixes), result.session_id, result.operation_id)
     except HTTPException:
-        await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
+        await _abandon(db, project_id, result)
         raise
     try:
         job_id = await _enqueue_edit(
@@ -405,17 +452,17 @@ async def post_chat(
             },
         )
     except DuplicateActiveJobError:
-        await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
+        await _abandon(db, project_id, result)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "brain_busy"}
         ) from None
     except EditIdentityRefusedError as exc:
         # The call this turn parked was answered or replaced before the job could
         # be queued; un-parking answers it only if it is still there.
-        await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
+        await _abandon(db, project_id, result)
         raise _identity_refused(exc) from None
     except Exception:
-        await abandon_parked_fix(db, project_id, call_count=result.fix_call_count)
+        await _abandon(db, project_id, result)
         logger.exception("chat_edit_enqueue_failed project=%s", project_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"reason": "edit_not_queued"}
@@ -436,7 +483,9 @@ async def post_chat(
 
 
 @router.post("/{project_id}/chat/approve", response_model=ChatTurnView)
-async def approve_pending(request: Request, project_id: str, auth: Authenticated) -> ChatTurnView:
+async def approve_pending(
+    request: Request, project_id: str, body: DecisionRequest, auth: Authenticated
+) -> ChatTurnView:
     """Run the parked change. A BUTTON got here — never the model."""
 
     user_id = str(auth.user_id)
@@ -446,7 +495,15 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
     await _refuse_if_busy(queue, project_id)
 
     db = request.app.state.db
-    pending = await pending_for_approval(db, project_id)
+    try:
+        pending = await pending_for_approval(
+            db,
+            project_id,
+            session_id=str(body.session_id),
+            operation_id=str(body.operation_id) if body.operation_id else None,
+        )
+    except DecisionStaleError:
+        raise _decision_changed() from None
     if pending is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "no_pending_action"}
@@ -503,7 +560,7 @@ async def approve_pending(request: Request, project_id: str, auth: Authenticated
 
 @router.post("/{project_id}/chat/reject", response_model=ChatTurnView)
 async def reject_pending_action(
-    request: Request, project_id: str, auth: Authenticated
+    request: Request, project_id: str, body: DecisionRequest, auth: Authenticated
 ) -> ChatTurnView:
     """Discard the parked change and unblock the conversation.
 
@@ -518,7 +575,16 @@ async def reject_pending_action(
     await _refuse_if_busy(queue, project_id)
 
     db = request.app.state.db
-    if not await reject_pending(db, project_id):
+    try:
+        rejected = await reject_pending(
+            db,
+            project_id,
+            session_id=str(body.session_id),
+            operation_id=str(body.operation_id) if body.operation_id else None,
+        )
+    except DecisionStaleError:
+        raise _decision_changed() from None
+    if not rejected:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "no_pending_action"}
         )
