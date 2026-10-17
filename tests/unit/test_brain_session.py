@@ -57,7 +57,6 @@ from packages.core.enums import (
     ExportFormat,
     GenerationPackage,
 )
-from packages.core.model_registry import Role, image_cost_usd, model_for
 from packages.core.models.presentation import SlideFix
 from packages.core.models.source import (
     SourceChunkCreate,
@@ -403,6 +402,10 @@ def test_has_fixes_remaining_counts_down_to_the_tier_limit() -> None:
 
 
 def test_total_spend_is_analytics_only_not_the_cap() -> None:
+    # Imported here, not at module level: the pre-fix gates import this module's
+    # helpers against applications that predate the model registry (B0).
+    from packages.core.model_registry import Role, image_cost_usd, model_for
+
     # The actual cost is still summed for billing/analytics; it just doesn't gate.
     per_image = image_cost_usd(model_for(Role.IMAGE_GENERATION))
     assert session_total_spend_usd(0.10, 3) == 0.10 + 3 * per_image
