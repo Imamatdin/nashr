@@ -12,9 +12,19 @@ from typing import Any
 
 import pytest
 
-from packages.bot.sessions import load_session
+from packages.bot.keyboards import (
+    APPROVE_PREFIX,
+    REJECT_PREFIX,
+    approval_callback,
+    parse_approval_callback,
+    presentation_approval_keyboard,
+)
+from packages.bot.sessions import load_session, persist_session
+from packages.bot.sessions.models import PendingAction
+from packages.bot.sessions.parked import park_call
 from packages.bot.sessions.receipts import EditReceipt, ReceiptOutcome, receipt_of
 from packages.bot.sessions.session_rows import SessionConflictError, merge
+from packages.core.models.presentation import SlideFix
 from packages.platform.jobs import (
     EditIdentityRefusedError,
     GenerationJob,
@@ -23,7 +33,11 @@ from packages.platform.jobs import (
     JobStatus,
     JobType,
 )
-from packages.sessions_core.chat import has_dangling_call, repair_dangling_call
+from packages.sessions_core.chat import (
+    has_dangling_call,
+    park_pending_for_apply,
+    repair_dangling_call,
+)
 from tests.unit.test_b1_fix3_regressions import (
     _PROJECT,  # pyright: ignore[reportPrivateUsage]
     _USER,  # pyright: ignore[reportPrivateUsage]
@@ -187,3 +201,43 @@ async def test_a_receipt_inconsistent_with_itself_is_job_data_invalid(
     with pytest.raises(JobDataInvalidError) as invalid:
         receipt_of(_settled(progress, **payload))
     assert invalid.value.job_id == "job-1"
+
+
+# ------------------------------------------------------- named decisions (B1-FIX5)
+
+
+async def test_an_approval_button_names_its_decision_within_telegrams_limit() -> None:
+    session_id, operation_id = str(uuid.uuid4()), str(uuid.uuid4())
+    markup = presentation_approval_keyboard("uz", session_id=session_id, operation_id=operation_id)
+    datas = [button.callback_data or "" for row in markup.inline_keyboard for button in row]
+
+    assert all(len(data.encode()) <= 64 for data in datas), datas
+    assert [parse_approval_callback(data) for data in datas] == [
+        (APPROVE_PREFIX, session_id, operation_id),
+        (REJECT_PREFIX, session_id, operation_id),
+    ]
+    legacy = approval_callback(APPROVE_PREFIX, session_id, None)
+    assert parse_approval_callback(legacy) == (APPROVE_PREFIX, session_id, None)
+    for junk in ("approve_redeliver", "apr::", "apr:x:y", "zzz:a:b", "apr:a"):
+        assert parse_approval_callback(junk) is None, junk
+
+
+async def test_the_worker_reads_only_its_own_approved_decision() -> None:
+    world = await _World4().open()
+    session = await load_session(world.db, _PROJECT)
+    assert session is not None and session.session_id is not None
+    session.pending_action = PendingAction(
+        fixes=[SlideFix(slide_id="s0", instruction="x")], reason="r", call_count=1
+    )
+    operation_id = park_call(session)
+    await persist_session(world.db, session)
+
+    mine = await park_pending_for_apply(
+        world.db, _PROJECT, session_id=session.session_id, operation_id=operation_id
+    )
+    other = await park_pending_for_apply(
+        world.db, _PROJECT, session_id=session.session_id, operation_id=str(uuid.uuid4())
+    )
+
+    assert mine is not None and mine.operation_id == operation_id
+    assert other is None

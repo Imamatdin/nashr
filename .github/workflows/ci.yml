@@ -415,6 +415,47 @@ jobs:
           path: artifacts/
           retention-days: 5
 
+  prefix-a1b2688:
+    name: pre-fix — B1-FIX5 unit regressions must FAIL on a1b2688
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The application is the B1-FIX4 review's SHA; the tests stay current.
+      - name: The app as of a1b2688
+        run: |
+          git diff --name-only --diff-filter=A a1b2688 HEAD -- packages scripts/worker_run_job.py \
+            | grep -v '\.test\.ts$' | xargs -r rm -f
+          git checkout a1b2688 -- packages scripts/worker_run_job.py
+          git diff --stat a1b2688 -- packages scripts/worker_run_job.py | tail -1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Unit regressions must FAIL on a1b2688
+        run: |
+          mkdir -p artifacts
+          set +e
+          python -m pytest tests/unit/test_b1_fix5_regressions.py -v -ra \
+            --junitxml=artifacts/prefix-unit.xml 2>&1 | tee artifacts/prefix-unit.log
+          set -e
+          python -m tests.db.expect_failures artifacts/prefix-unit.xml tests/prefix/unit_fix4.json \
+            | tee artifacts/prefix-unit-verdict.log
+          exit ${PIPESTATUS[0]}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prefix-a1b2688-logs
+          path: artifacts/
+          retention-days: 5
+
   journey-prefix:
     name: browser journey pre-fix (${{ matrix.only }} steps must FAIL on ${{ matrix.ref }})
     runs-on: ubuntu-24.04
@@ -528,7 +569,7 @@ jobs:
   minutes:
     name: minutes used
     if: always()
-    needs: [unit, postgres, prefix-fdb14bc, prefix-3723d30, journey, journey-prefix]
+    needs: [unit, postgres, prefix-fdb14bc, prefix-3723d30, prefix-a1b2688, journey, journey-prefix]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

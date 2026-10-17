@@ -463,6 +463,24 @@ B1-FIX3 (Codex Review A, A1) the hold is a database row, not session JSON:
   call drops its duplicate answer (and keeps the row's next parked call). An approval
   parked before operation ids existed gets one when it is approved. The API answers
   an identity refusal at enqueue with 409 `session_busy` (`why` names the refusal).
+* **Every answerer names the call it answers (B1-FIX5, Codex review of a1b2688).**
+  Whatever answers or consumes a parked call on behalf of one request loads the
+  session and acts only if it is still that request's call (`parked.is_parked`:
+  same session id and parked operation id); otherwise it writes nothing. This
+  covers the route's enqueue-failure cleanup (`abandon_parked_fix`, given the
+  turn's own session and operation for the identity refusal, duplicate enqueue,
+  generic enqueue failure and revision/stamp refusal), the worker's read of an
+  approved batch (`park_pending_for_apply`), web approve/reject (the chat's
+  `pending_action` now carries `session_id` and `operation_id`, which the client
+  sends back; a different decision is 409 `decision_changed`) and the bot's
+  approval buttons (callback data `apr|rej:<session>:<operation>`, base64url, at
+  most 49 bytes; a stale button or one sent before this change answers
+  `approval_stale` and changes nothing). A change after the check is still caught
+  by the write's compare-and-swap merge. Functions that act on the session the same
+  request just loaded (`run_web_turn`, `repair_dangling_call`,
+  `move_session_to_head`, the bot's chat turn) are bound by that load and the CAS;
+  `dispatch_fix` and receipt recovery were bound in B1-FIX4; `create_session`
+  replaces the session by design.
 * The render's completion (`_deliver_parents`), its final failure (`_fail_delivery`)
   and the reaper settle the row to `delivered` / `released` in the same transaction
   that settles the parent job.
@@ -796,6 +814,11 @@ to `ci/**` branches and on manual dispatch, never on `main`:
    releases them; with the row lock the second writer waits for the row before it can
    read and exactly one commits, without it both commit against the same head. It
    needs no lucky schedule. The lifecycle property test stays in the post-change suite.
+   B1-FIX5 adds the `prefix-a1b2688` job: `tests/unit/test_b1_fix5_regressions.py`
+   against a1b2688's application (`tests/prefix/unit_fix4.json`): a refused enqueue
+   after another request repaired its call and parked the next one, the same across
+   a session replacement, and stale approve/reject from the web and from old bot
+   buttons.
 5. The presentation-worker suite, including PPTX determinism and the Chromium PDF
    tests, and its typecheck.
 

@@ -1,0 +1,30 @@
+{
+  "schema": "the application as of a1b2688 (packages/ and scripts/worker_run_job.py), current tests and emulator",
+  "module": "tests/unit/test_b1_fix5_regressions.py",
+  "tests": {
+    "tests.unit.test_b1_fix5_regressions::test_a_refused_enqueue_never_answers_the_call_parked_after_it": {
+      "expect": "fail",
+      "match": "A's refused enqueue answered B's call O2"
+    },
+    "tests.unit.test_b1_fix5_regressions::test_a_refused_enqueue_never_answers_a_replacement_sessions_call": {
+      "expect": "fail",
+      "match": "A's refused enqueue answered B's call O2"
+    },
+    "tests.unit.test_b1_fix5_regressions::test_a_stale_decision_never_acts_on_the_newer_one[approve]": {
+      "expect": "fail",
+      "match": "a job was queued"
+    },
+    "tests.unit.test_b1_fix5_regressions::test_a_stale_decision_never_acts_on_the_newer_one[reject]": {
+      "expect": "fail",
+      "match": "a stale reject changed the newer decision"
+    },
+    "tests.unit.test_b1_fix5_regressions::test_an_old_bot_button_never_acts_on_the_newer_decision[approve]": {
+      "expect": "fail",
+      "match": "an old button applied the newer decision"
+    },
+    "tests.unit.test_b1_fix5_regressions::test_an_old_bot_button_never_acts_on_the_newer_decision[reject]": {
+      "expect": "fail",
+      "match": "an old button changed the newer decision"
+    }
+  }
+}
