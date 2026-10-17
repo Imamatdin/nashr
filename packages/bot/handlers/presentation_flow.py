@@ -1127,7 +1127,7 @@ async def _dispatch_fix(
     )
 
 
-async def _apply_pending(
+async def _apply_pending(  # pyright: ignore[reportUnusedFunction]  (kept for B8 item 1)
     *,
     orchestrator: PresentationOrchestrator,
     db: DatabaseClient,
@@ -1138,6 +1138,10 @@ async def _apply_pending(
     storage: FileStorage | None = None,
 ) -> _ChatResult:
     """Approve path: fire the parked change. A button — not the model — got here.
+
+    UNREACHABLE until B8 item 1: the Approve button no longer calls this (it applies
+    inline through ``commit_revision`` without operation fencing); bot approvals
+    will go through the same operation-bound queued job as web approvals.
 
     Only the decision the button was shown for (B1-FIX5): one answered or replaced
     since is DECISION_STALE and nothing is applied or written.
@@ -1316,36 +1320,20 @@ async def approve_redeliver(
     credits: CreditLedger,
     storage: FileStorage | None = None,
 ) -> None:
-    """The user authorized the parked change: fire it, re-deliver, resume chatting."""
+    """The user pressed Approve: for now, the change is applied from the web.
 
-    data = await state.get_data()
-    project_id = str(data.get("project_id", ""))
-    lang = _flow_language(data)
-    labels = get_bot_labels(lang)
-    named = parse_approval_callback(callback.data or "")
-    if not isinstance(callback.message, Message) or named is None:
-        await callback.answer()
-        return
-    _prefix, session_id, operation_id = named
-    orchestrator = _orchestrator(bot, db, credits, storage)
-    async with (
-        _session_lock(project_id),
-        ChatActionSender.typing(bot=bot, chat_id=callback.message.chat.id),
-    ):
-        # Applying the parked fix runs the fix-chain + a full re-render (minutes):
-        # keep a typing indicator up so the user sees the bot is working.
-        result = await _apply_pending(
-            orchestrator=orchestrator,
-            db=db,
-            project_id=project_id,
-            telegram_id=callback.from_user.id,
-            session_id=session_id,
-            operation_id=operation_id,
-            storage=storage,
-        )
-    await _render_chat_result(callback.message, lang, labels, result)
-    if result.outcome is not _ChatOutcome.DECISION_STALE:
-        await state.set_state(PresentationStates.talking_to_brain)
+    B8 item 1: the bot's inline apply (:func:`_apply_pending`) commits through
+    ``commit_revision`` with no operation fencing, unlike a web approval's
+    operation-bound queued job. Until bot approvals go through that same job, the
+    button applies nothing: it says so in the user's language, and the decision
+    stays parked, so it can be approved on the web or rejected here. Nothing is
+    committed, delivered or counted. The dependencies stay injected for B8.
+    """
+
+    del bot, db, credits, storage
+    labels = get_bot_labels(_flow_language(await state.get_data()))
+    if isinstance(callback.message, Message):
+        await callback.message.answer(labels.approval_web_only)
     await callback.answer()
 
 

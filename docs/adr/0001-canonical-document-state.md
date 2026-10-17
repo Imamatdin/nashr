@@ -541,6 +541,9 @@ loaded **from that revision**, not from the head. A bot edit commits
 bot replies in the user's language (uz/ru/kaa/en) that the deck changed elsewhere,
 with a Reload button that sets `revision_id` to the head.
 
+Approving a parked (model-proposed) decision is web-only until B8 item 1 (§10, item 5):
+the bot's Approve button applies nothing and points the user to the web; Reject works.
+
 Bot generation and bot edits render in-process (Telegram delivers the local files
 at once) and had **no job row**, so their exports could not satisfy I8. After a
 committed revision is rendered, the bot inserts a `presentation_render` job already
@@ -742,6 +745,14 @@ Open:
    can commit a revision, fail its render and refund. I11 is scoped to queued jobs and
    does not cover them. Moving bot generation onto queued jobs (or giving it job-stamped
    settlement) is B8.
+   **B8 item 1 — bot approvals (Codex review of B1-FIX5).** The bot's Approve button
+   applied a parked decision inline (`_apply_pending`) and committed through
+   `commit_revision` with no operation fencing, unlike a web approval's
+   operation-bound queued job. Since B1 closes without it, the button applies nothing:
+   it answers in the user's language (uz/ru/kaa/en) that edits are applied on the web
+   for now, and the decision stays parked for web approval or the bot's Reject (which
+   still works). `_apply_pending` stays in the code, unreachable. B8 item 1: bot
+   approvals go through the same operation-bound queued job as web approvals.
 6. **`brain_sessions.fixes_used` (decided 2026-10-15).** Queued (web) edits count only
    from `edit_deliveries`; nothing about them is stored on the session, and a unit test
    asserts no web or worker path writes `fixes_used`. The column remains the counter of

@@ -103,6 +103,8 @@ class BotLabels:
     approval_required_first: str
     # A button pressed for a decision that was answered or replaced since (B1-FIX5).
     approval_stale: str
+    # Approve pressed in the bot: edits are applied from the web for now (B8).
+    approval_web_only: str
     change_discarded: str
     edit_button: str  # the "Edit with AI" delivery button
     edit_invite: str  # shown on entering the conversational editor
@@ -199,6 +201,7 @@ LABELS_UZ = BotLabels(
     approval_approve="✅ Tasdiqlash",
     approval_reject="❌ Bekor qilish",
     approval_required_first="Avval o'zgarishni tasdiqlang yoki bekor qiling.",
+    approval_web_only="Hozircha o'zgarishlar veb-saytda qo'llanadi: loyihani veb-saytda oching va u yerda tasdiqlang. Bu yerda faqat bekor qilish mumkin.",
     approval_stale="Bu tugma eski o'zgarishga tegishli — u allaqachon hal qilingan yoki almashtirilgan. Hech narsa o'zgarmadi.",
     change_discarded="O'zgarish bekor qilindi.",
     edit_button="✏️ AI bilan tahrirlash",
@@ -299,6 +302,7 @@ LABELS_RU = BotLabels(
     approval_approve="✅ Подтвердить",
     approval_reject="❌ Отменить",
     approval_required_first="Сначала подтвердите или отмените изменение.",
+    approval_web_only="Пока изменения применяются на сайте: откройте проект на сайте и подтвердите его там. Здесь можно только отменить.",
     approval_stale="Эта кнопка относится к прежнему изменению — оно уже решено или заменено. Ничего не изменилось.",
     change_discarded="Изменение отменено.",
     edit_button="✏️ Редактировать с ИИ",
@@ -397,6 +401,7 @@ LABELS_EN = BotLabels(
     approval_approve="✅ Approve",
     approval_reject="❌ Reject",
     approval_required_first="Please approve or reject the change first.",
+    approval_web_only="For now, edits are applied on the web: open the project on the website and approve it there. Here you can only reject it.",
     approval_stale="This button belongs to an earlier change that was already resolved or replaced. Nothing was changed.",
     change_discarded="Change discarded.",
     edit_button="✏️ Edit with AI",
@@ -494,6 +499,7 @@ LABELS_KAA = BotLabels(
     approval_approve="✅ Tastıyıqlaw",
     approval_reject="❌ Biykarlaw",
     approval_required_first="Aldın ózgeristi tastıyıqlań yamasa biykarlań.",
+    approval_web_only="Házirshe ózgerisler veb-saytta qollanadı: joybardı veb-saytta ashıń hám sol jerde tastıyıqlań. Bul jerde tek biykarlaw múmkin.",
     approval_stale="Bul túyme aldıńǵı ózgeriske tiyisli — ol sheshilgen yamasa almastırılǵan. Hesh nárse ózgermedi.",
     change_discarded="Ózgeris biykarlandı.",
     edit_button="✏️ AI menen redaktorlaw",
