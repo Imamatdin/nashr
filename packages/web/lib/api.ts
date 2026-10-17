@@ -932,6 +932,9 @@ export interface ChatFixView {
 }
 
 export interface ChatPendingView {
+  /** The decision approve/reject name (B1-FIX5); operation_id is null only for a pre-B1-FIX4 decision. */
+  session_id: string | null;
+  operation_id: string | null;
   reason: string;
   fixes: ChatFixView[];
 }
@@ -1000,24 +1003,38 @@ export function postChat(
   );
 }
 
+/** The parked decision the user acts on, exactly as the chat showed it. */
+export interface DecisionRef {
+  session_id: string;
+  operation_id: string | null;
+}
+
+export function decisionOf(pending: ChatPendingView): DecisionRef | null {
+  return pending.session_id
+    ? { session_id: pending.session_id, operation_id: pending.operation_id }
+    : null;
+}
+
 export function approvePending(
   projectId: string,
+  decision: DecisionRef,
   token: string,
 ): Promise<ChatTurnView> {
   return postJson<ChatTurnView>(
     `/projects/${projectId}/chat/approve`,
-    {},
+    decision,
     token,
   );
 }
 
 export function rejectPending(
   projectId: string,
+  decision: DecisionRef,
   token: string,
 ): Promise<ChatTurnView> {
   return postJson<ChatTurnView>(
     `/projects/${projectId}/chat/reject`,
-    {},
+    decision,
     token,
   );
 }

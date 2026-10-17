@@ -62,6 +62,7 @@ import {
   type ProvenanceRow,
   type ProvenanceView,
   approvePending,
+  decisionOf,
   enqueueJob,
   getChat,
   getDecisions,
@@ -559,13 +560,16 @@ export default function ProjectPage() {
   }
 
   async function onDecision(approve: boolean) {
+    const pending = chat?.pending_action ?? null;
+    const decision = pending ? decisionOf(pending) : null;
+    if (!decision) return;
     setApproving(true);
     setChatError(null);
     try {
       const turn = await withAuth((token) =>
         approve
-          ? approvePending(projectId, token)
-          : rejectPending(projectId, token),
+          ? approvePending(projectId, decision, token)
+          : rejectPending(projectId, decision, token),
       );
       if (!turn) return;
       const view = await withAuth((token) => getChat(projectId, token));
@@ -573,6 +577,11 @@ export default function ProjectPage() {
       if (approve) refresh();
     } catch (error) {
       setChatError(error);
+      if (reasonOf(error) === "decision_changed") {
+        // The decision changed elsewhere: show the one that is parked now.
+        const view = await withAuth((token) => getChat(projectId, token)).catch(() => null);
+        if (view) setChat(view);
+      }
     } finally {
       setApproving(false);
     }

@@ -89,6 +89,12 @@ const CATALOG: Record<string, Entry> = {
     message: "Bu o‘zgarish allaqachon qo‘llangan yoki bekor qilingan.",
     tone: "info",
   },
+  decision_changed: {
+    title: "O‘zgarish yangilandi",
+    message:
+      "Siz ko‘rgan o‘zgarish allaqachon hal qilingan yoki almashtirilgan. Hozirgisi ko‘rsatildi — hech narsa o‘zgarmadi.",
+    tone: "info",
+  },
   edit_not_queued: {
     title: "Tahrir boshlanmadi",
     message: "Tahrirni navbatga qo‘yib bo‘lmadi. Suhbat saqlanib qoldi.",
@@ -281,6 +287,10 @@ const ERROR_COPY = {
         "Nothing to approve",
         "This change was already applied or dismissed.",
       ],
+      decision_changed: [
+        "This change was updated",
+        "The change you saw was already resolved or replaced. The current one is shown; nothing was changed.",
+      ],
       edit_not_queued: [
         "Edit did not start",
         "The edit could not be queued. Your conversation is still saved.",
@@ -416,6 +426,10 @@ const ERROR_COPY = {
       no_pending_action: [
         "Нечего подтверждать",
         "Это изменение уже применено или отменено.",
+      ],
+      decision_changed: [
+        "Изменение обновилось",
+        "Изменение, которое вы видели, уже решено или заменено. Показано текущее — ничего не изменилось.",
       ],
       edit_not_queued: [
         "Правка не запустилась",
