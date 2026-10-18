@@ -27,7 +27,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from packages.api.middleware.auth import Authenticated
 from packages.core.models.presentation import SlideFix
-from packages.platform.document_models import DocumentKind
 from packages.platform.jobs import (
     DuplicateActiveJobError,
     EditIdentityRefusedError,
@@ -44,6 +43,7 @@ from packages.sessions_core import (
     TurnResult,
     abandon_parked_fix,
     enqueue_approved_edit,
+    enqueue_edit,
     read_session,
     reject_pending,
     run_web_turn,
@@ -272,79 +272,6 @@ async def get_chat(request: Request, project_id: str, auth: Authenticated) -> Ch
     )
 
 
-async def _enqueue_edit(
-    request: Request,
-    *,
-    project_id: str,
-    user_id: str,
-    payload: dict[str, Any],
-) -> str:
-    """Queue the apply. NO deduction — the payload carries no price, so the
-    worker's refund helper finds nothing to refund and correctly does nothing."""
-
-    queue: JobQueue = request.app.state.job_queue
-    job = await queue.enqueue(
-        project_id=project_id,
-        user_id=user_id,
-        job_type=JobType.PRESENTATION_EDIT,
-        payload=payload,
-    )
-    return job.id
-
-
-async def _design_revision_payload(
-    request: Request, project_id: str, revision_id: str | None
-) -> dict[str, str]:
-    """Stamp an edit with the revision the brain saw; the worker commits against it.
-
-    Every presentation has a document since migration 016, so a missing document
-    or revision means the session cannot edit and the edit is refused (409).
-    """
-
-    document_id = await request.app.state.documents.document_id(
-        project_id, DocumentKind.PRESENTATION
-    )
-    if document_id is None or revision_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail={"reason": "session_not_ready"}
-        )
-    return {"document_id": document_id, "base_revision_id": revision_id}
-
-
-class EditStamp(BaseModel):
-    """What an edit job carries for its identity and delivery (B1-FIX4).
-
-    ``session_id`` and ``operation_id`` name the parked call the job answers: the
-    database admits the job, and ``finish_generation_job`` its commit, only while
-    that session still has that call parked, and a load recovers a dead worker's
-    answer only from the job carrying both. ``slides_changed`` sizes the edit's
-    allowance hold and its chat notice.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    session_id: uuid.UUID
-    operation_id: uuid.UUID
-    slides_changed: int = Field(ge=0, le=1000)
-
-
-def _delivery_stamp(
-    slides_changed: int, session_id: str | None, operation_id: str | None
-) -> dict[str, Any]:
-    """The stamp, or 409 ``session_not_ready`` when the parked call has no identity."""
-
-    if session_id is None or operation_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail={"reason": "session_not_ready"}
-        )
-    stamp = EditStamp(
-        session_id=uuid.UUID(session_id),
-        operation_id=uuid.UUID(operation_id),
-        slides_changed=slides_changed,
-    )
-    return stamp.model_dump(mode="json")
-
-
 def _identity_refused(exc: EditIdentityRefusedError) -> HTTPException:
     """The database refused the edit's identity: the parked call changed under us.
 
@@ -432,27 +359,24 @@ async def post_chat(
     # FIX_READY: the session is parked with the call unanswered; the job carries
     # the batch. An enqueue that fails must un-park, or the session stays wedged.
     try:
-        revision_payload = await _design_revision_payload(request, project_id, result.revision_id)
-        stamp = _delivery_stamp(len(result.fixes), result.session_id, result.operation_id)
-    except HTTPException:
-        await _abandon(db, project_id, result)
-        raise
-    try:
-        job_id = await _enqueue_edit(
-            request,
+        job_id = await enqueue_edit(
+            db,
+            queue,
+            request.app.state.documents,
             project_id=project_id,
             user_id=user_id,
-            payload={
-                "fixes": [
-                    {"slide_id": fix.slide_id, "instruction": fix.instruction}
-                    for fix in result.fixes
-                ],
-                "call_count": result.fix_call_count,
-                "reply_text": result.reply_text,
-                **revision_payload,
-                **stamp,
-            },
+            fixes=result.fixes,
+            call_count=result.fix_call_count,
+            reply_text=result.reply_text,
+            revision_id=result.revision_id,
+            session_id=result.session_id,
+            operation_id=result.operation_id,
         )
+    except SessionNotReadyError:
+        await _abandon(db, project_id, result)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail={"reason": "session_not_ready"}
+        ) from None
     except DuplicateActiveJobError:
         await _abandon(db, project_id, result)
         raise HTTPException(

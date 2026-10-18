@@ -530,9 +530,64 @@ async def enqueue_approved_edit(
         "slides_changed": len(pending.fixes),
     }
     if delivery is not None:
-        payload["delivery"] = {
-            "telegram": {"chat_id": delivery.chat_id, "language": delivery.language}
-        }
+        payload["delivery"] = _delivery_block(delivery)
+    job = await queue.enqueue(
+        project_id=project_id,
+        user_id=user_id,
+        job_type=JobType.PRESENTATION_EDIT,
+        payload=payload,
+    )
+    return job.id
+
+
+def _delivery_block(delivery: TelegramDelivery) -> dict[str, object]:
+    return {"telegram": {"chat_id": delivery.chat_id, "language": delivery.language}}
+
+
+async def enqueue_edit(
+    db: DatabaseClient,
+    queue: JobQueue,
+    documents: DocumentStore,
+    *,
+    project_id: str,
+    user_id: str,
+    fixes: Sequence[SlideFix],
+    call_count: int,
+    reply_text: str | None,
+    revision_id: str | None,
+    session_id: str | None,
+    operation_id: str | None,
+    delivery: TelegramDelivery | None = None,
+) -> str:
+    """Enqueue a parked FIX turn's edit as a ``presentation_edit`` job, web and bot alike.
+
+    The single builder the web turn route (``POST /chat`` FIX_READY) and the bot chat
+    turn both call, so a bot edit and a web edit submit the identical job (B8.2); the
+    bot passes ``delivery`` for the worker to push the files to Telegram, the web omits
+    it. The caller has already parked the call (``session_id``/``operation_id`` name it)
+    and holds the turn's ``fixes`` and the revision the brain saw. No deduction: an edit
+    spends the fix allowance, not money.
+
+    Raises :class:`SessionNotReadyError` when the session has no revision/document, and
+    the enqueue's own ``DuplicateActiveJobError`` / ``EditIdentityRefusedError``; the
+    caller maps these to its transport and un-parks the call as its contract requires.
+    """
+
+    document_id = await documents.document_id(project_id, DocumentKind.PRESENTATION)
+    if document_id is None or revision_id is None or session_id is None or operation_id is None:
+        raise SessionNotReadyError(project_id)
+    payload: dict[str, object] = {
+        "fixes": [{"slide_id": fix.slide_id, "instruction": fix.instruction} for fix in fixes],
+        "call_count": call_count,
+        "reply_text": reply_text,
+        "document_id": document_id,
+        "base_revision_id": revision_id,
+        "session_id": session_id,
+        "operation_id": operation_id,
+        "slides_changed": len(fixes),
+    }
+    if delivery is not None:
+        payload["delivery"] = _delivery_block(delivery)
     job = await queue.enqueue(
         project_id=project_id,
         user_id=user_id,
@@ -736,6 +791,7 @@ __all__ = [
     "append_fix_result",
     "dispatch_fix",
     "enqueue_approved_edit",
+    "enqueue_edit",
     "has_dangling_call",
     "history_for_wire",
     "park_pending_for_apply",
