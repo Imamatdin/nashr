@@ -221,8 +221,10 @@ async def test_a_job_for_revision_x_cannot_register_revision_y(tmp_path: Path) -
 def test_file_format_maps_renderer_extensions() -> None:
     assert file_format("html") is ExportFileFormat.HTML
     assert file_format(".PPTX") is ExportFileFormat.PPTX
+    # "zip" is the stored extension of the png export, not a format name, so the
+    # helper (which maps a renderer output's format name) refuses it.
     with pytest.raises(ValueError):
-        file_format("docx")
+        file_format("zip")
 
 
 def test_renderer_version_is_a_stable_source_hash() -> None:

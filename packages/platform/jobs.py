@@ -40,6 +40,7 @@ class JobType(StrEnum):
     EXPORT = "export"
     PRESENTATION_EDIT = "presentation_edit"
     PRESENTATION_RENDER = "presentation_render"
+    ARTICLE_RENDER = "article_render"
     IMAGE_REGEN = "image_regen"
 
 
@@ -61,6 +62,13 @@ class JobStatus(StrEnum):
 # Statuses a job never leaves.
 TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
     {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.DELIVERY_FAILED, JobStatus.CANCELLED}
+)
+
+# Render jobs: a worker produces export files for a revision rather than a new
+# revision. Both kinds dedupe on (revision, renderer_version, formats), not on the
+# project, and register their outputs through register_export (migration 017).
+RENDER_JOB_TYPES: frozenset[JobType] = frozenset(
+    {JobType.PRESENTATION_RENDER, JobType.ARTICLE_RENDER}
 )
 
 
@@ -340,7 +348,7 @@ class JobQueue:
             return (
                 self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
                 .select("*")
-                .eq("job_type", JobType.PRESENTATION_RENDER.value)
+                .in_("job_type", [t.value for t in RENDER_JOB_TYPES])
                 .eq("payload->>revision_id", revision_id)
                 .eq("payload->>renderer_version", renderer_version)
                 .in_("status", [JobStatus.QUEUED.value, JobStatus.PROCESSING.value])
@@ -416,7 +424,7 @@ class JobQueue:
 
         job_type = JobType(str(row["job_type"]))
         payload = cast(dict[str, Any], row["payload"])
-        if job_type is JobType.PRESENTATION_RENDER:
+        if job_type in RENDER_JOB_TYPES:
             return await self.get_active_render_job(
                 str(payload.get("revision_id")),
                 str(payload.get("renderer_version")),

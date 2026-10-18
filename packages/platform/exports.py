@@ -53,7 +53,11 @@ def renderer_version() -> str:
 
 
 def file_format(extension: str) -> ExportFileFormat:
-    """The export format for a rendered file extension (``html``, ``pptx``, ``pdf``)."""
+    """The export format named by a renderer output's extension.
+
+    The Node renderer emits presentation files whose extension is the format name
+    (``html``, ``pptx``, ``pdf``); an extension that is not an export format raises.
+    """
 
     return ExportFileFormat(extension.lstrip(".").lower())
 

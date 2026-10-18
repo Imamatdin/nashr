@@ -18,11 +18,17 @@ from packages.core.export_formats import (
     wire_formats,
     wire_name,
 )
-from packages.platform.document_models import ExportFileFormat
-
-_MIGRATION = (
-    Path(__file__).resolve().parents[2] / "supabase/migrations/016_canonical_document_state.sql"
+from packages.platform.document_models import (
+    EXPORT_FILE_FORMATS,
+    DocumentKind,
+    ExportFileFormat,
 )
+
+# Migration 017 seeds the SQL export_file_formats lookup; this file parses that
+# seed to prove it matches the Python table. The authoritative drift guard runs
+# against real PostgreSQL in tests/db (the seed and Python can still disagree with
+# the live table if a later migration edits it, which only Postgres catches).
+_MIGRATION_017 = Path(__file__).resolve().parents[2] / "supabase/migrations/017_export_formats.sql"
 
 
 def test_every_session_format_has_exactly_one_wire_name() -> None:
@@ -34,15 +40,36 @@ def test_every_session_format_has_exactly_one_wire_name() -> None:
     }
 
 
-def test_wire_names_are_the_export_rows_and_the_sql_checks() -> None:
-    assert {f.value for f in ExportFileFormat} == set(WIRE_NAMES)
-    sql = _MIGRATION.read_text(encoding="utf-8")
-    checks = re.findall(r"format\s+text not null check \(format in \(([^)]*)\)\)", sql)
-    assert [set(re.findall(r"'([a-z]+)'", c)) for c in checks] == [set(WIRE_NAMES)]
-    render_checks = re.findall(r"f not in \(([^)]*)\)", sql)
-    assert render_checks and all(
-        set(re.findall(r"'([a-z]+)'", c)) == set(WIRE_NAMES) for c in render_checks
+def test_wire_names_are_presentation_file_formats() -> None:
+    # Every session render produces a presentation file format. The stored file
+    # formats are a superset (png and docx have no session format; docx is an
+    # article format), so the relationship is subset, not equality.
+    wire = set(WIRE_NAMES)
+    assert wire <= {f.value for f in ExportFileFormat}
+    for name in wire:
+        spec = EXPORT_FILE_FORMATS[ExportFileFormat(name)]
+        assert DocumentKind.PRESENTATION in spec.allowed_kinds
+
+
+def test_python_format_table_matches_the_sql_seed() -> None:
+    sql = _MIGRATION_017.read_text(encoding="utf-8")
+    rows = re.findall(
+        r"\('([a-z]+)',\s*'([a-z0-9]+)',\s*'([^']+)',\s*array\[([^\]]*)\]\)",
+        sql,
     )
+    seeded = {
+        fmt: (
+            ext,
+            media,
+            frozenset(DocumentKind(k) for k in re.findall(r"'([a-z]+)'", kinds)),
+        )
+        for fmt, ext, media, kinds in rows
+    }
+    expected = {
+        fmt.value: (spec.file_extension, spec.media_type, spec.allowed_kinds)
+        for fmt, spec in EXPORT_FILE_FORMATS.items()
+    }
+    assert seeded == expected
 
 
 def test_wire_round_trip_is_stable() -> None:

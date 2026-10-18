@@ -8,9 +8,11 @@ models and must still be kept and shown.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -59,11 +61,69 @@ class ProposalStatus(StrEnum):
 
 
 class ExportFileFormat(StrEnum):
-    """revision_exports.format: the file extension of a rendered output."""
+    """revision_exports.format: one stored export format of a rendered output.
+
+    The format name is not always the file extension: ``png`` is delivered as a
+    zip of slide images. The extension, media type and the document kinds a format
+    is valid for live in :data:`EXPORT_FILE_FORMATS`, mirrored by the SQL
+    ``export_file_formats`` lookup (migration 017); a tests/db check proves the two
+    do not drift.
+    """
 
     HTML = "html"
     PPTX = "pptx"
     PDF = "pdf"
+    PNG = "png"
+    DOCX = "docx"
+
+
+class FormatSpec(BaseModel):
+    """What one export format is: its file extension, media type and valid kinds."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    file_extension: str
+    media_type: str
+    allowed_kinds: frozenset[DocumentKind]
+
+
+EXPORT_FILE_FORMATS: Final[Mapping[ExportFileFormat, FormatSpec]] = MappingProxyType(
+    {
+        ExportFileFormat.HTML: FormatSpec(
+            file_extension="html",
+            media_type="text/html",
+            allowed_kinds=frozenset({DocumentKind.PRESENTATION}),
+        ),
+        ExportFileFormat.PPTX: FormatSpec(
+            file_extension="pptx",
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            ),
+            allowed_kinds=frozenset({DocumentKind.PRESENTATION}),
+        ),
+        ExportFileFormat.PDF: FormatSpec(
+            file_extension="pdf",
+            media_type="application/pdf",
+            allowed_kinds=frozenset({DocumentKind.PRESENTATION, DocumentKind.ARTICLE}),
+        ),
+        ExportFileFormat.PNG: FormatSpec(
+            file_extension="zip",
+            media_type="application/zip",
+            allowed_kinds=frozenset({DocumentKind.PRESENTATION}),
+        ),
+        ExportFileFormat.DOCX: FormatSpec(
+            file_extension="docx",
+            media_type=("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            allowed_kinds=frozenset({DocumentKind.ARTICLE}),
+        ),
+    }
+)
+
+
+def format_allowed_for_kind(file_format: ExportFileFormat, kind: DocumentKind) -> bool:
+    """True when ``file_format`` may be produced for a document of ``kind``."""
+
+    return kind in EXPORT_FILE_FORMATS[file_format].allowed_kinds
 
 
 ERROR_CODES: frozenset[str] = frozenset(
@@ -246,9 +306,14 @@ def export_storage_key(
     file_format: ExportFileFormat,
     sha256: str,
 ) -> str:
-    """The only key an export may live at (checked again by register_export)."""
+    """The only key an export may live at (checked again by register_export).
 
+    The path segment is the format name; the file extension comes from the format
+    table, so a ``png`` export (a zip of slide images) lives at ``.../png/<sha>.zip``.
+    """
+
+    extension = EXPORT_FILE_FORMATS[file_format].file_extension
     return (
         f"exports/{document_id}/{revision_id}/{renderer_version}/"
-        f"{file_format.value}/{sha256}.{file_format.value}"
+        f"{file_format.value}/{sha256}.{extension}"
     )
