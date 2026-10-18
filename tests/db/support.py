@@ -79,7 +79,9 @@ def migration_016(schema: str = SCHEMA) -> Path:
         return FIX2_016
     if schema == "fix3":
         return FIX3_016
-    return migrations_through(None)[-1]
+    # The real 016, found by prefix so a later migration (017+, e.g. bot 019) does
+    # not displace it: migrations_through("016") keeps only files with name[:3] <= 016.
+    return migrations_through("016")[-1]
 
 
 def database_url(name: str) -> str:
