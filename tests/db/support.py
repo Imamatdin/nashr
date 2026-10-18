@@ -79,7 +79,9 @@ def migration_016(schema: str = SCHEMA) -> Path:
         return FIX2_016
     if schema == "fix3":
         return FIX3_016
-    return migrations_through(None)[-1]
+    # The current schema's 016 is the real file, not whatever migration happens
+    # to be last (017 and later are stacked after it).
+    return migrations_through("016")[-1]
 
 
 def database_url(name: str) -> str:
