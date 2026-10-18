@@ -96,6 +96,10 @@ class _FakeQueue:
     async def heartbeat(self, job_id: str, worker_id: str, claim_token: int) -> bool:
         return True
 
+    async def jobs_for_render(self, render_job_id: str) -> list[Any]:
+        # No bot-enqueued edit parents in these render tests, so nothing to deliver.
+        return []
+
     async def set_progress(
         self, job_id: str, worker_id: str, claim_token: int, progress: dict[str, Any]
     ) -> None:

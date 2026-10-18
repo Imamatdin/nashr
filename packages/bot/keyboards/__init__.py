@@ -315,6 +315,25 @@ def presentation_approval_keyboard(
     )
 
 
+SEND_FILES_CALLBACK = "send_files"
+
+
+def send_files_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """One button to pull the latest rendered files from storage (B8.1 'send again').
+
+    A queued bot edit is rendered and delivered by the worker; if that push did not
+    arrive (a transient Telegram error, a bot restart), this lets the user fetch the
+    committed revision's files on demand instead of re-running the paid edit.
+    """
+
+    labels = get_bot_labels(lang)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=labels.send_files_button, callback_data=SEND_FILES_CALLBACK)]
+        ]
+    )
+
+
 def presentation_mini_app_keyboard(lang: str, mini_app_url: str) -> InlineKeyboardMarkup:
     """Button that opens the presentation questionnaire Mini App.
 

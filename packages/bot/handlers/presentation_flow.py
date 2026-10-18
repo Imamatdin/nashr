@@ -51,6 +51,7 @@ from aiogram.utils.chat_action import ChatActionSender
 from packages.bot.keyboards import (
     APPROVE_PREFIX,
     REJECT_PREFIX,
+    SEND_FILES_CALLBACK,
     deck_changed_keyboard,
     main_menu_keyboard,
     parse_approval_callback,
@@ -58,6 +59,7 @@ from packages.bot.keyboards import (
     presentation_approval_keyboard,
     presentation_chat_keyboard,
     presentation_output_keyboard,
+    send_files_keyboard,
     tier_keyboard,
     upload_more_keyboard,
 )
@@ -100,8 +102,20 @@ from packages.platform.document_models import (
     bot_actor,
 )
 from packages.platform.document_store import DocumentStore
+from packages.platform.jobs import (
+    DuplicateActiveJobError,
+    EditIdentityRefusedError,
+    JobQueue,
+)
 from packages.platform.storage import FileStorage
 from packages.presentation.editorial import EditorialContentCriticError
+from packages.sessions_core import (
+    DecisionStaleError,
+    NoPendingActionError,
+    SessionNotReadyError,
+    TelegramDelivery,
+    enqueue_approved_edit,
+)
 from packages.sessions_core.apply import FixStatus, answer_fix_calls, apply_fix_batch
 
 logger = logging.getLogger("nashr.bot.presentation")
@@ -1127,42 +1141,6 @@ async def _dispatch_fix(
     )
 
 
-async def _apply_pending(  # pyright: ignore[reportUnusedFunction]  (kept for B8 item 1)
-    *,
-    orchestrator: PresentationOrchestrator,
-    db: DatabaseClient,
-    project_id: str,
-    telegram_id: int,
-    session_id: str,
-    operation_id: str | None,
-    storage: FileStorage | None = None,
-) -> _ChatResult:
-    """Approve path: fire the parked change. A button — not the model — got here.
-
-    UNREACHABLE until B8 item 1: the Approve button no longer calls this (it applies
-    inline through ``commit_revision`` without operation fencing); bot approvals
-    will go through the same operation-bound queued job as web approvals.
-
-    Only the decision the button was shown for (B1-FIX5): one answered or replaced
-    since is DECISION_STALE and nothing is applied or written.
-    """
-
-    session = await load_session(db, project_id)
-    if session is None or session.pending_action is None:
-        return _ChatResult(_ChatOutcome.NO_SESSION)
-    if not is_parked(session, session_id, operation_id):
-        return _ChatResult(_ChatOutcome.DECISION_STALE)
-    return await _dispatch_fix(
-        orchestrator=orchestrator,
-        db=db,
-        session=session,
-        fixes=list(session.pending_action.fixes),
-        call_count=session.pending_action.call_count,
-        telegram_id=telegram_id,
-        storage=storage,
-    )
-
-
 async def _reject_pending(
     *, db: DatabaseClient, project_id: str, session_id: str, operation_id: str | None
 ) -> _ChatResult:
@@ -1315,25 +1293,68 @@ async def legacy_approval_button(callback: CallbackQuery, state: FSMContext) -> 
 async def approve_redeliver(
     callback: CallbackQuery,
     state: FSMContext,
-    bot: Bot,
     db: DatabaseClient,
-    credits: CreditLedger,
-    storage: FileStorage | None = None,
 ) -> None:
-    """The user pressed Approve: for now, the change is applied from the web.
+    """Approve: enqueue the SAME operation-bound ``presentation_edit`` job the web approve does.
 
-    B8 item 1: the bot's inline apply (:func:`_apply_pending`) commits through
-    ``commit_revision`` with no operation fencing, unlike a web approval's
-    operation-bound queued job. Until bot approvals go through that same job, the
-    button applies nothing: it says so in the user's language, and the decision
-    stays parked, so it can be approved on the web or rejected here. Nothing is
-    committed, delivered or counted. The dependencies stay injected for B8.
+    Through the shared :func:`enqueue_approved_edit` (B8.1): the worker applies the
+    parked batch against the revision the brain saw, commits it (or stores a proposal
+    when the deck moved), renders it, and delivers the files to this chat when the job
+    completes (ADR 0004). Nothing is applied in the bot process. A stale, foreign or
+    already-answered button enqueues nothing, says so, and clears the gate.
     """
 
-    del bot, db, credits, storage
-    labels = get_bot_labels(_flow_language(await state.get_data()))
-    if isinstance(callback.message, Message):
-        await callback.message.answer(labels.approval_web_only)
+    data = await state.get_data()
+    project_id = str(data.get("project_id", ""))
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+    named = parse_approval_callback(callback.data or "")
+    if not isinstance(callback.message, Message) or named is None:
+        await callback.answer()
+        return
+    _prefix, session_id, operation_id = named
+    project = await db.get_project(project_id) if project_id else None
+    if project is None:
+        await callback.message.answer(labels.edit_session_not_found)
+        await callback.answer()
+        return
+    delivery = TelegramDelivery(chat_id=callback.message.chat.id, language=lang)
+    async with _session_lock(project_id):
+        try:
+            await enqueue_approved_edit(
+                db,
+                JobQueue(db),
+                DocumentStore(db),
+                project_id=project_id,
+                user_id=str(project["user_id"]),
+                session_id=session_id,
+                operation_id=operation_id,
+                delivery=delivery,
+            )
+        except (DecisionStaleError, NoPendingActionError, EditIdentityRefusedError):
+            # The parked decision was answered or replaced since the button was shown:
+            # nothing is queued, and the gate is clear.
+            await callback.message.answer(labels.approval_stale)
+            await state.set_state(PresentationStates.talking_to_brain)
+            await callback.answer()
+            return
+        except SessionNotReadyError:
+            await callback.message.answer(labels.edit_session_not_found)
+            await callback.answer()
+            return
+        except DuplicateActiveJobError:
+            # An edit for this project is already running; the decision stays parked.
+            await callback.message.answer(labels.brain_busy)
+            await callback.answer()
+            return
+        except Exception:
+            logger.exception("bot_approve_enqueue_failed project=%s", project_id)
+            await callback.message.answer(labels.edit_not_queued)
+            await callback.answer()
+            return
+    # Queued. The decision deliberately stays parked (like the web) so a lost job
+    # leaves it re-presentable; the worker answers its call on completion.
+    await callback.message.answer(labels.approval_applying, reply_markup=send_files_keyboard(lang))
     await callback.answer()
 
 
@@ -1359,6 +1380,41 @@ async def reject_redeliver(callback: CallbackQuery, state: FSMContext, db: Datab
     await _render_chat_result(callback.message, lang, labels, result)
     if result.outcome is not _ChatOutcome.DECISION_STALE:
         await state.set_state(PresentationStates.talking_to_brain)
+    await callback.answer()
+
+
+@router.callback_query(_DOWNLOAD_STATES, F.data == SEND_FILES_CALLBACK)
+async def send_files(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: DatabaseClient,
+    storage: FileStorage | None = None,
+) -> None:
+    """Pull the latest rendered files from storage and send them (B8.1 'send again').
+
+    The fallback when the worker's push of a queued edit did not arrive. It fetches
+    the committed revision's exports on demand; it never re-runs the edit, so it
+    costs nothing. ``files_not_ready`` when the revision has no exports yet.
+    """
+
+    data = await state.get_data()
+    project_id = str(data.get("project_id", ""))
+    lang = _flow_language(data)
+    labels = get_bot_labels(lang)
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+    session = await load_session(db, project_id) if project_id else None
+    revision_id = session.revision_id if session is not None else None
+    files = await fetch_exports(db, storage, revision_id) if revision_id else {}
+    if not files:
+        await callback.message.answer(labels.files_not_ready)
+        await callback.answer()
+        return
+    for ext, path in files.items():
+        await callback.message.answer_document(
+            FSInputFile(str(path), filename=f"nashr_presentation.{ext}")
+        )
     await callback.answer()
 
 

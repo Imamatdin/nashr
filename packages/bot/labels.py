@@ -103,8 +103,11 @@ class BotLabels:
     approval_required_first: str
     # A button pressed for a decision that was answered or replaced since (B1-FIX5).
     approval_stale: str
-    # Approve pressed in the bot: edits are applied from the web for now (B8).
-    approval_web_only: str
+    # Approve pressed in the bot: the edit is now queued like a web approval and its
+    # files are delivered here when the job completes (B8.1).
+    approval_applying: str
+    # The approved edit could not be queued; the decision stays re-presentable.
+    edit_not_queued: str
     change_discarded: str
     edit_button: str  # the "Edit with AI" delivery button
     edit_invite: str  # shown on entering the conversational editor
@@ -120,6 +123,9 @@ class BotLabels:
     deck_reloaded: str
     deck_regeneration_proposed: str
     edit_unchanged: str
+    # Fetch the latest rendered files from storage when a push did not arrive (B8.1).
+    send_files_button: str
+    files_not_ready: str
 
 
 LABELS_UZ = BotLabels(
@@ -201,7 +207,8 @@ LABELS_UZ = BotLabels(
     approval_approve="✅ Tasdiqlash",
     approval_reject="❌ Bekor qilish",
     approval_required_first="Avval o'zgarishni tasdiqlang yoki bekor qiling.",
-    approval_web_only="Hozircha o'zgarishlar veb-saytda qo'llanadi: loyihani veb-saytda oching va u yerda tasdiqlang. Bu yerda faqat bekor qilish mumkin.",
+    approval_applying="✅ O'zgarish qo'llanmoqda. Yangilangan fayllar tez orada shu yerga keladi.",
+    edit_not_queued="O'zgarishni boshlab bo'lmadi. Birozdan keyin qayta urinib ko'ring.",
     approval_stale="Bu tugma eski o'zgarishga tegishli — u allaqachon hal qilingan yoki almashtirilgan. Hech narsa o'zgarmadi.",
     change_discarded="O'zgarish bekor qilindi.",
     edit_button="✏️ AI bilan tahrirlash",
@@ -225,6 +232,8 @@ LABELS_UZ = BotLabels(
     deck_reloaded="So'nggi versiya yuklandi. Tahrirlashni davom ettirishingiz mumkin.",
     deck_regeneration_proposed="Qayta yaratish davomida taqdimot boshqa joyda o'zgartirildi. Yangi versiya taklif sifatida saqlandi — uni saytda ko'rib chiqib, qabul qilishingiz mumkin.",
     edit_unchanged="Bu tahrir taqdimotga hech qanday o'zgarish kiritmadi.",
+    send_files_button="📥 Fayllarni yuborish",
+    files_not_ready="Fayllar hali tayyor emas. Birozdan keyin qayta urinib ko'ring.",
 )
 
 
@@ -302,7 +311,8 @@ LABELS_RU = BotLabels(
     approval_approve="✅ Подтвердить",
     approval_reject="❌ Отменить",
     approval_required_first="Сначала подтвердите или отмените изменение.",
-    approval_web_only="Пока изменения применяются на сайте: откройте проект на сайте и подтвердите его там. Здесь можно только отменить.",
+    approval_applying="✅ Изменение применяется. Обновлённые файлы скоро придут сюда.",
+    edit_not_queued="Не удалось запустить изменение. Попробуйте ещё раз чуть позже.",
     approval_stale="Эта кнопка относится к прежнему изменению — оно уже решено или заменено. Ничего не изменилось.",
     change_discarded="Изменение отменено.",
     edit_button="✏️ Редактировать с ИИ",
@@ -326,6 +336,8 @@ LABELS_RU = BotLabels(
     deck_reloaded="Последняя версия загружена. Можно продолжать редактирование.",
     deck_regeneration_proposed="Пока презентация создавалась заново, её изменили в другом месте. Новая версия сохранена как предложение — её можно просмотреть и принять на сайте.",
     edit_unchanged="Эта правка не изменила презентацию.",
+    send_files_button="📥 Отправить файлы",
+    files_not_ready="Файлы ещё не готовы. Попробуйте чуть позже.",
 )
 
 
@@ -401,7 +413,8 @@ LABELS_EN = BotLabels(
     approval_approve="✅ Approve",
     approval_reject="❌ Reject",
     approval_required_first="Please approve or reject the change first.",
-    approval_web_only="For now, edits are applied on the web: open the project on the website and approve it there. Here you can only reject it.",
+    approval_applying="✅ Your change is being applied. The updated files will arrive here shortly.",
+    edit_not_queued="Couldn't start the change. Please try again in a moment.",
     approval_stale="This button belongs to an earlier change that was already resolved or replaced. Nothing was changed.",
     change_discarded="Change discarded.",
     edit_button="✏️ Edit with AI",
@@ -421,6 +434,8 @@ LABELS_EN = BotLabels(
     deck_reloaded="Loaded the latest version. You can keep editing.",
     deck_regeneration_proposed="The presentation was changed elsewhere while it was being regenerated. The new version was saved as a proposal — you can review and accept it on the website.",
     edit_unchanged="That edit made no change to the presentation.",
+    send_files_button="📥 Send files",
+    files_not_ready="The files aren't ready yet. Please try again in a moment.",
 )
 
 
@@ -499,7 +514,8 @@ LABELS_KAA = BotLabels(
     approval_approve="✅ Tastıyıqlaw",
     approval_reject="❌ Biykarlaw",
     approval_required_first="Aldın ózgeristi tastıyıqlań yamasa biykarlań.",
-    approval_web_only="Házirshe ózgerisler veb-saytta qollanadı: joybardı veb-saytta ashıń hám sol jerde tastıyıqlań. Bul jerde tek biykarlaw múmkin.",
+    approval_applying="✅ Ózgeris qollanbaqta. Jańalanǵan fayllar tez arada usı jerge keledi.",
+    edit_not_queued="Ózgeristi baslap bolmadı. Azdan keyin qayta urinıp kóriń.",
     approval_stale="Bul túyme aldıńǵı ózgeriske tiyisli — ol sheshilgen yamasa almastırılǵan. Hesh nárse ózgermedi.",
     change_discarded="Ózgeris biykarlandı.",
     edit_button="✏️ AI menen redaktorlaw",
@@ -523,6 +539,8 @@ LABELS_KAA = BotLabels(
     deck_reloaded="Eń sońǵı versiya júklendi. Redaktorlawdı dawam ettiriwińiz múmkin.",
     deck_regeneration_proposed="Qaytadan jaratıw waqtında prezentaciya basqa jerde ózgertildi. Jańa versiya usınıs retinde saqlandı — onı saytta kórip shıǵıp, qabıl ete alasız.",
     edit_unchanged="Bul redaktorlaw prezentaciyaǵa hesh qanday ózgeris kirgizbedi.",
+    send_files_button="📥 Fayllardı jiberiw",
+    files_not_ready="Fayllar ele tayyar emes. Azdan keyin qayta urinıp kóriń.",
 )
 
 

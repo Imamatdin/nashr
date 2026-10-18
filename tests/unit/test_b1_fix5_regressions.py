@@ -206,10 +206,6 @@ def _button(prefix: str, decision: dict[str, str]) -> str:
     return f"{prefix}:{_short(decision['session_id'])}:{_short(decision['operation_id'])}"
 
 
-class _Bot:
-    """Stands in for the aiogram Bot; the fake orchestrator never calls it."""
-
-
 async def _press(
     monkeypatch: pytest.MonkeyPatch, db: Any, data: str, orchestrator: Any, approve: bool
 ) -> list[str]:
@@ -253,9 +249,7 @@ async def _press(
     await state.set_data({"project_id": "proj-1"})
     await state.set_state(pf.PresentationStates.awaiting_approval)
     if approve:
-        await pf.approve_redeliver(
-            callback, state, cast(Any, _Bot()), db, cast(Any, object()), None
-        )
+        await pf.approve_redeliver(callback, state, db)
     else:
         await pf.reject_redeliver(callback, state, db)
     return sent

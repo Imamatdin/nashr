@@ -57,6 +57,9 @@ from packages.bot.sessions.store import (
 )
 from packages.core.models.presentation import SlideFix
 from packages.platform.database import DatabaseClient
+from packages.platform.document_models import DocumentKind
+from packages.platform.document_store import DocumentStore
+from packages.platform.jobs import JobQueue, JobType
 from packages.sessions_core.apply import (
     CommitDeck,
     DeliverRevision,
@@ -444,6 +447,101 @@ class DecisionStaleError(Exception):
         super().__init__(f"the parked decision of project {project_id} has changed")
 
 
+class NoPendingActionError(Exception):
+    """No decision is parked to approve (the gate is clear)."""
+
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
+        super().__init__(f"project {project_id} has no parked decision")
+
+
+class SessionNotReadyError(Exception):
+    """The session has no committed document/revision to edit yet."""
+
+    def __init__(self, project_id: str) -> None:
+        self.project_id = project_id
+        super().__init__(f"project {project_id} has no revision to edit")
+
+
+@dataclass(frozen=True)
+class TelegramDelivery:
+    """Where a bot-approved edit's files are delivered once the job completes.
+
+    Stamped on the ``presentation_edit`` job's payload by the bot; absent on web
+    jobs (the web client polls the job and reads exports itself). The worker reads
+    it to push the rendered files to this chat on completion (B8.1, ADR 0004).
+    """
+
+    chat_id: int
+    language: str
+
+
+async def enqueue_approved_edit(
+    db: DatabaseClient,
+    queue: JobQueue,
+    documents: DocumentStore,
+    *,
+    project_id: str,
+    user_id: str,
+    session_id: str,
+    operation_id: str | None,
+    delivery: TelegramDelivery | None = None,
+) -> str:
+    """Enqueue the operation-bound ``presentation_edit`` job for an approved decision.
+
+    The single path the web approve route and the bot Approve button both take, so
+    both submit the SAME job through the SAME code rather than a copy (B8.1). It
+    confirms the decision the caller named is still the parked one, stamps the job
+    with that call's identity and the revision the brain saw, and enqueues it with
+    no deduction (an edit spends the fix allowance, not money).
+
+    ``delivery`` is stamped only for the bot; the web omits it. Raises, for the
+    caller to map to its transport and to decide whether to un-park (the web
+    deliberately does not): :class:`DecisionStaleError` (the parked decision
+    changed), :class:`NoPendingActionError` (nothing parked),
+    :class:`SessionNotReadyError` (no revision to edit), and the enqueue's own
+    ``DuplicateActiveJobError`` / ``EditIdentityRefusedError``.
+    """
+
+    pending = await pending_for_approval(
+        db, project_id, session_id=session_id, operation_id=operation_id
+    )
+    if pending is None:
+        raise NoPendingActionError(project_id)
+    document_id = await documents.document_id(project_id, DocumentKind.PRESENTATION)
+    session_row = await db.get_brain_session(project_id)
+    base_revision_id = (
+        str(session_row["revision_id"])
+        if session_row is not None and session_row.get("revision_id")
+        else None
+    )
+    if document_id is None or base_revision_id is None:
+        raise SessionNotReadyError(project_id)
+    # pending_for_approval guarantees the call now carries an operation id (it
+    # parks one if the decision predated them), so the stamp's identity is set.
+    assert pending.session_id is not None and pending.operation_id is not None
+    payload: dict[str, object] = {
+        "from_pending": True,
+        "call_count": pending.call_count,
+        "document_id": document_id,
+        "base_revision_id": base_revision_id,
+        "session_id": pending.session_id,
+        "operation_id": pending.operation_id,
+        "slides_changed": len(pending.fixes),
+    }
+    if delivery is not None:
+        payload["delivery"] = {
+            "telegram": {"chat_id": delivery.chat_id, "language": delivery.language}
+        }
+    job = await queue.enqueue(
+        project_id=project_id,
+        user_id=user_id,
+        job_type=JobType.PRESENTATION_EDIT,
+        payload=payload,
+    )
+    return job.id
+
+
 def _stale(project_id: str, action: str, session: BrainSession, session_id: str | None) -> None:
     logger.warning(
         "parked_call_stale project=%s action=%s session_matches=%s operation_parked=%s",
@@ -628,12 +726,16 @@ __all__ = [
     "DecisionStaleError",
     "FixDispatchResult",
     "FixRunner",
+    "NoPendingActionError",
     "PendingActionView",
+    "SessionNotReadyError",
+    "TelegramDelivery",
     "TurnKind",
     "TurnResult",
     "abandon_parked_fix",
     "append_fix_result",
     "dispatch_fix",
+    "enqueue_approved_edit",
     "has_dangling_call",
     "history_for_wire",
     "park_pending_for_apply",

@@ -37,11 +37,13 @@ from packages.platform.jobs import (
 from packages.platform.rate_limit import CHAT_ACTION, RateLimiter
 from packages.sessions_core import (
     DecisionStaleError,
+    NoPendingActionError,
     PendingActionView,
+    SessionNotReadyError,
     TurnKind,
     TurnResult,
     abandon_parked_fix,
-    pending_for_approval,
+    enqueue_approved_edit,
     read_session,
     reject_pending,
     run_web_turn,
@@ -495,42 +497,29 @@ async def approve_pending(
     await _refuse_if_busy(queue, project_id)
 
     db = request.app.state.db
+    # The batch is NOT copied into the payload: it stays on the session row so a
+    # lost job leaves the decision re-presentable instead of silently dropped. No
+    # un-parking on failure (unlike the turn route) for the same reason.
     try:
-        pending = await pending_for_approval(
+        job_id = await enqueue_approved_edit(
             db,
-            project_id,
+            queue,
+            request.app.state.documents,
+            project_id=project_id,
+            user_id=user_id,
             session_id=str(body.session_id),
             operation_id=str(body.operation_id) if body.operation_id else None,
         )
     except DecisionStaleError:
         raise _decision_changed() from None
-    if pending is None:
+    except NoPendingActionError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "no_pending_action"}
-        )
-    session_row = await db.get_brain_session(project_id)
-    session_revision = (
-        str(session_row["revision_id"])
-        if session_row is not None and session_row.get("revision_id")
-        else None
-    )
-    revision_payload = await _design_revision_payload(request, project_id, session_revision)
-    stamp = _delivery_stamp(len(pending.fixes), pending.session_id, pending.operation_id)
-
-    # The batch is NOT copied into the payload: it stays on the session row so a
-    # lost job leaves the decision re-presentable instead of silently dropped.
-    try:
-        job_id = await _enqueue_edit(
-            request,
-            project_id=project_id,
-            user_id=user_id,
-            payload={
-                "from_pending": True,
-                "call_count": pending.call_count,
-                **revision_payload,
-                **stamp,
-            },
-        )
+        ) from None
+    except SessionNotReadyError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail={"reason": "session_not_ready"}
+        ) from None
     except DuplicateActiveJobError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail={"reason": "brain_busy"}
@@ -538,8 +527,6 @@ async def approve_pending(
     except EditIdentityRefusedError as exc:
         raise _identity_refused(exc) from None
     except Exception:
-        # No un-parking here (unlike the turn route): the decision deliberately
-        # stays on the session row, so a failed enqueue leaves it re-presentable.
         # The client still gets the same machine-readable reason its sibling
         # returns rather than an opaque 500.
         logger.exception("chat_approve_enqueue_failed project=%s", project_id)

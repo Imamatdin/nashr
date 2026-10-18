@@ -510,48 +510,6 @@ async def test_chat_turn_model_proposed_fix_gates_even_at_one_slide() -> None:
     assert len(reloaded.pending_action.fixes) == 1
 
 
-async def test_approve_fires_pending_and_clears_gate() -> None:
-    db, _fake, deck, _sources = await _provision()
-    driver = ScriptedStubDriver()
-    driver.queue(
-        StubResponse(
-            action=TurnAction.FIX,
-            fixes=(SlideFix(slide_id="s0", instruction="big change"),),
-            reason="significant",
-        )
-    )
-    orch = _FakeOrchestrator(deck, cost=0.30, images=2)
-    await pf._run_chat_turn(
-        driver=driver,
-        orchestrator=orch,
-        db=db,
-        project_id="proj-1",
-        user_text="ok",
-        user_initiated=False,
-        telegram_id=OWNER_TELEGRAM_ID,
-    )
-    assert orch.calls == []  # still gated (model-proposed)
-
-    parked = await load_session(db, "proj-1")
-    assert parked is not None and parked.session_id is not None
-    result = await pf._apply_pending(
-        orchestrator=orch,
-        db=db,
-        project_id="proj-1",
-        telegram_id=OWNER_TELEGRAM_ID,
-        session_id=parked.session_id,
-        operation_id=parked.parked_operation_id,
-    )
-
-    assert result.outcome is pf._ChatOutcome.REDELIVERED
-    assert len(orch.calls) == 1
-    reloaded = await load_session(db, "proj-1")
-    assert reloaded is not None
-    assert reloaded.approval_state is ApprovalState.IDLE
-    assert reloaded.pending_action is None
-    assert reloaded.accumulated_image_count == 2
-
-
 async def test_reject_discards_pending_without_firing_tool() -> None:
     db, _fake, deck, _sources = await _provision()
     driver = ScriptedStubDriver()

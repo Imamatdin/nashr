@@ -57,6 +57,7 @@ from packages.platform.jobs import (
     HEARTBEAT_INTERVAL_SECONDS,
     GenerationJob,
     JobQueue,
+    JobStatus,
     JobType,
 )
 from packages.platform.liveness import LivenessFile
@@ -76,6 +77,77 @@ WEB_FILE_FORMATS: tuple[str, ...] = tuple(wire_formats(PRIMARY_FORMATS))
 
 def _worker_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+
+
+def _telegram_delivery(job: GenerationJob) -> tuple[int, str] | None:
+    """The Telegram chat a bot-enqueued edit's files go to, or None for a web job (B8.1).
+
+    Fails closed: anything but an ``{chat_id: int, language: str}`` block means no
+    Telegram delivery (a web job, or a malformed stamp we must not guess at).
+    """
+
+    raw = job.payload.get("delivery")
+    if not isinstance(raw, dict):
+        return None
+    telegram = cast(dict[str, Any], raw).get("telegram")
+    if not isinstance(telegram, dict):
+        return None
+    block = cast(dict[str, Any], telegram)
+    chat_id = block.get("chat_id")
+    language = block.get("language")
+    if not isinstance(chat_id, int) or not isinstance(language, str):
+        return None
+    return chat_id, language
+
+
+async def _deliver_edit_files(
+    bot: Bot,
+    db: DatabaseClient,
+    storage: FileStorage,
+    *,
+    chat_id: int,
+    language: str,
+    revision_id: str,
+    slides_changed: int,
+) -> None:
+    """Push a completed edit's rendered files to its Telegram chat (best-effort, B8.1).
+
+    Never raises into the job lifecycle: the edit is already committed, rendered and
+    settled, so re-running it would be wrong and refunding it has nothing to refund.
+    A send failure (or missing exports) is logged once with context and no secrets;
+    the user re-pulls the files with the bot's 'send files' button (ADR 0004).
+    """
+
+    from aiogram.types import FSInputFile
+
+    from packages.bot.labels import get_bot_labels
+    from packages.bot.orchestrators.inline_publish import fetch_exports
+
+    try:
+        files = await fetch_exports(db, storage, revision_id)
+        if not files:
+            logger.warning(
+                "telegram_delivery_no_exports %s",
+                json.dumps({"revision_id": revision_id, "chat_id": chat_id}),
+            )
+            return
+        labels = get_bot_labels(language)
+        await bot.send_message(chat_id, labels.edit_applied.format(count=slides_changed))
+        for ext, path in files.items():
+            await bot.send_document(
+                chat_id, FSInputFile(str(path), filename=f"nashr_presentation.{ext}")
+            )
+    except Exception as exc:
+        logger.warning(
+            "telegram_delivery_failed %s",
+            json.dumps(
+                {
+                    "revision_id": revision_id,
+                    "chat_id": chat_id,
+                    "error_type": type(exc).__name__,
+                }
+            ),
+        )
 
 
 class JobRunner:
@@ -200,8 +272,8 @@ class JobRunner:
 
         return progress
 
-    async def _finish_completed(self, job: GenerationJob, outcome: dict[str, Any]) -> None:
-        """Land the guarded completion of a job that committed nothing, with its outcome."""
+    async def _finish_completed(self, job: GenerationJob, outcome: dict[str, Any]) -> bool:
+        """Land the guarded completion of a job that committed nothing; True iff we completed it."""
 
         completed_by_us = await self._queue.complete(
             job.id, self._worker_id, job.attempts, {"step": "done", **outcome}
@@ -210,11 +282,48 @@ class JobRunner:
             logger.warning(
                 "worker_complete_suppressed_row_not_ours %s", json.dumps({"job_id": job.id})
             )
-            return
+            return False
         logger.info(
             "worker_job_completed %s",
             json.dumps({"job_id": job.id, "project_id": job.project_id, **outcome}),
         )
+        return True
+
+    async def _deliver_render_parents(self, render_job: GenerationJob, revision_id: str) -> None:
+        """Deliver this render's bot-enqueued parents to Telegram (B8.1, ADR 0004).
+
+        A render completing flipped each committed parent it delivers to ``completed``
+        in the same transaction. Those carrying a Telegram stamp are bot edits whose
+        files must now be pushed to their chat; web parents carry none and are skipped.
+        Best-effort: :func:`_deliver_edit_files` swallows send failures.
+        """
+
+        from aiogram import Bot
+
+        parents = await self._queue.jobs_for_render(render_job.id)
+        targets = [
+            (parent, delivery)
+            for parent in parents
+            if parent.status is JobStatus.COMPLETED
+            and (delivery := _telegram_delivery(parent)) is not None
+        ]
+        if not targets:
+            return
+        bot = Bot(token=self._config.telegram_bot_token)
+        try:
+            for parent, (chat_id, language) in targets:
+                slides = parent.payload.get("slides_changed")
+                await _deliver_edit_files(
+                    bot,
+                    self._db,
+                    self._storage,
+                    chat_id=chat_id,
+                    language=language,
+                    revision_id=revision_id,
+                    slides_changed=slides if isinstance(slides, int) else 0,
+                )
+        finally:
+            await bot.session.close()
 
     async def _run_presentation_render(self, job: GenerationJob) -> None:
         """Render one immutable revision and publish every requested format, or fail."""
@@ -266,7 +375,7 @@ class JobRunner:
                 )
             finally:
                 await bot.session.close()
-        await self._finish_completed(
+        completed = await self._finish_completed(
             job,
             {
                 "outcome": "rendered",
@@ -278,6 +387,9 @@ class JobRunner:
         )
         # complete_job delivered every job this render was publishing for, and
         # their edit holds, in its own transaction (B1-FIX3): no session write.
+        # Bot-enqueued parents still need their files pushed to Telegram (B8.1).
+        if completed:
+            await self._deliver_render_parents(job, revision_id)
 
     async def _run_presentation_edit(self, job: GenerationJob) -> None:
         """Apply a parked fix batch against its base revision; commit or propose with the job.
@@ -374,6 +486,23 @@ class JobRunner:
                 operation_id=operation_id,
                 delivery_job_id=job.id,
             )
+            if result.status is FixStatus.DELIVERED and result.revision_id is not None:
+                # Every format already existed, so finish_generation_job completed
+                # the job now with no render job to deliver it later: push the files
+                # to Telegram here, while the bot is still open (B8.1). A COMMITTED
+                # result is delivered by its render job's completion instead.
+                delivery = _telegram_delivery(job)
+                if delivery is not None:
+                    chat_id, language = delivery
+                    await _deliver_edit_files(
+                        bot,
+                        self._db,
+                        self._storage,
+                        chat_id=chat_id,
+                        language=language,
+                        revision_id=result.revision_id,
+                        slides_changed=result.slides_changed,
+                    )
         finally:
             await bot.session.close()
 

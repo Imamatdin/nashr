@@ -269,6 +269,31 @@ class JobQueue:
             return None
         return _row_to_job(cast(dict[str, Any], result.data[0]))
 
+    async def jobs_for_render(self, render_job_id: str) -> list[GenerationJob]:
+        """Every job whose committed revision this render job delivers (B1-FIX2).
+
+        A render completing flips each such parent to ``completed`` in the same
+        transaction; the worker reads them back to deliver bot-enqueued edits to
+        Telegram (B8.1). A row that does not parse is skipped, not fatal.
+        """
+
+        def run() -> Any:
+            return (
+                self._db._query("generation_jobs")  # pyright: ignore[reportPrivateUsage]
+                .select("*")
+                .eq("render_job_id", render_job_id)
+                .execute()
+            )
+
+        result = await asyncio.to_thread(run)
+        jobs: list[GenerationJob] = []
+        for row in cast(list[dict[str, Any]], list(result.data or [])):
+            try:
+                jobs.append(_row_to_job(row))
+            except JobDataInvalidError:
+                continue
+        return jobs
+
     async def enqueue(
         self,
         *,
