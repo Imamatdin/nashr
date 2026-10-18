@@ -242,6 +242,12 @@ begin
 end;
 $$;
 
+-- _enqueue_render is internal (called only by request_render and
+-- finish_generation_job, both SECURITY DEFINER): re-assert the 016 revoke so no
+-- role can call it directly, fail closed.
+revoke all on function _enqueue_render(uuid, uuid, uuid, uuid, text, text[], integer, uuid)
+    from public, anon, authenticated, service_role;
+
 -- request_render (016) is unchanged and intentionally not redefined here: it
 -- looks up the revision's document and owner, checks ownership, and delegates to
 -- _enqueue_render, which is the single choke point for kind derivation and
@@ -256,7 +262,10 @@ $$;
 -- the storage key's file extension comes from export_file_formats (png is stored
 -- as a .zip of slide images). Every other guard, the first-writer-wins insert and
 -- the claim fence are unchanged.
-drop function if exists register_export(uuid, text, integer, uuid, text, text, text, text, bigint, integer);
+--
+-- CREATE OR REPLACE with no DROP, so the 016 grant matrix is preserved: a DROP
+-- would reset the ACL and the bootstrap default privileges would re-grant EXECUTE
+-- to the API roles. The revoke/grant is also re-asserted below, fail closed.
 create or replace function register_export(
     p_job_id uuid,
     p_worker_id text,
@@ -355,8 +364,15 @@ begin
 end;
 $$;
 
--- register_export keeps its 016 signature, so its grants (service_role only)
--- carry over; no re-grant needed.
+-- Re-assert register_export's ACL (service_role only), so the function fails
+-- closed regardless of how it was (re)created: only the queue, acting as
+-- service_role, may publish an export; an end user never calls it directly.
+revoke all on function register_export(
+    uuid, text, integer, uuid, text, text, text, text, bigint, integer
+) from public, anon, authenticated;
+grant execute on function register_export(
+    uuid, text, integer, uuid, text, text, text, text, bigint, integer
+) to service_role;
 
 -- DOWN
 -- drop function if exists register_export(uuid, text, integer, uuid, text, text, text, text, bigint, integer);
