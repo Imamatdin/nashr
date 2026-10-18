@@ -24,11 +24,15 @@ create table if not exists export_file_formats (
     format          text primary key,
     file_extension  text not null check (file_extension ~ '^[a-z0-9]{1,16}$'),
     media_type      text not null check (char_length(media_type) between 1 and 128),
+    -- The only valid elements are the two document kinds, so a subset of that
+    -- two-element set with cardinality 1 or 2 is exactly the set of valid,
+    -- duplicate-free values (a CHECK may not contain a subquery to test
+    -- distinctness directly).
     allowed_kinds   text[] not null check (
         cardinality(allowed_kinds) between 1 and 2
         and allowed_kinds <@ array['presentation', 'article']
-        and array_length(allowed_kinds, 1) = cardinality(array(
-            select distinct unnest(allowed_kinds)))
+        and (cardinality(allowed_kinds) = 1
+             or allowed_kinds @> array['presentation', 'article'])
     )
 );
 
