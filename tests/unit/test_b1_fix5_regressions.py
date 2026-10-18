@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import inspect
 import uuid
 from typing import Any, cast
 
@@ -248,10 +249,21 @@ async def _press(
     )
     await state.set_data({"project_id": "proj-1"})
     await state.set_state(pf.PresentationStates.awaiting_approval)
-    if approve:
-        await pf.approve_redeliver(callback, state, db)
-    else:
-        await pf.reject_redeliver(callback, state, db)
+    # Signature-adaptive so this current test drives BOTH the B8.1 handler
+    # (callback, state, db) and the pre-B8.1 a1b2688 handler the pre-fix gate runs it
+    # against (callback, state, bot, db, credits, storage): the regression must reach
+    # its assertion on either, not die on a TypeError.
+    handler = pf.approve_redeliver if approve else pf.reject_redeliver
+    available: dict[str, Any] = {
+        "callback": callback,
+        "state": state,
+        "db": db,
+        "bot": cast(Any, object()),
+        "credits": cast(Any, object()),
+        "storage": None,
+    }
+    accepted = inspect.signature(handler).parameters
+    await handler(**{name: value for name, value in available.items() if name in accepted})
     return sent
 
 
