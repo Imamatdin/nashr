@@ -30,6 +30,10 @@ python-docx==1.2.0
 openpyxl==3.1.5
 python-pptx==1.0.2
 pymupdf==1.27.2.3
+# PDF to PNG (D3) and reading embedded font names to detect LibreOffice
+# substitutions (office_render). Both BSD/Apache, no copyleft.
+pypdfium2==4.30.0
+pypdf==4.3.1
 pillow==12.0.0
 pytesseract==0.3.13
 magika==1.0.3
