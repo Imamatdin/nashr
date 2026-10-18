@@ -37,7 +37,7 @@ export function useLocale() { return useContext(Context); }
 
 export function LanguagePicker() {
   const { locale, setLocale } = useLocale();
-  return <select className="n-language" aria-label="O‘zbekcha / Русский / English" value={locale}
+  return <select className="n-language" aria-label="O‘zbekcha / Русский / Qaraqalpaqsha / English" value={locale}
     onChange={(event) => setLocale(event.target.value as Locale)}>
     {LOCALES.map((code) => <option key={code} value={code}>{LOCALE_NAMES[code]}</option>)}
   </select>;

@@ -48,6 +48,21 @@ const STEP_LABELS_BY_LOCALE = {
     { key: "Resolving images", label: "Vizuallar tayyorlanmoqda" },
     { key: "Rendering presentation", label: "Taqdimot yig‘ilmoqda" },
   ],
+  kaa: [
+    { key: "Processing sources", label: "Derekler oqılbaqta" },
+    { key: "Building evidence matrix", label: "Dáliller jıynalbaqta" },
+    { key: "Applying preferences", label: "Talaplar esapqa alınbaqta" },
+    {
+      key: "Choosing design direction",
+      label: "Dizayn baǵdarı tańlanbaqta",
+    },
+    {
+      key: "Creating slide sequence",
+      label: "Slaydlar izbe-izligi dúzilbekte",
+    },
+    { key: "Resolving images", label: "Vizuallar tayarlanbaqta" },
+    { key: "Rendering presentation", label: "Prezentaciya jıynalbaqta" },
+  ],
 } satisfies Record<Locale, ReadonlyArray<{ key: string; label: string }>>;
 
 /** Kept as the Uzbek default for older callers and error-parser tests. */
@@ -63,6 +78,7 @@ const EDIT_STEP_LABEL: Record<Locale, string> = {
   en: "Applying the edit",
   ru: "Применяем правку",
   uz: "Tahrir qo'llanmoqda",
+  kaa: "Redaktorlaw qollanbaqta",
 };
 
 export interface Progress {
@@ -89,7 +105,13 @@ function labelFor(
   // and the positional label is the right guess.
   if (stepName === undefined) {
     const fallback =
-      locale === "en" ? "Step" : locale === "ru" ? "Этап" : "Bosqich";
+      locale === "en"
+        ? "Step"
+        : locale === "ru"
+          ? "Этап"
+          : locale === "kaa"
+            ? "Basqısh"
+            : "Bosqich";
     return labels[index]?.label ?? `${fallback} ${index + 1}`;
   }
 

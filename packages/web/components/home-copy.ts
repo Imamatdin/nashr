@@ -11,7 +11,7 @@ export const HOME_COPY = {
  {title: "Start with your sources", text: "Bring PDFs, documents, and notes into your project. Keep the original material close to the work."},
  {title: "See where ideas come from", text: "Explore recorded connections between claims and sources. Inspect quotations and spot missing evidence."},
  {title: "Make it yours", text: "Write articles in a versioned block editor, or refine presentations through conversation and export them in three formats."}],
- closing: "Your ideas. Your sources. Your next piece of work.", closingSub: "Start an article or presentation in Uzbek, Russian, or English.", privacy: "Privacy", terms: "Terms", help: "Help", footer: "A place to do thoughtful work."
+ closing: "Your ideas. Your sources. Your next piece of work.", closingSub: "Start an article or presentation in Uzbek, Russian, Karakalpak, or English.", privacy: "Privacy", terms: "Terms", help: "Help", footer: "A place to do thoughtful work."
  },
  ru: {
  nav: ["Рабочее пространство", "Как это работает", "Для образования"], signIn: "Войти", start: "Открыть пространство",
@@ -25,7 +25,7 @@ export const HOME_COPY = {
  {title: "Начните с источников", text: "Добавляйте PDF, документы и заметки в проект. Держите исходные материалы рядом с работой."},
  {title: "Проследите путь идеи", text: "Изучайте связи утверждений с источниками. Проверяйте цитаты и находите пробелы в доказательствах."},
  {title: "Доведите до своего результата", text: "Пишите статьи в блочном редакторе с историей версий или дорабатывайте презентации в диалоге и выгружайте их в трёх форматах."}],
- closing: "Ваши идеи. Ваши источники. Ваша новая работа.", closingSub: "Начните статью или презентацию на узбекском, русском или английском.", privacy: "Конфиденциальность", terms: "Условия", help: "Помощь", footer: "Место для вдумчивой работы."
+ closing: "Ваши идеи. Ваши источники. Ваша новая работа.", closingSub: "Начните статью или презентацию на узбекском, русском, каракалпакском или английском.", privacy: "Конфиденциальность", terms: "Условия", help: "Помощь", footer: "Место для вдумчивой работы."
  },
  uz: {
  nav: ["Ish maydoni", "Qanday ishlaydi", "Ta’lim uchun"], signIn: "Kirish", start: "Ish maydonini ochish",
@@ -39,6 +39,20 @@ export const HOME_COPY = {
  {title: "Manbalardan boshlang", text: "PDF, hujjat va qaydlarni loyihaga qo‘shing. Asl materiallar doim ish yonida tursin."},
  {title: "Fikrning manbasini ko‘ring", text: "Da’volar va manbalar orasidagi bog‘lanishlarni kuzating. Iqtiboslarni tekshiring, dalil yetishmagan joylarni toping."},
  {title: "O‘zingiz istagan natijaga keling", text: "Maqolani versiyalar tarixiga ega blokli muharrirda yozing yoki taqdimotni suhbat orqali yaxshilab, uch formatda oling."}],
- closing: "Sizning g‘oyangiz. Sizning manbalaringiz. Sizning ishingiz.", closingSub: "O‘zbek, rus yoki ingliz tilida maqola yoki taqdimotdan boshlang.", privacy: "Maxfiylik", terms: "Shartlar", help: "Yordam", footer: "Puxta ishlash uchun bir joy."
+ closing: "Sizning g‘oyangiz. Sizning manbalaringiz. Sizning ishingiz.", closingSub: "O‘zbek, rus, qoraqalpoq yoki ingliz tilida maqola yoki taqdimotdan boshlang.", privacy: "Maxfiylik", terms: "Shartlar", help: "Yordam", footer: "Puxta ishlash uchun bir joy."
+ },
+ kaa: {
+ nav: ["Jumıs orını", "Qalay isleydi", "Bilimlendiriw ushın"], signIn: "Kiriw", start: "Jumıs orının ashıw",
+ eyebrow: "Bilimlendiriw ushın jumıs orını", title: "Jaqsı jumıs ushın", accent: "oylawǵa orın kerek.", description: "Dereklerdi jıynań, ideyalarıńızdı rawajlandırıń hám bólisiwge arzıytuǵın jumıs jaratıń. Oqıw, sabaq beriw hám izertlew ushın bir orın.",
+ placeholder: "Neniń ústinde islep atırsız?", promptHint: "Nátiyje tilin tańlań. Dereklerdi jumıs orınında qosasız.", examples: ["Klimat haqqında sabaq tayarlaw", "Ilimiy maqalanı túsindiriw", "Nátiyjelerdi usınıw"],
+ audience: "Úyretetuǵın, úyrenetuǵın hám soraw beretuǵın hár bir adam ushın.", roles: ["Oqıtıwshılar", "Studentler", "Izertlewshiler", "Professorlar"],
+ preview: "Jumıs orını úlgisi", project: "Qalay úyrenemiz", document: "Hújjet", graph: "Dálil kartası", sources: "Derekler", assistant: "Járdemshi", outline: ["Kirisiw", "Úyreniw usılları", "Talqılaw", "Ádebiyatlar"], section: "Úyreniw usılları",
+ paragraph: "Paydalı oqıw rejesinde shınıǵıw, pikir-mulahaza alıw hám quramalı temalarǵa qaytıw ushın waqıt ajratıladı. Bul bólimde jantasıwlar salıstırıladı hám qosımsha dálil kerek bolǵan orınlar belgilenedi.", note: "Dereklerdi tekseriw yamasa redaktorlaw soraw ushın tekstti tańlań.", review: "Derek kerek", sourceNames: ["Jazbalar.pdf", "Sabaq materialları.docx"],
+ ask: "Bul pikirdi túsiniklirek jaz", selected: "Tańlanǵan abzac", answer: "Tiykarǵı pikirdi saqlań, atamalardı túsindiriń hám sabaqtan anıq mısal qosıń. Hár bir ózgeristi qollawdan aldın tekseriń.",
+ heading: "Jıynalǵan materiallardan tayar jumısqa shekem.", cards: [
+ {title: "Dereklerden baslań", text: "PDF, hújjet hám jazbalardı loyihaǵa qosıń. Túp materiallar hámme waqıt jumıs janında tursın."},
+ {title: "Pikirdiń derekin kóriń", text: "Da'walar hám derekler arasındaǵı baylanıslardı baqlań. Iqtiboslardı tekseriń, dálil jetispegen orınlardı tabıń."},
+ {title: "Ózińiz qálegen nátiyjege keliń", text: "Maqalanı versiyalar tariyxı bar blokli redaktorda jazıń yamasa prezentaciyanı sáwbet arqalı jaqsılap, úsh formatta alıń."}],
+ closing: "Sizdiń ideyańız. Sizdiń dereklerińiz. Sizdiń jumısıńız.", closingSub: "Ózbek, rus, qaraqalpaq yaki ingliz tilinde maqala yamasa prezentaciyadan baslań.", privacy: "Qupıyalıq", terms: "Shártler", help: "Járdem", footer: "Puqta islew ushın bir orın."
  }
 };

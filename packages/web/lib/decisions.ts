@@ -137,6 +137,47 @@ const VOCABULARY = {
       close: "Yakun",
     },
   },
+  kaa: {
+    mood: {
+      warm_historical: "Jıllı, tariyxıy",
+      clean_modern: "Taza, zamanagóy",
+      bold_editorial: "Qatań, jurnal uslıbı",
+      quiet_academic: "Basıq, akademikalıq",
+      vivid_scientific: "Jarqın, ilimiy",
+    },
+    background: {
+      dark: "Qoyıw fon",
+      light: "Jaqtı fon",
+      gradient: "Gradient",
+      texture: "Tekstura",
+      image: "Súwret",
+    },
+    audience: {
+      school: "Mektep oqıwshıları",
+      undergraduate: "Bakalavr studentleri",
+      graduate: "Magistratura studentleri",
+      academic_conference: "Akademikalıq konferenciya",
+      mixed_academic_industry: "Akademikalıq hám sanaat aralas",
+      professional: "Qániygeler",
+      general_public: "Keń jámiyetshilik",
+    },
+    emphasis: {
+      problem_framing: "Másele qoyılısı",
+      technical_mechanism: "Texnikalıq mexanizm",
+      methodology: "Metodologiya",
+      results_numbers: "Nátiyjeler hám sanlar",
+      roadmap_scalability: "Keyingi qádemler",
+      balanced: "Teń salmaqlı",
+    },
+    phase: {
+      hook: "Ashılıw",
+      context: "Kontekst",
+      core: "Tiykarǵı bólim",
+      evidence: "Dáliller",
+      implications: "Aqıbetler",
+      close: "Juwmaq",
+    },
+  },
 } satisfies Record<Locale, Record<string, Record<string, string>>>;
 
 function label(
@@ -207,6 +248,16 @@ export function decidedFor(
       no: "Yo‘q",
       slides: "Slaydlar",
     },
+    kaa: {
+      audience: "Auditoriya",
+      duration: "Dawamlılıq",
+      minutes: "minut",
+      emphasis: "Urǵı",
+      interactive: "Interaktiv",
+      yes: "Bar",
+      no: "Joq",
+      slides: "Slaydlar",
+    },
   }[locale];
   return [
     { label: copy.audience, value: audienceLabel(view.audience, locale) },
@@ -239,6 +290,7 @@ export function swatches(
     en: ["Background", "Surface", "Text", "Accent"],
     ru: ["Фон", "Поверхность", "Текст", "Акцент"],
     uz: ["Fon", "Yuza", "Matn", "Urg‘u"],
+    kaa: ["Fon", "Bet", "Tekst", "Urǵı"],
   }[locale];
   return [
     { name: names[0], hex: view.palette.background },

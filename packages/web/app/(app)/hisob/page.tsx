@@ -76,6 +76,23 @@ const COPY = {
       "Birinchi loyihangizni yaratganingizda yoki manba yuklaganingizda shu yerda yozuv paydo bo‘ladi.",
     first: "Birinchi loyiha",
   },
+  kaa: {
+    topUp: "Toltırıw házirshe Telegram-bot arqalı ámelge asırıladı —",
+    openBot: "bottı ashıw",
+    retry: "Qayta urınıw",
+    technical: "Texnikalıq maǵlıwmat",
+    openProject: "Loyihanı ashıw",
+    account: "Esap",
+    subtitle:
+      "Prezentaciya jaratılǵanda baha usı esaptan alınadı. Generaciya sátsiz tamamlansa, aqsha avtomat túrde qaytarıladı.",
+    history: "Háreketler tariyxı",
+    loading: "Júklenbekte",
+    historyLoading: "Tariyx júklenbekte",
+    emptyTitle: "Házirshe háreket joq",
+    emptyHint:
+      "Birinshi loyihańızdı jaratqanıńızda yamasa derek júklegenińizde usı jerde jazba payda boladı.",
+    first: "Birinshi loyiha",
+  },
 };
 
 /** Top-up, stated honestly: there is no web checkout, and this says so. */

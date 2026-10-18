@@ -28,6 +28,7 @@ export function ThemeToggle({
     en: { group: "Theme", system: "System", light: "Light", dark: "Dark" },
     ru: { group: "Тема", system: "Система", light: "Светлая", dark: "Тёмная" },
     uz: { group: "Mavzu", system: "Tizim", light: "Yorug‘", dark: "Qorong‘i" },
+    kaa: { group: "Tema", system: "Sistema", light: "Jaqtı", dark: "Qarańǵı" },
   }[locale];
 
   return (

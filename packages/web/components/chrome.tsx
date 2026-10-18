@@ -161,6 +161,20 @@ export function AppChrome({
       closeSearch: "Close search",
       noProject: "No project found",
     },
+    kaa: {
+      nav: ["Loyihalar", "Jaratıw"],
+      signOut: "Shıǵıw",
+      balance: "Esap",
+      unnamed: "Atsız loyiha",
+      navigation: "Jumıs orını navigaciyası",
+      recentProjects: "Sońǵı loyihalar",
+      collapse: "Paneldi jıynaw",
+      expand: "Paneldi ashıw",
+      search: "Loyihalardı izlew",
+      searchHistory: "Loyihalar tariyxınan izlew",
+      closeSearch: "Izlewdi jabıw",
+      noProject: "Loyiha tabılmadı",
+    },
   }[locale];
   const navigation = NAV.map((item, index) => ({
     ...item,

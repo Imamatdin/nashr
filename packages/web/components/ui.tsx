@@ -63,6 +63,24 @@ const UI_COPY = {
       cancelled: "Bekor qilingan",
     },
   },
+  kaa: {
+    error: "Bir nárse qáte ketti",
+    retry: "Qayta urınıw",
+    loading: "Júklenbekte",
+    status: {
+      draft: "Qaralama",
+      sourcing: "Derekler",
+      interview: "Sáwbet",
+      generating: "Jaratılbaqta",
+      ready: "Tayar",
+      failed: "Qátelik",
+      archived: "Arxiv",
+      queued: "Gezekte",
+      processing: "Processte",
+      completed: "Tayar",
+      cancelled: "Biykarlanǵan",
+    },
+  },
 };
 
 type ButtonVariant = "primary" | "ghost" | "danger";

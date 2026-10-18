@@ -57,6 +57,22 @@ const COPY = {
     abstract: "Annotatsiya",
     download: "PDF ni ochish",
   },
+  kaa: {
+    title: "Izertlew izlew",
+    placeholder: "Tema, soraw yamasa maqala atı",
+    search: "Izlew",
+    busy: "Derekler izlenbekte…",
+    note: "Nátiyjeler — derek jazbaları, da'wanıń tastıyıǵı emes. Iqtibos keltiriwden aldın maqalanı oqıń.",
+    legal:
+      "Usı attaǵı sorawdı Lex.uz rásmiy bazasında ashıń. Nashr onıń nátiyjelerin kóshirmeydi yamasa teksermeydi.",
+    legalLink: "Lex.uz'da izlew",
+    open: "Derekti ashıw",
+    empty: "Maqala tabılmadı. Anıǵıraq soraw kirgiziń.",
+    error: "Izlew tamamlanbadı. Qayta urınıp kóriń.",
+    partial: "Ba'zi bazalar islemedi:",
+    abstract: "Annotaciya",
+    download: "PDF ti ashıw",
+  },
 };
 
 function safeUrl(value: string | null) {

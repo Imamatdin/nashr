@@ -353,6 +353,121 @@ export const WORKSPACE_COPY = {
       presentation_premium: "Premium",
     },
   },
+  kaa: {
+    sourceTitle: "Derekler",
+    sourceEmpty:
+      "PDF, hújjet yamasa jazbalarıńızdı qosıń. Izertlew hám iqtiboslar qaralama janında turadı.",
+    sourceChoose: "Fayl tańlaw",
+    sourceHint: "PDF, DOCX, PPTX. Maks. 20 MB.",
+    sourceUpload: "Derek qosıw",
+    sourceUploading: "Júklenbekte",
+    sourceLabel: "Loyiha derekleri",
+    chooseFirst: "Aldın fayl tańlań",
+    uploaded: (name: string) => `${name} júklendi`,
+    duplicateRun:
+      "Bul loyiha áldeqashan jaratılbaqta — esaptan qayta alınbadı.",
+    fixStarting: "Redaktorlaw qollanbaqta — prezentaciya qayta jıynalbaqta.",
+    shareDisabled: "Silteme óshirildi",
+    shareRotated: "Jańa silteme jaratıldı. Eskisi biykar boldı.",
+    shareEnabled: "Járiya silteme qosıldı",
+    shareCopied: "Silteme kóshirildi",
+    shareCopyFailed: "Kóshirip bolmadı. Siltemeni qolda belgileń.",
+    backProjects: "Loyihalarǵa qaytıw",
+    chatDisabledRunning:
+      "Prezentaciya tayar bolǵannan keyin, usı jerde onı redaktorlaysız.",
+    chatDisabledEmpty:
+      "Sáwbet prezentaciya tayar bolǵannan keyin ashıladı — ol tayar slaydlar ústinde isleydi.",
+    fixApplying: "Redaktorlaw qollanbaqta — bir neshe minut.",
+    fixDelivering: "Redaktorlaw saqlandı, onıń faylları tayarlanbaqta.",
+    fixesRemaining: "Qalǵan redaktorlawlar",
+    reconnecting: "Halat jańalanbay atır — qayta jalǵanbaqta.",
+    archivedTitle: "Arxivlengen loyiha",
+    archivedHint:
+      "Bul loyiha arxivte. Onı kóriwge boladı, biraq jańa generaciya baslanbaydı.",
+    startLead:
+      "Derekler tayar bolǵannan keyin, prezentaciyanı buyırtpa etiń. Ádette 3–6 minut dawam etedi.",
+    createPresentation: "Prezentaciya jaratıw",
+    charge: (tier: string, price: string) =>
+      `Esaptan ${tier} paketi alınadı: ${price}. Sátsiz bolsa avtomat túrde qaytarıladı.`,
+    needsSource: "Keminde bir derek kerek — tómende júkleń.",
+    queued: "Gezekte",
+    queuedHint: "Jumıs gezekke qoyıldı. Birinshi basqısh baslanbaqta.",
+    working: "Islenbekte",
+    elapsed: "Ótken waqıt",
+    live: "janlı",
+    refreshing: "jańalanbaqta",
+    stalled:
+      "Jumıs 45 sekundtan beri juwap bermey atır. Ádette ózi tiklenedi — tiklenbese, kredit avtomat túrde qaytarıladı.",
+    refunded: "Kredit qaytarıldı",
+    technical: "Texnikalıq maǵlıwmat",
+    restart: "Qaytadan baslaw",
+    restartHint:
+      "Bul jańa generaciya: process birinshi basqıshtan baslanadı hám esaptan qayta alınadı.",
+    preparingFiles: "Fayllar tayarlanbaqta",
+    preparingFilesHint: "Prezentaciya jıynaldı — fayllar házir jaylanbaqta.",
+    delivering: "Prezentaciya saqlandı — fayllar tayarlanbaqta",
+    deliveringHint:
+      "Prezentaciya saqlandı. Hár bir fayl jaylanıwı menen usı jerde payda boladı — betti jańalaw shárt emes.",
+    deliveryFailed: "Prezentaciya saqlandı, biraq onıń faylların tayarlap bolmadı.",
+    deliveryFailedHint:
+      "Bul jumısqa alınǵan aqsha qaytarıldı. Prezentaciyanı redaktorlawǵa boladı: fayllardı qayta urınıw ushın eksporttı jańalań yamasa jańa generaciya baslań.",
+    processDetails: "Process maǵlıwmatı",
+    deckAppears: "Prezentaciya usı jerde payda boladı.",
+    noDeck: "Ele prezentaciya joq.",
+    aiImages: "AI súwret",
+    readyIn: "ishinde tayarlandı",
+    chat: "Sáwbet",
+    chatPlaceholder: "Neni ózgertemiz?",
+    chatEmptyTitle: "Prezentaciya ústinde sóylesemiz",
+    chatEmptyHint:
+      "«3-slaydtaǵı sáneni durısla» yamasa «juwmaqtı qısqart» dep jazıń. Nashr tek siz júklegen dereklerdegi faktlerge súyenedi.",
+    approvalLabel: "Tastıyıqlaw",
+    approvalTitle: "Bul ózgeristi qollaymız ba?",
+    approve: "Qollaw",
+    reject: "Kerek emes",
+    messageLabel: "Xabar",
+    sendLabel: "Jiberiw",
+    presentation: "Prezentaciya",
+    railLabel: "Sáwbet hám process",
+    noSourceTitle: "Derek júklenbegen",
+    noSourceHint:
+      "Prezentaciya tek siz júklegen fayllardaǵı faktlerge súyenedi. PDF, DOCX yamasa PPTX júkleń (maks. 20 MB).",
+    sourceSnapshot:
+      "Prezentaciya usı derekler tiykarında jıynalǵan. Jańa fayl qossańız, onı qosıw ushın qaytadan jaratıw kerek.",
+    upload: "Júklew",
+    sharing: "Bólisiw",
+    shareActiveHint:
+      "Silteme siz óshirmegenińizshe isleydi. Jańalasańız, eskisi derhal biykar boladı.",
+    copy: "Kóshiriw",
+    rotateLink: "Siltemeni jańalaw",
+    disable: "Óshiriw",
+    shareLead:
+      "Járiya silteme prezentaciyanı qálegen adamǵa, kirmey-aq, kórsetedi.",
+    createShare: "Járiya silteme jaratıw",
+    decisions: "Ne sheshim etildi",
+    audienceTakeaway: "Tıńlawshı ne menen shıǵadı",
+    legacyPlan:
+      "Bul prezentaciya reje mexanizmi engiziliwinen aldın jaratılǵan, sonlıqtan onıń jazba argumenti saqlanbaǵan. Dizayn hám slaydlar dizimi tómende.",
+    palette: "Reń palitrası",
+    defaultDecisions:
+      "Sorawlarǵa juwap bermegen bolsańız, bul tańlawlardı dereklerińiz tiykarında Nashr ózi isledi.",
+    evidence: "Dáliller",
+    noEvidenceTitle: "Dálil tabılmadı",
+    noEvidenceHint:
+      "Bul prezentaciya ushın dereklerden da'wa ajratılmaǵan. Tekstli PDF yamasa DOCX júkleseńiz, dáliller usı jerde kórinedi.",
+    evidenceShown: (total: number, shown: number) =>
+      `${total} da'wadan birinshi ${shown} kórsetilgen.`,
+    sourceUnknown: "Derek belgisiz",
+    chunk: "bólek",
+    topUp: "Tólem házirshe Telegram-botta:",
+    openBot: "bottı ashıw",
+    retry: "Qayta urınıw",
+    packageNames: {
+      presentation_basic: "Ápiwayı",
+      presentation_standard: "Standart",
+      presentation_premium: "Premium",
+    },
+  },
 } satisfies Record<Locale, Record<string, unknown>>;
 
 export type WorkspaceCopy = (typeof WORKSPACE_COPY)[Locale];

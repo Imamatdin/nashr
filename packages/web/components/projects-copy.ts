@@ -106,6 +106,41 @@ export const PROJECTS_COPY = {
     retry: "Qayta urinish",
     technical: "Texnik tafsilot",
   },
+  kaa: {
+    title: "Loyihalar",
+    search: "Loyiha izlew",
+    noMatch: "Say keletuǵın loyiha tabılmadı",
+    tryAnother: "Basqa sóz benen urınıp kóriń",
+    view: "Kórinis",
+    list: "Dizim",
+    grid: "Katak",
+    new: "Jańa",
+    loading: "Loyihalar júklenbekte…",
+    emptyTitle: "Házirshe loyiha joq",
+    emptyHint:
+      "Derek júkleń, talaptı aytıń — jumısıńız usı jerde payda boladı.",
+    first: "Birinshi loyiha",
+    table: "Loyihalar kestesi",
+    name: "Atı",
+    type: "Túri",
+    created: "Jaratılǵan",
+    status: "Halat",
+    sortBy: (label: string) => `${label} boyınsha tártiplew`,
+    count: (count: number) => `${count} loyiha`,
+    all: "Hámmesi",
+    filters: {
+      draft: "Qaralama",
+      generating: "Jaratılbaqta",
+      ready: "Tayar",
+      failed: "Qátelik",
+      archived: "Arxiv",
+    },
+    types: { presentation: "Prezentaciya", article: "Maqala" },
+    errorNote:
+      "Dizim júklenbedi — biraq jańa loyihanı házir de baslawıńız múmkin.",
+    retry: "Qayta urınıw",
+    technical: "Texnikalıq maǵlıwmat",
+  },
 } satisfies Record<Locale, Record<string, unknown>>;
 
 export type ProjectsCopy = (typeof PROJECTS_COPY)[Locale];

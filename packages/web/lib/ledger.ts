@@ -77,6 +77,13 @@ const ACTION_LABEL: Record<Locale, Record<string, string>> = {
     deduct_presentation: "Taqdimot yaratildi",
     refund: "Kredit qaytarildi",
   },
+  kaa: {
+    grant_free: "Úyreniw sıylıǵı",
+    grant_paid: "Tólem qabıl etildi",
+    deduct_article: "Maqala jaratıldı",
+    deduct_presentation: "Prezentaciya jaratıldı",
+    refund: "Kredit qaytarıldı",
+  },
 };
 
 const ACTION_TONE: Record<string, LedgerTone> = {
@@ -129,6 +136,21 @@ export function rewardCopy(
       `Ваше исследование укрепило доказательную базу, ${credit}.`
     );
   }
+  if (locale === "kaa") {
+    const credit = `hám ${amount} bepul kredit qosıldı`;
+    switch (entry.reason) {
+      case "source_upload":
+        return `Júklegen deregińiz jumıstıń dálil bazasın kúsheytti — ${credit}.`;
+      case "interview_answer":
+        return `Juwabıńız arqalı jumıs temańızǵa anıǵıraq sáykeslesti — ${credit}.`;
+      case "contradiction_explain":
+        return `Derekler arasındaǵı qarama-qarsılıqtı túsindirdińiz, talqılaw kúsheydi — ${credit}.`;
+      case "daily_bonus":
+        return `Kúnlik bonus — ${credit}.`;
+      default:
+        return `Izertlew jumısıńız jumıstıń dálil bazasın kúsheytti — ${credit}.`;
+    }
+  }
   const credit = `va ${amount} bepul kredit qo‘shildi`;
   switch (entry.reason) {
     case "source_upload":
@@ -158,6 +180,11 @@ function noteFor(entry: LedgerEntryView, locale: Locale): string | null {
         ? "Генерация не завершилась, поэтому списанные средства вернулись на баланс."
         : "Списанные средства вернулись на баланс.";
     }
+    if (locale === "kaa") {
+      return entry.generation_job_id !== null
+        ? "Generaciya sátsiz tamamlandı — alınǵan aqsha esabıńızǵa qaytarıldı."
+        : "Alınǵan aqsha esabıńızǵa qaytarıldı.";
+    }
     return entry.generation_job_id !== null
       ? "Generatsiya muvaffaqiyatsiz tugadi — yechilgan mablag‘ hisobingizga qaytarildi."
       : "Yechilgan mablag‘ hisobingizga qaytarildi.";
@@ -182,7 +209,9 @@ export function describeLedgerEntry(
         ? "Balance activity"
         : locale === "ru"
           ? "Операция по балансу"
-          : "Hisob amaliyoti"),
+          : locale === "kaa"
+            ? "Esap operaciyası"
+            : "Hisob amaliyoti"),
     note: noteFor(entry, locale),
     tone: ACTION_TONE[entry.action] ?? "neutral",
     amount: signedSoum(entry.amount),

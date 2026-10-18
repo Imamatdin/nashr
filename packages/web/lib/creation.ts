@@ -241,6 +241,74 @@ const CREATION_COPY = {
         "Kamida bitta manba biriktiring — Nashr faqat siz bergan fayllardagi dalillarga tayanadi.",
     },
   },
+  kaa: {
+    skip: "Ótkerip jiberiw",
+    minutes: "minut",
+    recommended: "usınıs etilgen",
+    customHint: "tómendegi maydanǵa jazsańız da boladı",
+    standard: "standart",
+    domains: {
+      medical: "medicina",
+      economics: "ekonomika",
+      legal: "huqıq",
+      engineering: "injenerlik",
+      environmental: "ekologiya",
+      education: "bilimlendiriw",
+      agriculture: "awıl xojalıǵı",
+      computer_science: "kompyuter ilimleri",
+      social_sciences: "jámiyetlik ilimler",
+      general: "ulıwma",
+    },
+    notReadyLead:
+      "Derekler birinshi generaciya dawamında oqıladı, sonlıqtan házir soraw joq — biz ózimiz sheshim qabıl etemiz.",
+    notReadyLines: [
+      "Auditoriya: bakalavr studenti.",
+      "Uzınlıǵı: dereklerdegi dáliller sanına qarap tańlanadı.",
+      "Baslıqlar: juwmaq túrinde; dokladshı izoxları qısqa tezisler menen.",
+      "Dizayn: temaǵa say palitra hám keypiyat avtomat túrde tańlanadı.",
+      "Keyingi generaciyada usı dereklerden kelip shıqqan sorawlar beriledi.",
+    ],
+    domain: "Tema baǵdarı",
+    estimate: "Shama kólem",
+    slides: "slayd",
+    statsFound: (count: number) =>
+      `Dereklerde ${count} sanlı dálil tabıldı — olar ayrıqsha slaydlarǵa shıǵarıladı.`,
+    noStats:
+      "Dereklerde sanlı dálil tabılmadı — itibar tekstli dálillerge beriledi.",
+    peopleFound: (count: number) =>
+      `${count} adam eslatılǵan — olar atı menen keltiriledi.`,
+    remaining:
+      "Qalǵan tańlawlar (auditoriya, uslıp, interaktivlik) dereklerge qarap qoyıladı.",
+    summaryLead: "Sorawlarǵa juwap bermeseńiz, tómendegishe sheshim qabıl etemiz.",
+    labels: {
+      topic: "Tema",
+      language: "Til",
+      package: "Paket",
+      slides: "Slaydlar",
+      formats: "Formatlar",
+      images: "AI súwret",
+      edits: "Redaktorlawlar",
+      sources: "Derekler",
+      price: "Baha",
+      remaining: "Keyin qaladı",
+    },
+    byPackage: "paket boyınsha",
+    noImages: "joq — tipografikalıq dizayn",
+    upTo: (count: number) => `${count} ǵa shekem`,
+    none: "joq",
+    freeEdits: (count: number) => `${count} bepul dúzetiw`,
+    sourceCount: (count: number) => String(count),
+    charge:
+      "Kredit házir alınadı; generaciya sátsiz tamamlansa, avtomat túrde qaytarıladı.",
+    blocks: {
+      topic: "Aldın temanı jazıń.",
+      uploading: "Derekler ele júklenbekte — bir dem kútiń.",
+      failed:
+        "Hesh bir derek dizimnen ótpedi — qatarlardaǵı «qayta urınıw» túymesin basıń.",
+      missing:
+        "Keminde bir derek biriktiriń — Nashr tek siz bergen fayllardaǵı dálillerge súyenedi.",
+    },
+  },
 } as const;
 
 /** Discrete stops for the duration slider, clamped into the question's range. */

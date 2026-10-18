@@ -29,4 +29,14 @@ export const EVIDENCE_COPY = {
     cancel: "Tanlovni bekor qilish", invalid: "Bu parcha mavjud emas. Havola maqolada saqlangan.", retry: "Qayta urinish", unreadable: "Faylni o‘qib bo‘lmadi",
     failedSome: "Ba’zi fayllarni o‘qib bo‘lmadi: ular buzilgan, himoyalangan yoki ajratib olinadigan matnsiz bo‘lishi mumkin. Boshqa manbalar tayyor. Qayta urinish harakatni takrorlaydi.",
   },
+  kaa: {
+    title: "Derek úzindileri", intro: "Derektegi ornı kórsetilgen tekst. Úzindini biriktiriw silteme jaratadı, biraq pikirińizdi tastıyıqlamaydı.",
+    refresh: "Jańalaw", process: "Dereklerdi qayta islew", working: "Derekler qayta islenbekte…", ready: "Tayar", pending: "Islenbegen",
+    empty: "Joqarıda derek júkleń, soń úzindilerdi oqıw hám iqtibos keltiriw ushın onı qayta isleń.", failed: "Qayta islew toqtadı. Tayar derekler saqlanǵan. Dawam etiw ushın qayta urınıń.",
+    error: "Derek úzindilerin júklep bolmadı. Qayta urınıp kóriń.", all: "Barlıq derekler", page: "Bet", passage: "Úzindi", more: "Taǵı úzindiler júklew",
+    cite: "Tańlanǵan blokqa biriktiriw", select: "Aldın maqala blokında «Derekke silteme» ni basıń.", selected: "Blok ushın derek", attached: "Biriktirilgen",
+    ocr: "OCR teksti — túp nusqanı tekseriń", low: "OCR anıqlıǵı tómen", close: "Jabıw", loading: "Úzindiler júklenbekte…", inspect: "Derek úzindisi",
+    cancel: "Tańlawdı biykar etiw", invalid: "Bul úzindi joq. Silteme maqalada saqlanǵan.", retry: "Qayta islewdi qaytalaw", unreadable: "Fayldı oqıp bolmadı",
+    failedSome: "Ba'zi fayllardı oqıp bolmadı: olar buzılǵan, qorǵalǵan yamasa ajratıp alınatuǵın tekstsiz bolıwı múmkin. Basqa derekler tayar. Qayta urınıw háreketti qaytalaydı.",
+  },
 };

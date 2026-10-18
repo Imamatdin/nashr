@@ -172,6 +172,7 @@ export function TaskRows({
     en: { failed: "Failed", retry: "Try again", completed: "Done" },
     ru: { failed: "Ошибка", retry: "Повторить", completed: "Готово" },
     uz: { failed: "Xatolik", retry: "Qayta urinish", completed: "Tayyor" },
+    kaa: { failed: "Qátelik", retry: "Qayta urınıw", completed: "Tayar" },
   }[locale];
   const [manualOpen, setManualOpen] = useState<Record<string, boolean>>({});
   const list = variant === "List";

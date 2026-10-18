@@ -533,6 +533,143 @@ const ERROR_COPY = {
     sharedNetwork:
       "Этот лимит действует для всех пользователей одной сети, например одного Wi-Fi.",
   },
+  kaa: {
+    actions: {
+      retry: "Qayta urınıw",
+      login: "Qaytadan kiriw",
+      topup: "Telegram-botta toltırıw",
+      back: "Loyihalarǵa qaytıw",
+      reload: "Betti jańalaw",
+      dismiss: "Jabıw",
+    },
+    reasons: {
+      insufficient_balance: [
+        "Kredit jetkiliksiz",
+        "Bul paketti baslaw ushın esabıńızda jeterli kredit joq.",
+      ],
+      rate_limited: [
+        "Limitke jettińiz",
+        "Azıraq kútiń — limit jańalanadı.",
+      ],
+      brain_busy: [
+        "Prezentaciya bánt",
+        "Redaktorlaw áldeqashan ketpekte. Tamamlanıwın kútiń, soń qayta urınıń.",
+      ],
+      session_not_ready: [
+        "Redaktorlaw ele múmkin emes",
+        "Sáwbet prezentaciya tayar bolǵannan keyin ashıladı hám onıń tayar slaydları ústinde isleydi.",
+      ],
+      fixes_exhausted: [
+        "Redaktorlawlar qalmadı",
+        "Bul paketdegi barlıq redaktorlawlardı paydalandıńız.",
+      ],
+      no_pending_action: [
+        "Tastıyıqlaytuǵın nárse joq",
+        "Bul ózgeris áldeqashan qollanǵan yamasa biykarlanǵan.",
+      ],
+      decision_changed: [
+        "Bul ózgeris jańalandı",
+        "Siz kórgen ózgeris áldeqashan sheshilgen yamasa almastırılǵan. Házirgisi kórsetildi; hesh nárse ózgermedi.",
+      ],
+      edit_not_queued: [
+        "Redaktorlaw baslanbadı",
+        "Redaktorlawdı gezekke qoyıp bolmadı. Sáwbetińiz saqlanıp qaldı.",
+      ],
+      sources_not_ready: [
+        "Sorawlar ele tayar emes",
+        "Derekler birinshi generaciyada oqıladı. Nashr házir maqul sazlamalardı tańlaydı hám keyingi sapar dereklerge tiyisli sorawlar beredi.",
+      ],
+      unregistered_source: [
+        "Derek tabılmadı",
+        "Bul fayl dizimnen ótpegen. Qaytadan biriktiriń.",
+      ],
+      file_too_large: [
+        "Fayl júdá úlken",
+        "Hár bir fayl 20 MB dan aspawı kerek.",
+      ],
+      file_type_not_allowed: [
+        "Bul túrdegi fayl qollap-quwatlanbaydı",
+        "PDF, DOCX, PPTX, XLSX, súwret yamasa tekst faylın júkleń.",
+      ],
+      r2_upload_failed: [
+        "Fayl júklenbedi",
+        "Baylanıs úzilgen shıǵar. Fayldı qayta júkleń.",
+      ],
+      missing_bearer_token: [
+        "Sessiya tamamlandı",
+        "Qáwipsizligińiz ushın sessiya jabıldı. Qaytadan kiriń.",
+      ],
+      expired: [
+        "Sessiya múddeti pitti",
+        "Usı jerden dawam etiw ushın qaytadan kiriń.",
+      ],
+      bad_signature: ["Jaramsız sessiya", "Qaytadan kiriń."],
+      malformed: ["Jaramsız sessiya", "Qaytadan kiriń."],
+      wrong_issuer: ["Jaramsız sessiya", "Qaytadan kiriń."],
+      initdata_expired: [
+        "Telegram siltemesi eskirdi",
+        "Botqa qaytıp, jańa silteme ashıń.",
+      ],
+      telegram_auth_backend_down: [
+        "Kiriw waqtınsha islemey atır",
+        "Bir neshe minuttan soń qayta urınıp kóriń.",
+      ],
+      server_missing_jwt_secret: [
+        "Xızmet sazlanbaǵan",
+        "Bul bizdiń tárepdegi nasazlıq. Onı dúzetip atırmız.",
+      ],
+      project_not_found: [
+        "Loyiha tabılmadı",
+        "Bul loyiha óshirilgen yamasa sizge tiyisli emes.",
+      ],
+      job_not_found: [
+        "Generaciya tabılmadı",
+        "Bul loyiha ushın ele generaciya baslanbaǵan.",
+      ],
+      deck_not_ready: [
+        "Prezentaciya ele tayar emes",
+        "Fayllar ele tayarlanbaqta.",
+      ],
+      not_found: [
+        "Silteme islemeydi",
+        "Silteme qáte yamasa iyesi onı óshirgen.",
+      ],
+    },
+    statuses: {
+      401: ["Sessiya tamamlandı", "Dawam etiw ushın qaytadan kiriń."],
+      403: ["Ruxsat joq", "Bul amalǵa sizde ruxsat joq."],
+      404: ["Tabılmadı", "Soralǵan nárse joq."],
+      409: ["Halat ózgerdi", "Betti jańalań hám qayta urınıp kóriń."],
+      413: ["Fayl júdá úlken", "Hár bir fayl 20 MB dan aspawı kerek."],
+      422: ["Soraw qabıl etilmedi", "Maǵlıwmatlardı tekserip, qayta jiberiń."],
+      429: ["Limitke jettińiz", "Azıraq kútiń — limit jańalanadı."],
+      500: ["Xızmette nasazlıq", "Bul bizdiń tárepdegi qáte. Qayta urınıp kóriń."],
+      502: ["Xızmet juwap bermey atır", "Bir neshe minuttan soń urınıp kóriń."],
+      503: [
+        "Xızmet waqtınsha jabıq",
+        "Bir neshe minuttan soń urınıp kóriń.",
+      ],
+    },
+    offline: [
+      "Internet úzildi",
+      "Baylanıstı tekseriń — maǵlıwmat alınbadı.",
+    ],
+    generic: [
+      "Bir nárse qáte ketti",
+      "Qayta urınıp kóriń. Qaytalansa, bizge xabar beriń.",
+    ],
+    timeout: ["Soraw júdá uzaq dawam etti", "Juwap kelmedi. Qayta urınıp kóriń."],
+    jobFailed: "Generaciya toqtadı",
+    jobIncomplete: "Process tamamlanbadı.",
+    jobNoReason: "Process tamamlanbadı, sebebi jazılmaǵan.",
+    stoppedAt: (step: string) => `«${step}» basqıshında toqtadı.`,
+    balance: (balance: string, required: string, missing: string) =>
+      `Esabıńızda ${balance}. Bul paket ushın ${required} kerek; jetpey turǵanı: ${missing}.`,
+    resetIn: "Limit jańalanadı",
+    dailyLimit: "Kúnlik shek",
+    sharedNetwork:
+      "Bul shek bir tarmaqtaǵı barlıq paydalanıwshılarǵa tiyisli, mısalı bir Wi-Fi baylanısına.",
+  },
 } as const;
 
 function localizedAction(action: ErrorAction | undefined, locale: Locale) {
@@ -763,14 +900,18 @@ function formatReset(at: Date, locale: Locale = "uz"): string {
       ? "in one minute"
       : locale === "ru"
         ? "через минуту"
-        : "bir daqiqada";
+        : locale === "kaa"
+          ? "bir minutta"
+          : "bir daqiqada";
   }
   if (minutes < 60) {
     return locale === "en"
       ? `in ${minutes} minutes`
       : locale === "ru"
         ? `через ${minutes} мин.`
-        : `${minutes} daqiqada`;
+        : locale === "kaa"
+          ? `${minutes} minutta`
+          : `${minutes} daqiqada`;
   }
   const hours = Math.round(minutes / 60);
   if (hours < 24) {
@@ -778,10 +919,17 @@ function formatReset(at: Date, locale: Locale = "uz"): string {
       ? `in ${hours} hours`
       : locale === "ru"
         ? `через ${hours} ч.`
-        : `${hours} soatda`;
+        : locale === "kaa"
+          ? `${hours} saatta`
+          : `${hours} soatda`;
   }
+  // Intl has no Karakalpak locale; uz-UZ gives the closest Latin-script date.
   const localeCode =
-    locale === "en" ? "en-US" : locale === "ru" ? "ru-RU" : "uz-UZ";
+    locale === "en"
+      ? "en-US"
+      : locale === "ru"
+        ? "ru-RU"
+        : "uz-UZ";
   return at.toLocaleDateString(localeCode, { day: "numeric", month: "long" });
 }
 

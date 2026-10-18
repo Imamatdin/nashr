@@ -1,6 +1,11 @@
-export const LOCALES = ["uz", "ru", "en"] as const;
+export const LOCALES = ["uz", "ru", "kaa", "en"] as const;
 export type Locale = (typeof LOCALES)[number];
-export const LOCALE_NAMES: Record<Locale, string> = { uz: "O‘zbekcha", ru: "Русский", en: "English" };
+export const LOCALE_NAMES: Record<Locale, string> = {
+  uz: "O‘zbekcha",
+  ru: "Русский",
+  kaa: "Qaraqalpaqsha",
+  en: "English",
+};
 export const LOCALE_KEY = "nashr.locale";
 
 export function resolveLocale(saved: string | null, browser = "uz"): Locale {
